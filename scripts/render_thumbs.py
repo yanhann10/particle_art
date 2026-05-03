@@ -31,6 +31,9 @@ def _warmup_for(piece_id: str) -> int:
         meta = json.loads(meta_path.read_text())
     except Exception:
         return WARMUP_MS_DEFAULT
+    # explicit per-piece warmup_ms wins
+    if isinstance(meta.get("warmup_ms"), (int, float)):
+        return int(meta["warmup_ms"])
     # any piece that declares a model source needs the longer warmup
     if meta.get("model_source"):
         return WARMUP_MS_MODEL_LOADING
