@@ -19,7 +19,25 @@ THUMBS.mkdir(exist_ok=True)
 
 # size + warmup time per piece
 W, H = 800, 500
-WARMUP_MS = 2500
+WARMUP_MS_DEFAULT = 2500
+WARMUP_MS_MODEL_LOADING = 9000   # pieces that fetch a 3D model from a CDN need more time
+
+
+def _warmup_for(piece_id: str) -> int:
+    meta_path = REPO / "pieces" / piece_id / "meta.json"
+    if not meta_path.exists():
+        return WARMUP_MS_DEFAULT
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception:
+        return WARMUP_MS_DEFAULT
+    # any piece that declares a model source needs the longer warmup
+    if meta.get("model_source"):
+        return WARMUP_MS_MODEL_LOADING
+    stack = meta.get("stack", [])
+    if any("Loader" in s for s in stack):
+        return WARMUP_MS_MODEL_LOADING
+    return WARMUP_MS_DEFAULT
 
 
 def render(only=None):
@@ -50,10 +68,11 @@ def render(only=None):
             page = ctx.new_page()
             try:
                 page.goto(url, wait_until="load")
-                page.wait_for_timeout(WARMUP_MS)
+                warmup = _warmup_for(p["id"])
+                page.wait_for_timeout(warmup)
                 out = THUMBS / f"{p['id']}.png"
                 page.screenshot(path=str(out), type="png")
-                print(f"  ok  {p['id']} → {out.relative_to(REPO)}")
+                print(f"  ok  {p['id']} (warmup {warmup}ms) → {out.relative_to(REPO)}")
             except Exception as e:
                 print(f"  fail {p['id']}: {e}", file=sys.stderr)
             finally:
