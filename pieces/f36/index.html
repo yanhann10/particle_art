@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>f36 · flamingo flock (animated point-cloud)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0c0710; overflow:hidden;
+               color:#f4dee0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+  .loading { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+             font-size: 13px; opacity: 0.6; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading flamingo · three.js examples …</div>
+<div class="id">f36 · flamingo flock</div>
+<div class="hint">drag to orbit · scroll to zoom · animated wing flap</div>
+<div class="src">model: Flamingo.glb · three.js examples (CC-attribution)</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Three.js examples ships an animated Flamingo.glb (~750KB). We sample N points
+// across its surface, then position each point on the *baked* original mesh
+// (which has its own bind-pose deformation animation). For a particle flock,
+// we render multiple copies with different positions + offsets — multiple
+// flamingos flying in formation.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0c0710, 0.012);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 80, 220);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0c0710, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 30, 0);
+
+// 5 flamingos in formation; each is a Points cloud sampled from the same source
+const FLOCK = 5;
+const N_PER = 12000;
+const formation = [
+  new THREE.Vector3( 0,   30, 0),
+  new THREE.Vector3(-50,  50, -40),
+  new THREE.Vector3( 50,  50, -40),
+  new THREE.Vector3(-90,  70, -90),
+  new THREE.Vector3( 90,  70, -90),
+];
+
+const allPoints = [];
+const FLAMINGO_URL = 'https://threejs.org/examples/models/gltf/Flamingo.glb';
+
+function buildShader(){
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uPixel: { value: renderer.getPixelRatio() },
+      uReady: { value: 0 },
+      uOffset: { value: new THREE.Vector3() },
+      uPhase:  { value: 0 }
+    },
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: `
+      uniform float uTime;
+      uniform float uPixel;
+      uniform float uReady;
+      uniform vec3  uOffset;
+      uniform float uPhase;
+      attribute float seed;
+      varying vec3 vCol;
+      varying float vEnergy;
+      void main(){
+        vec3 p = position;
+        // wing-flap: oscillate y of points based on x-extent (wings extend in x)
+        float flap = sin(uTime * 5.0 + uPhase) * 0.28;
+        // x-distance from spine drives flap amount
+        float wing = abs(p.x);
+        p.y += wing * flap * smoothstep(0.5, 3.5, wing);
+        // shimmer
+        float t = uTime * 0.7 + seed * 6.28;
+        p.x += 0.05 * sin(t);
+        p.z += 0.05 * cos(t * 1.1);
+
+        // forward motion: drift along -z, wrap
+        float driftZ = mod(uTime * 12.0 + uPhase * 30.0, 200.0) - 100.0;
+        vec3 worldP = p * 9.0 + uOffset + vec3(0, 0, driftZ);
+
+        // reveal: particles arc in from above the screen into formation
+        vec3 entry = worldP + vec3(0, 80.0 + seed * 40.0, 200.0);
+        worldP = mix(entry, worldP, smoothstep(0.0, 1.0, uReady));
+
+        vEnergy = 0.5 + 0.5 * sin(t * 0.8);
+        // flamingo palette: hot pink → coral → soft cream
+        vec3 a = vec3(0.96, 0.30, 0.55);
+        vec3 b = vec3(0.99, 0.62, 0.55);
+        vec3 c = vec3(0.99, 0.92, 0.85);
+        float k = clamp(0.4 + 0.4 * sin(seed * 9.0) + 0.2 * vEnergy, 0.0, 1.0);
+        vCol = mix(a, b, k);
+        vCol = mix(vCol, c, smoothstep(0.7, 1.0, k) * 0.6);
+
+        vec4 mv = modelViewMatrix * vec4(worldP, 1.0);
+        float dist = -mv.z;
+        gl_PointSize = (1.0 + 0.6 * vEnergy) * uPixel * (60.0 / dist) * (0.4 + 0.6 * uReady);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vCol;
+      varying float vEnergy;
+      void main(){
+        vec2 d = gl_PointCoord - 0.5;
+        float r = dot(d,d);
+        if (r > 0.25) discard;
+        float a = exp(-r * 17.0) * (0.55 + 0.45 * vEnergy);
+        gl_FragColor = vec4(vCol * a, a);
+      }
+    `
+  });
+}
+
+let revealStart = 0;
+
+const loader = new GLTFLoader();
+loader.load(FLAMINGO_URL,
+  (gltf) => {
+    // find first mesh with a position attribute
+    let target = null;
+    gltf.scene.traverse(o => { if (!target && o.isMesh && o.geometry?.attributes?.position) target = o; });
+    if (!target) { document.getElementById('loading').textContent = 'no mesh in glb'; return; }
+
+    target.updateMatrixWorld(true);
+    const sampleMesh = new THREE.Mesh(target.geometry.toNonIndexed(), target.material);
+    sampleMesh.matrixWorld.copy(target.matrixWorld);
+    const sampler = new MeshSurfaceSampler(sampleMesh).build();
+
+    const tmp = new THREE.Vector3();
+    for (let f = 0; f < FLOCK; f++){
+      const positions = new Float32Array(N_PER * 3);
+      const seeds     = new Float32Array(N_PER);
+      for (let i = 0; i < N_PER; i++){
+        sampler.sample(tmp);
+        positions[i*3]   = tmp.x;
+        positions[i*3+1] = tmp.y;
+        positions[i*3+2] = tmp.z;
+        seeds[i] = Math.random();
+      }
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+
+      const mat = buildShader();
+      mat.uniforms.uOffset.value.copy(formation[f]);
+      mat.uniforms.uPhase.value = f * 1.3;
+      const points = new THREE.Points(geom, mat);
+      scene.add(points);
+      allPoints.push(points);
+    }
+
+    document.getElementById('loading').style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      document.getElementById('loading').textContent = `loading flamingo · ${pct}%`;
+    }
+  },
+  (err) => {
+    console.error(err);
+    document.getElementById('loading').textContent = 'load failed';
+  });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  for (const p of allPoints){
+    p.material.uniforms.uTime.value = t;
+    if (revealStart > 0) {
+      p.material.uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 2800);
+    }
+  }
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
