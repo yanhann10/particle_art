@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>m4d · hand-sculpted starcloud</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden;
+               color:#dcd9d2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  #cam { position:fixed; right:14px; bottom:14px; width:240px; height:160px;
+         border:1px solid #333; border-radius:4px; transform:scaleX(-1); opacity:0.85; }
+  #cam.hidden { display:none; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size: 11px; letter-spacing: 0.04em; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #111; color:#dcd9d2; border:1px solid #444;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; }
+  button.start:hover { background:#222; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant camera · sculpt with hands</button>
+<video id="cam" class="hidden" autoplay playsinline muted></video>
+<div class="id">m4d · hand-sculpted starcloud</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 24);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 50000;
+const positions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+for (let i = 0; i < N; i++) {
+  // start as soft cosmic shell
+  const r = 8 + Math.random() * 6;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2*Math.random()-1);
+  positions[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+  positions[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+  positions[i*3+2] = r * Math.cos(phi);
+  seeds[i] = Math.random();
+}
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uPinch: { value: 1.0 },     // 0=fist (collapse) … 2=open (explode)
+  uHand:  { value: new THREE.Vector3(0,0,0) },
+  uActive:{ value: 0.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPinch;
+    uniform vec3  uHand;
+    uniform float uActive;
+    attribute float seed;
+    varying float vLife;
+    varying vec3 vCol;
+    void main(){
+      vec3 p = position;
+      // radial scaling driven by pinch
+      float scale = mix(0.18, 1.6, uPinch * 0.5);
+      p *= mix(1.0, scale, uActive);
+      // gentle drift
+      float t = uTime * 0.4 + seed * 6.28;
+      p += 0.4 * vec3(sin(t), cos(t*0.8), sin(t*0.6 + seed));
+      // pulled toward hand position
+      vec3 toHand = uHand - p;
+      float pull = uActive * (0.06 + 0.18 * (1.0 - uPinch * 0.5));
+      p += toHand * pull;
+
+      vLife = 0.4 + 0.6*sin(t*0.7);
+      // warm palette: amber→pink→cyan
+      vec3 a = vec3(1.0, 0.78, 0.42);
+      vec3 b = vec3(0.95, 0.45, 0.75);
+      vec3 c = vec3(0.45, 0.85, 0.95);
+      vCol = mix(a, b, vLife);
+      vCol = mix(vCol, c, smoothstep(0.7, 1.0, vLife) * 0.6);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.0 + 2.0*vLife) * uPixel * (50.0/dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vLife;
+    varying vec3 vCol;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * (0.5 + 0.5*vLife);
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// MediaPipe Hands integration
+const hint = document.getElementById('hint');
+const camEl = document.getElementById('cam');
+const startBtn = document.getElementById('startBtn');
+let handsActive = false;
+
+async function loadMediaPipe(){
+  // load via dynamic <script> tags (keeps single-file friendly)
+  const load = (src) => new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.crossOrigin = 'anonymous';
+    s.onload = res; s.onerror = rej; document.head.appendChild(s);
+  });
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js');
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js');
+}
+
+async function startHands(){
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting camera…';
+  try {
+    await loadMediaPipe();
+  } catch (e) {
+    hint.textContent = 'mediapipe load failed — running passive';
+    return;
+  }
+  const hands = new window.Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}` });
+  hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+  hands.onResults((res) => {
+    if (!res.multiHandLandmarks || res.multiHandLandmarks.length === 0){
+      uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 0.0, 0.05);
+      return;
+    }
+    uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 1.0, 0.1);
+    // pinch: distance between thumb_tip(4) and index_tip(8) on first hand
+    const lm = res.multiHandLandmarks[0];
+    const dx = lm[4].x - lm[8].x, dy = lm[4].y - lm[8].y, dz = lm[4].z - lm[8].z;
+    const pinch = Math.min(2.0, Math.sqrt(dx*dx+dy*dy+dz*dz) * 6.0);
+    uniforms.uPinch.value = THREE.MathUtils.lerp(uniforms.uPinch.value, pinch, 0.15);
+    // mean palm position → world target
+    const palm = lm[9];
+    const wx = (0.5 - palm.x) * 22;
+    const wy = (0.5 - palm.y) * 14;
+    uniforms.uHand.value.set(wx, wy, 0.0);
+    hint.textContent = `hand · pinch=${pinch.toFixed(2)}`;
+  });
+  camEl.classList.remove('hidden');
+  const cam = new window.Camera(camEl, {
+    onFrame: async () => { await hands.send({ image: camEl }); },
+    width: 320, height: 240
+  });
+  cam.start();
+  handsActive = true;
+}
+startBtn.addEventListener('click', startHands);
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  points.rotation.y = t * 0.05;
+  if (!handsActive) {
+    // passive mode: gentle pinch oscillation so the piece is alive
+    uniforms.uPinch.value = 1.0 + 0.5 * Math.sin(t * 0.3);
+    uniforms.uActive.value = 0.55;
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
