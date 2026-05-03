@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uzk · sponza atrium point-cloud</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08060a; overflow:hidden;
+               color:#e0d4c4; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+  .loading { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+             font-size: 13px; opacity: 0.6; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading sponza atrium · khronos glTF samples …</div>
+<div class="id">uzk · sponza atrium point-cloud</div>
+<div class="hint" id="hint">drift · drag to orbit · scroll to zoom</div>
+<div class="src">model: sponza · khronos glTF samples (CC-BY)</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(14, 6, 0);
+camera.lookAt(0, 4, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08060a, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 4, 0);
+
+// 80k particles sampled across all surfaces of Sponza weighted by face area
+const N = 80000;
+const positions = new Float32Array(N * 3);
+const restPos   = new Float32Array(N * 3);
+const colors    = new Float32Array(N * 3);
+const seeds     = new Float32Array(N);
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0.0 }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  vertexColors: true,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    attribute vec3 rest;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vEnergy;
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.5 + seed * 6.28;
+      // gentle breathing
+      p += 0.02 * vec3(sin(t), cos(t*1.1), sin(t*0.8));
+
+      // reveal: particles fly in from a distant cylindrical shell
+      float th = seed * 6.28;
+      vec3 entry = vec3(cos(th)*30.0, (seed-0.5)*40.0, sin(th)*30.0);
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      vEnergy = 0.5 + 0.5*sin(t*0.7 + seed*2.0);
+      vCol = color * (0.8 + 0.4 * vEnergy);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (0.9 + 0.6*vEnergy) * uPixel * (50.0/dist) * (0.4 + 0.6*uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vEnergy;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 17.0) * (0.55 + 0.45*vEnergy);
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const loadingEl = document.getElementById('loading');
+const SPONZA_URL = 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Sponza/glTF-Binary/Sponza.glb';
+
+const loader = new GLTFLoader();
+loader.load(SPONZA_URL,
+  (gltf) => {
+    // collect all meshes; sample weighted by surface area
+    const meshes = [];
+    gltf.scene.traverse(o => { if (o.isMesh && o.geometry?.attributes?.position) meshes.push(o); });
+    if (meshes.length === 0) { loadingEl.textContent = 'no meshes in sponza'; return; }
+
+    // compute total area to weight sampling
+    let totalArea = 0;
+    const areas = meshes.map(m => {
+      m.updateMatrixWorld(true);
+      const g = m.geometry.toNonIndexed();
+      const pos = g.attributes.position;
+      let a = 0;
+      const v0 = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+      const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), n  = new THREE.Vector3();
+      for (let i = 0; i < pos.count; i += 3){
+        v0.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
+        v1.fromBufferAttribute(pos, i+1).applyMatrix4(m.matrixWorld);
+        v2.fromBufferAttribute(pos, i+2).applyMatrix4(m.matrixWorld);
+        e1.subVectors(v1, v0); e2.subVectors(v2, v0); n.crossVectors(e1, e2);
+        a += n.length() * 0.5;
+      }
+      m._cachedNonIndexed = g;
+      totalArea += a;
+      return a;
+    });
+
+    // build samplers per mesh, sample N points proportional to area
+    const samplers = meshes.map((m) => {
+      const tmp = new THREE.Mesh(m._cachedNonIndexed, m.material);
+      tmp.matrixWorld.copy(m.matrixWorld);
+      const s = new MeshSurfaceSampler(tmp).build();
+      return { sampler: s, mesh: m };
+    });
+
+    let written = 0;
+    const tmpP = new THREE.Vector3();
+    const tmpC = new THREE.Color();
+    const tmpW = new THREE.Vector3();
+    for (let i = 0; i < meshes.length; i++){
+      const share = Math.floor(N * (areas[i] / totalArea));
+      const count = (i === meshes.length - 1) ? (N - written) : share;
+      for (let k = 0; k < count; k++){
+        samplers[i].sampler.sample(tmpP);
+        tmpW.copy(tmpP).applyMatrix4(meshes[i].matrixWorld);
+        const idx = (written + k);
+        restPos[idx*3]   = tmpW.x;
+        restPos[idx*3+1] = tmpW.y;
+        restPos[idx*3+2] = tmpW.z;
+        // color by base material color (fallback warm sandstone)
+        const baseCol = meshes[i].material?.color || tmpC.set(0xc9a86a);
+        // bias toward warm-cream sponza palette
+        colors[idx*3]   = THREE.MathUtils.lerp(0.85, baseCol.r ?? 0.85, 0.5);
+        colors[idx*3+1] = THREE.MathUtils.lerp(0.72, baseCol.g ?? 0.72, 0.5);
+        colors[idx*3+2] = THREE.MathUtils.lerp(0.50, baseCol.b ?? 0.50, 0.5);
+        seeds[idx] = Math.random();
+      }
+      written += count;
+    }
+    // any remainder
+    while (written < N){
+      restPos[written*3]   = (Math.random()-0.5)*4;
+      restPos[written*3+1] = Math.random()*4;
+      restPos[written*3+2] = (Math.random()-0.5)*4;
+      colors[written*3] = 0.85; colors[written*3+1] = 0.72; colors[written*3+2] = 0.5;
+      seeds[written] = Math.random();
+      written++;
+    }
+
+    // re-frame: bounding box of restPos to fit camera
+    const bb = new THREE.Box3();
+    for (let i = 0; i < N; i++) bb.expandByPoint(new THREE.Vector3(restPos[i*3], restPos[i*3+1], restPos[i*3+2]));
+    const center = bb.getCenter(new THREE.Vector3());
+    for (let i = 0; i < N; i++){
+      restPos[i*3]   -= center.x;
+      restPos[i*3+1] -= center.y;
+      restPos[i*3+2] -= center.z;
+    }
+
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPos, 3));
+    geom.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    geom.computeBoundingSphere();
+
+    loadingEl.style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      loadingEl.textContent = `loading sponza atrium · ${pct}%`;
+    }
+  },
+  (err) => {
+    console.error(err);
+    loadingEl.textContent = 'load failed — check network';
+  });
+
+let revealStart = 0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 3500);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
