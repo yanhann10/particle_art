@@ -42,6 +42,35 @@ def load_json(p: Path) -> dict:
     return json.loads(p.read_text())
 
 
+def _tags_from_directive(directive_id: str, parent: dict) -> list[str]:
+    """Best-effort tag set derived from directive id + parent's existing tags/direction."""
+    tags = []
+    parent_tags = parent.get("tags") or []
+    tags.extend(parent_tags)
+    direction = parent.get("direction", "")
+    for tok in re.split(r"[-_\s]+", direction):
+        if tok and tok not in tags:
+            tags.append(tok)
+    if directive_id.startswith("channel_"):
+        tags.append(directive_id.replace("channel_", "channel:"))
+    if directive_id == "cross_pollinate":
+        tags.append("cross-pollinated")
+    if directive_id == "fog_and_light_beam":
+        tags.append("volumetric-light")
+    if directive_id == "multi_click_states":
+        tags.append("multi-state")
+    if directive_id == "swap_object_model":
+        tags.append("object-cloud")
+    if directive_id not in tags:
+        tags.append(directive_id)
+    # dedup preserving order
+    seen, out = set(), []
+    for t in tags:
+        if t not in seen:
+            out.append(t); seen.add(t)
+    return out
+
+
 def _read_recent_log(n: int = 50) -> list[dict]:
     """Read the last n entries from mutation_log.jsonl. Empty list if missing."""
     if not LOG.exists():
@@ -57,6 +86,13 @@ def _read_recent_log(n: int = 50) -> list[dict]:
 
 
 def pick_parent(lineage: dict, prefs: dict, recent: list[dict]) -> dict:
+    """Frontier-expansion picker.
+
+    Weight each candidate by 1 / (1 + descendants^0.7), so favorites with no
+    children yet get picked first and the lineage tree fills out evenly. Then
+    skip the parents of the last two ticks (when alternatives exist) so we
+    don't get bursty repeats. Final pick is weighted-random over what's left.
+    """
     pieces = lineage["pieces"]
     if not pieces:
         raise RuntimeError("no pieces to mutate")
@@ -66,10 +102,50 @@ def pick_parent(lineage: dict, prefs: dict, recent: list[dict]) -> dict:
     pool = favored if favored else [p for p in pieces if p["id"] not in dropped]
     if not pool:
         pool = pieces
-    # avoid picking the parent of either of the last two ticks if we have alternatives
+
+    # count descendants for each piece (count of pieces with this id anywhere in their lineage chain)
+    parent_of = {p["id"]: p.get("parent_id") for p in pieces}
+    desc_count: dict[str, int] = {p["id"]: 0 for p in pieces}
+    for p in pieces:
+        cur = p.get("parent_id")
+        seen = set()
+        while cur and cur not in seen:
+            if cur in desc_count:
+                desc_count[cur] += 1
+            seen.add(cur)
+            cur = parent_of.get(cur)
+
+    # last-2 deduplication
     last_two = {r.get("parent") for r in recent[-2:] if r.get("parent")}
-    deduped = [p for p in pool if p["id"] not in last_two]
-    return random.choice(deduped if deduped else pool)
+    candidates = [p for p in pool if p["id"] not in last_two] or pool
+
+    # weight: 1 / (1 + descendants^0.7) → no descendants ⇒ weight 1.0; 1 ⇒ ~0.61; 4 ⇒ ~0.36; 16 ⇒ ~0.13
+    weights = [1.0 / (1.0 + (desc_count.get(p["id"], 0) ** 0.7)) for p in candidates]
+    return random.choices(candidates, weights=weights, k=1)[0]
+
+
+def _lineage_chain(piece_id: str, pieces: list[dict]) -> list[str]:
+    """Return [piece_id, parent, grandparent, ...] — root last."""
+    by_id = {p["id"]: p for p in pieces}
+    out, cur, seen = [], piece_id, set()
+    while cur and cur not in seen:
+        out.append(cur)
+        seen.add(cur)
+        cur = by_id.get(cur, {}).get("parent_id")
+    return out
+
+
+def _directives_in_lineage(piece_id: str, pieces: list[dict]) -> list[str]:
+    """All directive_ids ever applied along the chain leading to piece_id (root → here)."""
+    chain = _lineage_chain(piece_id, pieces)
+    by_id = {p["id"]: p for p in pieces}
+    out = []
+    for pid in reversed(chain):
+        p = by_id.get(pid, {})
+        d = p.get("mutation_directive_id") or p.get("mutation_directive")
+        if d and d != "seed":
+            out.append(d)
+    return out
 
 
 def sample_directive(spec_path: Path, parent_id: str, recent: list[dict]) -> tuple[str, str]:
@@ -230,6 +306,9 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "index.html").write_text(html)
 
+    pieces_now = lineage["pieces"]
+    parent_chain = _lineage_chain(parent["id"], pieces_now)            # parent → … → root
+    parent_directives = _directives_in_lineage(parent["id"], pieces_now)
     new_meta = {
         "id": new_id,
         "title": f"mut.{directive_id}",
@@ -243,6 +322,10 @@ def main():
         "mutation_directive": directive,
         "mutation_directive_id": directive_id,
         "provider": provider,
+        # richer fields for future-iter introspection:
+        "lineage_path": [new_id] + parent_chain,                       # [self, parent, grandparent, ...]
+        "directives_in_lineage": parent_directives + [directive_id],   # root → here, ordered
+        "tags": _tags_from_directive(directive_id, parent),
     }
     (out_dir / "meta.json").write_text(json.dumps(new_meta, indent=2))
 
