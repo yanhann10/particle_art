@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>particle_art · lineage tree</title>
+<style>
+  :root {
+    --bg: #0a0a0d; --panel: #111116; --ink: #e8e6df; --muted: #8a8a93;
+    --line: #1f1f26; --accent: #c9a86a; --hot: #d76b5a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
+    overflow: hidden;
+  }
+  header {
+    position: fixed; top: 0; left: 0; right: 0;
+    padding: 1rem 1.6rem 0.7rem;
+    background: linear-gradient(180deg, rgba(10,10,13,0.95), rgba(10,10,13,0));
+    z-index: 5;
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  h1 { margin: 0; font-size: 1.0rem; font-weight: 600; letter-spacing: 0.04em; }
+  header .meta {
+    color: var(--muted); font-size: 0.82rem;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  header a { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); }
+  header a:hover { color: var(--hot); border-color: var(--hot); }
+  #stage { width: 100%; height: 100vh; display: block; }
+  #tooltip {
+    position: fixed; pointer-events: none; z-index: 10;
+    background: rgba(20, 20, 26, 0.96);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.7rem 0.9rem;
+    max-width: 360px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    display: none;
+  }
+  #tooltip .code { color: var(--accent); font-weight: 600; font-size: 0.95rem; }
+  #tooltip .title { color: var(--ink); margin-top: 2px; }
+  #tooltip .row   { margin-top: 6px; color: var(--muted); }
+  #tooltip .row b { color: var(--ink); font-weight: 500; }
+  #tooltip .tags  {
+    margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px;
+  }
+  #tooltip .tag {
+    background: rgba(201, 168, 106, 0.15); color: var(--accent);
+    border: 1px solid rgba(201, 168, 106, 0.35);
+    padding: 1px 6px; border-radius: 2px; font-size: 0.7rem;
+  }
+  #tooltip .influence {
+    margin-top: 8px; padding-top: 6px;
+    border-top: 1px dotted var(--line);
+    color: #c9d2dc; font-style: italic; font-size: 0.78rem;
+  }
+  .legend {
+    position: fixed; bottom: 0.8rem; left: 1.2rem; z-index: 5;
+    color: var(--muted); font-size: 0.72rem;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    background: rgba(10,10,13,0.7);
+    padding: 0.5rem 0.7rem;
+    border: 1px solid var(--line); border-radius: 3px;
+  }
+  .legend .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  .legend .swatch { width: 10px; height: 10px; border-radius: 50%; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>particle_art · lineage tree</h1>
+    <div class="meta"><span id="counts">…</span> · hover any node for details · click to open the piece</div>
+  </div>
+  <div class="meta"><a href="index.html">← gallery</a></div>
+</header>
+<svg id="stage"></svg>
+<div id="tooltip"></div>
+<div class="legend">
+  <div class="row"><span class="swatch" style="background:#c9a86a"></span> seed (no parent)</div>
+  <div class="row"><span class="swatch" style="background:#5b6e8f"></span> mutation</div>
+  <div class="row"><span class="swatch" style="background:#48b09e"></span> user-directed</div>
+  <div class="row"><span class="swatch" style="background:#aaaaaa; opacity:0.4"></span> dropped</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script>
+async function load(){
+  const [lineage, prefs] = await Promise.all([
+    fetch('lineage.json',          { cache: 'no-cache' }).then(r => r.json()),
+    fetch('scripts/preferences.json', { cache: 'no-cache' }).then(r => r.json()).catch(() => ({marks:{}}))
+  ]);
+
+  const marks = prefs.marks || {};
+
+  // hydrate per-piece meta to enrich tooltips (best-effort; fail silently if missing)
+  const enrichments = {};
+  await Promise.all(lineage.pieces.map(async p => {
+    try {
+      const m = await fetch(`pieces/${p.id}/meta.json`, { cache: 'no-cache' }).then(r => r.json());
+      enrichments[p.id] = m;
+    } catch(e) {}
+  }));
+
+  const stage = document.getElementById('stage');
+  const w = stage.clientWidth, h = stage.clientHeight;
+  const svg = d3.select(stage).attr('viewBox', `0 0 ${w} ${h}`);
+  const g = svg.append('g');
+
+  // pan + zoom
+  svg.call(d3.zoom().scaleExtent([0.4, 4]).on('zoom', e => g.attr('transform', e.transform)));
+
+  // build node + link arrays
+  const nodes = lineage.pieces.map(p => ({
+    ...p,
+    enrich: enrichments[p.id] || {},
+    mark: marks[p.id] || {}
+  }));
+  const links = (lineage.edges || []).map(e => ({
+    source: e.from, target: e.to, directive: e.directive
+  }));
+
+  // descendant count (for size)
+  const descCount = {};
+  nodes.forEach(n => { descCount[n.id] = 0; });
+  nodes.forEach(n => {
+    let cur = n.parent_id;
+    const seen = new Set();
+    while (cur && !seen.has(cur)){
+      if (cur in descCount) descCount[cur] += 1;
+      seen.add(cur);
+      const par = nodes.find(x => x.id === cur);
+      cur = par ? par.parent_id : null;
+    }
+  });
+
+  function nodeColor(n){
+    if (n.mark.drop) return '#666';
+    if ((n.enrich.mutation_directive_id || '').startsWith('user-')) return '#48b09e';
+    if (!n.parent_id) return '#c9a86a';   // seed
+    return '#5b6e8f';                       // mutation
+  }
+  function nodeRadius(n){
+    if (n.mark.drop) return 7;
+    return 9 + Math.min(18, Math.sqrt(descCount[n.id] || 0) * 5);
+  }
+  function nodeOpacity(n){
+    return n.mark.drop ? 0.35 : 1.0;
+  }
+
+  // force-directed layout
+  const sim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(110).strength(0.6))
+    .force('charge', d3.forceManyBody().strength(-220))
+    .force('center', d3.forceCenter(w/2, h/2))
+    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 6));
+
+  // arrow marker
+  svg.append('defs').append('marker')
+    .attr('id', 'arrow').attr('viewBox', '0 -4 8 8')
+    .attr('refX', 12).attr('refY', 0)
+    .attr('markerWidth', 6).attr('markerHeight', 6).attr('orient', 'auto')
+    .append('path').attr('d', 'M0,-4L8,0L0,4').attr('fill', '#5b6e8f').attr('opacity', 0.6);
+
+  const linkSel = g.append('g').selectAll('line').data(links).enter()
+    .append('line')
+    .attr('stroke', '#5b6e8f').attr('stroke-opacity', 0.45)
+    .attr('stroke-width', 1.4)
+    .attr('marker-end', 'url(#arrow)');
+
+  const linkLabel = g.append('g').selectAll('text').data(links).enter()
+    .append('text')
+    .attr('font-size', '9px')
+    .attr('fill', '#8a8a93')
+    .attr('font-family', 'ui-monospace, monospace')
+    .attr('text-anchor', 'middle')
+    .attr('opacity', 0.75)
+    .text(d => d.directive || '');
+
+  const nodeSel = g.append('g').selectAll('g').data(nodes).enter().append('g')
+    .style('cursor', 'pointer')
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end',   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+  nodeSel.append('circle')
+    .attr('r', d => nodeRadius(d))
+    .attr('fill', d => nodeColor(d))
+    .attr('opacity', d => nodeOpacity(d))
+    .attr('stroke', '#0a0a0d')
+    .attr('stroke-width', 2);
+
+  nodeSel.append('text')
+    .text(d => d.id)
+    .attr('text-anchor', 'middle')
+    .attr('dy', '0.35em')
+    .attr('font-size', '11px')
+    .attr('font-weight', '600')
+    .attr('font-family', 'ui-monospace, monospace')
+    .attr('fill', '#0a0a0d')
+    .style('pointer-events', 'none');
+
+  // tooltip
+  const tip = document.getElementById('tooltip');
+  function showTip(e, d){
+    const enrich = d.enrich || {};
+    const tags = (enrich.tags || []).slice(0, 6);
+    const directives = (enrich.directives_in_lineage || []).slice(-3);
+    const inputModality = enrich.input || d.input || '—';
+    const stack = (enrich.stack || []).slice(0, 4).join(' · ');
+
+    // best-effort artistic-influence extraction from tags / directive
+    const channelTag = (tags.find(t => t.startsWith('channel:')) || '').replace('channel:', '');
+    const conceptTag = (tags.find(t => t.startsWith('concept_')) || '');
+    let influence = '';
+    if (channelTag) influence = 'channels ' + channelTag.replace(/_/g, ' ');
+    else if (conceptTag) influence = 'engages ' + conceptTag.replace('concept_', '').replace(/_/g, ' ');
+    else if (d.mark.note) influence = d.mark.note;
+
+    tip.innerHTML = `
+      <div class="code">${d.id}</div>
+      <div class="title">${d.title || ''}</div>
+      <div class="row"><b>direction</b> · ${d.direction || '—'}</div>
+      <div class="row"><b>input</b> · ${inputModality}</div>
+      <div class="row"><b>generation</b> · ${d.generation ?? 0} · <b>desc</b> · ${descCount[d.id] || 0}</div>
+      ${stack ? `<div class="row"><b>stack</b> · ${stack}</div>` : ''}
+      ${directives.length ? `<div class="row"><b>directives</b> · ${directives.join(' → ')}</div>` : ''}
+      ${tags.length ? `<div class="tags">${tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>` : ''}
+      ${influence ? `<div class="influence">${influence}</div>` : ''}
+    `;
+    tip.style.display = 'block';
+    tip.style.left = Math.min(window.innerWidth - 380, e.clientX + 12) + 'px';
+    tip.style.top  = Math.min(window.innerHeight - 250, e.clientY + 12) + 'px';
+  }
+  function hideTip(){ tip.style.display = 'none'; }
+
+  nodeSel
+    .on('mouseover', showTip)
+    .on('mousemove', showTip)
+    .on('mouseout', hideTip)
+    .on('click', (e, d) => {
+      // open the piece in a new tab
+      window.open(`pieces/${d.id}/`, '_blank');
+    });
+
+  document.getElementById('counts').textContent =
+    `${nodes.length} pieces · ${links.length} edges · ` +
+    `${nodes.filter(n => !n.mark.drop).length} active`;
+
+  sim.on('tick', () => {
+    linkSel
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    linkLabel
+      .attr('x', d => (d.source.x + d.target.x) / 2)
+      .attr('y', d => (d.source.y + d.target.y) / 2 - 4);
+    nodeSel.attr('transform', d => `translate(${d.x},${d.y})`);
+  });
+}
+load();
+</script>
+</body>
+</html>

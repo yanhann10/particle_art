@@ -16,7 +16,7 @@
 </head>
 <body>
 <div class="id">xs4 · attractor cycler</div>
-<div class="hint">click to cycle stage · pointer subtly nudges parameters</div>
+<div class="hint">click to cycle stage · auto-cycles every 14s</div>
 <div class="stage" id="stage">stage 1/4 · lorenz</div>
 <div class="src">100k GPGPU · fog + volumetric beam</div>
 <script type="importmap">
@@ -25,18 +25,25 @@
 <script type="module">
 import * as THREE from 'three';
 
-// 100k particles share the same buffer. A uniform `uMode` (0..3) selects which
-// attractor's equations are integrated each frame. On click we transition to
-// the next mode by lerping `uBlend` from 0→1 over 1.4s; during transition the
-// integrator emits a weighted average of the OUTGOING and INCOMING fields,
-// which produces a continuous morph through the design space rather than a
-// discontinuous re-spawn.
+// 100k particles, GPGPU ping-pong. Each MODE has its own native equations,
+// init basin, integration step, and render-time normalization (offset + scale)
+// that maps the native orbit into the unit cube. Camera lives in the unit
+// cube so framing is consistent across modes.
+//
+// Click switches mode: particles re-spawn in the new basin (fade-out + re-init
+// + fade-in), no equation-blend (the previous attempt blended equations during
+// transition but that left particles stranded outside any orbit).
 
 const MODES = [
-  { id: 'lorenz',     scale: 0.06, palette: [[0.20,0.32,0.78],[0.85,0.32,0.62],[0.98,0.86,0.50]] },
-  { id: 'aizawa',     scale: 0.85, palette: [[0.20,0.62,0.45],[0.55,0.30,0.78],[0.92,0.95,0.98]] },
-  { id: 'thomas',     scale: 0.55, palette: [[0.92,0.55,0.20],[0.98,0.78,0.32],[0.55,0.20,0.05]] },
-  { id: 'halvorsen',  scale: 0.18, palette: [[0.42,0.78,0.92],[0.88,0.42,0.62],[0.92,0.92,0.85]] },
+  // each mode: {id, basinCenter, basinSize, normCenter, normScale, palette}
+  { id: 'lorenz',    basinCenter: [0, 0, 27],  basinSize: 8,
+    normCenter:[0, 0, 25],  normScale: 25,  pal: [[0.20,0.32,0.78],[0.85,0.32,0.62],[0.98,0.86,0.50]] },
+  { id: 'aizawa',    basinCenter: [0.1, 0, 0], basinSize: 0.6,
+    normCenter:[0, 0, 0],   normScale: 1.6, pal: [[0.20,0.62,0.45],[0.55,0.30,0.78],[0.92,0.95,0.98]] },
+  { id: 'thomas',    basinCenter: [0.5, 0, 0.5], basinSize: 1.2,
+    normCenter:[0, 0, 0],   normScale: 5.0, pal: [[0.92,0.55,0.20],[0.98,0.78,0.32],[0.55,0.20,0.05]] },
+  { id: 'halvorsen', basinCenter: [-1, -1, -1], basinSize: 1.8,
+    normCenter:[0, 0, 0],   normScale: 7.0, pal: [[0.42,0.78,0.92],[0.88,0.42,0.62],[0.92,0.92,0.85]] },
 ];
 
 const W = 320, H = 320;
@@ -48,7 +55,6 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.setClearColor(0x04060a, 1);
 document.body.appendChild(renderer.domElement);
 
-// state RTs
 const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
                    minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
                    wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
@@ -56,35 +62,41 @@ const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
 let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
 let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
 
-// init
-const init = new Float32Array(N * 4);
-for (let i = 0; i < N; i++){
-  init[i*4]   = (Math.random() - 0.5) * 1.4;
-  init[i*4+1] = (Math.random() - 0.5) * 1.4;
-  init[i*4+2] = (Math.random() - 0.5) * 1.4 + 0.5;
-  init[i*4+3] = Math.random();
+function makeInitTexture(modeIdx){
+  const m = MODES[modeIdx];
+  const init = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++){
+    init[i*4]   = m.basinCenter[0] + (Math.random() - 0.5) * m.basinSize;
+    init[i*4+1] = m.basinCenter[1] + (Math.random() - 0.5) * m.basinSize;
+    init[i*4+2] = m.basinCenter[2] + (Math.random() - 0.5) * m.basinSize;
+    init[i*4+3] = Math.random();
+  }
+  const t = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+  t.needsUpdate = true; return t;
 }
-const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
-initTex.needsUpdate = true;
 
 const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
 const blitMat = new THREE.ShaderMaterial({
-  uniforms: { tex: { value: initTex } },
+  uniforms: { tex: { value: makeInitTexture(0) } },
   vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
   fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
 });
 const blitScene = new THREE.Scene();
 blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
-renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
-renderer.setRenderTarget(null);
 
-// simulation: integrates whichever attractor uMode points at, blending toward uModeNext during transitions
+function reinitTo(modeIdx){
+  blitMat.uniforms.tex.value = makeInitTexture(modeIdx);
+  renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+  renderer.setRenderTarget(rtB); renderer.render(blitScene, camOrtho);
+  renderer.setRenderTarget(null);
+}
+reinitTo(0);
+
+// simulation: integrate WHICHEVER attractor uMode points at, in NATIVE coords
 const simUniforms = {
   prev: { value: rtA.texture },
-  uDt: { value: 0.012 },
-  uMode:     { value: 0 },
-  uModeNext: { value: 0 },
-  uBlend:    { value: 0.0 }
+  uDt:   { value: 0.0 },
+  uMode: { value: 0 }
 };
 const simMat = new THREE.ShaderMaterial({
   uniforms: simUniforms,
@@ -93,45 +105,25 @@ const simMat = new THREE.ShaderMaterial({
     uniform sampler2D prev;
     uniform float uDt;
     uniform int uMode;
-    uniform int uModeNext;
-    uniform float uBlend;
     varying vec2 vUv;
 
     vec3 lorenz(vec3 p){
-      return vec3(
-        10.0 * (p.y - p.x),
-        p.x * (28.0 - p.z) - p.y,
-        p.x * p.y - (8.0 / 3.0) * p.z
-      ) * 0.06;  // scale down so all attractors live in similar volume
+      return vec3(10.0*(p.y-p.x), p.x*(28.0-p.z)-p.y, p.x*p.y - (8.0/3.0)*p.z);
     }
     vec3 aizawa(vec3 p){
-      const float a = 0.95, b = 0.7, c = 0.6, d = 3.5, e = 0.25, f = 0.1;
-      return vec3(
-        (p.z - b) * p.x - d * p.y,
-        d * p.x + (p.z - b) * p.y,
-        c + a * p.z - (p.z * p.z * p.z) / 3.0
-            - (p.x * p.x + p.y * p.y) * (1.0 + e * p.z)
-            + f * p.z * p.x * p.x * p.x
-      );
+      const float a=0.95, b=0.7, c=0.6, d=3.5, e=0.25, f=0.1;
+      return vec3((p.z-b)*p.x - d*p.y, d*p.x + (p.z-b)*p.y,
+                  c + a*p.z - p.z*p.z*p.z/3.0 - (p.x*p.x + p.y*p.y)*(1.0+e*p.z) + f*p.z*p.x*p.x*p.x);
     }
-    vec3 thomasAttractor(vec3 p){
+    vec3 thomasA(vec3 p){
       const float B = 0.208186;
-      return vec3(sin(p.y) - B * p.x, sin(p.z) - B * p.y, sin(p.x) - B * p.z) * 0.55;
+      return vec3(sin(p.y)-B*p.x, sin(p.z)-B*p.y, sin(p.x)-B*p.z);
     }
     vec3 halvorsen(vec3 p){
       const float a = 1.4;
-      return vec3(
-        -a * p.x - 4.0 * p.y - 4.0 * p.z - p.y * p.y,
-        -a * p.y - 4.0 * p.z - 4.0 * p.x - p.z * p.z,
-        -a * p.z - 4.0 * p.x - 4.0 * p.y - p.x * p.x
-      ) * 0.18;
-    }
-
-    vec3 evalMode(int m, vec3 p){
-      if (m == 0) return lorenz(p);
-      if (m == 1) return aizawa(p);
-      if (m == 2) return thomasAttractor(p);
-                  return halvorsen(p);
+      return vec3(-a*p.x - 4.0*p.y - 4.0*p.z - p.y*p.y,
+                  -a*p.y - 4.0*p.z - 4.0*p.x - p.z*p.z,
+                  -a*p.z - 4.0*p.x - 4.0*p.y - p.x*p.x);
     }
 
     void main(){
@@ -139,16 +131,19 @@ const simMat = new THREE.ShaderMaterial({
       vec3 p = s.xyz;
       float age = s.w;
 
-      vec3 d_now  = evalMode(uMode,     p);
-      vec3 d_next = evalMode(uModeNext, p);
-      vec3 dp = mix(d_now, d_next, uBlend);
+      vec3 dp;
+      if (uMode == 0)      dp = lorenz(p);
+      else if (uMode == 1) dp = aizawa(p);
+      else if (uMode == 2) dp = thomasA(p);
+      else                 dp = halvorsen(p);
 
-      p += dp * uDt;
-      // soft clamp to keep particles from flying to infinity if a transition pushes them outside the basin
-      float r = length(p);
-      if (r > 8.0) p *= 8.0 / r;
+      // mode-specific dt: Lorenz needs small dt to stay stable, Thomas can take larger
+      float dt = uDt;
+      if (uMode == 0) dt *= 0.15;       // Lorenz native rates are ~10-30
+      else if (uMode == 3) dt *= 0.4;   // Halvorsen rates are ~5-10
 
-      age = mod(age + uDt * 0.06, 1.0);
+      p += dp * dt;
+      age = mod(age + dt * 0.06, 1.0);
       gl_FragColor = vec4(p, age);
     }
   `
@@ -156,55 +151,38 @@ const simMat = new THREE.ShaderMaterial({
 const simScene = new THREE.Scene();
 simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
 
-// ────────────── render scene
+// ─────────────────────────── render scene ───────────────────────────
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x04060a, 0.06);
-const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 50);
-camera.position.set(0, 0.5, 5.5);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 50);
+camera.position.set(0, 0.6, 5);
 camera.lookAt(0, 0, 0);
 
-// volumetric light beam: a tall narrow cone with additive translucent shader.
-// Off-axis to upper-left so it cuts diagonally across the scene.
+// volumetric beam
 const beamGeom = new THREE.ConeGeometry(1.2, 11, 24, 1, true);
-beamGeom.translate(0, 5.5, 0);  // base at origin, tip up
+beamGeom.translate(0, 5.5, 0);
 const beamMat = new THREE.ShaderMaterial({
-  uniforms: {
-    uTime: { value: 0 },
-    uColor: { value: new THREE.Color(0.85, 0.92, 1.0) }
-  },
+  uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(0.85, 0.92, 1.0) } },
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-  vertexShader: `
-    varying vec3 vLocal;
-    varying float vYNorm;
+  vertexShader: `varying vec3 vLocal; varying float vYNorm;
+    void main(){ vLocal=position; vYNorm=position.y/11.0;
+                 gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `uniform float uTime; uniform vec3 uColor;
+    varying vec3 vLocal; varying float vYNorm;
     void main(){
-      vLocal = position;
-      vYNorm = position.y / 11.0;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: `
-    uniform float uTime;
-    uniform vec3 uColor;
-    varying vec3 vLocal;
-    varying float vYNorm;
-    void main(){
-      // alpha falls off radially from cone axis AND vertically toward tip
       float radial = length(vec2(vLocal.x, vLocal.z));
-      float r = 1.0 - smoothstep(0.0, 1.2 * (1.0 - vYNorm), radial);
+      float r = 1.0 - smoothstep(0.0, 1.2*(1.0-vYNorm), radial);
       float vert = 1.0 - smoothstep(0.0, 1.0, vYNorm);
-      float a = r * vert * 0.18;
-      // very gentle flicker
-      a *= 0.95 + 0.05 * sin(uTime * 0.7);
-      gl_FragColor = vec4(uColor * a, a);
-    }
-  `
+      float a = r * vert * 0.20 * (0.95 + 0.05*sin(uTime*0.7));
+      gl_FragColor = vec4(uColor*a, a);
+    }`
 });
 const beam = new THREE.Mesh(beamGeom, beamMat);
-beam.position.set(-2.4, -3.0, -1.0);   // off-center upper-left
-beam.rotation.z = -0.18;                // slight tilt
+beam.position.set(-2.4, -3.0, -1.0);
+beam.rotation.z = -0.18;
 scene.add(beam);
 
-// points
+// points geometry
 const pointsGeom = new THREE.BufferGeometry();
 const idxArr = new Float32Array(N * 2);
 for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
@@ -217,53 +195,54 @@ pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
 
 const pointsMat = new THREE.ShaderMaterial({
   uniforms: {
-    state:  { value: rtB.texture },
+    state:  { value: rtA.texture },
     uPixel: { value: renderer.getPixelRatio() },
-    uPalA:  { value: new THREE.Vector3() },
-    uPalB:  { value: new THREE.Vector3() },
-    uPalC:  { value: new THREE.Vector3() },
-    uPalA2: { value: new THREE.Vector3() },
-    uPalB2: { value: new THREE.Vector3() },
-    uPalC2: { value: new THREE.Vector3() },
-    uBlend: { value: 0 },
-    uBeamPos: { value: new THREE.Vector3(-2.4, 0.0, -1.0) }   // approximate beam centerline at y=0
+    uPalA:  { value: new THREE.Vector3(...MODES[0].pal[0]) },
+    uPalB:  { value: new THREE.Vector3(...MODES[0].pal[1]) },
+    uPalC:  { value: new THREE.Vector3(...MODES[0].pal[2]) },
+    uNormCenter: { value: new THREE.Vector3(...MODES[0].normCenter) },
+    uNormScale:  { value: MODES[0].normScale },
+    uFade:       { value: 1.0 },                  // 0 during mode-switch wipe, 1 normal
+    uBeamPos:    { value: new THREE.Vector3(-2.4, 0.0, -1.0) }
   },
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: true,
   vertexShader: `
     uniform sampler2D state;
     uniform float uPixel;
-    uniform vec3 uPalA; uniform vec3 uPalB; uniform vec3 uPalC;
-    uniform vec3 uPalA2; uniform vec3 uPalB2; uniform vec3 uPalC2;
-    uniform float uBlend;
+    uniform vec3  uPalA, uPalB, uPalC;
+    uniform vec3  uNormCenter;
+    uniform float uNormScale;
+    uniform float uFade;
     uniform vec3  uBeamPos;
     attribute vec2 uvIdx;
     varying vec3 vCol;
     varying float vBeam;
+    varying float vAlpha;
     varying float vFogDepth;
     void main(){
       vec4 s = texture2D(state, uvIdx);
       vec3 p = s.xyz;
       float age = s.w;
 
-      // brighten when intersecting the beam (cylinder around beam's vertical axis)
-      vec2 toBeamXZ = vec2(p.x, p.z) - vec2(uBeamPos.x, uBeamPos.z);
-      float beamProx = exp(-dot(toBeamXZ, toBeamXZ) * 3.5);
+      // map from native coords → display unit-cube
+      vec3 disp = (p - uNormCenter) / uNormScale;
+
+      // beam proximity (in display coords)
+      vec2 toBeam = disp.xz - vec2(uBeamPos.x, uBeamPos.z);
+      float beamProx = exp(-dot(toBeam, toBeam) * 3.5);
       vBeam = beamProx;
 
-      // palette lerp: blend between current-mode palette and next-mode palette
-      vec3 a = mix(uPalA, uPalA2, uBlend);
-      vec3 b = mix(uPalB, uPalB2, uBlend);
-      vec3 c = mix(uPalC, uPalC2, uBlend);
+      // palette
       float k = mod(age, 1.0);
-      vec3 col = mix(a, b, smoothstep(0.0, 0.5, k));
-      col = mix(col, c, smoothstep(0.5, 1.0, k));
-      // beam-lit boost
-      col = mix(col, col * 1.5 + vec3(0.05, 0.08, 0.12), beamProx * 0.6);
+      vec3 col = mix(uPalA, uPalB, smoothstep(0.0, 0.5, k));
+      col = mix(col, uPalC, smoothstep(0.5, 1.0, k));
+      col = mix(col, col*1.5 + vec3(0.05,0.08,0.12), beamProx*0.6);
       vCol = col;
+      vAlpha = uFade;
 
-      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vec4 mv = modelViewMatrix * vec4(disp, 1.0);
       vFogDepth = -mv.z;
-      gl_PointSize = (1.1 + 1.2 * beamProx) * uPixel * (8.0 / vFogDepth);
+      gl_PointSize = (1.2 + 1.4 * beamProx) * uPixel * (5.5 / vFogDepth);
       gl_Position = projectionMatrix * mv;
     }
   `,
@@ -272,6 +251,7 @@ const pointsMat = new THREE.ShaderMaterial({
     uniform float fogDensity;
     varying vec3 vCol;
     varying float vBeam;
+    varying float vAlpha;
     varying float vFogDepth;
     void main(){
       vec2 d = gl_PointCoord - 0.5;
@@ -279,47 +259,43 @@ const pointsMat = new THREE.ShaderMaterial({
       if (r > 0.25) discard;
       float a = exp(-r * 14.0);
       vec3 col = vCol;
-      // expFog: factor = 1 - exp(-dens^2 * z^2)
-      float fogF = 1.0 - exp(-fogDensity * fogDensity * vFogDepth * vFogDepth);
+      float fogF = 1.0 - exp(-fogDensity*fogDensity*vFogDepth*vFogDepth);
       col = mix(col, fogColor, fogF);
-      gl_FragColor = vec4(col * a * (0.45 + vBeam * 0.7), a);
+      gl_FragColor = vec4(col * a * (0.5 + vBeam*0.7) * vAlpha, a * vAlpha);
     }
   `
 });
 const points = new THREE.Points(pointsGeom, pointsMat);
 scene.add(points);
 
-// ────────────── stage state machine
-let modeNow = 0;
-let modeNext = 0;
-let blendStartT = -1e9;
-const TRANSITION_S = 1.4;
+// ─────────────────────────── mode-switch wipe ───────────────────────────
+let mode = 0;
+let switching = false;
+let switchStartT = 0;
+let switchTargetMode = 0;
+const SWITCH_S = 1.4;     // total wipe duration
+
 const stageEl = document.getElementById('stage');
+function setStageText(){ stageEl.textContent = `stage ${mode+1}/4 · ${MODES[mode].id}`; }
+setStageText();
 
-function setMode(m){
-  modeNow = m; modeNext = m;
-  simUniforms.uMode.value = m; simUniforms.uModeNext.value = m;
-  simUniforms.uBlend.value = 0.0;
-  applyPalette(m, m, 0.0);
-  stageEl.textContent = `stage ${m+1}/4 · ${MODES[m].id}`;
+function updateUniformsForMode(m){
+  pointsMat.uniforms.uPalA.value.set(...MODES[m].pal[0]);
+  pointsMat.uniforms.uPalB.value.set(...MODES[m].pal[1]);
+  pointsMat.uniforms.uPalC.value.set(...MODES[m].pal[2]);
+  pointsMat.uniforms.uNormCenter.value.set(...MODES[m].normCenter);
+  pointsMat.uniforms.uNormScale.value = MODES[m].normScale;
+  simUniforms.uMode.value = m;
 }
 
-function applyPalette(m1, m2, b){
-  const a = MODES[m1].palette, b2 = MODES[m2].palette;
-  pointsMat.uniforms.uPalA.value.set(...a[0]); pointsMat.uniforms.uPalB.value.set(...a[1]); pointsMat.uniforms.uPalC.value.set(...a[2]);
-  pointsMat.uniforms.uPalA2.value.set(...b2[0]); pointsMat.uniforms.uPalB2.value.set(...b2[1]); pointsMat.uniforms.uPalC2.value.set(...b2[2]);
-  pointsMat.uniforms.uBlend.value = b;
+function startSwitch(target){
+  if (switching) return;
+  switching = true;
+  switchStartT = performance.now();
+  switchTargetMode = target;
 }
 
-setMode(0);
-
-addEventListener('click', () => {
-  const next = (modeNow + 1) % MODES.length;
-  modeNext = next;
-  simUniforms.uModeNext.value = next;
-  blendStartT = performance.now();
-  stageEl.textContent = `stage ${modeNow+1} → ${modeNext+1} · transitioning`;
-});
+addEventListener('click', () => startSwitch((mode + 1) % MODES.length));
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth/innerHeight;
@@ -327,31 +303,39 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-// pointer subtly nudges (placeholder hook — current attractors use fixed params, but the visual
-// drift from the beam + fog gives a sense of variability. Future iter could nudge each attractor's params.)
+// auto-cycle every 14s
+setInterval(() => { if (!switching) startSwitch((mode + 1) % MODES.length); }, 14000);
 
-const t0 = performance.now();
+let lastT = performance.now();
 function loop(){
   const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  beamMat.uniforms.uTime.value = now / 1000;
+  simUniforms.uDt.value = dt;
 
-  // transition update
-  if (modeNow !== modeNext){
-    const u = Math.min(1.0, (now - blendStartT) / (TRANSITION_S * 1000));
-    simUniforms.uBlend.value = u;
-    applyPalette(modeNow, modeNext, u);
-    if (u >= 1.0){
-      // commit
-      modeNow = modeNext;
-      simUniforms.uMode.value = modeNow;
-      simUniforms.uBlend.value = 0.0;
-      applyPalette(modeNow, modeNow, 0.0);
-      stageEl.textContent = `stage ${modeNow+1}/4 · ${MODES[modeNow].id}`;
+  // wipe transition
+  if (switching){
+    const u = (now - switchStartT) / (SWITCH_S * 1000);
+    if (u < 0.5){
+      // fade out current
+      pointsMat.uniforms.uFade.value = 1.0 - u * 2.0;
+    } else if (u < 1.0){
+      // re-init at midpoint, then fade in target
+      if (pointsMat.uniforms.uFade.value <= 0.05 && mode !== switchTargetMode){
+        mode = switchTargetMode;
+        updateUniformsForMode(mode);
+        reinitTo(mode);
+        setStageText();
+      }
+      pointsMat.uniforms.uFade.value = (u - 0.5) * 2.0;
+    } else {
+      pointsMat.uniforms.uFade.value = 1.0;
+      switching = false;
     }
   }
 
-  beamMat.uniforms.uTime.value = now / 1000;
-
-  // sim 4 substeps for stability
+  // sim 4 substeps
   for (let i = 0; i < 4; i++){
     simUniforms.prev.value = rtA.texture;
     renderer.setRenderTarget(rtB);
@@ -361,27 +345,18 @@ function loop(){
   renderer.setRenderTarget(null);
 
   pointsMat.uniforms.state.value = rtA.texture;
-  // slow camera rotation reveals 3D
-  const ang = (now - t0) * 0.00018;
-  camera.position.x = Math.sin(ang) * 5.5;
-  camera.position.z = Math.cos(ang) * 5.5;
-  camera.position.y = Math.sin(ang * 0.7) * 1.2;
-  camera.lookAt(0, 0, 0.5);
+
+  // slow camera turn around the unit cube
+  const ang = now * 0.00018;
+  camera.position.x = Math.sin(ang) * 5;
+  camera.position.z = Math.cos(ang) * 5;
+  camera.position.y = Math.sin(ang * 0.7) * 1.0;
+  camera.lookAt(0, 0, 0);
 
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
 }
 loop();
-
-// auto-cycle every 12s if user doesn't click (so the thumbnail captures variety)
-setInterval(() => {
-  if (modeNow === modeNext){
-    const next = (modeNow + 1) % MODES.length;
-    modeNext = next;
-    simUniforms.uModeNext.value = next;
-    blendStartT = performance.now();
-  }
-}, 12000);
 </script>
 </body>
 </html>
