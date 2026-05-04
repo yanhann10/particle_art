@@ -42,7 +42,21 @@ def load_json(p: Path) -> dict:
     return json.loads(p.read_text())
 
 
-def pick_parent(lineage: dict, prefs: dict) -> dict:
+def _read_recent_log(n: int = 50) -> list[dict]:
+    """Read the last n entries from mutation_log.jsonl. Empty list if missing."""
+    if not LOG.exists():
+        return []
+    lines = LOG.read_text().splitlines()[-n:]
+    out = []
+    for ln in lines:
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            pass
+    return out
+
+
+def pick_parent(lineage: dict, prefs: dict, recent: list[dict]) -> dict:
     pieces = lineage["pieces"]
     if not pieces:
         raise RuntimeError("no pieces to mutate")
@@ -52,18 +66,34 @@ def pick_parent(lineage: dict, prefs: dict) -> dict:
     pool = favored if favored else [p for p in pieces if p["id"] not in dropped]
     if not pool:
         pool = pieces
-    return random.choice(pool)
+    # avoid picking the parent of either of the last two ticks if we have alternatives
+    last_two = {r.get("parent") for r in recent[-2:] if r.get("parent")}
+    deduped = [p for p in pool if p["id"] not in last_two]
+    return random.choice(deduped if deduped else pool)
 
 
-def sample_directive(spec_path: Path) -> tuple[str, str]:
+def sample_directive(spec_path: Path, parent_id: str, recent: list[dict]) -> tuple[str, str]:
     spec = load_json(spec_path)
-    weights = [d["weight"] for d in spec["directives"]]
-    chosen = random.choices(spec["directives"], weights=weights, k=1)[0]
+    # constraints:
+    #   1) never repeat (parent_id × directive_id) — descendants of a piece never use the same directive twice
+    #   2) avoid directives used in the last 3 system-wide ticks (so the gallery doesn't get bursts of one style)
+    used_for_parent = {r.get("directive_id") for r in recent if r.get("parent") == parent_id}
+    cooldown = {r.get("directive_id") for r in recent[-3:]}
+    candidates, weights = [], []
+    for d in spec["directives"]:
+        did = d["id"]
+        if did in used_for_parent:
+            continue
+        w = d["weight"]
+        if did in cooldown:
+            w *= 0.15  # heavy soft-penalty rather than hard exclude
+        candidates.append(d); weights.append(w)
+    if not candidates:                       # all used → reset for this parent
+        candidates = spec["directives"]; weights = [d["weight"] for d in spec["directives"]]
+    chosen = random.choices(candidates, weights=weights, k=1)[0]
     text = chosen["directive"]
     if "{" in text and "params" in chosen:
-        # substitute the first {placeholder} with a random param
         param = random.choice(chosen["params"])
-        # find the first {…} in text and replace
         text = re.sub(r"\{[^}]+\}", str(param), text, count=1)
     return chosen["id"], text
 
@@ -153,6 +183,8 @@ def main():
     lineage = load_json(LINEAGE)
     prefs = load_json(PREFS)
 
+    recent = _read_recent_log(50)
+
     if args.parent:
         candidates = [p for p in lineage["pieces"] if p["id"] == args.parent]
         if not candidates:
@@ -160,14 +192,14 @@ def main():
             return 3
         parent = candidates[0]
     else:
-        parent = pick_parent(lineage, prefs)
+        parent = pick_parent(lineage, prefs, recent)
 
     parent_html = (PIECES / parent["id"] / "index.html").read_text()
 
     if args.directive:
         directive_id, directive = "manual", args.directive
     else:
-        directive_id, directive = sample_directive(DIRECTIVES)
+        directive_id, directive = sample_directive(DIRECTIVES, parent["id"], recent)
 
     print(f"parent: {parent['id']} ({parent['title']})")
     print(f"directive: {directive_id} — {directive}")
