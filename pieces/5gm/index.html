@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5gm · differential growth · 3D upward tower</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080b; overflow:hidden;
+               color:#dde6d8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">5gm · 3D differential growth · tower</div>
+<div class="hint">drag to orbit · scroll to zoom · click to pause/resume</div>
+<div class="src">descended from 7ea · self-avoiding curve in full 3D + age-driven upward drift</div>
+<div class="stat" id="stat">vertices=0</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// 7ea was effectively 2D (curve on the XZ plane with a tiny age-based Y sink).
+// 5gm is the 3D ANSWER: curve evolves in full 3D, and every vertex experiences
+// a slow upward drift proportional to its own age. Newly-subdivided midpoints
+// inherit a young age and stay near the base; older vertices rise. Result is
+// a coral tower that grows UP over time — a record of evolution stacked
+// vertically, not splayed horizontally.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x06080b, 0.038);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080b, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+// ─────────────────────────── curve state (full 3D)
+const MAX_VERTS = 4000;
+const ATTRACT  = 0.06;
+const REPEL_R  = 0.42;
+const REPEL_STR= 0.12;
+const NOISE    = 0.003;
+const PRESSURE = 0.0028;          // outward from local 3D centroid
+const RISE     = 0.012;           // baseline upward drift per step (small; multiplied by age)
+const MAX_D    = 0.32;
+let paused = false;
+
+// initial wobbly ring of 24 verts at y=0
+const verts = [];
+for (let i = 0; i < 24; i++){
+  const th = i / 24 * Math.PI * 2;
+  const r = 1.4 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+}
+
+// 3D spatial hash
+const CELL = REPEL_R;
+const grid = new Map();
+function key(x, y, z){
+  return Math.floor(x/CELL)+','+Math.floor(y/CELL)+','+Math.floor(z/CELL);
+}
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i]; const k = key(v.x, v.y, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++)
+    for (let dy=-1; dy<=1; dy++)
+      for (let dz=-1; dz<=1; dz++){
+        const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+        if (arr) for (const idx of arr) out.push(idx);
+      }
+  return out;
+}
+
+function step(){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+
+  // 3D repulsion via spatial hash
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    const cands = neighbors(v);
+    for (const j of cands){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  // attraction toward two polyline neighbors (3D)
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x + b.x - 2*v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2*v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2*v.z) * ATTRACT;
+  }
+  // outward pressure from local 3D centroid (drives growth in all directions)
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++){ cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x - cx, oy = verts[i].y - cy, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox/d) * PRESSURE;
+    dy[i] += (oy/d) * PRESSURE * 0.4;        // less radial pressure on Y so the form ribbons up rather than ballooning
+    dz[i] += (oz/d) * PRESSURE;
+  }
+  // apply + brownian + age + age-proportional UPWARD DRIFT
+  // (this is the key change vs 7ea — older vertices rise; the form becomes a tower)
+  for (let i = 0; i < n; i++){
+    const a = verts[i].age;
+    // upward velocity: small constant + age-driven so newer mid-points stay low while elders rise
+    const upward = RISE * (0.3 + 1.2 * Math.min(a * 1.5, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE;
+    verts[i].y += dy[i] + (Math.random()-0.5)*NOISE * 0.5 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE;
+    verts[i].age += 0.0012;
+  }
+  // subdivide: midpoints inherit a fraction of the parent's age (young, stays low)
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if (ex*ex + ey*ey + ez*ez > MAX_D*MAX_D && verts.length + grown.length < MAX_VERTS){
+      grown.push({
+        x: (a.x+b.x)*0.5,
+        y: (a.y+b.y)*0.5 - 0.05,           // small downward bias on new midpoints — they're "born" lower
+        z: (a.z+b.z)*0.5,
+        age: Math.max(a.age, b.age) * 0.5  // start younger so they don't immediately rise
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// pre-warm 800 steps so the tower opens with structure already established
+for (let s = 0; s < 800; s++) step();
+
+addEventListener('click', () => { paused = !paused; });
+
+// ─────────────────────────── rendering: 50k particles distributed along polyline
+const N_RENDER = 50000;
+const rPos = new Float32Array(N_RENDER * 3);
+const rSeed = new Float32Array(N_RENDER);
+const rAge = new Float32Array(N_RENDER);
+const rHeight = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeed[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeed, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('hgt',      new THREE.BufferAttribute(rHeight, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uYMax: { value: 1 }    // current max y across the form (for normalization in shader)
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uYMax;
+    attribute float seed;
+    attribute float age;
+    attribute float hgt;
+    varying vec3 vCol;
+    varying float vH;
+    void main(){
+      vec3 p = position;
+      // tiny shimmer
+      float t = uTime * 0.5 + seed * 6.28;
+      p.x += 0.005 * sin(t);
+      p.z += 0.005 * cos(t);
+
+      vH = clamp(hgt / max(uYMax, 0.5), 0.0, 1.0);
+      // height-graded palette: bright algae at base (young, lower)
+      // → coral red at mid → bone/silver at top (old, risen high)
+      vec3 a = vec3(0.42, 0.86, 0.55);    // algae
+      vec3 b = vec3(0.95, 0.40, 0.38);    // coral red
+      vec3 c = vec3(0.94, 0.92, 0.84);    // bone
+      vec3 col = mix(a, b, smoothstep(0.0, 0.55, vH));
+      col = mix(col, c, smoothstep(0.55, 1.0, vH));
+      vCol = col;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 1.4 * uPixel * (40.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vH;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 18.0) * 0.62;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+function loop(){
+  uniforms.uTime.value = (performance.now() - start) / 1000;
+
+  // few sim steps per frame — keep growth visible but not chaotic
+  for (let s = 0; s < 3; s++) step();
+
+  // distribute render particles along polyline; track yMax for shader normalization
+  const n = verts.length;
+  let yMax = 0;
+  if (n > 1){
+    const lengths = []; let total = 0;
+    for (let i = 0; i < n; i++){
+      const a = verts[i], b = verts[(i+1)%n];
+      const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+      const L = Math.sqrt(ex*ex + ey*ey + ez*ez);
+      lengths.push(L); total += L;
+      if (a.y > yMax) yMax = a.y;
+    }
+    if (total > 0){
+      let written = 0;
+      for (let i = 0; i < n; i++){
+        const share = (i === n - 1) ? N_RENDER - written : Math.max(1, Math.floor(N_RENDER * lengths[i] / total));
+        const a = verts[i], b = verts[(i+1)%n];
+        for (let k = 0; k < share && written < N_RENDER; k++){
+          const u = Math.random();
+          rPos[written*3]   = a.x + (b.x-a.x)*u + (Math.random()-0.5)*0.018;
+          rPos[written*3+1] = a.y + (b.y-a.y)*u + (Math.random()-0.5)*0.018;
+          rPos[written*3+2] = a.z + (b.z-a.z)*u + (Math.random()-0.5)*0.018;
+          rAge[written]    = Math.max(a.age, b.age);
+          rHeight[written] = a.y + (b.y-a.y)*u;
+          written++;
+        }
+      }
+      geom.attributes.position.needsUpdate = true;
+      geom.attributes.age.needsUpdate = true;
+      geom.attributes.hgt.needsUpdate = true;
+    }
+  }
+  uniforms.uYMax.value = Math.max(yMax, 1.0);
+
+  // camera follows the tower as it grows: target rises with yMax, distance scales
+  controls.target.y = yMax * 0.45;
+  statEl.textContent = `vertices=${n} · height=${yMax.toFixed(1)}${paused ? ' · paused' : ''}`;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
