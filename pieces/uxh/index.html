@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uxh · coral surface · volcanic eruption from beneath</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0605; overflow:hidden;
+               color:#f4d8c8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">uxh · coral surface · volcanic eruption</div>
+<div class="hint">drag to orbit · click to trigger eruption · auto-pulse every ~10s</div>
+<div class="src">descended from 7ea · differential growth + emitter physics</div>
+<div class="stat" id="stat">coral=0 · lava=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Two-system piece:
+//   1. CORAL SURFACE — 7ea's differential-growth curve on the y=0 plane.
+//      Older parts sink slightly so the surface has crustal depth.
+//   2. VOLCANIC ERUPTION — a particle emitter at the origin, beneath the
+//      coral. Particles erupt upward through the gaps in the coral mesh,
+//      arc under gravity, cool from white-hot through ember-red, fall and
+//      re-die. Eruption rate pulses on a slow sin cycle; click triggers
+//      an immediate strong burst.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0605, 0.05);
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(6, 4.5, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0605, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0.5, 0);
+
+// ─────────────────────────── CORAL SURFACE (descended from 7ea) ───────────────────────────
+const MAX_VERTS = 3500;
+const ATTRACT  = 0.06;
+const REPEL_R  = 0.42;
+const REPEL_STR= 0.12;
+const NOISE    = 0.003;
+const PRESSURE = 0.0035;
+const MAX_D    = 0.32;
+const verts = [];
+for (let i = 0; i < 24; i++){
+  const th = i / 24 * Math.PI * 2;
+  // ring around the future crater, NOT centered on it — leaves a clear vent
+  const r = 2.2 + (Math.random() - 0.5) * 0.2;
+  verts.push({ x: Math.cos(th)*r, z: Math.sin(th)*r, y: 0, age: 0 });
+}
+const CELL = REPEL_R;
+const grid = new Map();
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i]; const k = Math.floor(v.x/CELL)+','+Math.floor(v.z/CELL);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++) for (let dz=-1; dz<=1; dz++){
+    const arr = grid.get((cx+dx)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+function coralStep(){
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n), dz = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    for (const j of neighbors(v)){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex*ex + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d/REPEL_R) / d;
+      dx[i] += ex*f; dz[i] += ez*f;
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x + b.x - 2*v.x) * ATTRACT;
+    dz[i] += (a.z + b.z - 2*v.z) * ATTRACT;
+  }
+  // pressure: outward from origin (the crater)
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x, oz = verts[i].z;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox/d) * PRESSURE;
+    dz[i] += (oz/d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++){
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE;
+    verts[i].age += 0.0006;
+    verts[i].y = -Math.min(verts[i].age * 0.5, 0.8);   // crustal sink
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ez = b.z-a.z;
+    if (ex*ex+ez*ez > MAX_D*MAX_D && verts.length + grown.length < MAX_VERTS){
+      grown.push({ x:(a.x+b.x)*0.5, z:(a.z+b.z)*0.5, y:(a.y+b.y)*0.5, age: Math.max(a.age,b.age)*0.85 });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+for (let i = 0; i < 600; i++) coralStep();   // pre-warm coral
+
+const N_CORAL = 30000;
+const coralPos = new Float32Array(N_CORAL * 3);
+const coralAge = new Float32Array(N_CORAL);
+const coralGeom = new THREE.BufferGeometry();
+coralGeom.setAttribute('position', new THREE.BufferAttribute(coralPos, 3));
+coralGeom.setAttribute('age',      new THREE.BufferAttribute(coralAge, 1));
+const coralMat = new THREE.ShaderMaterial({
+  uniforms: { uTime:{value:0}, uPixel:{value:renderer.getPixelRatio()} },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float age;
+    varying vec3 vCol;
+    void main(){
+      vec3 p = position;
+      // muted mineral palette — the coral is the cooled crust
+      vec3 a = vec3(0.32, 0.20, 0.18);    // basalt
+      vec3 b = vec3(0.55, 0.30, 0.22);    // oxidized iron
+      vec3 c = vec3(0.78, 0.55, 0.32);    // amber crystal
+      float k = clamp(age * 0.8, 0.0, 1.0);
+      vCol = mix(a, b, k);
+      vCol = mix(vCol, c, smoothstep(0.85, 1.0, k) * 0.4);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 1.3 * uPixel * (40.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 18.0) * 0.55;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const coralPoints = new THREE.Points(coralGeom, coralMat);
+scene.add(coralPoints);
+
+// ─────────────────────────── VOLCANIC ERUPTION ───────────────────────────
+const N_LAVA = 25000;
+const lavaPos = new Float32Array(N_LAVA * 3);
+const lavaVel = new Float32Array(N_LAVA * 3);
+const lavaLife = new Float32Array(N_LAVA);
+const lavaMaxLife = new Float32Array(N_LAVA);
+const lavaSeed = new Float32Array(N_LAVA);
+let cursor = 0;   // ring-buffer write head
+
+const GRAVITY = -8.4;
+const VENT = new THREE.Vector3(0, 0, 0);   // crater at origin, ground level
+let burstUntil = 0;
+function spawnLava(n, intensity = 1.0){
+  for (let i = 0; i < n; i++){
+    const idx = cursor;
+    // small jitter on vent position so the column isn't a single line
+    const r = Math.random() * 0.18;
+    const th = Math.random() * Math.PI * 2;
+    lavaPos[idx*3]   = VENT.x + Math.cos(th) * r;
+    lavaPos[idx*3+1] = VENT.y - 0.05;
+    lavaPos[idx*3+2] = VENT.z + Math.sin(th) * r;
+    // velocity: cone upward with slight outward bias
+    const speed = (4.5 + Math.random() * 5.5) * intensity;
+    const cone = 0.30 + Math.random() * 0.25;       // half-angle of cone
+    const yaw = Math.random() * Math.PI * 2;
+    const pitch = (Math.random() - 0.5) * cone;
+    const yComp = Math.cos(pitch);
+    const planar = Math.sin(pitch);
+    lavaVel[idx*3]   = planar * Math.cos(yaw) * speed;
+    lavaVel[idx*3+1] = yComp * speed;
+    lavaVel[idx*3+2] = planar * Math.sin(yaw) * speed;
+    const life = 1.6 + Math.random() * 1.4;
+    lavaLife[idx] = life;
+    lavaMaxLife[idx] = life;
+    lavaSeed[idx] = Math.random();
+    cursor = (cursor + 1) % N_LAVA;
+  }
+}
+
+function lavaStep(dt){
+  // base emission pulse: slow sin between 80 and 220 particles/frame; burst windows boost to 800
+  const t = performance.now() / 1000;
+  const base = 80 + 70 * (Math.sin(t * 0.6) + 1);     // 80..220
+  const burst = (performance.now() < burstUntil) ? 600 : 0;
+  const emit = Math.floor((base + burst) * dt * 60);
+  spawnLava(Math.min(emit, 1200));
+
+  // integrate
+  let alive = 0;
+  for (let i = 0; i < N_LAVA; i++){
+    if (lavaLife[i] <= 0) continue;
+    alive++;
+    lavaVel[i*3+1] += GRAVITY * dt;
+    lavaPos[i*3]   += lavaVel[i*3]   * dt;
+    lavaPos[i*3+1] += lavaVel[i*3+1] * dt;
+    lavaPos[i*3+2] += lavaVel[i*3+2] * dt;
+    lavaLife[i] -= dt;
+    // kill when life expires OR fallen below ground
+    if (lavaLife[i] <= 0 || lavaPos[i*3+1] < -0.6){
+      lavaLife[i] = 0;
+    }
+  }
+  return alive;
+}
+
+const lavaGeom = new THREE.BufferGeometry();
+lavaGeom.setAttribute('position', new THREE.BufferAttribute(lavaPos, 3));
+lavaGeom.setAttribute('life',     new THREE.BufferAttribute(lavaLife, 1));
+lavaGeom.setAttribute('maxLife',  new THREE.BufferAttribute(lavaMaxLife, 1));
+lavaGeom.setAttribute('seed',     new THREE.BufferAttribute(lavaSeed, 1));
+
+const lavaMat = new THREE.ShaderMaterial({
+  uniforms: { uPixel:{value:renderer.getPixelRatio()} },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uPixel;
+    attribute float life;
+    attribute float maxLife;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vLife;
+    varying float vAge01;   // 0=fresh hot, 1=cooled
+    void main(){
+      vec3 p = position;
+      vLife = life;
+      // discard dead particles by collapsing them out of clip space
+      if (life <= 0.0){
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);   // outside clip → not rendered
+        gl_PointSize = 0.0;
+        vCol = vec3(0.0);
+        return;
+      }
+      float age01 = clamp(1.0 - life / max(maxLife, 0.001), 0.0, 1.0);
+      vAge01 = age01;
+      // heat-graded palette: white-hot → yellow → orange → red → soot
+      vec3 c0 = vec3(1.00, 0.98, 0.92);   // white-hot
+      vec3 c1 = vec3(1.00, 0.78, 0.30);   // yellow
+      vec3 c2 = vec3(0.95, 0.42, 0.12);   // orange
+      vec3 c3 = vec3(0.70, 0.18, 0.10);   // red
+      vec3 c4 = vec3(0.10, 0.06, 0.05);   // soot
+      vec3 col;
+      if (age01 < 0.15)      col = mix(c0, c1, age01 / 0.15);
+      else if (age01 < 0.40) col = mix(c1, c2, (age01 - 0.15) / 0.25);
+      else if (age01 < 0.75) col = mix(c2, c3, (age01 - 0.40) / 0.35);
+      else                   col = mix(c3, c4, (age01 - 0.75) / 0.25);
+      vCol = col;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // size: hot = bright + bigger, cool = smaller
+      gl_PointSize = (1.4 + 1.6 * (1.0 - age01)) * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vLife;
+    varying float vAge01;
+    void main(){
+      if (vLife <= 0.0) discard;
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      // hot particles glow harder; cooled particles darken faster
+      float alpha = a * (0.55 + 0.45 * (1.0 - vAge01));
+      gl_FragColor = vec4(vCol * alpha * (1.5 - vAge01 * 0.7), alpha);
+    }
+  `
+});
+const lavaPoints = new THREE.Points(lavaGeom, lavaMat);
+scene.add(lavaPoints);
+
+// click → trigger immediate burst
+addEventListener('click', () => { burstUntil = performance.now() + 1800; });
+
+// auto-pulse: strong burst every ~10s in addition to the steady sin pulse
+setInterval(() => {
+  if (performance.now() > burstUntil) burstUntil = performance.now() + 1500;
+}, 10000);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+let lastT = performance.now();
+let coralStepsThisFrame = 0;
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  coralMat.uniforms.uTime.value = (now - 0) / 1000;
+
+  // run a few coral steps (slow growth — the crust keeps developing)
+  for (let s = 0; s < 1; s++){ coralStep(); coralStepsThisFrame++; }
+
+  // distribute coral particles along the polyline
+  const n = verts.length;
+  if (n > 1){
+    const lengths = []; let total = 0;
+    for (let i = 0; i < n; i++){
+      const a = verts[i], b = verts[(i+1)%n];
+      const ex = b.x-a.x, ez = b.z-a.z, ey = b.y-a.y;
+      const L = Math.sqrt(ex*ex + ez*ez + ey*ey);
+      lengths.push(L); total += L;
+    }
+    if (total > 0){
+      let written = 0;
+      for (let i = 0; i < n; i++){
+        const share = (i === n - 1) ? N_CORAL - written : Math.max(1, Math.floor(N_CORAL * lengths[i] / total));
+        const a = verts[i], b = verts[(i+1)%n];
+        for (let k = 0; k < share && written < N_CORAL; k++){
+          const u = Math.random();
+          coralPos[written*3]   = a.x + (b.x-a.x)*u + (Math.random()-0.5)*0.02;
+          coralPos[written*3+1] = a.y + (b.y-a.y)*u;
+          coralPos[written*3+2] = a.z + (b.z-a.z)*u + (Math.random()-0.5)*0.02;
+          coralAge[written] = Math.max(a.age, b.age);
+          written++;
+        }
+      }
+      coralGeom.attributes.position.needsUpdate = true;
+      coralGeom.attributes.age.needsUpdate = true;
+    }
+  }
+
+  // step volcano
+  const aliveLava = lavaStep(dt);
+  lavaGeom.attributes.position.needsUpdate = true;
+  lavaGeom.attributes.life.needsUpdate = true;
+
+  statEl.textContent = `coral=${verts.length} · lava=${aliveLava}`;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
