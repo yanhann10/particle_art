@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qbv · aria attractor</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0806; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">qbv</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Chain from 6rs (tender / Gonzalez-Torres / Aizawa attractor with breathing
+// paired-clock drift and amber palette). "Aria" morphs the form: the attractor
+// stretches vertically over time — a single voice rising out of the ensemble.
+// Released particles now drift UPWARD with wider scatter (a sung note dissolving
+// into the rafters). Palette warms from amber into a brighter, more luminous
+// peak at the crescendo of each particle's life-envelope. Breathing and pointer
+// nudge inherited directly from 6rs.
+// Reference: Meredith Monk's sustained-vocal installations — single tones
+// expanding to fill architectural space.
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0806, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 0.5;
+  init[i*4+1] = (Math.random()*2-1) * 0.5;
+  init[i*4+2] = (Math.random()*2-1) * 0.5;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+/* ── simulation ── identical 6rs Aizawa params as starting state ── */
+const simUniforms = {
+  prev:     { value: rtA.texture },
+  uDt:      { value: 0.010 },
+  uA:       { value: 0.95 },
+  uB:       { value: 0.70 },
+  uC:       { value: 0.60 },
+  uD:       { value: 3.50 },
+  uE:       { value: 0.25 },
+  uF:       { value: 0.10 },
+  uTime:    { value: 0.0 },
+  uBreath:  { value: 0.0 },
+  uAria:    { value: 0.0 }   // 0→1 morph factor: how far the aria has taken hold
+};
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF, uTime, uBreath, uAria;
+    varying vec2 vUv;
+
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      float h = hash(vUv);
+
+      // 6rs breathing: paired-clock modulation (inherited)
+      float breath = sin(uTime * 0.4 + h * 6.28) * 0.5 + 0.5;
+      float localA = uA + breath * uBreath * 0.06;
+      float localC = uC + breath * uBreath * 0.04;
+
+      // ── aria morph: vocal envelope per particle ──
+      // each particle has a phase offset so they don't all crescendo together
+      float voicePhase = mod(age + h * 0.3, 1.0);
+      // crescendo (0→0.3), sustain (0.3→0.55), diminuendo (0.55→1.0)
+      float crescendo  = smoothstep(0.0, 0.3, voicePhase);
+      float sustain     = 1.0 - smoothstep(0.55, 1.0, voicePhase);
+      float envelope    = crescendo * sustain;
+
+      // aria stretches the attractor vertically — voice rising
+      // at full aria, y-component of dp is amplified, z pulled upward
+      float yStretch = 1.0 + uAria * 0.6 * envelope;
+
+      // aizawa integration (inherited from 6rs)
+      vec3 dp = vec3(
+        (p.z - uB) * p.x - uD * p.y,
+        (uD * p.x + (p.z - uB) * p.y) * yStretch,
+        localC + localA * p.z - (p.z*p.z*p.z)/3.0
+              - (p.x*p.x + p.y*p.y)*(1.0 + uE*p.z)
+              + uF * p.z * p.x*p.x*p.x
+      );
+
+      // aria adds a gentle upward bias during sustain — the held note
+      float liftBias = uAria * envelope * 0.08;
+      dp.y += liftBias;
+
+      // 6rs release: particles past threshold drift away
+      // aria change: drift UPWARD (voice ascending) with wider scatter
+      float release = smoothstep(0.6, 1.0, age);
+      float releaseAngle = h * 6.2832;
+      vec3 drift = vec3(
+        sin(releaseAngle) * 0.12 * release * (1.0 + uAria),
+        (0.20 + uAria * 0.15) * release,
+        cos(releaseAngle) * 0.12 * release * (1.0 + uAria)
+      );
+      // parent: released particles loosen from attractor
+      float attractorStrength = 1.0 - release * 0.7;
+
+      p += (dp * attractorStrength + drift) * uDt;
+
+      age = mod(age + uDt * 0.035, 1.0);
+
+      // on reset, respawn near attractor (inherited from 6rs)
+      if(age < uDt * 0.04){
+        p = vec3(
+          (hash(vUv + 0.1) * 2.0 - 1.0) * 0.4,
+          (hash(vUv + 0.2) * 2.0 - 1.0) * 0.4,
+          (hash(vUv + 0.3) * 2.0 - 1.0) * 0.4
+        );
+      }
+
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+/* ── render points ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.05, 60);
+camera.position.set(0, 0, 5);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:   { value: rtB.texture },
+    uPixel:  { value: renderer.getPixelRatio() },
+    uBreath: { value: 0.0 },
+    uAria:   { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel, uAria;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vRelease;
+    varying float vEnvelope;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      vRelease = smoothstep(0.6, 1.0, vAge);
+
+      // vocal envelope for this particle
+      float h = fract(sin(dot(uvIdx, vec2(127.1,311.7)))*43758.5453);
+      float voicePhase = mod(vAge + h * 0.3, 1.0);
+      float crescendo  = smoothstep(0.0, 0.3, voicePhase);
+      float sustain     = 1.0 - smoothstep(0.55, 1.0, voicePhase);
+      vEnvelope = crescendo * sustain;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 0.1);
+      // aria morph: particles at crescendo peak grow brighter/larger
+      float ariaSize = 1.0 + uAria * vEnvelope * 0.8;
+      float sz = (1.4 + vRelease * 1.2) * ariaSize * uPixel * (7.0 / dist);
+      gl_PointSize = sz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vRelease;
+    varying float vEnvelope;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+
+      float a = exp(-r * 10.0);
+
+      // palette morphs from 6rs amber toward a brighter, more luminous peak
+      // at crescendo — like a voice gaining brilliance at the top of a phrase
+      vec3 warm  = vec3(0.95, 0.72, 0.38); // 6rs amber core (inherited)
+      vec3 pale  = vec3(1.0, 0.92, 0.82);  // 6rs pale glow (inherited)
+      vec3 faded = vec3(0.65, 0.42, 0.22); // 6rs dimming (inherited)
+      vec3 aria  = vec3(1.0, 0.88, 0.72);  // aria: warmer, more luminous
+
+      float life = smoothstep(0.0, 0.15, vAge) * (1.0 - smoothstep(0.7, 1.0, vAge));
+
+      vec3 col = mix(warm, pale, life * 0.4);
+      // aria pushes the peak brightness higher during envelope crescendo
+      col = mix(col, aria, vEnvelope * 0.5);
+      col = mix(col, faded, vRelease);
+
+      // released particles fade — ascending notes dissolving into space
+      float opacity = a * (0.35 + life * 0.65) * (1.0 - vRelease * 0.6);
+      // envelope brightens particles at their crescendo
+      opacity *= (1.0 + vEnvelope * 0.3);
+
+      gl_FragColor = vec4(col * opacity, opacity);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pointer: gentle parameter nudge (inherited from 6rs)
+const target = { a: 0.95, c: 0.60 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth)  - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.a = 0.95 + nx * 0.05;
+  target.c = 0.60 + ny * 0.06;
+});
+
+// centroid tracking — aria morph raises centroid as form stretches upward
+const centroid = new THREE.Vector3(0, 0, 0.8);
+const centroidTarget = new THREE.Vector3(0, 0, 0.8);
+let frameCount = 0;
+
+function sampleCentroid(elapsed, ariaFactor){
+  const t = elapsed;
+  centroidTarget.set(
+    Math.sin(t * 0.1) * 0.15,
+    -0.08 + Math.sin(t * 0.07) * 0.05 + ariaFactor * 0.25,
+    0.85 + Math.sin(t * 0.13) * 0.1
+  );
+}
+
+const t0 = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  // aria morph factor: 0→1 over ~40 seconds, so viewer sees the parent
+  // transform gradually rather than starting fresh
+  const ariaFactor = Math.min(elapsed / 40.0, 1.0);
+
+  // 6rs breathing oscillation (inherited)
+  const breathCycle = Math.sin(elapsed * 0.3) * 0.5 + 0.5;
+  simUniforms.uBreath.value = breathCycle;
+  simUniforms.uTime.value = elapsed;
+  simUniforms.uAria.value = ariaFactor;
+  pointsMat.uniforms.uBreath.value = breathCycle;
+  pointsMat.uniforms.uAria.value = ariaFactor;
+
+  // gentle parameter easing (inherited from 6rs)
+  simUniforms.uA.value += (target.a - simUniforms.uA.value) * 0.03;
+  simUniforms.uC.value += (target.c - simUniforms.uC.value) * 0.03;
+
+  // 3 substeps (inherited from 6rs — "tenderness")
+  for (let i = 0; i < 3; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+  pointsMat.uniforms.state.value = rtA.texture;
+
+  // camera: slow orbit tracking centroid, pulls back slightly as form stretches
+  frameCount++;
+  if (frameCount % 60 === 0) sampleCentroid(elapsed, ariaFactor);
+  centroid.lerp(centroidTarget, 0.02);
+
+  const ang = elapsed * 0.08;
+  const radius = 4.5 + Math.sin(elapsed * 0.12) * 0.3 + ariaFactor * 0.5;
+  camera.position.set(
+    Math.sin(ang) * radius + centroid.x,
+    Math.sin(ang * 0.6) * 0.6 + centroid.y + 0.3,
+    Math.cos(ang) * radius + centroid.z
+  );
+  camera.lookAt(centroid);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
