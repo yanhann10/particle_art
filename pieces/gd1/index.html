@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>votive · vermilion → candlelit Lucy · de La Tour chiaroscuro</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#060404; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.6; letter-spacing:0.06em;
+             font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#e5dcd2; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy · votive light …</div>
+<div class="id">v5q</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(52, innerWidth / innerHeight, 0.1, 600);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x060404, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── instance layout: central Lucy + 3 concentric rings (inherited) ── */
+const COPIES = 30;
+const PER_CENTER = 28000;
+const PER_RING   = 1200;
+const N = PER_CENTER + (COPIES - 1) * PER_RING;
+
+const copyOffsets = [];
+const copyScales  = [];
+
+copyOffsets.push(new THREE.Vector3(0, 0, 0));
+copyScales.push(1.0);
+
+for (let i = 0; i < 7; i++) {
+  const a = (i / 7) * Math.PI * 2;
+  copyOffsets.push(new THREE.Vector3(Math.cos(a) * 22, 0, Math.sin(a) * 22));
+  copyScales.push(0.52);
+}
+for (let i = 0; i < 11; i++) {
+  const a = (i / 11) * Math.PI * 2 + 0.28;
+  copyOffsets.push(new THREE.Vector3(Math.cos(a) * 42, 0, Math.sin(a) * 42));
+  copyScales.push(0.33);
+}
+for (let i = 0; i < 11; i++) {
+  const a = (i / 11) * Math.PI * 2 + 0.14;
+  copyOffsets.push(new THREE.Vector3(Math.cos(a) * 64, 0, Math.sin(a) * 64));
+  copyScales.push(0.21);
+}
+
+const restPositions = new Float32Array(N * 3);
+const localRest     = new Float32Array(N * 3);
+const seedsArr      = new Float32Array(N);
+const scaleArr      = new Float32Array(N);
+
+const uniforms = {
+  uTime:      { value: 0 },
+  uPixel:     { value: renderer.getPixelRatio() },
+  uReady:     { value: 0.0 }
+};
+
+/* ── shaders: votive — de La Tour chiaroscuro ── */
+/* Georges de La Tour: figures emerge from absolute darkness, lit by a single */
+/* candle flame held close. The votive transforms vermilion's tiled pattern */
+/* into 3 focal flame sources with true inverse-square falloff. Lucy's body */
+/* is swallowed in shadow except where candlelight finds her surface. */
+const vertexShader = `
+  uniform float uTime;
+  uniform float uPixel;
+  uniform float uReady;
+  attribute vec3  rest;
+  attribute vec3  localR;
+  attribute float seed;
+  attribute float sc;
+  varying vec3  vCol;
+  varying float vAlpha;
+  varying float vGlow;
+  varying float vRise;
+
+  /* 3 votive flame positions in Lucy's local space (normalized ~15 units tall) */
+  /* These are the offering lights: one low (hands), one mid (heart), one high (crown) */
+  const vec3 flame0 = vec3( 0.0, -4.0,  2.8);  /* low votive — at the feet/hands   */
+  const vec3 flame1 = vec3(-2.2,  1.5,  2.0);  /* heart flame — mid-torso left     */
+  const vec3 flame2 = vec3( 0.8,  5.5,  1.6);  /* crown flame — near the head      */
+
+  /* inverse-square flame illumination with warm falloff */
+  float flameLight(vec3 p, vec3 flamePos, float radius, float intensity) {
+    float d = length(p - flamePos);
+    return intensity / (1.0 + d * d / (radius * radius));
+  }
+
+  /* flame flicker — organic pulsation per flame */
+  float flicker(float id, float t) {
+    return 0.75 + 0.25 * sin(t * 3.1 + id * 7.0)
+                * sin(t * 5.3 + id * 13.0)
+                * sin(t * 1.7 + id * 3.0) * 0.5 + 0.5;
+  }
+
+  void main() {
+    float t = uTime * 0.25 + seed * 6.2831;
+
+    /* inherited drape fold — gentler in candlelight */
+    vec3 lr = localR;
+    float drapeAng = sin(lr.y * 0.18 + uTime * 0.04) * 0.15 * smoothstep(0.0, 1.0, uReady);
+    float ct = cos(drapeAng), st = sin(drapeAng);
+    lr = vec3(lr.x * ct - lr.z * st, lr.y, lr.x * st + lr.z * ct);
+
+    /* compute flame illumination — 3 point lights with flicker */
+    float f0 = flameLight(lr, flame0, 5.5, 1.0) * flicker(0.0, uTime);
+    float f1 = flameLight(lr, flame1, 5.0, 0.85) * flicker(1.0, uTime);
+    float f2 = flameLight(lr, flame2, 4.5, 0.75) * flicker(2.0, uTime);
+    float totalLight = f0 + f1 + f2;
+    float litAmount = smoothstep(0.0, 0.12, totalLight);
+
+    /* which flame is dominant — for color temperature variation */
+    float maxF = max(f0, max(f1, f2));
+    float warmShift = f0 / (totalLight + 0.001); /* low flame warmest */
+
+    /* votive palette: tallow gold, beeswax amber, deep umber shadow */
+    /* de La Tour's palette — warm gold emerging from near-black */
+    vec3 deepShadow  = vec3(0.04, 0.025, 0.02);    /* near-black warm     */
+    vec3 umberBody   = vec3(0.18, 0.10, 0.06);      /* dark umber          */
+    vec3 tallowGold  = vec3(0.85, 0.62, 0.22);      /* candle-flame gold   */
+    vec3 beeswaxWarm = vec3(0.92, 0.48, 0.12);      /* beeswax amber       */
+
+    /* body color: mostly shadow, revealed only by flame proximity */
+    vec3 bodyCol = mix(deepShadow, umberBody, litAmount * 0.7);
+    /* candlelight wash on lit surfaces */
+    vec3 candleCol = mix(tallowGold, beeswaxWarm, warmShift);
+    vCol = mix(bodyCol, candleCol, totalLight * 0.85);
+
+    /* reconstruct world position */
+    vec3 off = rest - localR * sc;
+    vec3 p = lr * sc + off;
+
+    /* subtle breathing — quieter than vermilion, reverent */
+    vec3 dir = normalize(lr + 0.001);
+    p += dir * sin(t) * 0.012 * sc;
+
+    /* ── votive plume: rising particles concentrate near flame sources ── */
+    /* instead of scattering across all dot-pattern hits, particles only */
+    /* rise if they are close to a flame — forming 3 coherent plumes */
+    float proxToFlame0 = exp(-length(lr - flame0) * 0.22);
+    float proxToFlame1 = exp(-length(lr - flame1) * 0.25);
+    float proxToFlame2 = exp(-length(lr - flame2) * 0.28);
+    float flameProximity = max(proxToFlame0, max(proxToFlame1, proxToFlame2));
+
+    /* only particles very close to a flame and with high seed rise */
+    float riseChance = step(0.82, seed) * step(0.35, flameProximity);
+    float risePhase = sin(uTime * 0.14 + seed * 9.42) * 0.5 + 0.5;
+    float riseDist = riseChance * risePhase * 4.5 * sc;
+    p.y += riseDist;
+
+    /* plume gathers inward toward the flame's vertical axis as it rises */
+    vec3 nearestFlame = flame0;
+    float nearestD = length(lr - flame0);
+    if (length(lr - flame1) < nearestD) { nearestFlame = flame1; nearestD = length(lr - flame1); }
+    if (length(lr - flame2) < nearestD) { nearestFlame = flame2; }
+    /* horizontal pull toward flame axis */
+    float riseH = riseChance * risePhase;
+    vec2 toFlameXZ = (nearestFlame.xz - lr.xz) * 0.3;
+    p.x += toFlameXZ.x * riseH * sc;
+    p.z += toFlameXZ.y * riseH * sc;
+    /* gentle spiral in the plume */
+    float riseT = uTime * 0.22 + seed * 18.0;
+    p.x += riseChance * sin(riseT) * 0.18 * sc * risePhase;
+    p.z += riseChance * cos(riseT) * 0.12 * sc * risePhase;
+
+    vRise = riseChance * risePhase;
+    vGlow = vRise;
+
+    /* rising ember color: hot gold → pale at tips */
+    vec3 emberCol = mix(vec3(0.95, 0.55, 0.10), vec3(0.98, 0.82, 0.45), vRise);
+    vCol = mix(vCol, emberCol, vRise * 0.9);
+
+    /* assembly reveal — spiral inward (inherited) */
+    float angle = seed * 6.2831 * 4.0;
+    float radius = 50.0 + seed * 30.0;
+    vec3 entry = vec3(cos(angle) * radius, sin(seed * 20.0) * 25.0, sin(angle) * radius);
+    float reveal = smoothstep(0.0, 1.0, uReady);
+    p = mix(entry, p, reveal);
+
+    /* ── alpha: the de La Tour key — body nearly invisible in shadow ── */
+    /* only flame-lit surfaces and rising embers are visible */
+    float bodyAlpha = 0.08 + 0.72 * litAmount;  /* dark shadow → lit surface */
+    float riseAlpha = 0.85 * vRise;
+    vAlpha = reveal * max(bodyAlpha, riseAlpha);
+
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    float camDist = -mv.z;
+    /* lit particles slightly larger, embers bigger */
+    float baseSz = (1.0 + 0.8 * litAmount + 2.0 * vRise) * uPixel * (42.0 / max(camDist, 1.0)) * reveal;
+    gl_PointSize = max(1.0, baseSz);
+    gl_Position  = projectionMatrix * mv;
+  }
+`;
+
+const fragmentShader = `
+  varying vec3  vCol;
+  varying float vAlpha;
+  varying float vGlow;
+  varying float vRise;
+  void main() {
+    vec2 d = gl_PointCoord - 0.5;
+    float r2 = dot(d, d);
+    if (r2 > 0.25) discard;
+    /* soft diffusion for embers, tighter for body */
+    float edge = mix(0.04, 0.18, vRise);
+    float a = smoothstep(0.25, edge, r2) * vAlpha;
+    /* warm additive glow for flame-lit regions */
+    vec3 col = vCol * (1.0 + vGlow * 0.5);
+    gl_FragColor = vec4(col * a, a);
+  }
+`;
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: true,
+  depthTest: true,
+  blending: THREE.NormalBlending,
+  vertexShader,
+  fragmentShader
+});
+
+const geom   = new THREE.BufferGeometry();
+const points  = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── ground plane: votive — near-black with faint pooled candlelight ── */
+const floorGeo = new THREE.PlaneGeometry(200, 200, 1, 1);
+floorGeo.rotateX(-Math.PI / 2);
+const floorMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: true,
+  uniforms: { uTime: uniforms.uTime, uReady: uniforms.uReady },
+  vertexShader: `
+    varying vec3 vWPos;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWPos = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uReady;
+    varying vec3 vWPos;
+    void main() {
+      /* 3 pools of candlelight on the floor beneath each flame */
+      vec2 f0 = vec2( 0.0,  2.8);
+      vec2 f1 = vec2(-2.2,  2.0);
+      vec2 f2 = vec2( 0.8,  1.6);
+      float d0 = length(vWPos.xz - f0);
+      float d1 = length(vWPos.xz - f1);
+      float d2 = length(vWPos.xz - f2);
+      float pool = 0.8 / (1.0 + d0 * d0 * 0.04)
+                 + 0.6 / (1.0 + d1 * d1 * 0.05)
+                 + 0.5 / (1.0 + d2 * d2 * 0.06);
+      /* warm tallow-gold light pool */
+      vec3 col = vec3(0.12, 0.07, 0.02) * pool;
+      float fade = smoothstep(100.0, 20.0, length(vWPos.xz));
+      gl_FragColor = vec4(col, fade * 0.18 * uReady * min(pool, 1.0));
+    }
+  `
+});
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.position.y = -8.5;
+scene.add(floor);
+
+/* ── load Stanford Lucy ── */
+const loadingEl = document.getElementById('loading');
+let revealStart = 0;
+
+new PLYLoader().load(
+  'https://threejs.org/examples/models/ply/binary/Lucy100k.ply',
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size   = bb.getSize(new THREE.Vector3());
+    const baseScale = 15 / Math.max(size.x, size.y, size.z);
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(baseScale, baseScale, baseScale);
+
+    const mesh    = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp     = new THREE.Vector3();
+
+    let idx = 0;
+    for (let c = 0; c < COPIES; c++) {
+      const count = c === 0 ? PER_CENTER : PER_RING;
+      const s   = copyScales[c];
+      const off = copyOffsets[c];
+      for (let i = 0; i < count; i++) {
+        sampler.sample(tmp);
+        const lx = tmp.x * s, ly = tmp.y * s, lz = tmp.z * s;
+        localRest[idx * 3]     = lx;
+        localRest[idx * 3 + 1] = ly;
+        localRest[idx * 3 + 2] = lz;
+        restPositions[idx * 3]     = lx + off.x;
+        restPositions[idx * 3 + 1] = ly + off.y;
+        restPositions[idx * 3 + 2] = lz + off.z;
+        seedsArr[idx] = Math.random();
+        scaleArr[idx] = s;
+        idx++;
+      }
+    }
+
+    const posArr = new Float32Array(N * 3);
+    geom.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+    geom.setAttribute('localR',   new THREE.BufferAttribute(localRest, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seedsArr, 1));
+    geom.setAttribute('sc',       new THREE.BufferAttribute(scaleArr, 1));
+
+    loadingEl.style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      loadingEl.textContent = `loading lucy · ${(xhr.loaded / xhr.total * 100).toFixed(0)}%`;
+    }
+  },
+  () => { loadingEl.textContent = 'load failed — check network'; }
+);
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── animation loop ── */
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 4000);
+  }
+
+  /* camera: votive — slower, more intimate orbit; drawn closer to the light */
+  const orbitR = 24 + 3 * Math.sin(t * 0.03);
+  const angle  = t * 0.028;
+  const camY   = 3.5 + 2.5 * Math.sin(t * 0.035) + 1.0 * Math.sin(t * 0.014);
+  camera.position.set(Math.sin(angle) * orbitR, camY, Math.cos(angle) * orbitR);
+  camera.lookAt(0, 1.0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
