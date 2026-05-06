@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dov · giacomo balla · whoosh</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08070b; overflow:hidden;
+               color:#dcd4d8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+  .loading { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+             font-size: 13px; opacity: 0.6; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading head scan · three.js examples …</div>
+<div class="id">dov</div>
+<div class="hint">drag to orbit · scroll to zoom</div>
+<div class="src">model: LeePerrySmith.glb · giacomo balla futurist speed</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 12);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08070b, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+const N = 60000;
+const restPos = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uReady:  { value: 0 },
+  uWhoosh: { value: 0 },
+  uWhooshDir: { value: new THREE.Vector2(1.0, 0.0) }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform float uWhoosh;
+    uniform vec2 uWhooshDir;
+    attribute vec3 rest;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vEnergy;
+    varying float vWhoosh;
+    varying vec2 vWDir;
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.5 + seed * 6.28;
+      // tiny per-point shimmer
+      p += 0.01 * vec3(sin(t), cos(t*1.1), sin(t*0.7));
+
+      // reveal: particles spiral in from a horizontal ring
+      float th = seed * 6.28;
+      vec3 entry = vec3(cos(th) * 12.0, p.y * 0.3, sin(th) * 12.0);
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      // WHOOSH: shearing displacement — particles peel off in layers
+      // depth-dependent delay creates a wave rolling across the face
+      float depthPhase = (p.z + 4.0) / 8.0; // 0..1 front to back
+      float heightPhase = (p.y + 4.0) / 8.0;
+      // stagger: front particles go first, back follow
+      float localWhoosh = smoothstep(depthPhase * 0.3, depthPhase * 0.3 + 0.4, uWhoosh);
+      // displacement along whoosh direction with some vertical scatter
+      float disp = localWhoosh * (2.5 + 1.8 * sin(seed * 31.4 + heightPhase * 5.0));
+      // add a slight upward lift like wind catching hair
+      float lift = localWhoosh * (0.6 + 0.4 * sin(seed * 17.3)) * smoothstep(0.0, 0.5, heightPhase);
+      p.x += disp * uWhooshDir.x;
+      p.z += disp * uWhooshDir.y;
+      p.y += lift * 0.7;
+      // trailing particles stretch more (speed lines à la Balla)
+      float stretch = localWhoosh * 0.4 * sin(seed * 43.7);
+      p.x += stretch * uWhooshDir.x;
+      p.z += stretch * uWhooshDir.y;
+
+      vEnergy = 0.5 + 0.5 * sin(t * 0.8);
+      vWhoosh = localWhoosh;
+      vWDir = uWhooshDir;
+
+      // palette: porcelain base, warm amber flash during whoosh
+      vec3 a = vec3(0.92, 0.86, 0.82);
+      vec3 b = vec3(0.42, 0.38, 0.40);
+      vec3 c = vec3(0.92, 0.94, 0.98);
+      float k = clamp(0.4 + 0.4 * sin(seed * 9.0) + 0.2 * vEnergy, 0.0, 1.0);
+      vec3 base = mix(a, b, k);
+      base = mix(base, c, smoothstep(0.78, 1.0, k) * 0.55);
+      // whoosh tint: warm amber-rose streak
+      vec3 whooshTint = vec3(1.0, 0.72, 0.48);
+      vCol = mix(base, whooshTint, localWhoosh * 0.55);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // particles elongate during whoosh — grow slightly larger
+      float sizeBoost = 1.0 + localWhoosh * 1.2;
+      gl_PointSize = (0.9 + 0.5 * vEnergy) * uPixel * (45.0 / dist) * (0.4 + 0.6 * uReady) * sizeBoost;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vEnergy;
+    varying float vWhoosh;
+    varying vec2 vWDir;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      // during whoosh, stretch the point into an ellipse (speed line)
+      // elongate along the whoosh direction in screen space (approx X)
+      vec2 stretch = d;
+      float ellipseX = 1.0 + vWhoosh * 2.5;
+      stretch.x /= ellipseX;
+      float r = dot(stretch, stretch);
+      if (r > 0.25) discard;
+      float a = exp(-r * 18.0) * (0.42 + 0.38 * vEnergy);
+      // brighter during whoosh
+      a *= 1.0 + vWhoosh * 0.6;
+      // fog: manual distance-based fade to background
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+let revealStart = 0;
+const HEAD_URL = 'https://threejs.org/examples/models/gltf/LeePerrySmith/LeePerrySmith.glb';
+
+const loader = new GLTFLoader();
+loader.load(HEAD_URL,
+  (gltf) => {
+    let target = null;
+    gltf.scene.traverse(o => { if (!target && o.isMesh && o.geometry?.attributes?.position) target = o; });
+    if (!target) { document.getElementById('loading').textContent = 'no mesh'; return; }
+    target.updateMatrixWorld(true);
+
+    const g = target.geometry.clone();
+    g.applyMatrix4(target.matrixWorld);
+    g.computeBoundingBox();
+    const bb = g.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scl = 8 / maxAxis;
+    g.translate(-center.x, -center.y, -center.z);
+    g.scale(scl, scl, scl);
+
+    const sampleMesh = new THREE.Mesh(g.toNonIndexed(), target.material);
+    const sampler = new MeshSurfaceSampler(sampleMesh).build();
+
+    const tmp = new THREE.Vector3();
+    for (let i = 0; i < N; i++){
+      sampler.sample(tmp);
+      restPos[i*3]   = tmp.x;
+      restPos[i*3+1] = tmp.y;
+      restPos[i*3+2] = tmp.z;
+      seeds[i] = Math.random();
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(restPos.slice(), 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPos, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    geom.computeBoundingSphere();
+
+    document.getElementById('loading').style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      document.getElementById('loading').textContent = `loading head scan · ${pct}%`;
+    }
+  },
+  (err) => { console.error(err); document.getElementById('loading').textContent = 'load failed'; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Whoosh timing: period ~9s, onset 0.4s, hold 0.3s, recover 1.8s
+// First whoosh after 4s (let reveal finish)
+function whooshCurve(t) {
+  const period = 9.0;
+  const firstDelay = 4.5;
+  if (t < firstDelay) return 0;
+  const phase = ((t - firstDelay) % period);
+  // 0..0.35: ramp up fast (the surprise!)
+  // 0.35..0.65: hold at peak
+  // 0.65..2.5: ease back down
+  // 2.5..period: rest
+  if (phase < 0.35) return smoothstepJS(0, 0.35, phase);
+  if (phase < 0.65) return 1.0;
+  if (phase < 2.5) return 1.0 - smoothstepJS(0.65, 2.5, phase);
+  return 0;
+}
+
+function smoothstepJS(a, b, x) {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+// Alternate whoosh direction each cycle for variety
+function whooshDirection(t) {
+  const period = 9.0;
+  const firstDelay = 4.5;
+  if (t < firstDelay) return [1, 0];
+  const cycle = Math.floor((t - firstDelay) / period);
+  // alternate: right, left-back, right-forward, etc
+  const angles = [0, Math.PI * 0.85, -0.3, Math.PI * 0.6];
+  const a = angles[cycle % angles.length];
+  return [Math.cos(a), Math.sin(a)];
+}
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 2400);
+  }
+  // whoosh
+  uniforms.uWhoosh.value = whooshCurve(t);
+  const dir = whooshDirection(t);
+  uniforms.uWhooshDir.value.set(dir[0], dir[1]);
+
+  // slow auto-orbit when user not dragging
+  points.rotation.y = Math.sin(t * 0.18) * 0.5 + t * 0.05;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
