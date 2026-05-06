@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>o3r · bonked vascular tower</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0608; overflow:hidden;
+               color:#e6c8c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">o3r</div>
+<div class="hint">drag to orbit · click to bonk</div>
+<div class="src">descended from t9w · vascular tower + bonk surprise</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0608, 0.035);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0608, 1);
+document.body.appendChild(renderer.domElement);
+
+const lightKey = new THREE.DirectionalLight(0xfff0e8, 0.9);
+lightKey.position.set(5, 10, 5);
+scene.add(lightKey);
+scene.add(new THREE.AmbientLight(0x2a141c, 0.6));
+const lightRim = new THREE.DirectionalLight(0x88aacc, 0.4);
+lightRim.position.set(-5, 3, -5);
+scene.add(lightRim);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+// ─────────── multi-strand differential growth
+const MAX_VERTS_PER_STRAND = 400;
+const NUM_STRANDS = 5;
+const ATTRACT   = 0.06;
+const REPEL_R   = 0.50;
+const REPEL_STR = 0.13;
+const NOISE     = 0.003;
+const PRESSURE  = 0.0028;
+const RISE      = 0.0045;
+const MAX_D     = 0.40;
+
+const strands = [];
+for (let s = 0; s < NUM_STRANDS; s++){
+  const strand = [];
+  const phaseOff = s * Math.PI * 2 / NUM_STRANDS;
+  const rOff = 0.6 + s * 0.25;
+  for (let i = 0; i < 10; i++){
+    const th = i / 10 * Math.PI * 2;
+    const r = rOff + (Math.random() - 0.5) * 0.08;
+    strand.push({
+      x: Math.cos(th + phaseOff) * r,
+      y: s * 0.3,
+      z: Math.sin(th + phaseOff) * r,
+      age: s * 0.1
+    });
+  }
+  strands.push(strand);
+}
+
+const CELL = REPEL_R;
+function rebuildGrid(allVerts){
+  const grid = new Map();
+  for (let i = 0; i < allVerts.length; i++){
+    const v = allVerts[i];
+    const k = Math.floor(v.x/CELL)+','+Math.floor(v.y/CELL)+','+Math.floor(v.z/CELL);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+  return grid;
+}
+function gridNeighbors(grid, v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++){
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+function stepAll(){
+  if (paused) return;
+  // flatten for cross-strand repulsion
+  const allVerts = [];
+  const strandMap = [];
+  for (let s = 0; s < strands.length; s++){
+    for (const v of strands[s]){
+      allVerts.push(v);
+      strandMap.push(s);
+    }
+  }
+  const grid = rebuildGrid(allVerts);
+  const n = allVerts.length;
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+
+  // cross-strand repulsion
+  for (let i = 0; i < n; i++){
+    const v = allVerts[i];
+    for (const j of gridNeighbors(grid, v)){
+      if (j === i) continue;
+      const u = allVerts[j];
+      const ex = v.x-u.x, ey = v.y-u.y, ez = v.z-u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d/REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+
+  // per-strand: attract, pressure, rise, split
+  let gi = 0;
+  for (let s = 0; s < strands.length; s++){
+    const sv = strands[s];
+    const sn = sv.length;
+    const sStart = gi;
+    // intra-strand attraction
+    for (let i = 0; i < sn; i++){
+      const idx = sStart + i;
+      const a = sv[(i-1+sn)%sn], b = sv[(i+1)%sn], v = sv[i];
+      dx[idx] += (a.x+b.x-2*v.x)*ATTRACT;
+      dy[idx] += (a.y+b.y-2*v.y)*ATTRACT;
+      dz[idx] += (a.z+b.z-2*v.z)*ATTRACT;
+    }
+    // centroid pressure + rise
+    let cx=0,cy=0,cz=0;
+    for (const v of sv){ cx+=v.x; cy+=v.y; cz+=v.z; }
+    cx/=sn; cy/=sn; cz/=sn;
+    for (let i = 0; i < sn; i++){
+      const idx = sStart + i;
+      const ox=sv[i].x-cx, oy=sv[i].y-cy, oz=sv[i].z-cz;
+      const d = Math.hypot(ox,oy,oz)+1e-6;
+      dx[idx] += (ox/d)*PRESSURE;
+      dy[idx] += (oy/d)*PRESSURE*0.4;
+      dz[idx] += (oz/d)*PRESSURE;
+      const upward = RISE * (0.3 + 1.2*Math.min(sv[i].age*1.5, 1.0));
+      sv[i].x += dx[idx] + (Math.random()-0.5)*NOISE;
+      sv[i].y += dy[idx] + (Math.random()-0.5)*NOISE*0.5 + upward;
+      sv[i].z += dz[idx] + (Math.random()-0.5)*NOISE;
+      sv[i].age += 0.0014;
+    }
+    // split
+    if (sn < MAX_VERTS_PER_STRAND){
+      const grown = [];
+      for (let i = 0; i < sn; i++){
+        const a = sv[i], b = sv[(i+1)%sn];
+        grown.push(a);
+        const ex=b.x-a.x, ey=b.y-a.y, ez=b.z-a.z;
+        if (ex*ex+ey*ey+ez*ez > MAX_D*MAX_D && grown.length + (sn-i) < MAX_VERTS_PER_STRAND){
+          grown.push({ x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5-0.05, z:(a.z+b.z)*0.5, age:Math.max(a.age,b.age)*0.5 });
+        }
+      }
+      strands[s] = grown;
+    }
+    gi += sn;
+  }
+}
+
+for (let s = 0; s < 500; s++) stepAll();
+
+// ─────────── BONK mechanics (Erwin Wurm "one minute sculptures" — sudden comedic deformation)
+let bonkTime = -999;
+let bonkY = 0;
+const BONK_DECAY_FAST = 1.6;   // primary squash recovery
+const BONK_DECAY_SLOW = 0.7;   // secondary jiggle
+const BONK_WOBBLE_FREQ = 8.0;
+const BONK_WOBBLE2_FREQ = 4.5;
+
+function triggerBonk(){
+  bonkTime = performance.now() / 1000;
+  // find top of structure
+  let yMax = -Infinity;
+  for (const strand of strands) for (const v of strand) if (v.y > yMax) yMax = v.y;
+  bonkY = yMax;
+}
+
+renderer.domElement.addEventListener('click', (e) => {
+  if (e.detail === 1) {
+    // single click = bonk
+    triggerBonk();
+  }
+});
+renderer.domElement.addEventListener('dblclick', () => {
+  paused = !paused;
+});
+
+// auto-bonk after 3 seconds to show the surprise
+setTimeout(triggerBonk, 3000);
+
+// ─────────── tube renderer
+const tubeMeshes = [];
+const baseColor = new THREE.Color(0xb04438);
+const bonkColorHot = new THREE.Color(0xff6644);
+const bonkColorWhite = new THREE.Color(0xffddcc);
+const normalEmissive = new THREE.Color(0x2a0808);
+const bonkEmissive = new THREE.Color(0x661818);
+
+function createTubeMats(){
+  return strands.map(() => new THREE.MeshStandardMaterial({
+    color: baseColor.clone(),
+    emissive: normalEmissive.clone(),
+    roughness: 0.5,
+    metalness: 0.05,
+  }));
+}
+const tubeMats = createTubeMats();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const startT = performance.now();
+function loop(){
+  const t = (performance.now() - startT) / 1000;
+  for (let s = 0; s < 2; s++) stepAll();
+
+  const elapsed = t - bonkTime;
+  // fast squash envelope
+  const bonkFast = Math.exp(-elapsed * BONK_DECAY_FAST);
+  // slow jiggle envelope
+  const bonkSlow = Math.exp(-elapsed * BONK_DECAY_SLOW);
+  // combined wobble
+  const wobble1 = Math.sin(elapsed * BONK_WOBBLE_FREQ * Math.PI * 2) * bonkFast;
+  const wobble2 = Math.sin(elapsed * BONK_WOBBLE2_FREQ * Math.PI * 2) * bonkSlow * 0.4;
+  const bonkAmount = wobble1 + wobble2;
+  const bonkIntensity = Math.max(bonkFast, bonkSlow * 0.6);
+
+  // color flush — strong at impact, lingers
+  const flush = Math.pow(bonkFast, 0.5); // slower color decay than deformation
+  const flushColor = new THREE.Color().copy(baseColor).lerp(bonkColorHot, flush * 0.9);
+  if (flush > 0.7) flushColor.lerp(bonkColorWhite, (flush - 0.7) / 0.3 * 0.6);
+  const flushEmissive = new THREE.Color().copy(normalEmissive).lerp(bonkEmissive, flush);
+
+  // global yMin/yMax across all strands
+  let gYMin = Infinity, gYMax = -Infinity;
+  for (const strand of strands) for (const v of strand){
+    if (v.y < gYMin) gYMin = v.y;
+    if (v.y > gYMax) gYMax = v.y;
+  }
+  const gYRange = Math.max(gYMax - gYMin, 0.1);
+
+  const pulse = 1.0 + 0.10 * Math.sin(t * 1.6);
+
+  for (let si = 0; si < strands.length; si++){
+    const sv = strands[si];
+    if (sv.length < 4) continue;
+
+    const pts = sv.map(v => {
+      let py = v.y;
+      let px = v.x;
+      let pz = v.z;
+      // bonk deformation: squash top, bulge middle (Erwin Wurm style)
+      const hFrac = (v.y - gYMin) / gYRange; // 0=base, 1=top
+      // squash: top compresses down, middle bulges out
+      const squash = bonkAmount * 0.8;
+      py -= squash * hFrac * hFrac * 2.0; // top squashes most
+      // lateral bulge at ~60% height
+      const bulgeFrac = Math.exp(-Math.pow((hFrac - 0.55) * 3, 2));
+      const bulgeAmt = squash * bulgeFrac * 0.6;
+      const cx0 = 0, cz0 = 0; // approximate center
+      const dirX = px - cx0, dirZ = pz - cz0;
+      const dirLen = Math.hypot(dirX, dirZ) + 1e-6;
+      px += (dirX / dirLen) * bulgeAmt;
+      pz += (dirZ / dirLen) * bulgeAmt;
+
+      return new THREE.Vector3(px, py, pz);
+    });
+
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+    const N_SAMPLES = Math.min(300, sv.length * 2);
+    const RADIAL = 7;
+    const positions = new Float32Array(N_SAMPLES * RADIAL * 3);
+    const indices = [];
+    const up = new THREE.Vector3(0, 1, 0);
+
+    // strand-specific radius variation
+    const rScale = 0.75 + si * 0.12;
+
+    for (let i = 0; i < N_SAMPLES; i++){
+      const tt = i / N_SAMPLES;
+      const p = curve.getPointAt(tt);
+      const heightFrac = Math.max(0, Math.min(1, (p.y - gYMin) / gYRange));
+      let r = 0.28 * rScale * (1 - heightFrac * 0.75);
+      // vessel node bulges
+      const node = Math.sin(tt * 18.0 + si * 5.0) * 0.5 + 0.5;
+      r *= (1.0 + 0.22 * Math.pow(node, 6));
+      r *= pulse;
+
+      // bonk radius wobble — make it jiggle laterally
+      const bonkRadWobble = 1.0 + bonkAmount * 0.15 * Math.sin(heightFrac * 12 + si * 2);
+      r *= bonkRadWobble;
+
+      const tangent = curve.getTangentAt(tt).normalize();
+      const normal = new THREE.Vector3().crossVectors(tangent, up).normalize();
+      if (normal.lengthSq() < 0.001) normal.set(1, 0, 0);
+      const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+      for (let j = 0; j < RADIAL; j++){
+        const ang = (j / RADIAL) * Math.PI * 2;
+        const vv = new THREE.Vector3()
+          .copy(normal).multiplyScalar(Math.cos(ang) * r)
+          .add(binormal.clone().multiplyScalar(Math.sin(ang) * r))
+          .add(p);
+        positions[(i * RADIAL + j) * 3]     = vv.x;
+        positions[(i * RADIAL + j) * 3 + 1] = vv.y;
+        positions[(i * RADIAL + j) * 3 + 2] = vv.z;
+      }
+    }
+    for (let i = 0; i < N_SAMPLES; i++){
+      const ni = (i + 1) % N_SAMPLES;
+      for (let j = 0; j < RADIAL; j++){
+        const nj = (j + 1) % RADIAL;
+        const a = i * RADIAL + j, b = i * RADIAL + nj;
+        const c = ni * RADIAL + j, d = ni * RADIAL + nj;
+        indices.push(a, b, c);
+        indices.push(b, d, c);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.setIndex(indices);
+    g.computeVertexNormals();
+
+    if (tubeMeshes[si]){ scene.remove(tubeMeshes[si]); tubeMeshes[si].geometry.dispose(); }
+    tubeMats[si].color.copy(flushColor);
+    tubeMats[si].emissive.copy(flushEmissive);
+    tubeMeshes[si] = new THREE.Mesh(g, tubeMats[si]);
+    scene.add(tubeMeshes[si]);
+  }
+
+  // camera tracking
+  let yMean = 0, cnt = 0;
+  for (const strand of strands) for (const v of strand){ yMean += v.y; cnt++; }
+  yMean /= Math.max(cnt, 1);
+  const targetY = Math.max(yMean, 2.0);
+  controls.target.y += (targetY - controls.target.y) * 0.04;
+  const desiredCamY = targetY + 4;
+  camera.position.y += (desiredCamY - camera.position.y) * 0.04;
+
+  // camera shake on bonk
+  if (bonkFast > 0.05){
+    const shake = bonkFast * 0.12;
+    camera.position.x += Math.sin(t * 37) * shake;
+    camera.position.z += Math.cos(t * 29) * shake;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
