@@ -47,7 +47,8 @@ def _warmup_for(piece_id: str) -> int:
     return 2500
 
 
-def validate(piece_ids: list[str]) -> int:
+def validate(piece_ids: list[str], record_clip: bool = False) -> int:
+    """If record_clip is True, capture a 3-second webm motion clip per piece in addition to the still PNG."""
     try:
         from playwright.sync_api import sync_playwright
         from PIL import Image
@@ -61,19 +62,31 @@ def validate(piece_ids: list[str]) -> int:
         return 2
 
     failed = []
+    clips_dir = REPO / "clips"
+    if record_clip:
+        clips_dir.mkdir(exist_ok=True)
     with sync_playwright() as pw:
         browser = pw.chromium.launch(args=[
             "--use-gl=swiftshader",
             "--enable-webgl",
             "--no-sandbox",
         ])
-        ctx = browser.new_context(viewport={"width": W, "height": H}, device_scale_factor=2)
         for pid in piece_ids:
             piece_html = PIECES / pid / "index.html"
             if not piece_html.exists():
                 print(f"  ✗ {pid}: no index.html")
                 failed.append((pid, "missing"))
                 continue
+
+            # per-piece context — needed because video recording is set at context level
+            ctx_kwargs = {
+                "viewport": {"width": W, "height": H},
+                "device_scale_factor": 2,
+            }
+            if record_clip:
+                ctx_kwargs["record_video_dir"] = str(clips_dir)
+                ctx_kwargs["record_video_size"] = {"width": W, "height": H}
+            ctx = browser.new_context(**ctx_kwargs)
             page = ctx.new_page()
             errors = []
             page.on("pageerror", lambda e: errors.append(str(e)))
@@ -82,6 +95,9 @@ def validate(piece_ids: list[str]) -> int:
                 page.wait_for_timeout(_warmup_for(pid))
                 out = REPO / "thumbs" / f"{pid}.png"
                 page.screenshot(path=str(out), type="png")
+                if record_clip:
+                    # additional 3s of motion capture after warmup
+                    page.wait_for_timeout(3000)
 
                 # content check
                 img = Image.open(out).convert("RGB")
@@ -101,8 +117,18 @@ def validate(piece_ids: list[str]) -> int:
                 print(f"  ✗ {pid}: render exception — {e}")
                 failed.append((pid, str(e)))
             finally:
+                # finalize video before closing context (Playwright finalizes on context close)
+                video = page.video
                 page.close()
-        ctx.close()
+                ctx.close()
+                if record_clip and video is not None:
+                    try:
+                        target = clips_dir / f"{pid}.webm"
+                        video.save_as(str(target))
+                        video.delete()
+                        print(f"     clip saved: {target.relative_to(REPO)}")
+                    except Exception as e:
+                        print(f"     clip save failed: {e}")
         browser.close()
 
     if failed:
@@ -117,4 +143,9 @@ def validate(piece_ids: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(validate(sys.argv[1:]))
+    args = sys.argv[1:]
+    record_clip = False
+    if "--clip" in args:
+        record_clip = True
+        args = [a for a in args if a != "--clip"]
+    sys.exit(validate(args, record_clip=record_clip))

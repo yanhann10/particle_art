@@ -174,7 +174,54 @@ def sample_directive(spec_path: Path, parent_id: str, recent: list[dict]) -> tup
     return chosen["id"], text
 
 
+def _read_taste() -> dict:
+    p = REPO / "taste.json"
+    if not p.exists(): return {}
+    try: return json.loads(p.read_text())
+    except Exception: return {}
+
+
+def _read_ratings() -> dict:
+    p = REPO / "ratings.json"
+    if not p.exists(): return {}
+    try:
+        d = json.loads(p.read_text())
+        return d.get("ratings", {})
+    except Exception:
+        return {}
+
+
+def _rejection_block() -> str:
+    """Build a block describing what the user has rejected.
+
+    Pulled from taste.json + preferences.json drops + ratings.json N-votes.
+    Injected into every prompt so the LLM doesn't re-emit known-bad patterns.
+    """
+    taste = _read_taste()
+    prefs = _read_ratings()
+    lines = []
+    dislikes = taste.get("dislikes", {})
+    if dislikes.get("directions"):
+        lines.append("Directions the user has explicitly rejected — DO NOT produce these:")
+        for d in dislikes["directions"][:8]:
+            lines.append(f"  - {d}")
+    if dislikes.get("techniques"):
+        lines.append("Technical patterns that have failed silently — AVOID:")
+        for t in dislikes["techniques"][:5]:
+            lines.append(f"  - {t}")
+    n_voted = [k for k, v in prefs.items() if v == "n"]
+    if n_voted:
+        lines.append(f"Ideas the user has voted N (bad) on: {', '.join(n_voted[:12])}")
+    principles = taste.get("principles") or []
+    if principles:
+        lines.append("Principles the user holds — every output should respect these:")
+        for p in principles:
+            lines.append(f"  - {p}")
+    return "\n".join(lines) if lines else ""
+
+
 def build_prompt(parent: dict, parent_html: str, directive: str) -> tuple[str, str]:
+    rejection = _rejection_block()
     system = (
         "You are a creative-coding shader/three.js mutation engine for a particle-art "
         "evolutionary gallery. Each mutation produces ONE self-contained HTML file "
@@ -182,7 +229,11 @@ def build_prompt(parent: dict, parent_html: str, directive: str) -> tuple[str, s
         "no external CSS/JS files beyond CDN imports). The output must run by opening "
         "the file in a modern browser. Keep the file under 600 lines. Preserve a small "
         "id label fixed to the bottom-left corner, font-family ui-monospace, color #cdd2dc, "
-        "opacity 0.55, font-size 11px (the 3-char id will be supplied)."
+        "opacity 0.55, font-size 11px (the 3-char id will be supplied).\n\n"
+        + (("USER TASTE GUARDRAILS — read carefully:\n" + rejection + "\n\n") if rejection else "")
+        + "If your output would violate any of the above, redesign before emitting. "
+        "Better to produce a structurally simple piece that respects the guardrails "
+        "than an ambitious piece that breaks them."
     )
     user = f"""# Mutation request
 
