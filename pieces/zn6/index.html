@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>g7p · gentle-explosion · Cai Guo-Qiang controlled detonation vessel</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#050508; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">zn6</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*
+  Cai Guo-Qiang — controlled detonation as drawing.
+  The Kapoor blood-red pigment vessel sits monumental, then every ~18 seconds
+  the particles gently bloom outward in a slow-motion explosion — color
+  briefly flaring to warm amber — before gravity pulls everything back into
+  the concave form. The vessel breathes through detonation and recovery.
+  Surprise is gentle, not violent: a sigh, not a scream.
+*/
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.1, 400);
+camera.position.set(0, 14, 22);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050508, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.target.set(0, 1, 0);
+
+/* ─── Bowl profile ─── */
+const NUM_RINGS = 28;
+const DEPTH = 5;
+const RIM_R = 9;
+const rings = [];
+
+for (let ri = 0; ri < NUM_RINGS; ri++) {
+  const t = ri / (NUM_RINGS - 1);
+  const y = -DEPTH + t * t * (DEPTH + 4);
+  const radius = 0.4 + t * t * (RIM_R - 0.4);
+  const nv = Math.floor(14 + t * 40);
+  const verts = [];
+  for (let i = 0; i < nv; i++) {
+    const th = (i / nv) * Math.PI * 2;
+    verts.push({
+      x: Math.cos(th) * radius + (Math.random() - 0.5) * 0.08,
+      y: y + (Math.random() - 0.5) * 0.12,
+      z: Math.sin(th) * radius + (Math.random() - 0.5) * 0.08,
+      // store rest position for explosion/recovery
+      rx: 0, ry: 0, rz: 0,
+      age: 0
+    });
+  }
+  rings.push({ verts, maxVerts: Math.floor(nv * 5), t });
+}
+
+/* ─── Differential growth per ring ─── */
+const ATTRACT  = 0.035;
+const REPEL_R  = 0.48;
+const REPEL_S  = 0.09;
+const MAX_EDGE = 0.38;
+
+function stepRing(ring) {
+  const v = ring.verts, n = v.length;
+  if (n < 3) return;
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const ex = v[i].x - v[j].x, ey = v[i].y - v[j].y, ez = v[i].z - v[j].z;
+      const d2 = ex * ex + ey * ey + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_S * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f; dy[i] += ey * f; dz[i] += ez * f;
+      dx[j] -= ex * f; dy[j] -= ey * f; dz[j] -= ez * f;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const a = v[(i - 1 + n) % n], b = v[(i + 1) % n], c = v[i];
+    dx[i] += (a.x + b.x - 2 * c.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2 * c.y) * ATTRACT * 0.25;
+    dz[i] += (a.z + b.z - 2 * c.z) * ATTRACT;
+  }
+  for (let i = 0; i < n; i++) {
+    v[i].x += dx[i] + (Math.random() - 0.5) * 0.0015;
+    v[i].y += dy[i] + (Math.random() - 0.5) * 0.0008;
+    v[i].z += dz[i] + (Math.random() - 0.5) * 0.0015;
+    v[i].age += 0.001;
+  }
+  if (n >= ring.maxVerts) return;
+  const grown = [];
+  for (let i = 0; i < n; i++) {
+    const a = v[i], b = v[(i + 1) % n];
+    grown.push(a);
+    const ex = b.x - a.x, ey = b.y - a.y, ez = b.z - a.z;
+    if (ex * ex + ey * ey + ez * ez > MAX_EDGE * MAX_EDGE && grown.length + (n - i) < ring.maxVerts) {
+      grown.push({ x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5, z: (a.z + b.z) * 0.5, rx: 0, ry: 0, rz: 0, age: 0 });
+    }
+  }
+  ring.verts = grown;
+}
+
+// Warm up
+for (let s = 0; s < 500; s++) {
+  for (const r of rings) stepRing(r);
+}
+
+/* ─── Explosion state ─── */
+// Each vertex gets a random outward velocity assigned at detonation
+let explPhase = 0;        // 0 = resting, ramps to 1 at peak, back to 0
+let explTimer = 0;
+const EXPL_PERIOD = 18.0; // seconds between gentle explosions
+const EXPL_RISE   = 2.0;  // seconds to bloom
+const EXPL_HOLD   = 0.8;  // seconds at peak
+const EXPL_FALL   = 3.5;  // seconds to recover
+const EXPL_TOTAL  = EXPL_RISE + EXPL_HOLD + EXPL_FALL;
+let exploding = false;
+let explVelocities = null; // per-vertex displacement directions
+
+function triggerExplosion() {
+  exploding = true;
+  explTimer = 0;
+  // Assign outward velocities to every vertex
+  explVelocities = [];
+  for (const ring of rings) {
+    const vels = [];
+    for (const v of ring.verts) {
+      // Direction: radially outward from vessel center + upward bias
+      const dx = v.x, dz = v.z;
+      const r = Math.sqrt(dx * dx + dz * dz) + 0.01;
+      const strength = 2.5 + Math.random() * 4.0;
+      // More bloom at rim, less at nadir
+      const rimFactor = 0.3 + ring.t * 0.7;
+      vels.push({
+        dx: (dx / r) * strength * rimFactor + (Math.random() - 0.5) * 1.2,
+        dy: (1.5 + Math.random() * 3.0) * rimFactor,
+        dz: (dz / r) * strength * rimFactor + (Math.random() - 0.5) * 1.2
+      });
+    }
+    explVelocities.push(vels);
+  }
+}
+
+function easeOutQuad(t) { return t * (2 - t); }
+function easeInCubic(t) { return t * t * t; }
+
+function getExplPhase(dt) {
+  if (!exploding) {
+    explTimer += dt;
+    if (explTimer >= EXPL_PERIOD) triggerExplosion();
+    return 0;
+  }
+  explTimer += dt;
+  let phase;
+  if (explTimer < EXPL_RISE) {
+    phase = easeOutQuad(explTimer / EXPL_RISE);
+  } else if (explTimer < EXPL_RISE + EXPL_HOLD) {
+    phase = 1.0;
+  } else if (explTimer < EXPL_TOTAL) {
+    const fallT = (explTimer - EXPL_RISE - EXPL_HOLD) / EXPL_FALL;
+    phase = 1.0 - easeInCubic(fallT);
+  } else {
+    exploding = false;
+    explTimer = 0;
+    explVelocities = null;
+    return 0;
+  }
+  return phase;
+}
+
+/* ─── Point-cloud pigment renderer ─── */
+const MAX_PTS = 80000;
+const pos  = new Float32Array(MAX_PTS * 3);
+const col  = new Float32Array(MAX_PTS * 3);
+const sz   = new Float32Array(MAX_PTS);
+
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geo.setAttribute('aColor',   new THREE.BufferAttribute(col, 3));
+geo.setAttribute('aSize',    new THREE.BufferAttribute(sz, 1));
+
+const mat = new THREE.ShaderMaterial({
+  vertexShader: `
+    attribute float aSize;
+    attribute vec3 aColor;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      vCol = aColor;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = aSize * (280.0 / dist);
+      gl_Position = projectionMatrix * mv;
+      vAlpha = smoothstep(120.0, 10.0, dist);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      float d = length(gl_PointCoord - 0.5);
+      if (d > 0.5) discard;
+      float a = smoothstep(0.5, 0.12, d) * vAlpha;
+      vec3 c = vCol + 0.06 * smoothstep(0.3, 0.0, d);
+      gl_FragColor = vec4(c, a * 0.92);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending
+});
+
+const pointCloud = new THREE.Points(geo, mat);
+scene.add(pointCloud);
+
+/* ─── Fill particles with explosion displacement ─── */
+function fillParticles(phase) {
+  let idx = 0;
+  let ringIdx = 0;
+  for (let ri = 0; ri < rings.length; ri++) {
+    const ring = rings[ri];
+    const t = ring.t;
+    const vels = (explVelocities && explVelocities[ringIdx]) ? explVelocities[ringIdx] : null;
+
+    for (let vi = 0; vi < ring.verts.length; vi++) {
+      if (idx >= MAX_PTS) break;
+      const v = ring.verts[vi];
+
+      // Base position
+      let px = v.x, py = v.y, pz = v.z;
+
+      // Apply explosion displacement
+      if (vels && vi < vels.length && phase > 0) {
+        const vel = vels[vi];
+        px += vel.dx * phase;
+        py += vel.dy * phase;
+        pz += vel.dz * phase;
+      }
+
+      pos[idx * 3]     = px;
+      pos[idx * 3 + 1] = py;
+      pos[idx * 3 + 2] = pz;
+
+      // Color: blend from Kapoor red toward warm amber/gold during explosion
+      const bright = t * t;
+      const baseR = 0.08 + bright * 0.74;
+      const baseG = 0.005 + bright * 0.035;
+      const baseB = 0.01 + bright * 0.025;
+
+      // Explosion color: warm amber-gold flash
+      const explR = 0.95;
+      const explG = 0.55 + bright * 0.3;
+      const explB = 0.08 + bright * 0.12;
+
+      // Smooth color blend — only the outer particles get the full gold shift
+      const colorPhase = phase * (0.3 + t * 0.7);
+      col[idx * 3]     = baseR + (explR - baseR) * colorPhase;
+      col[idx * 3 + 1] = baseG + (explG - baseG) * colorPhase;
+      col[idx * 3 + 2] = baseB + (explB - baseB) * colorPhase;
+
+      // Particles grow slightly during explosion for bloom feel
+      sz[idx] = (2.0 + t * 3.5) * (1.0 + phase * 0.6);
+      idx++;
+    }
+
+    // Interpolated particles between rings
+    if (ri < rings.length - 1) {
+      const next = rings[ri + 1];
+      const nA = ring.verts.length, nB = next.verts.length;
+      const count = Math.min(nA, nB, 30);
+      const velsNext = (explVelocities && explVelocities[ringIdx + 1]) ? explVelocities[ringIdx + 1] : null;
+
+      for (let i = 0; i < count; i++) {
+        if (idx >= MAX_PTS) break;
+        const ai = Math.floor(i / count * nA);
+        const bi = Math.floor(i / count * nB);
+        const a = ring.verts[ai];
+        const bv = next.verts[bi];
+        const mix = 0.3 + Math.random() * 0.4;
+
+        let px = a.x + (bv.x - a.x) * mix;
+        let py = a.y + (bv.y - a.y) * mix;
+        let pz = a.z + (bv.z - a.z) * mix;
+
+        // Explosion displacement for interp particles
+        if (phase > 0) {
+          const va = (vels && ai < vels.length) ? vels[ai] : null;
+          const vb = (velsNext && bi < velsNext.length) ? velsNext[bi] : null;
+          if (va && vb) {
+            px += (va.dx + (vb.dx - va.dx) * mix) * phase;
+            py += (va.dy + (vb.dy - va.dy) * mix) * phase;
+            pz += (va.dz + (vb.dz - va.dz) * mix) * phase;
+          }
+        }
+
+        pos[idx * 3]     = px;
+        pos[idx * 3 + 1] = py;
+        pos[idx * 3 + 2] = pz;
+
+        const tMid = t + (next.t - t) * mix;
+        const bri = tMid * tMid;
+        const cp = phase * (0.3 + tMid * 0.7);
+        col[idx * 3]     = (0.08 + bri * 0.74) * (1 - cp) + 0.95 * cp;
+        col[idx * 3 + 1] = (0.005 + bri * 0.035) * (1 - cp) + (0.55 + bri * 0.3) * cp;
+        col[idx * 3 + 2] = (0.01 + bri * 0.025) * (1 - cp) + (0.08 + bri * 0.12) * cp;
+
+        sz[idx] = (1.8 + tMid * 2.5) * (1.0 + phase * 0.6);
+        idx++;
+      }
+    }
+    ringIdx++;
+  }
+  geo.attributes.position.needsUpdate = true;
+  geo.attributes.aColor.needsUpdate = true;
+  geo.attributes.aSize.needsUpdate = true;
+  geo.setDrawRange(0, idx);
+}
+
+/* ─── Spark emitter — brief sparkle motes during explosion peak ─── */
+const SPARK_MAX = 600;
+const sparkPos = new Float32Array(SPARK_MAX * 3);
+const sparkSz  = new Float32Array(SPARK_MAX);
+const sparkGeo = new THREE.BufferGeometry();
+sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos, 3));
+sparkGeo.setAttribute('aSize', new THREE.BufferAttribute(sparkSz, 1));
+
+const sparkMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    attribute float aSize;
+    varying float vAlpha;
+    void main() {
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = aSize * (200.0 / dist);
+      gl_Position = projectionMatrix * mv;
+      vAlpha = smoothstep(80.0, 5.0, dist);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main() {
+      float d = length(gl_PointCoord - 0.5);
+      if (d > 0.5) discard;
+      float a = smoothstep(0.5, 0.0, d) * vAlpha;
+      // warm white-gold spark
+      vec3 c = vec3(1.0, 0.92, 0.7);
+      gl_FragColor = vec4(c, a * 0.7);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const sparks = new THREE.Points(sparkGeo, sparkMat);
+scene.add(sparks);
+
+// Spark particles: live only during explosion
+const sparkData = [];
+function emitSparks(phase) {
+  // Emit new sparks near peak
+  if (phase > 0.6 && sparkData.length < SPARK_MAX) {
+    const count = Math.floor(phase * 8);
+    for (let i = 0; i < count && sparkData.length < SPARK_MAX; i++) {
+      const ring = rings[Math.floor(Math.random() * rings.length)];
+      const v = ring.verts[Math.floor(Math.random() * ring.verts.length)];
+      sparkData.push({
+        x: v.x + (Math.random() - 0.5) * 2,
+        y: v.y + Math.random() * 4,
+        z: v.z + (Math.random() - 0.5) * 2,
+        vx: (Math.random() - 0.5) * 0.3,
+        vy: 0.1 + Math.random() * 0.2,
+        vz: (Math.random() - 0.5) * 0.3,
+        life: 1.0
+      });
+    }
+  }
+  // Update sparks
+  for (let i = sparkData.length - 1; i >= 0; i--) {
+    const s = sparkData[i];
+    s.x += s.vx; s.y += s.vy; s.z += s.vz;
+    s.vy -= 0.008; // gentle gravity
+    s.life -= 0.02;
+    if (s.life <= 0) sparkData.splice(i, 1);
+  }
+  // Write to buffer
+  for (let i = 0; i < SPARK_MAX; i++) {
+    if (i < sparkData.length) {
+      const s = sparkData[i];
+      sparkPos[i * 3] = s.x;
+      sparkPos[i * 3 + 1] = s.y;
+      sparkPos[i * 3 + 2] = s.z;
+      sparkSz[i] = s.life * 3.0;
+    } else {
+      sparkSz[i] = 0;
+    }
+  }
+  sparkGeo.attributes.position.needsUpdate = true;
+  sparkGeo.attributes.aSize.needsUpdate = true;
+  sparkGeo.setDrawRange(0, sparkData.length);
+}
+
+let time = 0;
+let lastT = performance.now() / 1000;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ─── Render loop ─── */
+function loop() {
+  const now = performance.now() / 1000;
+  const dt = Math.min(now - lastT, 0.05);
+  lastT = now;
+  time += 0.004;
+
+  // Differential growth — slow during explosion to let the visual breathe
+  const phase = getExplPhase(dt);
+  const growSteps = phase > 0.3 ? 1 : 2;
+  for (let s = 0; s < growSteps; s++) {
+    for (const r of rings) stepRing(r);
+  }
+
+  fillParticles(phase);
+  emitSparks(phase);
+
+  // Background color: subtle warm flash during explosion
+  const bgR = 0.02 + phase * 0.04;
+  const bgG = 0.02 + phase * 0.02;
+  const bgB = 0.03 + phase * 0.01;
+  renderer.setClearColor(new THREE.Color(bgR, bgG, bgB), 1);
+
+  // Camera: gentle auto-orbit
+  const orbitR = 24 + Math.sin(time * 0.3) * 2;
+  const baseAngle = time * 0.08;
+
+  // Pull camera out slightly during explosion for drama
+  const camPull = 1.0 + phase * 0.15;
+
+  if (!controls.enabled || !controls._isDragging) {
+    camera.position.x += (Math.sin(baseAngle) * orbitR * camPull - camera.position.x) * 0.008;
+    camera.position.z += (Math.cos(baseAngle) * orbitR * camPull - camera.position.z) * 0.008;
+    camera.position.y += (12 + Math.sin(time * 0.2) * 2 + phase * 3 - camera.position.y) * 0.008;
+  }
+
+  // Track centroid
+  let cx = 0, cy = 0, cz = 0, cnt = 0;
+  for (const r of rings) {
+    for (const v of r.verts) { cx += v.x; cy += v.y; cz += v.z; cnt++; }
+  }
+  if (cnt > 0) { cx /= cnt; cy /= cnt; cz /= cnt; }
+  controls.target.x += (cx - controls.target.x) * 0.02;
+  controls.target.y += (cy - controls.target.y) * 0.02;
+  controls.target.z += (cz - controls.target.z) * 0.02;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
