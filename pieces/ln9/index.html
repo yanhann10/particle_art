@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ln9 · gestural scribbles</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f5f0e8; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.35; font-size:10px;
+          letter-spacing:0.04em; color:#999; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+</style>
+</head>
+<body>
+<div class="id">ln9</div>
+<div class="hint">drag to orbit · click to redraw</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const N = 80000;
+
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ── Scribble generator — Twombly-style looping cursive marks ── */
+function generateScribbles(rng) {
+  const allPoints = [];
+  const numStrokes = 14 + Math.floor(rng() * 8);
+
+  for (let i = 0; i < numStrokes; i++) {
+    const yBase = (rng() - 0.45) * 16;
+    const xStart = -12 - rng() * 3;
+    const xEnd = 12 + rng() * 3;
+    const loopCount = 4 + rng() * 10;
+    const loopAmp = 0.3 + rng() * 2.2;
+    const steps = 300 + Math.floor(rng() * 500);
+    const basePressure = 0.15 + rng() * 0.85;
+    const colorIdx = Math.floor(rng() * 3);
+    const phase = rng() * Math.PI * 2;
+    const wobble = 0.08 + rng() * 0.35;
+    const tilt = (rng() - 0.5) * 0.12;
+    /* occasional tight spiral clusters (Twombly's compulsive loops) */
+    const hasSpiralBurst = rng() < 0.35;
+    const spiralCenter = rng();
+    const spiralWidth = 0.05 + rng() * 0.08;
+
+    for (let j = 0; j <= steps; j++) {
+      const t = j / steps;
+      const x = xStart + (xEnd - xStart) * t;
+      const loopPhase = t * loopCount * Math.PI * 2 + phase;
+
+      /* tighten loops near spiral center */
+      let localAmp = loopAmp;
+      let localFreqMult = 1.0;
+      if (hasSpiralBurst) {
+        const dist = Math.abs(t - spiralCenter);
+        if (dist < spiralWidth) {
+          const k = 1.0 - dist / spiralWidth;
+          localAmp *= 1.0 + k * 1.5;
+          localFreqMult = 1.0 + k * 3.0;
+        }
+      }
+
+      const y = yBase + tilt * (x - xStart)
+              + Math.sin(loopPhase * localFreqMult) * localAmp
+              + Math.sin(loopPhase * 2.3 + 1.5) * localAmp * 0.2
+              + Math.sin(t * 17 + phase) * wobble;
+      const z = Math.sin(loopPhase * 0.7 + 0.8) * localAmp * 0.12;
+
+      const p = basePressure
+              * (0.25 + 0.75 * Math.abs(Math.sin(loopPhase * 0.5)))
+              * (0.6 + 0.4 * Math.sin(t * 6 + i));
+
+      allPoints.push({ x, y, z, pressure: p, colorIdx, strokeIdx: i });
+    }
+  }
+
+  /* vertical drip lines — downward smears / paint-runs */
+  const numDrips = 4 + Math.floor(rng() * 6);
+  for (let i = 0; i < numDrips; i++) {
+    const x = (rng() - 0.5) * 24;
+    const yTop = (rng() - 0.2) * 10;
+    const yBot = yTop - 2.5 - rng() * 8;
+    const steps = 40 + Math.floor(rng() * 100);
+    const colorIdx = Math.floor(rng() * 3);
+
+    for (let j = 0; j <= steps; j++) {
+      const t = j / steps;
+      const y = yTop + (yBot - yTop) * t;
+      const xj = x + Math.sin(t * 2.2 + rng()) * 0.12;
+      const p = 0.45 * (1.0 - t * 0.55) * (0.4 + rng() * 0.6);
+      allPoints.push({ x: xj, y, z: 0, pressure: p, colorIdx, strokeIdx: numStrokes + i });
+    }
+  }
+
+  /* scattered dots / flicks — Twombly's accidental marks */
+  const numFlicks = 30 + Math.floor(rng() * 40);
+  for (let i = 0; i < numFlicks; i++) {
+    const x = (rng() - 0.5) * 26;
+    const y = (rng() - 0.45) * 18;
+    const p = 0.15 + rng() * 0.5;
+    const colorIdx = Math.floor(rng() * 3);
+    allPoints.push({ x, y, z: 0, pressure: p, colorIdx, strokeIdx: -1 });
+  }
+
+  return allPoints;
+}
+
+function buildParticles(allPoints, totalN, rng) {
+  const positions = new Float32Array(totalN * 3);
+  const pressures = new Float32Array(totalN);
+  const colorIndices = new Float32Array(totalN);
+  const seeds = new Float32Array(totalN);
+  const orderT = new Float32Array(totalN);
+
+  for (let i = 0; i < totalN; i++) {
+    const idx = Math.floor(rng() * allPoints.length);
+    const pt = allPoints[idx];
+    const jitter = pt.pressure * 0.4;
+    positions[i * 3]     = pt.x + (rng() - 0.5) * jitter;
+    positions[i * 3 + 1] = pt.y + (rng() - 0.5) * jitter;
+    positions[i * 3 + 2] = pt.z + (rng() - 0.5) * jitter * 0.25;
+    pressures[i] = pt.pressure;
+    colorIndices[i] = pt.colorIdx;
+    seeds[i] = rng();
+    orderT[i] = (pt.x + 15.0) / 30.0;
+  }
+  return { positions, pressures, colorIndices, seeds, orderT };
+}
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 32);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf5f0e8, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+let geom, pts;
+
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uReveal: { value: 0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReveal;
+    attribute float pressure;
+    attribute float colorIdx;
+    attribute float seed;
+    attribute float orderT;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec3 p = position;
+
+      /* hand-tremor: subtle shaking like chalk on rough surface */
+      float t = uTime * 0.35 + seed * 6.2832;
+      p.x += sin(t * 1.3 + p.y * 0.4) * 0.025;
+      p.y += sin(t * 0.8 + p.x * 0.3) * 0.02;
+
+      /* reveal: marks sweep in left-to-right, mimicking writing */
+      float revealEdge = mix(-0.15, 1.15, uReveal);
+      float vis = smoothstep(revealEdge - 0.12, revealEdge, orderT);
+      if (vis < 0.01) {
+        gl_PointSize = 0.0;
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+      }
+
+      /* palette on cream: graphite / dusty rose / raw umber */
+      vec3 graphite = vec3(0.22, 0.22, 0.26);
+      vec3 rose     = vec3(0.70, 0.35, 0.38);
+      vec3 umber    = vec3(0.46, 0.36, 0.24);
+
+      vec3 col = graphite;
+      if (colorIdx > 0.5 && colorIdx < 1.5) col = rose;
+      else if (colorIdx > 1.5) col = umber;
+      col += (seed - 0.5) * 0.05;
+
+      vCol = col;
+      vAlpha = (0.06 + pressure * 0.22) * vis;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      /* dramatic pressure-driven size — thin wispy marks to fat chalk drags */
+      float size = (0.4 + pressure * 4.0) * uPixel * (55.0 / dist);
+      gl_PointSize = size;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      /* soft chalk edge with slight grain */
+      float falloff = 1.0 - smoothstep(0.03, 0.25, r);
+      float a = vAlpha * falloff;
+      gl_FragColor = vec4(vCol, a);
+    }
+  `
+});
+
+let revealStart = 0;
+
+function regrow(seed) {
+  const rng = makeRng(seed);
+  const allPoints = generateScribbles(rng);
+  const data = buildParticles(allPoints, N, rng);
+
+  /* compute centroid for camera tracking */
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < N; i++) {
+    cx += data.positions[i * 3];
+    cy += data.positions[i * 3 + 1];
+    cz += data.positions[i * 3 + 2];
+  }
+  cx /= N; cy /= N; cz /= N;
+  controls.target.set(cx, cy, cz);
+
+  if (!geom) {
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    geom.setAttribute('pressure', new THREE.BufferAttribute(data.pressures, 1));
+    geom.setAttribute('colorIdx', new THREE.BufferAttribute(data.colorIndices, 1));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(data.seeds, 1));
+    geom.setAttribute('orderT',   new THREE.BufferAttribute(data.orderT, 1));
+    pts = new THREE.Points(geom, mat);
+    scene.add(pts);
+  } else {
+    geom.attributes.position.array.set(data.positions); geom.attributes.position.needsUpdate = true;
+    geom.attributes.pressure.array.set(data.pressures); geom.attributes.pressure.needsUpdate = true;
+    geom.attributes.colorIdx.array.set(data.colorIndices); geom.attributes.colorIdx.needsUpdate = true;
+    geom.attributes.seed.array.set(data.seeds); geom.attributes.seed.needsUpdate = true;
+    geom.attributes.orderT.array.set(data.orderT); geom.attributes.orderT.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+  revealStart = performance.now();
+}
+
+regrow(Math.floor(Math.random() * 1e9));
+addEventListener('click', () => regrow(Math.floor(Math.random() * 1e9)));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const startTime = performance.now();
+function loop() {
+  const now = performance.now();
+  uniforms.uTime.value = (now - startTime) / 1000;
+
+  if (revealStart > 0) {
+    uniforms.uReveal.value = Math.min(1.0, (now - revealStart) / 3500);
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
