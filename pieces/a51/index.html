@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7kw · lucy double-take</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a080c; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.6; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy · stanford 3d scanning repo …</div>
+<div class="id">a51</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 30);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a080c, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 60000;
+const positions     = new Float32Array(N * 3);
+const restPositions = new Float32Array(N * 3);
+const seeds         = new Float32Array(N);
+
+/* Double-take timing:
+   Every ~8s Lucy's head snaps toward the viewer, holds briefly, snaps back.
+   uSnap: 0→1 sharp onset, exponential decay
+   uBlush: rises with snap, lingers 0.3s past recovery */
+const uniforms = {
+  uTime:    { value: 0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+  uReady:   { value: 0.0 },
+  uSnap:    { value: 0.0 },
+  uBlush:   { value: 0.0 },
+  uImpulse: { value: 0.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform float uSnap;
+    uniform float uBlush;
+    uniform float uImpulse;
+    attribute vec3  rest;
+    attribute float seed;
+    varying vec3  vCol;
+    varying float vEnergy;
+
+    // rotate around Y
+    vec3 rotY(vec3 p, float a){
+      float c = cos(a), s = sin(a);
+      return vec3(c*p.x + s*p.z, p.y, -s*p.x + c*p.z);
+    }
+
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.5 + seed * 6.28;
+
+      // --- height mask: 1 at top of head, 0 at feet ---
+      // Lucy model is centered; head is positive Y
+      float hNorm = clamp((p.y + 7.5) / 15.0, 0.0, 1.0);
+      // head region: upper 30%
+      float headMask = smoothstep(0.55, 0.8, hNorm);
+      // shoulder region: upper 45%
+      float shoulderMask = smoothstep(0.4, 0.65, hNorm);
+
+      // --- double-take: height-masked Y rotation ---
+      // Head turns most, shoulders follow partially, hips stay planted
+      float snapAngle = uSnap * 0.45; // ~25 degrees max
+      float turnAmount = headMask * 1.0 + shoulderMask * 0.3 * (1.0 - headMask);
+      p = mix(p, rotY(p, snapAngle * turnAmount), 1.0);
+
+      // --- startlement impulse: sharp displacement that decays ---
+      // Single backward jolt in the head/shoulders, not a tremor
+      float jolt = uImpulse * shoulderMask;
+      p.z -= jolt * 0.4;
+      p.y += jolt * 0.15;
+
+      // --- gentle breathing ---
+      vec3 dir = normalize(p);
+      p += dir * sin(t) * 0.06 * (1.0 + 0.5 * sin(seed * 9.0));
+
+      // --- assembly reveal ---
+      vec3 entry = vec3(sin(seed*40.0), cos(seed*30.0), sin(seed*22.0)) * 18.0;
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      vEnergy = 0.4 + 0.6 * sin(t * 0.7);
+
+      // --- palette: ivory → amber, with blush on head region ---
+      vec3 ivory = vec3(0.95, 0.92, 0.86);
+      vec3 amber = vec3(0.98, 0.78, 0.55);
+      vec3 ember = vec3(0.78, 0.32, 0.22);
+      vec3 blushTone = vec3(0.92, 0.38, 0.35);
+
+      vec3 col = mix(ivory, amber, vEnergy);
+      col = mix(col, ember, smoothstep(0.78, 1.0, vEnergy) * 0.6);
+
+      // blush: concentrated in head/upper area, intensity 0.65
+      float blushAmount = uBlush * 0.65 * headMask;
+      col = mix(col, blushTone, blushAmount);
+
+      vCol = col;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.0 + 1.6 * vEnergy) * uPixel * (45.0 / dist) * (0.4 + 0.6 * uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vEnergy;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 17.0) * (0.45 + 0.55 * vEnergy);
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const loadingEl = document.getElementById('loading');
+
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+const loader  = new PLYLoader();
+let revealStart = 0;
+let modelCenter = new THREE.Vector3();
+
+loader.load(PLY_URL,
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size   = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scale   = 15 / maxAxis;
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    // recompute center post-transform for camera tracking
+    geometry.computeBoundingBox();
+    geometry.boundingBox.getCenter(modelCenter);
+
+    const mesh    = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp     = new THREE.Vector3();
+    for (let i = 0; i < N; i++){
+      sampler.sample(tmp);
+      restPositions[i*3]   = tmp.x;
+      restPositions[i*3+1] = tmp.y;
+      restPositions[i*3+2] = tmp.z;
+      seeds[i] = Math.random();
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+
+    loadingEl.style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      loadingEl.textContent = `loading lucy · ${pct}% · stanford 3d scanning repo`;
+    }
+  },
+  (err) => {
+    loadingEl.textContent = 'load failed — check network';
+    console.error(err);
+  });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* Double-take state machine
+   States: IDLE → SNAP_IN → HOLD → SNAP_BACK → BLUSH_LINGER → IDLE
+   Cycle every ~7-10s (randomized so it feels organic) */
+
+const IDLE_MIN = 5.0, IDLE_MAX = 9.0;
+const SNAP_IN_DUR  = 0.12;   // sharp onset
+const HOLD_DUR     = 0.6;    // holds the glance
+const SNAP_BACK_DUR = 0.18;  // snaps back
+const BLUSH_LINGER  = 0.5;   // blush fades after snap-back
+
+let dtState    = 'idle';
+let dtTimer    = 3.0; // first glance after 3s post-reveal
+let snapVal    = 0;
+let blushVal   = 0;
+let impulseVal = 0;
+let stateStart = 0;
+
+function nextIdleDuration(){ return IDLE_MIN + Math.random() * (IDLE_MAX - IDLE_MIN); }
+
+function updateDoubleTake(dt, t){
+  dtTimer -= dt;
+  const elapsed = t - stateStart;
+
+  switch(dtState){
+    case 'idle':
+      snapVal    *= Math.exp(-dt * 8.0);
+      blushVal   *= Math.exp(-dt * 3.0);
+      impulseVal *= Math.exp(-dt * 12.0);
+      if (dtTimer <= 0 && uniforms.uReady.value > 0.95){
+        dtState = 'snap_in';
+        stateStart = t;
+      }
+      break;
+
+    case 'snap_in': {
+      // Sharp exponential rise
+      const p = Math.min(1.0, elapsed / SNAP_IN_DUR);
+      snapVal = p * p * (3.0 - 2.0 * p); // smoothstep-ish but fast
+      blushVal = p * 0.5;
+      // Fire impulse at onset
+      if (elapsed < 0.04) impulseVal = 1.0;
+      else impulseVal *= Math.exp(-dt * 18.0);
+      if (elapsed >= SNAP_IN_DUR){
+        dtState = 'hold';
+        stateStart = t;
+      }
+      break;
+    }
+
+    case 'hold':
+      snapVal = 1.0;
+      blushVal = Math.min(1.0, blushVal + dt * 2.0);
+      impulseVal *= Math.exp(-dt * 15.0);
+      if (elapsed >= HOLD_DUR){
+        dtState = 'snap_back';
+        stateStart = t;
+      }
+      break;
+
+    case 'snap_back': {
+      const p = Math.min(1.0, elapsed / SNAP_BACK_DUR);
+      snapVal = 1.0 - p * p;
+      // blush stays high
+      blushVal = Math.max(blushVal, 0.8);
+      // small secondary jolt on snap-back
+      if (elapsed < 0.03) impulseVal = 0.4;
+      else impulseVal *= Math.exp(-dt * 15.0);
+      if (elapsed >= SNAP_BACK_DUR){
+        dtState = 'blush_linger';
+        stateStart = t;
+      }
+      break;
+    }
+
+    case 'blush_linger':
+      snapVal *= Math.exp(-dt * 6.0);
+      impulseVal *= Math.exp(-dt * 12.0);
+      // blush decays slowly — lingers 0.3-0.5s
+      if (elapsed > 0.3){
+        blushVal *= Math.exp(-dt * 4.0);
+      }
+      if (elapsed >= BLUSH_LINGER){
+        dtState = 'idle';
+        dtTimer = nextIdleDuration();
+        stateStart = t;
+      }
+      break;
+  }
+
+  uniforms.uSnap.value    = snapVal;
+  uniforms.uBlush.value   = blushVal;
+  uniforms.uImpulse.value = impulseVal;
+}
+
+const start = performance.now();
+let lastT   = 0;
+
+function loop(){
+  const t  = (performance.now() - start) / 1000;
+  const dt = Math.min(t - lastT, 0.1);
+  lastT = t;
+
+  uniforms.uTime.value = t;
+
+  // reveal
+  if (revealStart > 0){
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 2500);
+  }
+
+  // double-take state machine
+  updateDoubleTake(dt, t);
+
+  // slow camera orbit between glances (0.02 rad/s)
+  const orbitAngle = t * 0.02;
+  const camR = 30;
+  camera.position.x = modelCenter.x + Math.sin(orbitAngle) * camR;
+  camera.position.z = modelCenter.z + Math.cos(orbitAngle) * camR;
+  camera.position.y = modelCenter.y + 1.5;
+  camera.lookAt(modelCenter);
+
+  // slow figure rotation adds to life
+  points.rotation.y = t * 0.03;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
