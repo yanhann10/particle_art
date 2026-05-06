@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nepenthe · votive → Hammershøi dust-forgetting</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0e; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.6; letter-spacing:0.06em;
+             font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#e5dcd2; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy · nepenthe …</div>
+<div class="id">gd1</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(52, innerWidth / innerHeight, 0.1, 600);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0e, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── layout: tightened rings per critic — denser outer copies ── */
+const COPIES = 30;
+const PER_CENTER = 28000;
+const PER_RING1  = 2000;
+const PER_RING2  = 1600;
+const PER_RING3  = 1400;
+const N = PER_CENTER + 7 * PER_RING1 + 11 * PER_RING2 + 11 * PER_RING3;
+
+const copyOffsets = [];
+const copyScales  = [];
+const copyRing    = []; /* which ring: 0=center, 1/2/3=outer */
+
+copyOffsets.push(new THREE.Vector3(0, 0, 0));
+copyScales.push(1.0);
+copyRing.push(0);
+
+for (let i = 0; i < 7; i++) {
+  const a = (i / 7) * Math.PI * 2;
+  copyOffsets.push(new THREE.Vector3(Math.cos(a) * 16, 0, Math.sin(a) * 16));
+  copyScales.push(0.52);
+  copyRing.push(1);
+}
+for (let i = 0; i < 11; i++) {
+  const a = (i / 11) * Math.PI * 2 + 0.28;
+  copyOffsets.push(new THREE.Vector3(Math.cos(a) * 30, 0, Math.sin(a) * 30));
+  copyScales.push(0.36);
+  copyRing.push(2);
+}
+for (let i = 0; i < 11; i++) {
+  const a = (i / 11) * Math.PI * 2 + 0.14;
+  copyOffsets.push(new THREE.Vector3(Math.cos(a) * 44, 0, Math.sin(a) * 44));
+  copyScales.push(0.25);
+  copyRing.push(3);
+}
+
+const restPositions = new Float32Array(N * 3);
+const localRest     = new Float32Array(N * 3);
+const seedsArr      = new Float32Array(N);
+const scaleArr      = new Float32Array(N);
+const ringArr       = new Float32Array(N);
+
+const uniforms = {
+  uTime:      { value: 0 },
+  uPixel:     { value: renderer.getPixelRatio() },
+  uReady:     { value: 0.0 }
+};
+
+/* ── nepenthe: the drug of forgetting from Homer's Odyssey ──────────── */
+/* Vilhelm Hammershøi: muted interiors, dust-lavender light, figures    */
+/* dissolving into the room. The votive flames are remembered but       */
+/* cooling — gold cedes to ash-lavender. Embers no longer rise; they    */
+/* drift sideways and fade, memory scattering like dust motes. The      */
+/* body softens at edges as forgetfulness diffuses the chiaroscuro.     */
+const vertexShader = `
+  uniform float uTime;
+  uniform float uPixel;
+  uniform float uReady;
+  attribute vec3  rest;
+  attribute vec3  localR;
+  attribute float seed;
+  attribute float sc;
+  attribute float ring;
+  varying vec3  vCol;
+  varying float vAlpha;
+  varying float vDrift;
+
+  /* remembered flame positions — same as votive parent, now dimming */
+  const vec3 flame0 = vec3( 0.0, -4.0,  2.8);
+  const vec3 flame1 = vec3(-2.2,  1.5,  2.0);
+  const vec3 flame2 = vec3( 0.8,  5.5,  1.6);
+
+  float flameLight(vec3 p, vec3 fp, float radius, float intensity) {
+    float d = length(p - fp);
+    return intensity / (1.0 + d * d / (radius * radius));
+  }
+
+  /* flicker dying down — slower, damped */
+  float flicker(float id, float t) {
+    return 0.6 + 0.15 * sin(t * 1.8 + id * 7.0) * (0.5 + 0.5 * sin(t * 2.1 + id * 13.0));
+  }
+
+  /* forgetFactor: increases over time per ring — outer rings forget faster */
+  float forgetCurve(float ringId, float t) {
+    float base = smoothstep(4.0, 40.0, t); /* gradual onset */
+    float ringBoost = 1.0 + ringId * 0.35;
+    return clamp(base * ringBoost, 0.0, 0.85);
+  }
+
+  void main() {
+    float t = uTime * 0.25 + seed * 6.2831;
+    float forget = forgetCurve(ring, uTime);
+
+    /* inherited drape fold — loosening as memory softens */
+    vec3 lr = localR;
+    float drapeStr = 0.15 * (1.0 - forget * 0.6);
+    float drapeAng = sin(lr.y * 0.18 + uTime * 0.03) * drapeStr * smoothstep(0.0, 1.0, uReady);
+    float ct = cos(drapeAng), st = sin(drapeAng);
+    lr = vec3(lr.x * ct - lr.z * st, lr.y, lr.x * st + lr.z * ct);
+
+    /* flame illumination — dimming as forgetting progresses */
+    float flameDim = 1.0 - forget * 0.7;
+    float f0 = flameLight(lr, flame0, 5.5, 1.0) * flicker(0.0, uTime) * flameDim;
+    float f1 = flameLight(lr, flame1, 5.0, 0.85) * flicker(1.0, uTime) * flameDim;
+    float f2 = flameLight(lr, flame2, 4.5, 0.75) * flicker(2.0, uTime) * flameDim;
+    float totalLight = f0 + f1 + f2;
+    float litAmount = smoothstep(0.0, 0.12, totalLight);
+
+    float warmShift = f0 / (totalLight + 0.001);
+
+    /* ── nepenthe palette: votive gold cooling to Hammershøi dust-lavender ── */
+    vec3 deepShadow    = vec3(0.04, 0.03, 0.05);
+    vec3 umberBody     = vec3(0.18, 0.10, 0.06);
+    vec3 tallowGold    = vec3(0.85, 0.62, 0.22);
+    vec3 beeswaxWarm   = vec3(0.92, 0.48, 0.12);
+    /* Hammershøi tones — dust, ash-lavender, cool grey */
+    vec3 dustLavender  = vec3(0.52, 0.48, 0.55);
+    vec3 ashGrey       = vec3(0.38, 0.36, 0.40);
+    vec3 coolShadow    = vec3(0.08, 0.07, 0.10);
+
+    /* body color transitions from warm shadow to cool grey */
+    vec3 warmBody = mix(deepShadow, umberBody, litAmount * 0.7);
+    vec3 coolBody = mix(coolShadow, ashGrey, litAmount * 0.5);
+    vec3 bodyCol  = mix(warmBody, coolBody, forget);
+
+    /* candlelight wash also cools */
+    vec3 warmCandle = mix(tallowGold, beeswaxWarm, warmShift);
+    vec3 coolCandle = mix(dustLavender, vec3(0.62, 0.56, 0.58), warmShift);
+    vec3 candleCol  = mix(warmCandle, coolCandle, forget);
+
+    vCol = mix(bodyCol, candleCol, totalLight * 0.85);
+
+    /* reconstruct world position */
+    vec3 off = rest - localR * sc;
+    vec3 p = lr * sc + off;
+
+    /* breathing — even quieter under nepenthe */
+    vec3 dir = normalize(lr + 0.001);
+    p += dir * sin(t) * 0.008 * sc * (1.0 - forget * 0.5);
+
+    /* ── nepenthe drift: embers no longer rise, they wander sideways ── */
+    /* like dust motes in a Hammershøi interior, memory dissipating */
+    float proxToFlame0 = exp(-length(lr - flame0) * 0.22);
+    float proxToFlame1 = exp(-length(lr - flame1) * 0.25);
+    float proxToFlame2 = exp(-length(lr - flame2) * 0.28);
+    float flameProx = max(proxToFlame0, max(proxToFlame1, proxToFlame2));
+
+    float driftChance = step(0.78, seed) * step(0.25, flameProx);
+    float driftPhase = sin(uTime * 0.09 + seed * 9.42) * 0.5 + 0.5;
+
+    /* clamped drift — max 3.5×sc, with soft return toward rest (critic fix) */
+    float maxDrift = 3.5 * sc * forget;
+    float driftAmt = driftChance * driftPhase * maxDrift;
+
+    /* lateral drift instead of vertical rise — forgetting spreads sideways */
+    float driftAng = seed * 6.2831 + uTime * 0.06;
+    p.x += sin(driftAng) * driftAmt * 0.8;
+    p.z += cos(driftAng) * driftAmt * 0.6;
+    /* slight vertical sag, not rise — memory sinks */
+    p.y -= driftAmt * 0.15;
+
+    /* return-drift term: particles pulled gently back (critic fix) */
+    float returnStr = 0.12 * (1.0 - driftPhase);
+    vec3 toRest = (lr * sc + off) - p;
+    p += toRest * returnStr * driftChance;
+
+    vDrift = driftChance * driftPhase * forget;
+
+    /* drift particles take on lavender-ash color */
+    vec3 dustCol = mix(dustLavender, vec3(0.45, 0.42, 0.50), seed);
+    vCol = mix(vCol, dustCol, vDrift * 0.7);
+
+    /* assembly reveal — spiral inward (inherited) */
+    float angle2 = seed * 6.2831 * 4.0;
+    float radius2 = 50.0 + seed * 30.0;
+    vec3 entry = vec3(cos(angle2) * radius2, sin(seed * 20.0) * 25.0, sin(angle2) * radius2);
+    float reveal = smoothstep(0.0, 1.0, uReady);
+    p = mix(entry, p, reveal);
+
+    /* ── alpha: body softens at edges as forgetting progresses ── */
+    float bodyAlpha = 0.10 + 0.65 * litAmount * (1.0 - forget * 0.4);
+    /* outer rings fade more under forgetting but stay readable */
+    float ringFade = 1.0 - ring * 0.08 * forget;
+    float driftAlpha = 0.55 * vDrift;
+    vAlpha = reveal * max(bodyAlpha, driftAlpha) * ringFade;
+
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    float camDist = -mv.z;
+    float baseSz = (1.0 + 0.6 * litAmount + 1.2 * vDrift) * uPixel * (42.0 / max(camDist, 1.0)) * reveal;
+    gl_PointSize = max(1.0, baseSz);
+    gl_Position  = projectionMatrix * mv;
+  }
+`;
+
+const fragmentShader = `
+  varying vec3  vCol;
+  varying float vAlpha;
+  varying float vDrift;
+  void main() {
+    vec2 d = gl_PointCoord - 0.5;
+    float r2 = dot(d, d);
+    if (r2 > 0.25) discard;
+    /* drifting particles softer-edged — dissolving */
+    float edge = mix(0.04, 0.22, vDrift);
+    float a = smoothstep(0.25, edge, r2) * vAlpha;
+    vec3 col = vCol * (1.0 + vDrift * 0.15);
+    gl_FragColor = vec4(col * a, a);
+  }
+`;
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: true,
+  depthTest: true,
+  blending: THREE.NormalBlending,
+  vertexShader,
+  fragmentShader
+});
+
+const geom   = new THREE.BufferGeometry();
+const points  = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── ground plane: cooling from warm pools to diffuse lavender haze ── */
+const floorGeo = new THREE.PlaneGeometry(200, 200, 1, 1);
+floorGeo.rotateX(-Math.PI / 2);
+const floorMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: true,
+  uniforms: { uTime: uniforms.uTime, uReady: uniforms.uReady },
+  vertexShader: `
+    varying vec3 vWPos;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWPos = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uReady;
+    varying vec3 vWPos;
+    void main() {
+      vec2 f0 = vec2( 0.0,  2.8);
+      vec2 f1 = vec2(-2.2,  2.0);
+      vec2 f2 = vec2( 0.8,  1.6);
+      float d0 = length(vWPos.xz - f0);
+      float d1 = length(vWPos.xz - f1);
+      float d2 = length(vWPos.xz - f2);
+      float pool = 0.8 / (1.0 + d0 * d0 * 0.04)
+                 + 0.6 / (1.0 + d1 * d1 * 0.05)
+                 + 0.5 / (1.0 + d2 * d2 * 0.06);
+      /* nepenthe: pools cool from gold to diffuse lavender */
+      float forget = smoothstep(4.0, 40.0, uTime);
+      vec3 warmPool = vec3(0.12, 0.07, 0.02) * pool;
+      vec3 coolPool = vec3(0.06, 0.05, 0.08) * pool;
+      vec3 col = mix(warmPool, coolPool, forget);
+      float fade = smoothstep(100.0, 20.0, length(vWPos.xz));
+      gl_FragColor = vec4(col, fade * 0.16 * uReady * min(pool, 1.0));
+    }
+  `
+});
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.position.y = -8.5;
+scene.add(floor);
+
+/* ── load Stanford Lucy ── */
+const loadingEl = document.getElementById('loading');
+let revealStart = 0;
+
+new PLYLoader().load(
+  'https://threejs.org/examples/models/ply/binary/Lucy100k.ply',
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size   = bb.getSize(new THREE.Vector3());
+    const baseScale = 15 / Math.max(size.x, size.y, size.z);
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(baseScale, baseScale, baseScale);
+
+    const mesh    = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp     = new THREE.Vector3();
+
+    let idx = 0;
+    for (let c = 0; c < COPIES; c++) {
+      const count = c === 0 ? PER_CENTER
+        : (copyRing[c] === 1 ? PER_RING1
+        : (copyRing[c] === 2 ? PER_RING2 : PER_RING3));
+      const s   = copyScales[c];
+      const off = copyOffsets[c];
+      const r   = copyRing[c];
+      for (let i = 0; i < count; i++) {
+        sampler.sample(tmp);
+        const lx = tmp.x * s, ly = tmp.y * s, lz = tmp.z * s;
+        localRest[idx * 3]     = lx;
+        localRest[idx * 3 + 1] = ly;
+        localRest[idx * 3 + 2] = lz;
+        restPositions[idx * 3]     = lx + off.x;
+        restPositions[idx * 3 + 1] = ly + off.y;
+        restPositions[idx * 3 + 2] = lz + off.z;
+        seedsArr[idx] = Math.random();
+        scaleArr[idx] = s;
+        ringArr[idx]  = r;
+        idx++;
+      }
+    }
+
+    const posArr = new Float32Array(N * 3);
+    geom.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+    geom.setAttribute('localR',   new THREE.BufferAttribute(localRest, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seedsArr, 1));
+    geom.setAttribute('sc',       new THREE.BufferAttribute(scaleArr, 1));
+    geom.setAttribute('ring',     new THREE.BufferAttribute(ringArr, 1));
+
+    loadingEl.style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      loadingEl.textContent = `loading lucy · ${(xhr.loaded / xhr.total * 100).toFixed(0)}%`;
+    }
+  },
+  () => { loadingEl.textContent = 'load failed — check network'; }
+);
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── animation loop ── */
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 4000);
+  }
+
+  /* camera: nepenthe — even slower orbit, slightly further out to hold tightened rings */
+  const orbitR = 28 + 4 * Math.sin(t * 0.02);
+  const angle  = t * 0.022;
+  const camY   = 4.0 + 3.0 * Math.sin(t * 0.025) + 0.8 * Math.sin(t * 0.011);
+  camera.position.set(Math.sin(angle) * orbitR, camY, Math.cos(angle) * orbitR);
+  /* lookAt drifts very slightly — as if attention is softening */
+  const lookDrift = Math.sin(t * 0.015) * 0.5;
+  camera.lookAt(lookDrift, 1.0 + lookDrift * 0.3, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
