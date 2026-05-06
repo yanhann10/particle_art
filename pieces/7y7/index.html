@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7y7 · cy twombly gestural head</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f0ebe3; overflow:hidden;
+               color:#3a3632; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px; letter-spacing:0.04em; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.5; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading · twombly gestural study …</div>
+<div class="id">7y7</div>
+<div class="hint">drag to orbit · scroll to zoom</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const BG = 0xf0ebe3;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0.5, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.target.set(0, 0, 0);
+
+/* ── constants ── */
+const N = 55000;
+const TRAIL_POINTS = 12;
+const TRAIL_COUNT = 800;
+
+const restPos   = new Float32Array(N * 3);
+const seeds     = new Float32Array(N);
+const scribbleA = new Float32Array(N); // scribble amplitude per point
+const scribbleF = new Float32Array(N); // scribble freq per point
+const colorIdx  = new Float32Array(N); // palette index
+
+/* ── point cloud material ── */
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    attribute vec3 rest;
+    attribute float seed;
+    attribute float scrAmp;
+    attribute float scrFreq;
+    attribute float cIdx;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    // looping scribble displacement — Twombly gesture
+    vec3 scribble(float t, float amp, float freq, float s) {
+      float p = t * freq + s * 37.0;
+      return amp * vec3(
+        sin(p * 2.1 + s * 5.0) * cos(p * 0.7),
+        cos(p * 1.7 + s * 3.0) * sin(p * 1.3),
+        sin(p * 0.9 + s * 7.0) * 0.5
+      );
+    }
+
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.35;
+
+      // gestural scribble displacement
+      vec3 scr = scribble(t, scrAmp, scrFreq, seed);
+      // scale scribble in with reveal
+      p += scr * uReady;
+
+      // reveal: converge from scattered chalk dust
+      float th = seed * 6.2831;
+      float phi = (seed * 2.0 - 1.0) * 3.14159;
+      vec3 entry = vec3(cos(th)*cos(phi), sin(phi), sin(th)*cos(phi)) * 18.0;
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      // Twombly palette: graphite, blood red, raw umber, chalk white
+      vec3 graphite = vec3(0.28, 0.26, 0.27);
+      vec3 bloodRed = vec3(0.62, 0.14, 0.12);
+      vec3 umber    = vec3(0.45, 0.34, 0.22);
+      vec3 chalk    = vec3(0.35, 0.33, 0.32);
+
+      float ci = cIdx;
+      vec3 col = graphite;
+      if (ci > 0.7) col = bloodRed;
+      else if (ci > 0.45) col = umber;
+      else if (ci > 0.2) col = chalk;
+
+      // slight variation
+      col += 0.04 * sin(seed * 47.0 + vec3(0.0, 1.0, 2.0));
+
+      vCol = col;
+      // higher scribble amplitude → slightly more transparent (chalk pressure)
+      vAlpha = mix(0.55, 0.25, scrAmp / 0.8) * (0.3 + 0.7 * uReady);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // larger points for chalk-mark feel
+      float baseSize = mix(1.2, 2.8, scrAmp / 0.8);
+      gl_PointSize = baseSize * uPixel * (50.0 / dist) * (0.3 + 0.7 * uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      // soft chalk edge — not sharp circle
+      float falloff = 1.0 - smoothstep(0.05, 0.25, r);
+      float a = falloff * vAlpha;
+      gl_FragColor = vec4(vCol, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const pointCloud = new THREE.Points(geom, mat);
+scene.add(pointCloud);
+
+/* ── gestural trail lines (scribble marks) ── */
+const trailGroup = new THREE.Group();
+scene.add(trailGroup);
+
+const trailMat = new THREE.LineBasicMaterial({
+  transparent: true, opacity: 0.0, depthWrite: false,
+  blending: THREE.NormalBlending
+});
+
+const trailData = [];
+
+function createTrail(origin, seed) {
+  const pts = [];
+  for (let i = 0; i < TRAIL_POINTS; i++) pts.push(new THREE.Vector3());
+  const trailGeom = new THREE.BufferGeometry().setFromPoints(pts);
+  // pick color from Twombly palette
+  const ci = Math.random();
+  let col;
+  if (ci > 0.65) col = new THREE.Color(0.62, 0.14, 0.12); // blood red
+  else if (ci > 0.35) col = new THREE.Color(0.45, 0.34, 0.22); // umber
+  else col = new THREE.Color(0.30, 0.28, 0.29); // graphite
+  const m = trailMat.clone();
+  m.color = col;
+  const line = new THREE.Line(trailGeom, m);
+  trailGroup.add(line);
+  trailData.push({ geom: trailGeom, mat: m, origin: origin.clone(), seed, pts });
+}
+
+/* ── load head ── */
+let revealStart = 0;
+let centroid = new THREE.Vector3();
+const HEAD_URL = 'https://threejs.org/examples/models/gltf/LeePerrySmith/LeePerrySmith.glb';
+
+const loader = new GLTFLoader();
+loader.load(HEAD_URL,
+  (gltf) => {
+    let target = null;
+    gltf.scene.traverse(o => { if (!target && o.isMesh && o.geometry?.attributes?.position) target = o; });
+    if (!target) { document.getElementById('loading').textContent = 'no mesh'; return; }
+    target.updateMatrixWorld(true);
+
+    const g = target.geometry.clone();
+    g.applyMatrix4(target.matrixWorld);
+    g.computeBoundingBox();
+    const bb = g.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scl = 8 / maxAxis;
+    g.translate(-center.x, -center.y, -center.z);
+    g.scale(scl, scl, scl);
+
+    const sampleMesh = new THREE.Mesh(g.toNonIndexed(), target.material);
+    const sampler = new MeshSurfaceSampler(sampleMesh).build();
+
+    const tmp = new THREE.Vector3();
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < N; i++) {
+      sampler.sample(tmp);
+      restPos[i * 3]     = tmp.x;
+      restPos[i * 3 + 1] = tmp.y;
+      restPos[i * 3 + 2] = tmp.z;
+      cx += tmp.x; cy += tmp.y; cz += tmp.z;
+      const s = Math.random();
+      seeds[i] = s;
+      // most points: tight scribble. ~15% get large gestural arcs
+      const isGestural = s > 0.85;
+      scribbleA[i] = isGestural ? 0.3 + Math.random() * 0.5 : 0.01 + Math.random() * 0.06;
+      scribbleF[i] = isGestural ? 0.8 + Math.random() * 1.5 : 2.0 + Math.random() * 3.0;
+      colorIdx[i] = Math.random();
+    }
+    centroid.set(cx / N, cy / N, cz / N);
+
+    geom.setAttribute('position', new THREE.BufferAttribute(restPos.slice(), 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPos, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('scrAmp',   new THREE.BufferAttribute(scribbleA, 1));
+    geom.setAttribute('scrFreq',  new THREE.BufferAttribute(scribbleF, 1));
+    geom.setAttribute('cIdx',     new THREE.BufferAttribute(colorIdx, 1));
+    geom.computeBoundingSphere();
+
+    // create gestural trail lines from random surface points
+    for (let i = 0; i < TRAIL_COUNT; i++) {
+      const idx = Math.floor(Math.random() * N);
+      const o = new THREE.Vector3(restPos[idx * 3], restPos[idx * 3 + 1], restPos[idx * 3 + 2]);
+      createTrail(o, Math.random());
+    }
+
+    document.getElementById('loading').style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      document.getElementById('loading').textContent = `loading · ${pct}%`;
+    }
+  },
+  (err) => { console.error(err); document.getElementById('loading').textContent = 'load failed'; }
+);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── animation ── */
+const start = performance.now();
+
+function updateTrails(t, ready) {
+  const posArr = [];
+  for (let i = 0; i < trailData.length; i++) {
+    const td = trailData[i];
+    const s = td.seed;
+    const freq = 0.6 + s * 1.2;
+    const amp = 0.15 + s * 0.6;
+    const phase = s * 50.0;
+    const positions = td.geom.attributes.position;
+
+    for (let j = 0; j < TRAIL_POINTS; j++) {
+      const frac = j / (TRAIL_POINTS - 1);
+      const tt = t * freq - frac * 1.5 + phase;
+      // looping scribble curve from anchor point
+      const x = td.origin.x + amp * frac * Math.sin(tt * 2.3 + s * 5.0) * Math.cos(tt * 0.7);
+      const y = td.origin.y + amp * frac * Math.cos(tt * 1.9 + s * 3.0) * Math.sin(tt * 1.1);
+      const z = td.origin.z + amp * frac * 0.5 * Math.sin(tt * 1.4 + s * 7.0);
+      positions.setXYZ(j, x, y, z);
+    }
+    positions.needsUpdate = true;
+    td.mat.opacity = 0.12 * ready * (0.5 + 0.5 * Math.sin(t * 0.4 + s * 10.0));
+  }
+}
+
+function loop() {
+  const elapsed = (performance.now() - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  let ready = 0;
+  if (revealStart > 0) {
+    ready = Math.min(1.0, (performance.now() - revealStart) / 3200);
+    uniforms.uReady.value = ready;
+  }
+
+  // very slow auto-rotation — Twombly pacing, contemplative
+  pointCloud.rotation.y = Math.sin(elapsed * 0.08) * 0.3;
+  trailGroup.rotation.y = pointCloud.rotation.y;
+
+  // camera gently tracks centroid
+  controls.target.lerp(centroid, 0.01);
+
+  updateTrails(elapsed * 0.35, ready);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
