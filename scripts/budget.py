@@ -12,9 +12,9 @@ STATE = Path(os.environ.get("PARTICLE_ART_BUDGET",
                             os.path.expanduser("~/.particle_art_budget.json")))
 
 # defaults; override via env
-DAILY_USD_CAP   = float(os.environ.get("PARTICLE_ART_DAILY_CAP",   "0.60"))
-MONTHLY_USD_CAP = float(os.environ.get("PARTICLE_ART_MONTHLY_CAP", "15.00"))
-DAILY_RUN_CAP   = int(os.environ.get("PARTICLE_ART_DAILY_RUNS",    "8"))
+DAILY_USD_CAP   = float(os.environ.get("PARTICLE_ART_DAILY_CAP",   "3.50"))   # was 0.60 — bumped for */30 cadence + swarm debate
+MONTHLY_USD_CAP = float(os.environ.get("PARTICLE_ART_MONTHLY_CAP", "60.00"))  # was 15.00
+DAILY_RUN_CAP   = int(os.environ.get("PARTICLE_ART_DAILY_RUNS",    "100"))    # was 8 — */30 = 48/day mutate + 48/day debate
 
 
 def _load() -> dict:

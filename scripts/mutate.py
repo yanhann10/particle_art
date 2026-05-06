@@ -191,6 +191,15 @@ def _read_ratings() -> dict:
         return {}
 
 
+def _swarm_block() -> str:
+    """Inject the last few swarm-debate directives. Lazy import so missing module is non-fatal."""
+    try:
+        from swarm_debate import advice_block
+        return advice_block()
+    except Exception:
+        return ""
+
+
 def _rejection_block() -> str:
     """Build a block describing what the user has rejected.
 
@@ -222,6 +231,7 @@ def _rejection_block() -> str:
 
 def build_prompt(parent: dict, parent_html: str, directive: str) -> tuple[str, str]:
     rejection = _rejection_block()
+    swarm = _swarm_block()
     system = (
         "You are a creative-coding shader/three.js mutation engine for a particle-art "
         "evolutionary gallery. Each mutation produces ONE self-contained HTML file "
@@ -231,6 +241,7 @@ def build_prompt(parent: dict, parent_html: str, directive: str) -> tuple[str, s
         "id label fixed to the bottom-left corner, font-family ui-monospace, color #cdd2dc, "
         "opacity 0.55, font-size 11px (the 3-char id will be supplied).\n\n"
         + (("USER TASTE GUARDRAILS — read carefully:\n" + rejection + "\n\n") if rejection else "")
+        + ((swarm + "\n\n") if swarm else "")
         + "If your output would violate any of the above, redesign before emitting. "
         "Better to produce a structurally simple piece that respects the guardrails "
         "than an ambitious piece that breaks them."
@@ -423,6 +434,17 @@ def main():
             print(f"push failed: {push.stderr}")
             return 6
     print(f"committed: {msg}")
+
+    # POST-MUTATION SWARM DEBATE — three distilled-artist personas critique the
+    # new piece in one Claude call. Verdicts feed forward into the next tick's
+    # prompt guardrails. Failure here is non-fatal (mutation is already shipped).
+    try:
+        from swarm_debate import debate
+        v = debate(new_id)
+        if v:
+            print(f"swarm debate: 3 verdicts logged for {new_id}")
+    except Exception as e:
+        print(f"swarm debate skipped: {e}")
     return 0
 
 
