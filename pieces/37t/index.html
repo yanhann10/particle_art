@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>37t · shibumi</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0c0b0a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">37t · shibumi</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0c0b0a, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  const angle = Math.random() * Math.PI * 2;
+  const rad = Math.random() * 1.8;
+  init[i*4]   = Math.cos(angle) * rad * (0.5 + Math.random() * 0.5);
+  init[i*4+1] = Math.sin(angle) * rad * (0.5 + Math.random() * 0.5);
+  init[i*4+2] = (Math.random() - 0.5) * 0.08;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev:  { value: rtA.texture },
+  uDt:   { value: 0.006 },
+  uA:    { value: 0.95 },
+  uB:    { value: 0.70 },
+  uC:    { value: 0.60 },
+  uD:    { value: 3.50 },
+  uE:    { value: 0.25 },
+  uF:    { value: 0.10 },
+  uTime: { value: 0.0 },
+  uSwingX: { value: 0.0 },
+  uSwingY: { value: 0.0 },
+  uBreath: { value: 0.0 },
+  uRes:  { value: new THREE.Vector2(W, H) }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF;
+    uniform float uTime, uSwingX, uSwingY, uBreath;
+    uniform vec2 uRes;
+    varying vec2 vUv;
+
+    float hash(vec2 p){
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vec2 pid = vUv * uRes;
+
+      float h1 = hash(pid);
+      float h2 = hash(pid + 71.0);
+      float h3 = hash(pid + 137.0);
+      float h4 = hash(pid + 213.0);
+
+      // Aizawa attractor — parent's ghost, now whispered
+      vec3 att = vec3(
+        (p.z * 6.0 - uB) * p.x - uD * p.y,
+        uD * p.x + (p.z * 6.0 - uB) * p.y,
+        uC + uA * p.z - (p.z * p.z * p.z) / 3.0
+              - (p.x * p.x + p.y * p.y) * (1.0 + uE * p.z)
+              + uF * p.z * p.x * p.x * p.x
+      );
+      att.z *= 0.02;
+      att.xy *= 0.18;
+
+      // Shibumi: the swing becomes a single deliberate brush stroke
+      // One slow arc, not Pollock's many — Sesshū Tōyō's haboku discipline
+      float swingT = uTime * 0.18 + h1 * 0.3;
+
+      // Single pivot traces a slow ensō-like arc
+      vec2 pivot = vec2(
+        sin(swingT * 0.4) * 0.8 + uSwingX * 0.3,
+        sin(swingT * 0.31 + 1.0) * 0.6 + uSwingY * 0.2
+      );
+
+      vec2 toPivot = pivot - p.xy;
+      float dist = length(toPivot);
+      vec2 radial = dist > 0.001 ? toPivot / dist : vec2(0.0);
+
+      // Tangential force — restrained, like a brush held lightly
+      vec2 tangent = vec2(-radial.y, radial.x);
+      float tangentStr = 0.8 + h2 * 0.4;
+
+      // Gentle tension — ink drawn by gravity and wrist alone
+      float idealRadius = 1.0 + h3 * 0.8;
+      float tension = (dist - idealRadius) * 0.25;
+
+      vec3 dp = att;
+      dp.xy += tangent * tangentStr / (1.0 + dist * 0.8);
+      dp.xy += radial * tension;
+
+      // Gravity: almost absent — ink suspended in the stroke
+      dp.y -= 0.04 + h3 * 0.02;
+
+      // Breath: instead of burst, a slow inhale-exhale that gathers and releases
+      // like the calligrapher's breath before a stroke
+      float breathCycle = sin(uTime * 0.15) * 0.5 + 0.5;
+      float breathPull = (breathCycle - 0.5) * 0.3;
+      dp.xy += radial * breathPull * uBreath;
+
+      // Subtle drift — ink dispersing in still water
+      float driftT = uTime * 0.12 + h2 * 6.28;
+      vec2 drift = vec2(
+        sin(driftT + p.y * 0.5) * 0.06,
+        cos(driftT * 0.7 + p.x * 0.5) * 0.05
+      );
+      dp.xy += drift;
+
+      // High viscosity — ink is thick, deliberate, unhurried
+      float viscosity = 0.78 + h4 * 0.08;
+      float speed = length(dp);
+      dp *= viscosity / (1.0 + speed * 0.15);
+
+      // Flatten onto surface
+      dp.z -= p.z * 2.5;
+
+      p += dp * uDt;
+
+      // Bounds — respawn quietly, close to center
+      if(abs(p.x) > 3.2 || abs(p.y) > 2.6){
+        float cycle = floor(uTime * 0.3 + h1 * 10.0);
+        float r1 = hash(vec2(h1, cycle));
+        float r2 = hash(vec2(h2, cycle));
+        p.x = (r1 - 0.5) * 1.8;
+        p.y = (r2 - 0.5) * 1.4;
+        p.z = (h3 - 0.5) * 0.04;
+        age = 0.0;
+      }
+
+      age = mod(age + uDt * 0.03, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// Render
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.05, 80);
+camera.position.set(0, 1.0, 5.5);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vSpeed;
+    varying float vHash;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      vSpeed = clamp(length(p.xy) * 0.2, 0.0, 1.0);
+      vHash = fract(sin(dot(uvIdx, vec2(127.1, 311.7))) * 43758.5453);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // Thin brush hairs — shibumi demands economy of mark
+      float thickness = 0.3 + vHash * 0.5;
+      float sz = thickness * uPixel * (6.0 / max(dist, 0.5));
+      gl_PointSize = sz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vSpeed;
+    varying float vHash;
+    uniform float uTime;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0);
+
+      // Shibumi palette: sumi ink on aged paper
+      // Sesshū Tōyō's haboku (splashed ink) — charcoal, warm gray, faint indigo
+      vec3 c_ink    = vec3(0.12, 0.11, 0.13);   // deep sumi ink
+      vec3 c_stone  = vec3(0.38, 0.36, 0.34);   // grinding stone gray
+      vec3 c_ash    = vec3(0.52, 0.50, 0.48);   // wood ash
+      vec3 c_indigo = vec3(0.18, 0.20, 0.28);   // ai-iro (indigo shadow)
+
+      // Most particles are ink; a few carry stone or ash tones
+      float colorBand = vHash;
+      vec3 col;
+      if(colorBand < 0.50){
+        // Dominant ink — varying density like wet-on-wet gradation
+        float inkDensity = smoothstep(0.0, 0.50, colorBand);
+        col = mix(c_ink, c_stone * 0.7, inkDensity * 0.3);
+      } else if(colorBand < 0.75){
+        // Stone gray — the lightest marks, like dry brush
+        col = mix(c_stone, c_ash, smoothstep(0.50, 0.75, colorBand));
+      } else if(colorBand < 0.90){
+        // Indigo undertone — depth in the darkest pools
+        col = mix(c_indigo, c_ink, smoothstep(0.75, 0.90, colorBand));
+      } else {
+        // Near-white wisps — the paper showing through
+        col = mix(c_ash, vec3(0.62, 0.58, 0.54), smoothstep(0.90, 1.0, colorBand));
+      }
+
+      // Age: ink dries, becomes matte — no shimmer, just quiet settling
+      float freshness = 1.0 - vAge * 0.15;
+      col *= freshness;
+
+      // Opacity: ink pooling — dense at rest, thin when moving
+      float stillness = 1.0 - vSpeed;
+      float opacity = a * (0.25 + stillness * 0.45 + (1.0 - vAge) * 0.15);
+      gl_FragColor = vec4(col * opacity, opacity);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Pointer: subtle influence — a breath across the ink, not a hand
+const swing = { x: 0, y: 0 };
+addEventListener('pointermove', (e) => {
+  swing.x = ((e.clientX / innerWidth) - 0.5) * 0.5;
+  swing.y = ((e.clientY / innerHeight) - 0.5) * -0.3;
+});
+
+let t0 = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  simUniforms.uTime.value = elapsed;
+  // Very slow response to pointer — unhurried
+  simUniforms.uSwingX.value += (swing.x - simUniforms.uSwingX.value) * 0.008;
+  simUniforms.uSwingY.value += (swing.y - simUniforms.uSwingY.value) * 0.008;
+
+  // Breath envelope — slow sine, no sharp attacks
+  simUniforms.uBreath.value = 0.5 + Math.sin(elapsed * 0.2) * 0.5;
+
+  // Attractor params drift glacially — shibumi is patient
+  simUniforms.uA.value = 0.95 + Math.sin(elapsed * 0.04) * 0.03;
+  simUniforms.uC.value = 0.60 + Math.sin(elapsed * 0.03 + 1.0) * 0.04;
+  simUniforms.uD.value = 3.50 + Math.sin(elapsed * 0.025 + 2.0) * 0.15;
+
+  for (let i = 0; i < 3; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = elapsed;
+
+  // Camera: nearly still — a scroll viewed in a quiet room
+  // Sesshū perspective: contemplation from a fixed seat, slight breath of movement
+  const ang = elapsed * 0.015;
+  const camDist = 5.0 + Math.sin(elapsed * 0.03) * 0.2;
+  const camHeight = 3.2 + Math.sin(elapsed * 0.025) * 0.15;
+  camera.position.x = Math.sin(ang) * camDist * 0.15;
+  camera.position.z = Math.cos(ang) * camDist;
+  camera.position.y = camHeight;
+  // Track centroid gently
+  const lookX = simUniforms.uSwingX.value * 0.15;
+  const lookY = simUniforms.uSwingY.value * 0.1 - 0.05;
+  camera.lookAt(lookX, lookY, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
