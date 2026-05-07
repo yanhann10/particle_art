@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5kf · cellular folding</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#070707; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">5kf</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Cellular growth system inspired by Andy Lomas ── */
+const MAX_CELLS = 15000;
+const SPLIT_THRESHOLD = 0.95;
+const NUTRIENT_RATE = 0.005;
+const SPRING_K = 0.18;
+const SPRING_REST = 0.24;
+const REPEL_DIST = 0.2;
+const REPEL_K = 0.015;
+
+class Cell {
+  constructor(pos, nutrient = 0){
+    this.pos = pos.clone();
+    this.vel = new THREE.Vector3();
+    this.nutrient = nutrient;
+    this.neighbors = [];
+    this.active = true;
+  }
+}
+
+let cells = [];
+let cellCount = 0;
+
+function seedOrganism(){
+  // Start with a tight cluster of 7 folded-leaf elements arranged in a loose spiral
+  const origins = [
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0.5, 0.3, -0.2),
+    new THREE.Vector3(-0.4, 0.6, 0.3),
+    new THREE.Vector3(0.3, -0.4, 0.5),
+    new THREE.Vector3(-0.6, -0.2, -0.4),
+    new THREE.Vector3(0.7, 0.8, 0.1),
+    new THREE.Vector3(-0.3, 1.0, -0.6),
+  ];
+  
+  for (const origin of origins){
+    // Each element is a curved strip of cells — a folded leaf
+    const stripCells = 28;
+    const arcRadius = 0.8 + Math.random() * 0.4;
+    const arcAngle = Math.PI * (0.7 + Math.random() * 0.5);
+    const twist = (Math.random() - 0.5) * Math.PI * 0.6;
+    const tilt = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(
+        (Math.random() - 0.5) * Math.PI * 0.8,
+        Math.random() * Math.PI * 2,
+        (Math.random() - 0.5) * Math.PI * 0.4
+      )
+    );
+    
+    for (let i = 0; i < stripCells; i++){
+      const t = i / (stripCells - 1);
+      const theta = t * arcAngle - arcAngle * 0.5;
+      const localPos = new THREE.Vector3(
+        arcRadius * Math.sin(theta),
+        arcRadius * (1 - Math.cos(theta)),
+        0.15 * Math.sin(t * Math.PI) * Math.sin(twist * t)
+      );
+      localPos.applyQuaternion(tilt);
+      localPos.add(origin);
+      
+      const cell = new Cell(localPos, Math.random() * 0.3);
+      cells.push(cell);
+    }
+  }
+  
+  cellCount = cells.length;
+  
+  // Link neighbors within each strip and between nearby strips
+  for (let i = 0; i < cellCount; i++){
+    const c = cells[i];
+    const candidates = [];
+    for (let j = 0; j < cellCount; j++){
+      if (i === j) continue;
+      const d = c.pos.distanceTo(cells[j].pos);
+      if (d < 0.6) candidates.push({ idx: j, dist: d });
+    }
+    candidates.sort((a, b) => a.dist - b.dist);
+    for (let k = 0; k < Math.min(6, candidates.length); k++){
+      c.neighbors.push(candidates[k].idx);
+    }
+  }
+}
+
+function growthStep(delta){
+  if (cellCount >= MAX_CELLS) return;
+  
+  const forces = [];
+  for (let i = 0; i < cellCount; i++){
+    forces.push(new THREE.Vector3());
+  }
+  
+  // Spring forces between neighbors
+  for (let i = 0; i < cellCount; i++){
+    const c = cells[i];
+    for (const nIdx of c.neighbors){
+      if (nIdx >= cellCount) continue;
+      const n = cells[nIdx];
+      const vec = new THREE.Vector3().subVectors(n.pos, c.pos);
+      const dist = vec.length();
+      if (dist < 0.001) continue;
+      const force = (dist - SPRING_REST) * SPRING_K;
+      vec.normalize().multiplyScalar(force);
+      forces[i].add(vec);
+    }
+  }
+  
+  // Repulsion from non-neighbors
+  for (let i = 0; i < cellCount; i++){
+    const c = cells[i];
+    for (let j = i + 1; j < cellCount; j++){
+      const other = cells[j];
+      const vec = new THREE.Vector3().subVectors(c.pos, other.pos);
+      const dist = vec.length();
+      if (dist < REPEL_DIST && dist > 0.001){
+        const force = REPEL_K * (1.0 / dist - 1.0 / REPEL_DIST);
+        vec.normalize().multiplyScalar(force);
+        forces[i].add(vec);
+        forces[j].sub(vec);
+      }
+    }
+  }
+  
+  // Apply forces and accumulate nutrient
+  for (let i = 0; i < cellCount; i++){
+    const c = cells[i];
+    c.vel.add(forces[i].multiplyScalar(delta));
+    c.vel.multiplyScalar(0.85);
+    c.pos.add(new THREE.Vector3().copy(c.vel).multiplyScalar(delta));
+    c.nutrient += NUTRIENT_RATE * delta * 60;
+  }
+  
+  // Cell division
+  const newCells = [];
+  for (let i = 0; i < cellCount; i++){
+    const c = cells[i];
+    if (c.nutrient > SPLIT_THRESHOLD && cellCount + newCells.length < MAX_CELLS){
+      c.nutrient = 0;
+      
+      // Find split direction — away from neighbor centroid
+      const centroid = new THREE.Vector3();
+      for (const nIdx of c.neighbors){
+        if (nIdx < cellCount) centroid.add(cells[nIdx].pos);
+      }
+      if (c.neighbors.length > 0){
+        centroid.divideScalar(c.neighbors.length);
+      }
+      
+      const splitDir = new THREE.Vector3().subVectors(c.pos, centroid);
+      if (splitDir.lengthSq() < 0.001){
+        splitDir.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
+      }
+      splitDir.normalize().multiplyScalar(SPRING_REST * 0.5);
+      
+      const newPos = c.pos.clone().add(splitDir);
+      const newCell = new Cell(newPos, Math.random() * 0.2);
+      
+      // Link to parent's neighbors and parent
+      newCell.neighbors.push(i);
+      for (const nIdx of c.neighbors){
+        if (nIdx < cellCount && Math.random() < 0.6){
+          newCell.neighbors.push(nIdx);
+          cells[nIdx].neighbors.push(cellCount + newCells.length);
+        }
+      }
+      c.neighbors.push(cellCount + newCells.length);
+      
+      newCells.push(newCell);
+    }
+  }
+  
+  cells.push(...newCells);
+  cellCount += newCells.length;
+}
+
+/* ── Rendering ── */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x070707, 0.045);
+
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(4.5, 2.8, 5.5);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x070707, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, 1.0, 0);
+controls.minDistance = 2;
+controls.maxDistance = 15;
+
+// Raking side-light
+const light1 = new THREE.DirectionalLight(0xffffff, 1.8);
+light1.position.set(5, 3, 2);
+scene.add(light1);
+
+const light2 = new THREE.DirectionalLight(0xb8a89f, 0.6);
+light2.position.set(-3, 1, -2);
+scene.add(light2);
+
+const ambient = new THREE.AmbientLight(0x1a1612, 0.4);
+scene.add(ambient);
+
+// Subsurface-tint hemisphere light
+const hemi = new THREE.HemisphereLight(0xf5e8dc, 0x0a0806, 0.3);
+scene.add(hemi);
+
+seedOrganism();
+
+const sphereGeom = new THREE.SphereGeometry(1, 8, 6);
+const mat = new THREE.MeshStandardMaterial({
+  color: 0xebe3d8,
+  roughness: 0.95,
+  metalness: 0.02,
+  emissive: 0x211c18,
+  emissiveIntensity: 0.08,
+});
+
+const instancedMesh = new THREE.InstancedMesh(sphereGeom, mat, MAX_CELLS);
+instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+instancedMesh.count = cellCount;
+scene.add(instancedMesh);
+
+const matrix = new THREE.Matrix4();
+const centroid = new THREE.Vector3();
+
+function updateInstances(){
+  instancedMesh.count = cellCount;
+  
+  centroid.set(0, 0, 0);
+  for (let i = 0; i < cellCount; i++){
+    centroid.add(cells[i].pos);
+  }
+  centroid.divideScalar(cellCount);
+  
+  for (let i = 0; i < cellCount; i++){
+    const c = cells[i];
+    const scale = 0.08 + c.nutrient * 0.04;
+    matrix.makeScale(scale, scale, scale);
+    matrix.setPosition(c.pos);
+    instancedMesh.setMatrixAt(i, matrix);
+  }
+  instancedMesh.instanceMatrix.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let lastTime = start;
+
+function loop(now){
+  const elapsed = (now - start) / 1000;
+  const delta = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  
+  // Growth slows after first 30s
+  const growthScale = elapsed < 30 ? 1.0 : Math.max(0.15, 1.0 - (elapsed - 30) / 60);
+  growthStep(delta * growthScale);
+  
+  updateInstances();
+  
+  // Camera tracks centroid
+  const target = controls.target;
+  target.lerp(centroid, 0.015);
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop(start);
+</script>
+</body>
+</html>
