@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fbo · JPEG vernacular · glitch-lattice</title>
+<!-- MOTION: pulse, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1a1c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.6; font-size: 11px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">fbo · jpeg vernacular · glitch-lattice</div>
+<div class="hint">rosa menkman · engineered compression artifacts</div>
+<div class="src">lumen prize 2023 · still image winner</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 400);
+camera.position.set(0, 0, 95);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1a1c, 1);
+document.body.appendChild(renderer.domElement);
+
+// 8×8 macroblock lattice — the fundamental unit of JPEG DCT
+const GRID_W = 14;
+const GRID_H = 10;
+const BLOCK_SIZE = 8;
+const SPACING = 5.5;
+const N_BLOCKS = GRID_W * GRID_H;
+const PARTICLES_PER_BLOCK = 64; // 8×8
+const N = N_BLOCKS * PARTICLES_PER_BLOCK;
+
+const positions = new Float32Array(N * 3);
+const blockIDs  = new Float32Array(N);
+const seeds     = new Float32Array(N);
+const localUVs  = new Float32Array(N * 2); // within-block coords (0–7)
+
+// chroma-subsampled palette — magenta/cyan/yellow banding
+const PALETTE = [
+  new THREE.Color(0xd946ef), // magenta
+  new THREE.Color(0x06b6d4), // cyan
+  new THREE.Color(0xfbbf24), // yellow
+  new THREE.Color(0x94a3b8), // ringing-artifact gray
+];
+
+const blockColors = new Float32Array(N_BLOCKS * 3);
+const blockPhases = new Float32Array(N_BLOCKS);
+const blockGlitch = new Float32Array(N_BLOCKS); // bit-flip teleport state
+
+for (let b = 0; b < N_BLOCKS; b++){
+  const col = PALETTE[Math.floor(Math.random() * PALETTE.length)];
+  blockColors[b*3]   = col.r;
+  blockColors[b*3+1] = col.g;
+  blockColors[b*3+2] = col.b;
+  blockPhases[b] = Math.random() * 6.28;
+  blockGlitch[b] = 0.0;
+}
+
+let idx = 0;
+for (let by = 0; by < GRID_H; by++){
+  for (let bx = 0; bx < GRID_W; bx++){
+    const blockIdx = by * GRID_W + bx;
+    const cx = (bx - GRID_W/2) * SPACING;
+    const cy = (by - GRID_H/2) * SPACING;
+    
+    for (let py = 0; py < BLOCK_SIZE; py++){
+      for (let px = 0; px < BLOCK_SIZE; px++){
+        const x = cx + (px - 3.5) * 0.65;
+        const y = cy + (py - 3.5) * 0.65;
+        positions[idx*3]   = x;
+        positions[idx*3+1] = y;
+        positions[idx*3+2] = 0;
+        blockIDs[idx] = blockIdx;
+        seeds[idx] = Math.random();
+        localUVs[idx*2]   = px;
+        localUVs[idx*2+1] = py;
+        idx++;
+      }
+    }
+  }
+}
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBlockColors: { value: blockColors },
+  uBlockPhases: { value: blockPhases },
+  uBlockGlitch: { value: blockGlitch }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uBlockColors[${N_BLOCKS * 3}];
+    uniform float uBlockPhases[${N_BLOCKS}];
+    uniform float uBlockGlitch[${N_BLOCKS}];
+    attribute float blockID;
+    attribute float seed;
+    attribute vec2 localUV;
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    // 2D DCT basis function
+    float dct2d(float u, float v, float x, float y){
+      float cu = (u == 0.0) ? sqrt(0.5) : 1.0;
+      float cv = (v == 0.0) ? sqrt(0.5) : 1.0;
+      float PI = 3.14159265;
+      return cu * cv * cos((2.0*x + 1.0)*u*PI/16.0) * cos((2.0*y + 1.0)*v*PI/16.0);
+    }
+    
+    void main(){
+      int bid = int(blockID);
+      vec3 p = position;
+      
+      // glitch teleport — bit-flip event moves block to random grid cell
+      float glitchAmt = uBlockGlitch[bid];
+      if (glitchAmt > 0.5){
+        float hash = fract(sin(blockID*78.233 + uTime*0.1)*43758.5);
+        p.x += sin(hash * 6.28) * 22.0 * glitchAmt;
+        p.y += cos(hash * 9.42) * 16.0 * glitchAmt;
+      }
+      
+      // DCT ripple — cosine-basis displacement
+      float phase = uBlockPhases[bid];
+      float t = uTime * 0.8 + phase;
+      
+      // choose two dominant DCT modes per block
+      float u1 = mod(blockID * 3.7, 5.0);
+      float v1 = mod(blockID * 2.3, 5.0);
+      float u2 = mod(blockID * 5.1, 6.0);
+      float v2 = mod(blockID * 1.9, 6.0);
+      
+      float wave1 = dct2d(u1, v1, localUV.x, localUV.y);
+      float wave2 = dct2d(u2, v2, localUV.x, localUV.y);
+      
+      float ripple = (wave1 * sin(t) + wave2 * cos(t*0.7)) * 0.35;
+      p.z += ripple;
+      
+      // banding pulse — quantization-step visibility
+      float band = floor(p.y / 2.2);
+      float bandPulse = sin(band * 0.8 + t * 0.5) * 0.15;
+      p.z += bandPulse;
+      
+      // chroma subsample shimmer — high-freq luma retained, chroma blurred
+      float lumaShimmer = sin(localUV.x * 2.5 + t*3.0) * sin(localUV.y * 2.5 - t*2.0) * 0.08;
+      p.z += lumaShimmer;
+      
+      // block color
+      vec3 col = vec3(uBlockColors[bid*3], uBlockColors[bid*3+1], uBlockColors[bid*3+2]);
+      
+      // artifact intensity — edges of blocks show compression ringing
+      float edgeDist = min(min(localUV.x, 7.0-localUV.x), min(localUV.y, 7.0-localUV.y));
+      float ringing = exp(-edgeDist * 0.4) * 0.6;
+      vAlpha = 0.3 + 0.5 * abs(ripple) + ringing;
+      
+      // desaturate based on DCT magnitude (high-freq → gray)
+      float dctMag = abs(wave1) + abs(wave2);
+      col = mix(col, vec3(0.58, 0.64, 0.72), smoothstep(0.3, 1.2, dctMag) * 0.4);
+      
+      vCol = col;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 2.8 * uPixel * (50.0/dist) * (0.8 + 0.4*vAlpha);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      float a = (1.0 - r*2.0) * vAlpha * 0.75;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('blockID',  new THREE.BufferAttribute(blockIDs, 1));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('localUV',  new THREE.BufferAttribute(localUVs, 2));
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// bit-flip events — random blocks glitch-teleport every 3–7 seconds
+let nextGlitch = 3000 + Math.random() * 4000;
+function triggerGlitch(){
+  const bid = Math.floor(Math.random() * N_BLOCKS);
+  blockGlitch[bid] = 1.0;
+  setTimeout(() => { blockGlitch[bid] = 0.0; }, 800);
+  nextGlitch = 3000 + Math.random() * 4000;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let lastGlitchCheck = start;
+
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+  
+  // trigger bit-flip glitch
+  if (now - lastGlitchCheck > nextGlitch){
+    triggerGlitch();
+    lastGlitchCheck = now;
+  }
+  
+  // gentle camera drift — viewing the compression artifact field
+  camera.position.x = Math.sin(t * 0.12) * 8;
+  camera.position.y = Math.cos(t * 0.09) * 5;
+  camera.lookAt(0, 0, 0);
+  
+  // rotate entire lattice slowly to see depth
+  points.rotation.z = Math.sin(t * 0.08) * 0.12;
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
