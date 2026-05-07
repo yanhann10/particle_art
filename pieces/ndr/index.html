@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ndr · spider web scan</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020204; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">ndr</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── Tomás Saraceno — Spider Web Scan / Hybrid Webs ──
+   Sparse luminous filaments suspended in cosmic black.
+   ~300 anchor nodes in a bounded volume, connected by 2-4 nearest
+   neighbors + long-range guy-lines. Spring + wind dynamics so the
+   whole web breathes. Metallic / pearlescent thread on deep black.
+   Graph topology, not cloud — connectivity is the form. */
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020204, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.1, 300);
+
+// ── Generate anchor nodes ──
+const NUM_NODES = 300;
+const nodes = [], restPos = [], vel = [];
+const rng = (() => { let s = 91827; return () => { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (s >>> 0) / 4294967296; }; })();
+
+for (let i = 0; i < NUM_NODES; i++) {
+  let x, y, z;
+  if (rng() < 0.35) {
+    // clustered knot regions — 3-4 dense pockets
+    const ci = Math.floor(rng() * 4);
+    const cx = [6, -8, 3, -4][ci], cy = [4, -2, -6, 7][ci], cz = [-5, 7, 4, -8][ci];
+    x = cx + (rng() - 0.5) * 7;
+    y = cy + (rng() - 0.5) * 5;
+    z = cz + (rng() - 0.5) * 7;
+  } else {
+    const theta = rng() * Math.PI * 2;
+    const phi = Math.acos(2 * rng() - 1);
+    const r = Math.pow(rng(), 0.45) * 20;
+    x = r * Math.sin(phi) * Math.cos(theta);
+    y = r * Math.sin(phi) * Math.sin(theta) * 0.55;
+    z = r * Math.cos(phi);
+  }
+  const v = new THREE.Vector3(x, y, z);
+  nodes.push(v.clone());
+  restPos.push(v.clone());
+  vel.push(new THREE.Vector3());
+}
+
+// ── Build connectivity ──
+const edges = [];
+const edgeSet = new Set();
+const nodeDegree = new Uint8Array(NUM_NODES);
+
+function addEdge(a, b) {
+  const key = Math.min(a, b) * 10000 + Math.max(a, b);
+  if (edgeSet.has(key) || a === b) return false;
+  edgeSet.add(key);
+  edges.push([a, b]);
+  nodeDegree[a]++; nodeDegree[b]++;
+  return true;
+}
+
+// Density voids — zones where threads are culled
+const voidCenters = [
+  new THREE.Vector3(0, 3, 0),
+  new THREE.Vector3(-5, -4, 6),
+  new THREE.Vector3(8, 1, -3),
+];
+const VOID_R = 4.5;
+
+function inVoid(p) {
+  for (const v of voidCenters) if (p.distanceTo(v) < VOID_R) return true;
+  return false;
+}
+
+// Pre-compute sorted neighbor lists
+const neighborLists = [];
+for (let i = 0; i < NUM_NODES; i++) {
+  const arr = [];
+  for (let j = 0; j < NUM_NODES; j++) {
+    if (i === j) continue;
+    arr.push({ idx: j, d: nodes[i].distanceTo(nodes[j]) });
+  }
+  arr.sort((a, b) => a.d - b.d);
+  neighborLists.push(arr);
+}
+
+const mid = new THREE.Vector3();
+for (let i = 0; i < NUM_NODES; i++) {
+  const nbs = neighborLists[i];
+  const want = 2 + Math.floor(rng() * 3); // 2-4 connections
+  let got = 0;
+  for (let k = 0; k < Math.min(nbs.length, 15) && got < want; k++) {
+    const prob = Math.exp(-nbs[k].d * 0.1) + 0.25;
+    if (rng() < prob) {
+      mid.addVectors(nodes[i], nodes[nbs[k].idx]).multiplyScalar(0.5);
+      if (!inVoid(mid)) {
+        addEdge(i, nbs[k].idx);
+        got++;
+      }
+    }
+  }
+  if (got === 0) addEdge(i, nbs[0].idx);
+}
+
+// Long-range guy-lines — 12-15 spanning threads
+for (let tries = 0, added = 0; tries < 80 && added < 14; tries++) {
+  const a = Math.floor(rng() * NUM_NODES);
+  const nbs = neighborLists[a];
+  const far = nbs[Math.floor(nbs.length * 0.6 + rng() * nbs.length * 0.4)];
+  if (far && far.d > 18) { addEdge(a, far.idx); added++; }
+}
+
+// Add ~15% lateral cross-threads between random mid-range pairs (Anadol advice)
+for (let tries = 0, added = 0; tries < 100 && added < Math.floor(edges.length * 0.15); tries++) {
+  const a = Math.floor(rng() * NUM_NODES);
+  const nbs = neighborLists[a];
+  const pick = nbs[4 + Math.floor(rng() * 6)];
+  if (pick && pick.d > 5 && pick.d < 14) { if (addEdge(a, pick.idx)) added++; }
+}
+
+const NUM_EDGES = edges.length;
+
+// ── Thread geometry (LineSegments) ──
+const linePos = new Float32Array(NUM_EDGES * 6);
+const lineAlpha = new Float32Array(NUM_EDGES * 2);
+const lineLen = new Float32Array(NUM_EDGES);
+
+for (let i = 0; i < NUM_EDGES; i++) {
+  const [a, b] = edges[i];
+  lineLen[i] = nodes[a].distanceTo(nodes[b]);
+  linePos[i * 6] = nodes[a].x; linePos[i * 6 + 1] = nodes[a].y; linePos[i * 6 + 2] = nodes[a].z;
+  linePos[i * 6 + 3] = nodes[b].x; linePos[i * 6 + 4] = nodes[b].y; linePos[i * 6 + 5] = nodes[b].z;
+  const isGuy = lineLen[i] > 16;
+  const base = isGuy ? 0.15 + rng() * 0.15 : 0.35 + rng() * 0.45;
+  lineAlpha[i * 2] = base; lineAlpha[i * 2 + 1] = base;
+}
+
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
+lineGeom.setAttribute('alpha', new THREE.BufferAttribute(lineAlpha, 1));
+
+const lineMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  uniforms: { uTime: { value: 0 }, uCamPos: { value: new THREE.Vector3() } },
+  vertexShader: `
+    attribute float alpha;
+    varying float vAlpha;
+    varying float vDist;
+    uniform vec3 uCamPos;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vDist = length(wp.xyz - uCamPos);
+      vAlpha = alpha;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }`,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vDist;
+    uniform float uTime;
+    void main() {
+      float fog = exp(-vDist * 0.018);
+      // pearlescent silver with micro-iridescence
+      vec3 col = mix(vec3(0.55, 0.58, 0.65), vec3(0.88, 0.85, 0.80), fog);
+      col += 0.04 * sin(vDist * 0.8 + uTime * 0.4 + vec3(0.0, 2.1, 4.2));
+      float a = vAlpha * fog * 0.75;
+      gl_FragColor = vec4(col * a, a);
+    }`
+});
+scene.add(new THREE.LineSegments(lineGeom, lineMat));
+
+// ── Junction nodes (tiny sprites) ──
+const ndGeom = new THREE.BufferGeometry();
+const ndPos = new Float32Array(NUM_NODES * 3);
+const ndSize = new Float32Array(NUM_NODES);
+for (let i = 0; i < NUM_NODES; i++) {
+  ndPos[i * 3] = nodes[i].x; ndPos[i * 3 + 1] = nodes[i].y; ndPos[i * 3 + 2] = nodes[i].z;
+  ndSize[i] = 0.6 + Math.min(nodeDegree[i], 6) * 0.35;
+}
+ndGeom.setAttribute('position', new THREE.BufferAttribute(ndPos, 3));
+ndGeom.setAttribute('size', new THREE.BufferAttribute(ndSize, 1));
+
+const ndMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  uniforms: { uPR: { value: renderer.getPixelRatio() }, uCamPos: { value: new THREE.Vector3() } },
+  vertexShader: `
+    attribute float size;
+    varying float vFog;
+    uniform float uPR;
+    uniform vec3 uCamPos;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      float d = length(wp.xyz - uCamPos);
+      vFog = exp(-d * 0.02);
+      vec4 mv = viewMatrix * wp;
+      gl_PointSize = size * uPR * (45.0 / max(-mv.z, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying float vFog;
+    void main() {
+      vec2 c = gl_PointCoord - 0.5;
+      float r2 = dot(c, c);
+      if (r2 > 0.25) discard;
+      float g = exp(-r2 * 18.0);
+      vec3 col = vec3(0.82, 0.84, 0.90) * g;
+      float a = g * vFog * 0.55;
+      gl_FragColor = vec4(col * a, a);
+    }`
+});
+scene.add(new THREE.Points(ndGeom, ndMat));
+
+// ── Dust motes for atmosphere ──
+const DUST = 600;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos = new Float32Array(DUST * 3);
+const dustPhase = new Float32Array(DUST);
+for (let i = 0; i < DUST; i++) {
+  dustPos[i * 3] = (Math.random() - 0.5) * 60;
+  dustPos[i * 3 + 1] = (Math.random() - 0.5) * 40;
+  dustPos[i * 3 + 2] = (Math.random() - 0.5) * 60;
+  dustPhase[i] = Math.random() * 6.28;
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('phase', new THREE.BufferAttribute(dustPhase, 1));
+
+const dustMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  uniforms: { uPR: { value: renderer.getPixelRatio() }, uTime: { value: 0 },
+              uCamPos: { value: new THREE.Vector3() } },
+  vertexShader: `
+    attribute float phase;
+    varying float vA;
+    uniform float uPR, uTime;
+    uniform vec3 uCamPos;
+    void main() {
+      vec3 p = position;
+      p.x += sin(uTime * 0.07 + phase) * 1.5;
+      p.y += cos(uTime * 0.05 + phase * 1.3) * 0.8;
+      vec4 mv = viewMatrix * vec4(p, 1.0);
+      float d = length(p - uCamPos);
+      vA = exp(-d * 0.04) * (0.5 + 0.5 * sin(uTime * 0.3 + phase));
+      gl_PointSize = uPR * (12.0 / max(-mv.z, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying float vA;
+    void main() {
+      vec2 c = gl_PointCoord - 0.5;
+      float r2 = dot(c, c);
+      if (r2 > 0.25) discard;
+      float g = exp(-r2 * 12.0);
+      float a = g * vA * 0.06;
+      gl_FragColor = vec4(vec3(0.7, 0.72, 0.78) * a, a);
+    }`
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+// ── Spring + wind dynamics ──
+const wind = new THREE.Vector3();
+const SPRING_K = 1.2;
+const DAMP = 0.90;
+
+function physics(dt) {
+  const t = performance.now() * 0.001;
+  wind.set(
+    Math.sin(t * 0.11) * 0.18 + Math.sin(t * 0.29) * 0.09,
+    Math.cos(t * 0.14) * 0.07 + Math.sin(t * 0.41) * 0.04,
+    Math.sin(t * 0.19 + 1.0) * 0.14
+  );
+
+  for (let i = 0; i < NUM_NODES; i++) {
+    const r = restPos[i], p = nodes[i], v = vel[i];
+    v.x += ((r.x - p.x) * SPRING_K + wind.x) * dt;
+    v.y += ((r.y - p.y) * SPRING_K + wind.y) * dt;
+    v.z += ((r.z - p.z) * SPRING_K + wind.z) * dt;
+    v.multiplyScalar(DAMP);
+    p.x += v.x * dt; p.y += v.y * dt; p.z += v.z * dt;
+  }
+
+  // Edge tension: pull connected nodes gently toward each other's rest midpoint
+  for (let i = 0; i < NUM_EDGES; i++) {
+    const [a, b] = edges[i];
+    const pa = nodes[a], pb = nodes[b];
+    const dx = pb.x - pa.x, dy = pb.y - pa.y, dz = pb.z - pa.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const rest = lineLen[i];
+    if (d > 0.01) {
+      const f = (d - rest) * 0.003;
+      const fx = dx / d * f, fy = dy / d * f, fz = dz / d * f;
+      vel[a].x += fx; vel[a].y += fy; vel[a].z += fz;
+      vel[b].x -= fx; vel[b].y -= fy; vel[b].z -= fz;
+    }
+  }
+
+  // Sync geometry
+  const lp = lineGeom.attributes.position.array;
+  for (let i = 0; i < NUM_EDGES; i++) {
+    const [a, b] = edges[i];
+    lp[i * 6] = nodes[a].x; lp[i * 6 + 1] = nodes[a].y; lp[i * 6 + 2] = nodes[a].z;
+    lp[i * 6 + 3] = nodes[b].x; lp[i * 6 + 4] = nodes[b].y; lp[i * 6 + 5] = nodes[b].z;
+  }
+  lineGeom.attributes.position.needsUpdate = true;
+
+  const np = ndGeom.attributes.position.array;
+  for (let i = 0; i < NUM_NODES; i++) {
+    np[i * 3] = nodes[i].x; np[i * 3 + 1] = nodes[i].y; np[i * 3 + 2] = nodes[i].z;
+  }
+  ndGeom.attributes.position.needsUpdate = true;
+}
+
+// ── Camera — slow stereoscopic dolly through the web ──
+camera.position.set(0, 0, 42);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop() {
+  const now = performance.now();
+  const dt = Math.min((now - lastT) / 1000, 0.05);
+  lastT = now;
+  const t = now * 0.001;
+
+  physics(dt);
+
+  // Orbit: slow, with gentle vertical drift and dolly in/out
+  const orbitR = 32 + Math.sin(t * 0.035) * 10;
+  const orbitY = Math.sin(t * 0.06) * 5;
+  const ang = t * 0.055;
+  camera.position.set(Math.sin(ang) * orbitR, orbitY, Math.cos(ang) * orbitR);
+  camera.lookAt(0, 0, 0);
+
+  lineMat.uniforms.uTime.value = t;
+  lineMat.uniforms.uCamPos.value.copy(camera.position);
+  ndMat.uniforms.uCamPos.value.copy(camera.position);
+  dustMat.uniforms.uTime.value = t;
+  dustMat.uniforms.uCamPos.value.copy(camera.position);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
