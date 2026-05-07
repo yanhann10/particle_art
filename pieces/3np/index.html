@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>flow ribbons · fidenza packing</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">3np</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Tyler Hobbs Fidenza: non-overlapping flow ribbons with varying thickness,
+// packing the canvas like river deltas. 2D flow field lifted to 3D as a height-painted plane.
+// MOTION: drift (gentle camera arc, slow plane rotation, no particle animation)
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 18, 28);
+camera.lookAt(0, 0, 0);
+
+// Fidenza "Luxe" palette: muted earth tones with occasional deep accent
+const palette = [
+  new THREE.Color(0.82, 0.75, 0.62), // warm sand
+  new THREE.Color(0.65, 0.48, 0.38), // clay
+  new THREE.Color(0.45, 0.32, 0.25), // dark brown
+  new THREE.Color(0.28, 0.42, 0.38), // muted teal
+  new THREE.Color(0.92, 0.88, 0.78), // cream
+];
+
+// 2D simplex noise (seeded via rotation of input)
+function noise2D(x, y, seed){
+  const s = Math.sin(seed * 12.9898 + 78.233) * 43758.5453;
+  const fx = Math.floor(x), fy = Math.floor(y);
+  const u = x - fx, v = y - fy;
+  const hash = (i, j) => {
+    const n = Math.sin((i * 127.1 + j * 311.7 + s) * 43.58) * 43758.5;
+    return n - Math.floor(n);
+  };
+  const a = hash(fx, fy);
+  const b = hash(fx+1, fy);
+  const c = hash(fx, fy+1);
+  const d = hash(fx+1, fy+1);
+  const su = u * u * (3 - 2 * u);
+  const sv = v * v * (3 - 2 * v);
+  return (a * (1-su) + b * su) * (1-sv) + (c * (1-su) + d * su) * sv;
+}
+
+// flow field: returns angle at (x,y)
+const flowSeed = Math.random() * 100;
+function flowAngle(x, y){
+  const n1 = noise2D(x * 0.08, y * 0.08, flowSeed);
+  const n2 = noise2D(x * 0.15 + 50, y * 0.15 + 50, flowSeed + 1);
+  return (n1 + n2 * 0.5) * Math.PI * 4;
+}
+
+// integrate streamline from (sx, sy) for given length, returning array of 2D points
+function traceStreamline(sx, sy, steps, stepSize){
+  const pts = [[sx, sy]];
+  let x = sx, y = sy;
+  for (let i = 0; i < steps; i++){
+    const ang = flowAngle(x, y);
+    x += Math.cos(ang) * stepSize;
+    y += Math.sin(ang) * stepSize;
+    pts.push([x, y]);
+    // boundary check
+    if (Math.abs(x) > 35 || Math.abs(y) > 35) break;
+  }
+  return pts;
+}
+
+// Quadtree for collision detection
+class QuadNode {
+  constructor(x, y, w, h){
+    this.x = x; this.y = y; this.w = w; this.h = h;
+    this.lines = []; this.children = null;
+  }
+  insert(line){
+    if (this.children){
+      const idx = this.getChildIndex(line);
+      if (idx !== -1) this.children[idx].insert(line);
+      else this.lines.push(line);
+    } else {
+      this.lines.push(line);
+      if (this.lines.length > 8 && this.w > 2){
+        this.subdivide();
+      }
+    }
+  }
+  subdivide(){
+    const hw = this.w / 2, hh = this.h / 2;
+    this.children = [
+      new QuadNode(this.x, this.y, hw, hh),
+      new QuadNode(this.x + hw, this.y, hw, hh),
+      new QuadNode(this.x, this.y + hh, hw, hh),
+      new QuadNode(this.x + hw, this.y + hh, hw, hh),
+    ];
+    for (const line of this.lines){
+      const idx = this.getChildIndex(line);
+      if (idx !== -1) this.children[idx].insert(line);
+    }
+  }
+  getChildIndex(line){
+    const mx = this.x + this.w / 2, my = this.y + this.h / 2;
+    const inLeft = line.maxX < mx, inRight = line.minX > mx;
+    const inTop = line.maxY < my, inBottom = line.minY > my;
+    if (inLeft && inTop) return 0;
+    if (inRight && inTop) return 1;
+    if (inLeft && inBottom) return 2;
+    if (inRight && inBottom) return 3;
+    return -1;
+  }
+  queryRange(x, y, r){
+    const result = [];
+    if (x + r < this.x || x - r > this.x + this.w || y + r < this.y || y - r > this.y + this.h) return result;
+    if (this.children){
+      for (const c of this.children) result.push(...c.queryRange(x, y, r));
+    } else {
+      result.push(...this.lines);
+    }
+    return result;
+  }
+}
+
+// check if point (px, py) with radius r collides with existing lines
+function collides(px, py, r, qt){
+  const nearby = qt.queryRange(px, py, r * 3);
+  for (const line of nearby){
+    for (const [lx, ly] of line.pts){
+      const dx = px - lx, dy = py - ly;
+      if (dx*dx + dy*dy < (r + line.radius) * (r + line.radius)) return true;
+    }
+  }
+  return false;
+}
+
+// generate non-overlapping streamlines
+const qt = new QuadNode(-40, -40, 80, 80);
+const streamlines = [];
+const attempts = 800;
+const minSteps = 60, maxSteps = 180;
+
+for (let i = 0; i < attempts; i++){
+  const sx = (Math.random() - 0.5) * 60;
+  const sy = (Math.random() - 0.5) * 60;
+  const steps = Math.floor(minSteps + Math.random() * (maxSteps - minSteps));
+  const stepSize = 0.4 + Math.random() * 0.3;
+  const baseRadius = 0.5 + Math.random() * 1.2;
+  
+  const pts = traceStreamline(sx, sy, steps, stepSize);
+  if (pts.length < 10) continue;
+  
+  // check collision along path
+  let valid = true;
+  for (const [px, py] of pts){
+    if (collides(px, py, baseRadius, qt)){
+      valid = false;
+      break;
+    }
+  }
+  
+  if (valid){
+    const col = palette[Math.floor(Math.random() * palette.length)].clone();
+    const line = { pts, radius: baseRadius, color: col,
+                   minX: Math.min(...pts.map(p=>p[0])),
+                   maxX: Math.max(...pts.map(p=>p[0])),
+                   minY: Math.min(...pts.map(p=>p[1])),
+                   maxY: Math.max(...pts.map(p=>p[1])) };
+    streamlines.push(line);
+    qt.insert(line);
+    if (streamlines.length >= 60) break;
+  }
+}
+
+// build geometry: each streamline becomes a swept ribbon with varying thickness
+const group = new THREE.Group();
+
+for (const line of streamlines){
+  const curve = new THREE.CatmullRomCurve3(
+    line.pts.map(([x, y]) => new THREE.Vector3(x, noise2D(x * 0.12, y * 0.12, flowSeed + 5) * 2, y))
+  );
+  
+  // radius variation along path
+  const radiusFunc = (u) => {
+    const pulse = Math.sin(u * Math.PI);
+    const noise = noise2D(u * 10, line.radius * 10, flowSeed + 10);
+    return line.radius * (0.7 + 0.6 * pulse + 0.2 * noise);
+  };
+  
+  const tubeGeom = new THREE.TubeGeometry(curve, line.pts.length * 2, 1, 8, false);
+  
+  // apply radius variation
+  const pos = tubeGeom.attributes.position;
+  for (let i = 0; i < pos.count; i++){
+    const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
+    const segIdx = Math.floor(i / 16);
+    const u = segIdx / (line.pts.length * 2);
+    const r = radiusFunc(u);
+    
+    // scale radially from curve center
+    const center = curve.getPointAt(Math.min(u, 1));
+    const dir = v.clone().sub(center);
+    const dist = dir.length();
+    if (dist > 0.01){
+      dir.normalize().multiplyScalar(r);
+      pos.setXYZ(i, center.x + dir.x, center.y + dir.y, center.z + dir.z);
+    }
+  }
+  pos.needsUpdate = true;
+  tubeGeom.computeVertexNormals();
+  
+  // painterly flat shader
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: line.color },
+      uTime: { value: 0 }
+    },
+    vertexShader: `
+      varying vec3 vNormal;
+      varying vec3 vPos;
+      void main(){
+        vNormal = normalize(normalMatrix * normal);
+        vPos = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uTime;
+      varying vec3 vNormal;
+      varying vec3 vPos;
+      void main(){
+        float ndl = dot(vNormal, normalize(vec3(0.4, 0.8, 0.5)));
+        float ambient = 0.25;
+        float diffuse = max(0.0, ndl) * 0.6;
+        float edge = pow(1.0 - abs(dot(vNormal, vec3(0,1,0))), 2.0) * 0.15;
+        
+        // subtle texture noise
+        float texNoise = fract(sin(dot(vPos.xz, vec2(12.9898, 78.233))) * 43758.5) * 0.08;
+        
+        vec3 col = uColor * (ambient + diffuse + edge + texNoise);
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `,
+    side: THREE.DoubleSide
+  });
+  
+  const mesh = new THREE.Mesh(tubeGeom, mat);
+  group.add(mesh);
+}
+
+scene.add(group);
+
+// subtle ambient light
+const ambient = new THREE.AmbientLight(0xf5ede0, 0.4);
+scene.add(ambient);
+
+const dirLight = new THREE.DirectionalLight(0xfff8e8, 0.8);
+dirLight.position.set(5, 10, 8);
+scene.add(dirLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let startT = performance.now();
+function loop(){
+  const t = (performance.now() - startT) / 1000;
+  
+  // slow camera drift
+  camera.position.x = Math.sin(t * 0.08) * 32;
+  camera.position.z = Math.cos(t * 0.08) * 32;
+  camera.position.y = 18 + Math.sin(t * 0.05) * 4;
+  camera.lookAt(0, 0, 0);
+  
+  // slow plane rotation
+  group.rotation.y = t * 0.03;
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
