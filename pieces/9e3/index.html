@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9e3 · hash-seeded choreography · Human Unreadable</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               background:#1a0f0a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+           color:#cdd2dc; letter-spacing:0.06em; z-index:10; }
+  .seed { position:fixed; left:14px; top:14px; opacity:0.28; font-size:9px;
+           color:#f0d8a8; letter-spacing:0.12em; word-break:break-all; max-width:320px;
+           line-height:1.6; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">9e3</div>
+<div class="seed" id="seedLabel"></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─── 256-bit seed generation & display
+const seedBytes = new Uint8Array(32);
+crypto.getRandomValues(seedBytes);
+const seedHex = Array.from(seedBytes).map(b => b.toString(16).padStart(2,'0')).join('');
+document.getElementById('seedLabel').textContent = '0x' + seedHex;
+
+// Deterministic PRNG seeded from our hash
+function mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0;
+  let t=Math.imul(a^a>>>15,1|a); t^=t+Math.imul(t^t>>>7,61|t);
+  return((t^t>>>14)>>>0)/4294967296; }; }
+// Combine seed bytes into a 32-bit starter
+const seed32 = (seedBytes[0]<<24|seedBytes[1]<<16|seedBytes[2]<<8|seedBytes[3])>>>0;
+const rng = mulberry32(seed32);
+
+// ─── Scene setup
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 6, 22);
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a0f0a, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 4, 0);
+
+// ─── Stage cyclorama warm gradient (background plane)
+const cycGeo = new THREE.PlaneGeometry(80, 60, 1, 64);
+const cycMat = new THREE.ShaderMaterial({
+  uniforms:{},
+  vertexShader:`varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader:`varying vec2 vUv;
+    void main(){
+      vec3 top = vec3(0.12,0.06,0.04);
+      vec3 mid = vec3(0.22,0.10,0.06);
+      vec3 bot = vec3(0.35,0.18,0.08);
+      float t = vUv.y;
+      vec3 col = mix(bot, mid, smoothstep(0.0,0.5,t));
+      col = mix(col, top, smoothstep(0.5,1.0,t));
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+  side: THREE.DoubleSide, depthWrite:false
+});
+const cyc = new THREE.Mesh(cycGeo, cycMat);
+cyc.position.set(0, 5, -18);
+scene.add(cyc);
+
+// Floor plane
+const floorGeo = new THREE.PlaneGeometry(60, 40);
+const floorMat = new THREE.MeshBasicMaterial({ color:0x1a0f0a, transparent:true, opacity:0.9 });
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.rotation.x = -Math.PI/2;
+floor.position.y = -0.5;
+scene.add(floor);
+
+// ─── Dancer configuration from seed
+const NUM_DANCERS = 3 + Math.floor(rng() * 4); // 3-6 dancers
+const JOINTS_PER = 8 + Math.floor(rng() * 5);  // 8-12 joints each
+
+class Dancer {
+  constructor(index){
+    // Derive parameters from seed bytes
+    const base = (index * 4) % 32;
+    this.phaseOffset = (seedBytes[base % 32] / 255) * Math.PI * 2;
+    this.amplitude = 0.6 + (seedBytes[(base+1) % 32] / 255) * 1.8;
+    this.speed = 0.4 + (seedBytes[(base+2) % 32] / 255) * 0.8;
+    this.stiffness = 0.02 + (seedBytes[(base+3) % 32] / 255) * 0.06;
+    this.centerX = (rng() - 0.5) * 8;
+    this.centerZ = (rng() - 0.5) * 4;
+    this.height = 4 + rng() * 5;
+
+    // Joint positions and velocities
+    this.joints = [];
+    this.velocities = [];
+    this.restLengths = [];
+    const segLen = this.height / JOINTS_PER;
+    for (let j = 0; j < JOINTS_PER; j++){
+      this.joints.push(new THREE.Vector3(
+        this.centerX + (rng()-0.5)*0.3,
+        j * segLen,
+        this.centerZ + (rng()-0.5)*0.3
+      ));
+      this.velocities.push(new THREE.Vector3());
+      if (j > 0) this.restLengths.push(segLen);
+    }
+
+    // Per-joint phase multipliers from seed
+    this.phaseMultipliers = [];
+    for (let j = 0; j < JOINTS_PER; j++){
+      this.phaseMultipliers.push(0.5 + (seedBytes[(base + j) % 32] / 255) * 2.0);
+    }
+
+    // Trail history
+    this.trailLength = 40;
+    this.trails = [];
+    for (let j = 0; j < JOINTS_PER; j++) this.trails.push([]);
+
+    // Color from seed
+    const hue = (seedBytes[(index*7) % 32] / 255) * 0.12 + 0.05; // warm hues
+    const sat = 0.5 + rng() * 0.4;
+    const lit = 0.6 + rng() * 0.3;
+    this.color = new THREE.Color().setHSL(hue, sat, lit);
+  }
+
+  update(time){
+    const t = time * this.speed;
+    // Apply sinusoidal forces to each joint
+    for (let j = 0; j < JOINTS_PER; j++){
+      const pm = this.phaseMultipliers[j];
+      const phase = this.phaseOffset + t * pm + j * 0.7;
+      const fx = Math.sin(phase) * this.amplitude * 0.15;
+      const fz = Math.cos(phase * 0.7 + 1.3) * this.amplitude * 0.12;
+      const fy = Math.sin(phase * 0.5 + 2.1) * 0.05;
+      this.velocities[j].x += fx * 0.01;
+      this.velocities[j].y += fy * 0.01;
+      this.velocities[j].z += fz * 0.01;
+    }
+
+    // Spring constraints
+    for (let j = 1; j < JOINTS_PER; j++){
+      const a = this.joints[j-1], b = this.joints[j];
+      const dx = b.x-a.x, dy = b.y-a.y, dz = b.z-a.z;
+      const dist = Math.sqrt(dx*dx+dy*dy+dz*dz) + 1e-6;
+      const rest = this.restLengths[j-1];
+      const force = (dist - rest) * this.stiffness;
+      const nx = dx/dist, ny = dy/dist, nz = dz/dist;
+      this.velocities[j].x -= nx * force;
+      this.velocities[j].y -= ny * force;
+      this.velocities[j].z -= nz * force;
+      this.velocities[j-1].x += nx * force;
+      this.velocities[j-1].y += ny * force;
+      this.velocities[j-1].z += nz * force;
+    }
+
+    // Gravity + damping + update positions
+    for (let j = 0; j < JOINTS_PER; j++){
+      this.velocities[j].y -= 0.002; // gentle gravity
+      this.velocities[j].multiplyScalar(0.92); // damping
+      this.joints[j].add(this.velocities[j]);
+      // Floor constraint
+      if (this.joints[j].y < 0){
+        this.joints[j].y = 0;
+        this.velocities[j].y *= -0.3;
+      }
+      // Record trail
+      this.trails[j].push(this.joints[j].clone());
+      if (this.trails[j].length > this.trailLength) this.trails[j].shift();
+    }
+
+    // Keep base near ground center
+    const base = this.joints[0];
+    base.x += (this.centerX - base.x) * 0.01;
+    base.z += (this.centerZ - base.z) * 0.01;
+    base.y += (0.2 - base.y) * 0.02;
+
+    // Slow drift of center (choreographic path from seed)
+    this.centerX += Math.sin(t * 0.3 + this.phaseOffset) * 0.005;
+    this.centerZ += Math.cos(t * 0.2 + this.phaseOffset * 1.3) * 0.004;
+  }
+}
+
+const dancers = [];
+for (let i = 0; i < NUM_DANCERS; i++) dancers.push(new Dancer(i));
+
+// ─── Rendering: lines for skeleton + trails
+const skeletonGroup = new THREE.Group();
+scene.add(skeletonGroup);
+
+// Point sprites for joints
+const jointTexture = (() => {
+  const c = document.createElement('canvas'); c.width=32; c.height=32;
+  const ctx = c.getContext('2d');
+  const grad = ctx.createRadialGradient(16,16,0,16,16,16);
+  grad.addColorStop(0, 'rgba(255,240,200,1)');
+  grad.addColorStop(0.4, 'rgba(255,200,140,0.8)');
+  grad.addColorStop(1, 'rgba(255,160,80,0)');
+  ctx.fillStyle = grad; ctx.fillRect(0,0,32,32);
+  return new THREE.CanvasTexture(c);
+})();
+
+// Ambient light dust particles
+const dustCount = 200;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+for (let i = 0; i < dustCount; i++){
+  dustPos[i*3] = (rng()-0.5)*30;
+  dustPos[i*3+1] = rng()*15;
+  dustPos[i*3+2] = (rng()-0.5)*20;
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({ color:0xf0d8a8, size:0.04, transparent:true, opacity:0.3 });
+const dust = new THREE.Points(dustGeo, dustMat);
+scene.add(dust);
+
+// Side light (warm)
+const spotL = new THREE.PointLight(0xffcc88, 2, 40);
+spotL.position.set(-10, 8, 5);
+scene.add(spotL);
+const spotR = new THREE.PointLight(0xff9966, 1.2, 40);
+spotR.position.set(10, 6, -3);
+scene.add(spotR);
+const ambient = new THREE.AmbientLight(0x331a0a, 0.5);
+scene.add(ambient);
+
+function rebuildVisuals(){
+  // Clear old
+  while(skeletonGroup.children.length) {
+    const c = skeletonGroup.children[0];
+    skeletonGroup.remove(c);
+    if(c.geometry) c.geometry.dispose();
+    if(c.material) c.material.dispose();
+  }
+
+  for (const dancer of dancers){
+    // Current skeleton lines
+    const skelPts = dancer.joints.map(j => j.clone());
+    const skelGeo = new THREE.BufferGeometry().setFromPoints(skelPts);
+    const skelMat = new THREE.LineBasicMaterial({
+      color: dancer.color, transparent:true, opacity:0.9, linewidth:1
+    });
+    skeletonGroup.add(new THREE.Line(skelGeo, skelMat));
+
+    // Joint points
+    const ptGeo = new THREE.BufferGeometry().setFromPoints(skelPts);
+    const ptMat = new THREE.PointsMaterial({
+      map: jointTexture, size:0.35, transparent:true, opacity:0.9,
+      color: dancer.color, blending:THREE.AdditiveBlending, depthWrite:false
+    });
+    skeletonGroup.add(new THREE.Points(ptGeo, ptMat));
+
+    // Trails (fading lines per joint)
+    for (let j = 0; j < JOINTS_PER; j++){
+      const trail = dancer.trails[j];
+      if (trail.length < 2) continue;
+      const tGeo = new THREE.BufferGeometry().setFromPoints(trail);
+      const tMat = new THREE.LineBasicMaterial({
+        color: dancer.color, transparent:true,
+        opacity: 0.15 + (j / JOINTS_PER) * 0.15,
+        blending: THREE.AdditiveBlending, depthWrite:false
+      });
+      skeletonGroup.add(new THREE.Line(tGeo, tMat));
+    }
+
+    // Inter-dancer connections (when joints are close)
+    for (const other of dancers){
+      if (other === dancer) continue;
+      for (let j = 0; j < Math.min(dancer.joints.length, other.joints.length); j += 2){
+        const d = dancer.joints[j].distanceTo(other.joints[j]);
+        if (d < 3.5){
+          const alpha = (1 - d/3.5) * 0.25;
+          const cGeo = new THREE.BufferGeometry().setFromPoints([
+            dancer.joints[j], other.joints[j]
+          ]);
+          const cMat = new THREE.LineBasicMaterial({
+            color:0xf0d8a8, transparent:true, opacity:alpha,
+            blending:THREE.AdditiveBlending, depthWrite:false
+          });
+          skeletonGroup.add(new THREE.Line(cGeo, cMat));
+        }
+      }
+    }
+  }
+}
+
+// ─── Animation loop
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const clock = new THREE.Clock();
+function loop(){
+  const elapsed = clock.getElapsedTime();
+
+  // Update dancers
+  for (const d of dancers) d.update(elapsed);
+
+  // Rebuild visual geometry
+  rebuildVisuals();
+
+  // Camera follows centroid of all joints
+  let cx=0, cy=0, cz=0, count=0;
+  for (const d of dancers){
+    for (const j of d.joints){ cx+=j.x; cy+=j.y; cz+=j.z; count++; }
+  }
+  cx/=count; cy/=count; cz/=count;
+  controls.target.x += (cx - controls.target.x) * 0.02;
+  controls.target.y += (Math.max(cy, 3) - controls.target.y) * 0.02;
+  controls.target.z += (cz - controls.target.z) * 0.02;
+
+  // Dust drift
+  const dPos = dust.geometry.attributes.position.array;
+  for (let i = 0; i < dustCount; i++){
+    dPos[i*3+1] += 0.003;
+    if (dPos[i*3+1] > 15) dPos[i*3+1] = 0;
+  }
+  dust.geometry.attributes.position.needsUpdate = true;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
