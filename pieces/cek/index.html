@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>&lt;NEW_ID&gt; · normal exhale · surface dispersion</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden;
+               color:#e6dcd6; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+           letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.06em; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.6; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading head scan…</div>
+<div class="id">&lt;NEW_ID&gt;</div>
+<div class="hint">drag to orbit · click to exhale / inhale</div>
+<div class="stat" id="stat">gathering…</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*
+  Antony Gormley — "Domain" / "Quantum Cloud" sensibility:
+  a human form held together by tension, always on the edge of
+  coming apart. Here a single head rests whole, then on interaction
+  every particle slides outward along its own surface normal —
+  the face exhales itself into space, a slow-motion shedding,
+  then draws back together. Narrative: cohesion / release / return.
+  The dispersion distance per particle varies with curvature and
+  randomness so noses and brows fly further, cheeks drift gently —
+  the topology of the face writes the explosion.
+*/
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 120);
+camera.position.set(0, 0.4, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.target.set(0, 0.3, 0);
+
+const N = 50000;
+
+const uniforms = {
+  uTime:      { value: 0 },
+  uPixel:     { value: renderer.getPixelRatio() },
+  uDisperse:  { value: 0 },
+  uReady:     { value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uDisperse;
+    uniform float uReady;
+    attribute vec3 restPos;
+    attribute vec3 normal2;
+    attribute float seed;
+    attribute float dispDist;
+    varying vec3  vCol;
+    varying float vAlpha;
+
+    void main(){
+      float t = uTime * 0.35 + seed * 6.2831;
+
+      // smooth dispersion easing
+      float d = smoothstep(0.0, 1.0, uDisperse);
+
+      // dispersed position: rest + normal * distance * easing
+      // add slight tangential drift so it doesn't look purely radial
+      vec3 tangent = normalize(cross(normal2, vec3(0.0, 1.0, 0.3 * seed)));
+      float spiralAngle = d * (1.5 + seed * 2.5);
+      vec3 drift = tangent * sin(spiralAngle) * 0.3 * dispDist;
+
+      vec3 dispersed = restPos + normal2 * dispDist * d + drift * d;
+
+      // breath shimmer at rest, wilder when dispersed
+      float breathAmp = mix(0.008, 0.04, d);
+      vec3 breath = breathAmp * vec3(sin(t), cos(t * 1.1), sin(t * 0.7));
+      vec3 p = mix(restPos, dispersed, 1.0) + breath;
+
+      // reveal: spiral inward from a ring
+      float th = seed * 6.2831;
+      vec3 entry = vec3(cos(th) * 18.0, sin(th * 0.4) * 2.0, sin(th) * 18.0);
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      // colour: warm skin at rest → cool scattered light when dispersed
+      // Gormley-esque: dark iron/corten at core, luminous at edges
+      vec3 restCol  = vec3(0.88, 0.78, 0.68);   // warm terracotta skin
+      vec3 edgeCol  = vec3(0.55, 0.65, 0.82);   // scattered sky steel
+      float normalUp = dot(normal2, vec3(0.0, 1.0, 0.0)) * 0.5 + 0.5;
+      vec3 col = mix(restCol, edgeCol, d * 0.7 + normalUp * 0.15);
+
+      // subsurface warmth: ears, nose edges glow slightly warmer
+      float curvatureHint = dispDist / 8.0;
+      col += vec3(0.12, 0.04, 0.0) * curvatureHint * (1.0 - d * 0.5);
+
+      // energy flicker
+      float energy = 0.5 + 0.5 * sin(t * 0.9);
+      col *= 0.80 + 0.30 * energy;
+
+      // distance-based alpha fade when dispersed to create atmosphere
+      float fadeFar = 1.0 - smoothstep(6.0, 14.0, dispDist * d);
+      vAlpha = (0.50 + 0.35 * energy) * mix(1.0, fadeFar, d) * smoothstep(0.0, 0.5, uReady);
+      vCol = col;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sizeBoost = mix(1.0, 0.7 + 0.6 * seed, d);
+      gl_PointSize = sizeBoost * (1.0 + 0.5 * energy) * uPixel * (38.0 / dist)
+                     * (0.3 + 0.7 * uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 c = gl_PointCoord - 0.5;
+      float r2 = dot(c, c);
+      if (r2 > 0.25) discard;
+      float a = exp(-r2 * 16.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// atmospheric dust motes — sparse, slow, warm
+const dustN = 800;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustN * 3);
+const dustSeed = new Float32Array(dustN);
+for (let i = 0; i < dustN; i++){
+  dustPos[i*3]   = (Math.random() - 0.5) * 30;
+  dustPos[i*3+1] = (Math.random() - 0.5) * 20;
+  dustPos[i*3+2] = (Math.random() - 0.5) * 30;
+  dustSeed[i] = Math.random();
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeo.setAttribute('seed', new THREE.BufferAttribute(dustSeed, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: uniforms.uTime },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    attribute float seed;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.08 + seed * 50.0;
+      p.x += sin(t * 0.7) * 1.5;
+      p.y += cos(t * 0.5) * 0.8 + uTime * 0.02;
+      p.z += sin(t * 0.3) * 1.0;
+      // wrap vertically
+      p.y = mod(p.y + 10.0, 20.0) - 10.0;
+      vA = 0.12 + 0.08 * sin(t * 2.0);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 1.5 * (12.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 c = gl_PointCoord - 0.5;
+      float r2 = dot(c, c);
+      if (r2 > 0.25) discard;
+      float a = exp(-r2 * 14.0) * vA;
+      gl_FragColor = vec4(vec3(0.9, 0.82, 0.7) * a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeo, dustMat));
+
+// subtle side-light gradient quad behind the head
+const bgGeo = new THREE.PlaneGeometry(60, 40);
+const bgMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: uniforms.uTime, uDisperse: uniforms.uDisperse },
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uDisperse;
+    varying vec2 vUv;
+    void main(){
+      // warm side-light from upper-left, shifts cooler on disperse
+      vec2 p = vUv - vec2(0.3, 0.65);
+      float g = exp(-dot(p, p) * 1.8);
+      vec3 warm = vec3(0.18, 0.10, 0.06);
+      vec3 cool = vec3(0.06, 0.09, 0.16);
+      vec3 col = mix(warm, cool, smoothstep(0.0, 1.0, uDisperse));
+      float a = g * mix(0.25, 0.35, uDisperse);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const bgPlane = new THREE.Mesh(bgGeo, bgMat);
+bgPlane.position.z = -12;
+scene.add(bgPlane);
+
+let revealStart = 0;
+
+// ─────────────────────────── load + sample
+const HEAD_URL = 'https://threejs.org/examples/models/gltf/LeePerrySmith/LeePerrySmith.glb';
+const loader = new GLTFLoader();
+loader.load(HEAD_URL,
+  (gltf) => {
+    const meshes = [];
+    gltf.scene.traverse(o => { if (o.isMesh && o.geometry?.attributes?.position) meshes.push(o); });
+    if (meshes.length === 0){ document.getElementById('loading').textContent = 'no mesh'; return; }
+    let target = meshes[0];
+    for (const m of meshes){
+      if (m.geometry.attributes.position.count > target.geometry.attributes.position.count) target = m;
+    }
+    target.updateMatrixWorld(true);
+
+    const g = target.geometry.clone();
+    g.applyMatrix4(target.matrixWorld);
+    g.computeBoundingBox();
+    const bb = g.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scl = 5.5 / maxAxis;
+    g.translate(-center.x, -center.y, -center.z);
+    g.scale(scl, scl, scl);
+
+    // ensure normals exist
+    if (!g.attributes.normal) g.computeVertexNormals();
+    const sampleMesh = new THREE.Mesh(g.toNonIndexed(), target.material);
+    // recompute normals on the non-indexed geometry for accurate sampling
+    sampleMesh.geometry.computeVertexNormals();
+    const sampler = new MeshSurfaceSampler(sampleMesh).build();
+
+    const positions = new Float32Array(N * 3);
+    const normals   = new Float32Array(N * 3);
+    const seeds     = new Float32Array(N);
+    const dispDists = new Float32Array(N);
+    const tmpPos = new THREE.Vector3();
+    const tmpNor = new THREE.Vector3();
+
+    for (let i = 0; i < N; i++){
+      sampler.sample(tmpPos, tmpNor);
+      positions[i*3]   = tmpPos.x;
+      positions[i*3+1] = tmpPos.y;
+      positions[i*3+2] = tmpPos.z;
+      // normalize the sampled normal
+      tmpNor.normalize();
+      normals[i*3]   = tmpNor.x;
+      normals[i*3+1] = tmpNor.y;
+      normals[i*3+2] = tmpNor.z;
+      seeds[i] = Math.random();
+
+      // dispersion distance: base + curvature proxy (distance from centroid)
+      // points further from center (nose tip, ears, chin) fly further
+      const distFromCenter = tmpPos.length();
+      dispDists[i] = 2.5 + distFromCenter * 1.8 + Math.random() * 2.5;
+    }
+
+    geom.setAttribute('position', new THREE.BufferAttribute(positions.slice(), 3));
+    geom.setAttribute('restPos',  new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('normal2',  new THREE.BufferAttribute(normals, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('dispDist', new THREE.BufferAttribute(dispDists, 1));
+    geom.computeBoundingSphere();
+
+    document.getElementById('loading').style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      document.getElementById('loading').textContent = `loading head scan · ${pct}%`;
+    }
+  },
+  (err) => { console.error(err); document.getElementById('loading').textContent = 'load failed'; }
+);
+
+// ─────────────────────────── interaction
+let targetDisperse = 0;
+let disperse = 0;
+addEventListener('click', (e) => {
+  // ignore drag-releases from orbit
+  if (e.detail === 0) return;
+  targetDisperse = 1 - targetDisperse;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (revealStart > 0){
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 2800);
+  }
+
+  // auto-oscillate for thumbnail: breathe every 11s
+  const autoCycle = Math.floor(t / 11) % 2;
+  const desired = targetDisperse ^ autoCycle;
+  disperse += (desired - disperse) * 0.014;
+  uniforms.uDisperse.value = disperse;
+
+  // camera: pull back slightly when dispersed so particles stay in frame
+  const baseDist = 14;
+  const disperseDist = 22;
+  const idealDist = baseDist + (disperseDist - baseDist) * smoothstep(disperse);
+  const currentDist = camera.position.length();
+  const dir = camera.position.clone().normalize();
+  const newDist = currentDist + (idealDist - currentDist) * 0.02;
+  camera.position.copy(dir.multiplyScalar(newDist));
+
+  if (revealStart > 0){
+    const pct = Math.round(disperse * 100);
+    statEl.textContent = disperse < 0.3
+      ? `held · ${N.toLocaleString()} particles`
+      : disperse < 0.7
+        ? `exhaling · ${pct}%`
+        : `dispersed · ${pct}%`;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+function smoothstep(x){ const c = Math.max(0, Math.min(1, x)); return c*c*(3 - 2*c); }
+
+loop();
+</script>
+</body>
+</html>
