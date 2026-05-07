@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bk8 · vernacular of file formats</title>
+<!-- MOTION: snap, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#686870; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">bk8 · vernacular of file formats</div>
+<div class="hint">DCT block snap · chroma smear · pointer perturbs quantization</div>
+<div class="src">rosa menkman · 100k GPGPU particles</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Rosa Menkman JPEG glitch: particles snap to 8x8 macroblocks, drift in DCT ripples,
+// occasional bit-flip teleport events, chroma-subsampled palette (magenta/cyan/yellow).
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x686870, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// init: random positions in attractor basin
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 0.5;
+  init[i*4+1] = (Math.random()*2-1) * 0.5;
+  init[i*4+2] = (Math.random()*2-1) * 0.5;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.012 },
+  uA:  { value: 0.95 },
+  uB:  { value: 0.70 },
+  uC:  { value: 0.60 },
+  uD:  { value: 3.50 },
+  uE:  { value: 0.25 },
+  uF:  { value: 0.10 },
+  uTime: { value: 0.0 },
+  uQuantize: { value: 0.125 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF, uTime, uQuantize;
+    varying vec2 vUv;
+    
+    // 2D DCT basis function (u,v in 0..7, x,y in 0..7)
+    float dct_basis(float u, float v, float x, float y){
+      const float PI = 3.14159265;
+      float cu = (u == 0.0) ? 0.707 : 1.0;
+      float cv = (v == 0.0) ? 0.707 : 1.0;
+      return 0.25 * cu * cv 
+             * cos((2.0*x+1.0)*u*PI/16.0)
+             * cos((2.0*y+1.0)*v*PI/16.0);
+    }
+    
+    vec3 snap_to_block(vec3 p, float q){
+      return floor(p / q) * q + q * 0.5;
+    }
+    
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      
+      // Aizawa attractor integration
+      vec3 dp = vec3(
+        (p.z - uB) * p.x - uD * p.y,
+        uD * p.x + (p.z - uB) * p.y,
+        uC + uA * p.z - (p.z * p.z * p.z) / 3.0
+              - (p.x * p.x + p.y * p.y) * (1.0 + uE * p.z)
+              + uF * p.z * p.x * p.x * p.x
+      );
+      p += dp * uDt;
+      
+      // Macroblock snap
+      vec3 p_block = snap_to_block(p, uQuantize);
+      
+      // DCT ripple displacement within block
+      vec3 p_norm = (p - p_block + uQuantize*0.5) / uQuantize;
+      vec2 block_coord = mod(p_norm.xy * 8.0, 8.0);
+      
+      float dct_u = 2.0;
+      float dct_v = 3.0;
+      float dct_wave = dct_basis(dct_u, dct_v, block_coord.x, block_coord.y);
+      dct_wave += 0.5 * dct_basis(1.0, 4.0, block_coord.x, block_coord.y);
+      
+      float phase = uTime * 0.8 + p_block.x * 2.0 + p_block.y * 3.0;
+      vec3 dct_offset = vec3(
+        cos(phase) * dct_wave * 0.015,
+        sin(phase * 1.3) * dct_wave * 0.015,
+        sin(phase * 0.7) * dct_wave * 0.01
+      );
+      
+      p = p_block + dct_offset;
+      
+      // Bit-flip teleport event (rare)
+      float flip_prob = fract(sin(dot(vUv * 1000.0, vec2(12.9898, 78.233)) + uTime * 0.1) * 43758.5453);
+      if (flip_prob < 0.001) {
+        // Teleport to random adjacent block
+        vec3 offset_block = vec3(
+          floor(fract(flip_prob * 17.0) * 3.0 - 1.0),
+          floor(fract(flip_prob * 23.0) * 3.0 - 1.0),
+          floor(fract(flip_prob * 31.0) * 3.0 - 1.0)
+        ) * uQuantize;
+        p = p_block + offset_block;
+      }
+      
+      age = mod(age + uDt * 0.05, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// render points
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.05, 50);
+camera.position.set(0, 0, 5.5);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel, uTime;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying vec3 vBlock;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      
+      // Block ID for coloring
+      vBlock = floor(p / 0.125);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 1.8 * uPixel * (7.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying vec3 vBlock;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      
+      // Chroma-subsampled palette: magenta/cyan/yellow (JPEG compression colors)
+      vec3 magenta = vec3(0.95, 0.20, 0.75);
+      vec3 cyan    = vec3(0.18, 0.82, 0.88);
+      vec3 yellow  = vec3(0.98, 0.92, 0.22);
+      
+      // Block hash for color selection
+      float block_hash = fract(sin(dot(vBlock.xy, vec2(12.9898, 78.233))) * 43758.5453);
+      
+      vec3 col;
+      if (block_hash < 0.33) {
+        col = mix(magenta, cyan, smoothstep(0.0, 1.0, vAge));
+      } else if (block_hash < 0.66) {
+        col = mix(cyan, yellow, smoothstep(0.0, 1.0, vAge));
+      } else {
+        col = mix(yellow, magenta, smoothstep(0.0, 1.0, vAge));
+      }
+      
+      // Banding artifact simulation
+      col = floor(col * 8.0) / 8.0;
+      
+      gl_FragColor = vec4(col * a * 0.7, a * 0.6);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pointer perturbations: quantization level
+const target = { q: 0.125 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth);
+  target.q = 0.08 + nx * 0.12;
+});
+
+let t0 = performance.now();
+function loop(){
+  const now = performance.now();
+  const time_sec = (now - t0) * 0.001;
+  
+  simUniforms.uTime.value = time_sec;
+  simUniforms.uQuantize.value += (target.q - simUniforms.uQuantize.value) * 0.03;
+  
+  for (let i = 0; i < 4; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = time_sec;
+  
+  // Camera orbit with slight vertical bob
+  const ang = time_sec * 0.12;
+  camera.position.x = Math.sin(ang) * 5.5;
+  camera.position.z = Math.cos(ang) * 5.5;
+  camera.position.y = Math.sin(ang * 0.5) * 0.8;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
