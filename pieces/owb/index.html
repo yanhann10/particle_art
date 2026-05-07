@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>owb · phosphorescent Riley grid</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#ffffff; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+</style>
+</head>
+<body>
+<div class="id">owb</div>
+<div class="hint">click to regenerate · watch for the afterglow</div>
+<div class="src">Riley · phosphorescence · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 30;
+const camera = new THREE.OrthographicCamera(
+  frustumSize * aspect / -2, frustumSize * aspect / 2,
+  frustumSize / 2, frustumSize / -2,
+  0.1, 100
+);
+camera.position.set(0, 0, 10);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xffffff, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+let geom, points, mat;
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPhase: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uRowFreq: { value: 0 },
+  uColFreq: { value: 0 },
+  uWaveAmp: { value: 0 },
+  uTwist: { value: 0 },
+  uGlow: { value: 0 },
+};
+
+mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPhase;
+    uniform float uRowFreq;
+    uniform float uColFreq;
+    uniform float uWaveAmp;
+    uniform float uTwist;
+    uniform float uGlow;
+
+    attribute vec2 gridPos;
+    attribute float seed;
+
+    varying float vDensity;
+    varying float vGlow;
+    varying float vCharge;
+
+    void main(){
+      vec2 gp = gridPos;
+
+      float rowWave = sin(gp.y * uRowFreq + uTime * 0.8 + uPhase) * uWaveAmp;
+      float colWave = sin(gp.x * uColFreq + uTime * 0.5) * uWaveAmp;
+
+      float twist = uTwist * length(gp) * 0.05;
+      float ct = cos(twist);
+      float st = sin(twist);
+      vec2 twisted = vec2(
+        gp.x * ct - gp.y * st,
+        gp.x * st + gp.y * ct
+      );
+
+      vec3 p = vec3(twisted.x + rowWave, twisted.y + colWave, 0.0);
+
+      float interference = sin(gp.y * uRowFreq * 2.0 + uTime * 0.8) *
+                          sin(gp.x * uColFreq * 2.0 + uTime * 0.5);
+      vDensity = interference;
+      vGlow = uGlow;
+
+      // Particles that were "black" (dense) charge up more phosphorescence
+      float wasDark = 1.0 - step(0.0, interference);
+      // Radial wave of charge spreading from center
+      float dist = length(gp);
+      float chargeWave = smoothstep(0.0, 1.0, uGlow * 14.0 - dist * 0.8);
+      vCharge = wasDark * chargeWave;
+
+      // During glow, particles swell slightly
+      float swell = 1.0 + uGlow * 0.6 * wasDark;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = uPixel * 2.2 * swell;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDensity;
+    varying float vGlow;
+    varying float vCharge;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // Normal Riley B&W
+      float val = step(0.0, vDensity);
+      vec3 bwCol = vec3(val);
+
+      // Phosphorescent color: cool cyan-green, like real phosphorescence
+      vec3 phosphor = vec3(0.25, 0.95, 0.7);
+
+      // During glow phase: dark particles become phosphorescent emitters
+      // Light particles fade into the dark background
+      vec3 glowCol = mix(vec3(0.02), phosphor * (0.6 + 0.4 * vCharge), vCharge);
+
+      // Soft radial falloff on glow particles for bloom feel
+      float softEdge = 1.0 - smoothstep(0.1, 0.25, r);
+      glowCol *= softEdge * 0.85 + 0.15;
+
+      vec3 finalCol = mix(bwCol, glowCol, vGlow);
+
+      // Alpha: always visible in BW mode; in glow mode, white particles dim out
+      float bwAlpha = 1.0;
+      float glowAlpha = mix(0.06, 1.0, vCharge);
+      float alpha = mix(bwAlpha, glowAlpha, vGlow);
+
+      gl_FragColor = vec4(finalCol, alpha);
+    }
+  `
+});
+
+function buildGrid(rows, cols, seed){
+  const positions = new Float32Array(N * 3);
+  const gridPositions = new Float32Array(N * 2);
+  const seeds = new Float32Array(N);
+
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const width = 24;
+  const height = 24;
+  const cellW = width / cols;
+  const cellH = height / rows;
+
+  let idx = 0;
+  for (let i = 0; i < rows && idx < N; i++){
+    for (let j = 0; j < cols && idx < N; j++){
+      const pointsPerCell = Math.floor(N / (rows * cols));
+      for (let k = 0; k < pointsPerCell && idx < N; k++){
+        const x = (j + rng() - 0.5) * cellW - width * 0.5;
+        const y = (i + rng() - 0.5) * cellH - height * 0.5;
+
+        positions[idx * 3] = x;
+        positions[idx * 3 + 1] = y;
+        positions[idx * 3 + 2] = 0;
+
+        gridPositions[idx * 2] = x;
+        gridPositions[idx * 2 + 1] = y;
+
+        seeds[idx] = rng();
+        idx++;
+      }
+    }
+  }
+
+  while (idx < N){
+    const x = (rng() - 0.5) * width;
+    const y = (rng() - 0.5) * height;
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = 0;
+    gridPositions[idx * 2] = x;
+    gridPositions[idx * 2 + 1] = y;
+    seeds[idx] = rng();
+    idx++;
+  }
+
+  return { positions, gridPositions, seeds };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random() * 1e9);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const rows = 80 + Math.floor(rng() * 60);
+  const cols = 80 + Math.floor(rng() * 60);
+
+  uniforms.uRowFreq.value = 0.8 + rng() * 1.2;
+  uniforms.uColFreq.value = 0.8 + rng() * 1.2;
+  uniforms.uWaveAmp.value = 0.3 + rng() * 0.7;
+  uniforms.uTwist.value = rng() * 6.28;
+  uniforms.uPhase.value = rng() * 6.28;
+
+  const { positions, gridPositions, seeds } = buildGrid(rows, cols, seed);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('gridPos', new THREE.BufferAttribute(gridPositions, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.gridPos.array.set(gridPositions);
+    geom.attributes.gridPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);
+    geom.attributes.seed.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+}
+
+regenerate();
+addEventListener('click', regenerate);
+
+addEventListener('resize', () => {
+  const newAspect = innerWidth / innerHeight;
+  camera.left = frustumSize * newAspect / -2;
+  camera.right = frustumSize * newAspect / 2;
+  camera.top = frustumSize / 2;
+  camera.bottom = frustumSize / -2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+// Phosphorescence cycle:
+// ~10s of normal Riley B&W, then a ~4s glow event
+// The "lights go out" and the dark bands remember their pattern as cyan-green afterglow
+// Then it recovers back to the clean grid
+const CYCLE = 14.0;   // total cycle length in seconds
+const ONSET = 9.0;    // glow begins at this point
+const PEAK = 10.5;    // glow peaks
+const FADE_END = 13.5; // glow fully faded
+
+const bgWhite = new THREE.Color(0xffffff);
+const bgDark = new THREE.Color(0x020a08);
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Compute glow envelope
+  const phase = t % CYCLE;
+  let glow = 0;
+  if (phase > ONSET && phase <= PEAK) {
+    // Ramp up — quick surprise onset
+    const p = (phase - ONSET) / (PEAK - ONSET);
+    glow = p * p; // ease-in
+  } else if (phase > PEAK && phase <= FADE_END) {
+    // Slow phosphorescent decay — exponential tail like real phosphors
+    const p = (phase - PEAK) / (FADE_END - PEAK);
+    glow = 1.0 - p * p; // ease-out
+  }
+
+  uniforms.uGlow.value = glow;
+
+  // Background lerps from white to dark during glow
+  const bg = bgWhite.clone().lerp(bgDark, glow);
+  renderer.setClearColor(bg, 1);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
