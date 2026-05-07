@@ -91,10 +91,12 @@ def validate(piece_ids: list[str], record_clip: bool = False) -> int:
             errors = []
             page.on("pageerror", lambda e: errors.append(str(e)))
             try:
-                page.goto(f"file://{piece_html}", wait_until="load")
+                page.goto(f"file://{piece_html}", wait_until="load", timeout=60000)
                 page.wait_for_timeout(_warmup_for(pid))
                 out = REPO / "thumbs" / f"{pid}.png"
-                page.screenshot(path=str(out), type="png")
+                # heavy installations (Shiota-channel = 50k line segments etc.)
+                # need more than the 30s default screenshot timeout
+                page.screenshot(path=str(out), type="png", timeout=60000)
                 if record_clip:
                     # additional 3s of motion capture after warmup
                     page.wait_for_timeout(3000)
