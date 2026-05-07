@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: sway, intensity: gentle -->
+<title>iwa · L-system tree (procedural)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#060807; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">iwa</div>
+<div class="hint">drag to orbit · scroll to zoom · click to regrow</div>
+<div class="src">procedural · L-system + 3D turtle · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const RULES = {
+  'F': [
+    { p: 0.45, s: 'FF[+F-F][-F+F][/F\\F]' },
+    { p: 0.30, s: 'F[+F][-F]F'           },
+    { p: 0.15, s: 'F[/F][\\F]F'          },
+    { p: 0.10, s: 'F[+F-F]F[\\F/F]'      },
+  ],
+};
+const ANGLE = THREE.MathUtils.degToRad(22.5);
+const STEP_BASE = 1.0;
+
+function expand(axiom, depth, rng){
+  let s = axiom;
+  for (let d = 0; d < depth; d++){
+    let out = '';
+    for (const ch of s){
+      if (ch in RULES) {
+        const r = rng();
+        let acc = 0;
+        for (const opt of RULES[ch]){
+          acc += opt.p;
+          if (r <= acc){ out += opt.s; break; }
+        }
+      } else out += ch;
+    }
+    s = out;
+  }
+  return s;
+}
+
+function turtle(str, depthFactor){
+  const H = new THREE.Vector3(0, 1, 0);
+  const L = new THREE.Vector3(-1, 0, 0);
+  const U = new THREE.Vector3(0, 0, 1);
+  const stack = [];
+  const segments = [];
+  let pos = new THREE.Vector3(0, -7, 0);
+  let h = H.clone(), l = L.clone(), u = U.clone();
+  let gen = 0;
+
+  const rotate = (axis, ang) => {
+    const q = new THREE.Quaternion().setFromAxisAngle(axis, ang);
+    h.applyQuaternion(q); l.applyQuaternion(q); u.applyQuaternion(q);
+  };
+
+  for (const ch of str){
+    switch(ch){
+      case 'F': {
+        const step = STEP_BASE * Math.pow(depthFactor, gen);
+        const nextPos = pos.clone().addScaledVector(h, step);
+        segments.push({ from: pos.clone(), to: nextPos.clone(), gen });
+        pos = nextPos;
+        break;
+      }
+      case '+': rotate(u, +ANGLE); break;
+      case '-': rotate(u, -ANGLE); break;
+      case '&': rotate(l, +ANGLE); break;
+      case '^': rotate(l, -ANGLE); break;
+      case '/': rotate(h, +ANGLE); break;
+      case '\\': rotate(h, -ANGLE); break;
+      case '[':
+        stack.push({ pos: pos.clone(), h: h.clone(), l: l.clone(), u: u.clone(), gen });
+        gen += 1;
+        break;
+      case ']': {
+        const f = stack.pop();
+        pos = f.pos; h = f.h; l = f.l; u = f.u; gen = f.gen;
+        break;
+      }
+    }
+  }
+  return segments;
+}
+
+function buildParticles(segments, totalN){
+  const lens = segments.map(s => s.from.distanceTo(s.to));
+  const total = lens.reduce((a,b)=>a+b, 0);
+  const positions = new Float32Array(totalN * 3);
+  const seeds     = new Float32Array(totalN);
+  const gens      = new Float32Array(totalN);
+  const lengths   = new Float32Array(totalN);
+  const v = new THREE.Vector3();
+  let written = 0;
+  for (let i = 0; i < segments.length; i++){
+    const share = i === segments.length - 1
+      ? totalN - written
+      : Math.max(1, Math.floor(totalN * lens[i] / total));
+    for (let k = 0; k < share && written < totalN; k++){
+      const t = Math.random();
+      v.lerpVectors(segments[i].from, segments[i].to, t);
+      // thicker bark at trunk (low gen), thinner scatter at tips
+      const jitter = 0.055 * Math.pow(0.72, segments[i].gen);
+      v.x += (Math.random()-0.5) * jitter;
+      v.y += (Math.random()-0.5) * jitter;
+      v.z += (Math.random()-0.5) * jitter;
+      positions[written*3]   = v.x;
+      positions[written*3+1] = v.y;
+      positions[written*3+2] = v.z;
+      seeds[written]   = Math.random();
+      gens[written]    = segments[i].gen;
+      lengths[written] = t;
+      written++;
+    }
+  }
+  return { positions, seeds, gens, lengths };
+}
+
+// scene
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 4, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x060807, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.target.set(0, 2, 0);
+
+// ground fog plane — subtle gradient beneath the tree
+const fogGeo = new THREE.PlaneGeometry(60, 60);
+const fogMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      float d = length(vUv - 0.5) * 2.0;
+      float a = smoothstep(1.0, 0.1, d) * 0.08;
+      gl_FragColor = vec4(0.18, 0.22, 0.14, a);
+    }
+  `
+});
+const fogPlane = new THREE.Mesh(fogGeo, fogMat);
+fogPlane.rotation.x = -Math.PI/2;
+fogPlane.position.y = -7.0;
+scene.add(fogPlane);
+
+// dust motes — sparse, slow, atmospheric
+const DUST_N = 400;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(DUST_N * 3);
+const dustSeed = new Float32Array(DUST_N);
+for (let i = 0; i < DUST_N; i++){
+  dustPos[i*3]   = (Math.random()-0.5) * 20;
+  dustPos[i*3+1] = -7 + Math.random() * 18;
+  dustPos[i*3+2] = (Math.random()-0.5) * 20;
+  dustSeed[i] = Math.random();
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeo.setAttribute('seed', new THREE.BufferAttribute(dustSeed, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    attribute float seed;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.15 + seed * 6.28;
+      p.x += sin(t * 0.7 + seed * 3.0) * 0.4;
+      p.y += sin(t * 0.5) * 0.2;
+      p.z += cos(t * 0.6 + seed * 2.0) * 0.3;
+      vA = 0.15 + 0.1 * sin(t * 2.0);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = (0.8 + 0.5 * sin(t)) * 2.0 * (30.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vA;
+      gl_FragColor = vec4(0.7, 0.75, 0.6, a);
+    }
+  `
+});
+const dustPoints = new THREE.Points(dustGeo, dustMat);
+scene.add(dustPoints);
+
+const N = 80000;
+let geom, points, mat;
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0 },
+};
+mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    attribute float seed;
+    attribute float gen;
+    attribute float lengthT;
+    varying vec3 vCol;
+    varying float vGen;
+    varying float vEnergy;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.5 + seed * 6.28;
+      // sway: organic, stronger at tips, near-zero at trunk
+      float swayAmt = 0.07 * gen * (0.5 + 0.5*sin(t * 0.7));
+      p.x += swayAmt * sin(t + p.y * 0.25);
+      p.z += swayAmt * cos(t * 0.85 + p.y * 0.25);
+      // slight vertical breathing at tips
+      p.y += 0.015 * gen * sin(t * 0.4 + seed * 3.14);
+
+      // reveal: particles drift in from scattered positions above
+      vec3 entry = vec3(seed*4.0 - 2.0, 25.0 + seed*8.0, seed*4.0 - 2.0);
+      float reveal = smoothstep(0.0, 1.0, uReady);
+      p = mix(entry, p, reveal);
+
+      vGen = gen;
+      vEnergy = 0.5 + 0.5 * sin(t * 0.5);
+
+      // hand-tuned 5-stop palette:
+      // #5C3D22 dark heartwood → #6B5030 warm bark → #3D6B3A deep moss
+      // → #6FA555 canopy green → #C4E06A bright leaf tip
+      vec3 c0 = vec3(0.36, 0.24, 0.13);  // heartwood
+      vec3 c1 = vec3(0.42, 0.31, 0.19);  // bark
+      vec3 c2 = vec3(0.24, 0.42, 0.23);  // deep moss
+      vec3 c3 = vec3(0.44, 0.65, 0.33);  // canopy
+      vec3 c4 = vec3(0.77, 0.88, 0.42);  // leaf tip
+
+      float k = clamp(gen * 0.2, 0.0, 1.0);
+      vec3 col;
+      if (k < 0.25) col = mix(c0, c1, k * 4.0);
+      else if (k < 0.5) col = mix(c1, c2, (k - 0.25) * 4.0);
+      else if (k < 0.75) col = mix(c2, c3, (k - 0.5) * 4.0);
+      else col = mix(c3, c4, (k - 0.75) * 4.0);
+      // subtle per-particle hue variation for handmade feel
+      col *= 0.9 + 0.2 * seed;
+      vCol = col;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // size: trunk particles larger, tip particles smaller & brighter
+      float baseSize = mix(2.2, 1.1, k);
+      float pulse = 1.0 + 0.25 * vEnergy * k; // tips pulse gently
+      gl_PointSize = baseSize * pulse * uPixel * (45.0/dist) * (0.35 + 0.65*reveal);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vGen;
+    varying float vEnergy;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      // softer falloff for trunk, sharper for leaves
+      float falloff = mix(12.0, 20.0, clamp(vGen * 0.2, 0.0, 1.0));
+      float core = exp(-r * falloff);
+      // opacity: trunk denser, canopy more ethereal
+      float baseAlpha = mix(0.7, 0.45, clamp(vGen * 0.2, 0.0, 1.0));
+      float a = core * (baseAlpha + 0.3 * vEnergy * clamp(vGen * 0.15, 0.0, 1.0));
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+// side-light gradient — warm amber from upper right, cold teal from below left
+const gradGeo = new THREE.PlaneGeometry(2, 2);
+const gradMat = new THREE.ShaderMaterial({
+  transparent: true, depthTest: false, depthWrite: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.999, 1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      // warm top-right glow
+      float warm = smoothstep(1.8, 0.0, length(vUv - vec2(1.1, 1.1)));
+      vec3 warmCol = vec3(0.18, 0.10, 0.04) * warm * 0.3;
+      // cool bottom-left
+      float cool = smoothstep(1.5, 0.0, length(vUv - vec2(-0.1, -0.1)));
+      vec3 coolCol = vec3(0.03, 0.06, 0.08) * cool * 0.25;
+      vec3 c = warmCol + coolCol;
+      float a = max(warm * 0.15, cool * 0.12);
+      gl_FragColor = vec4(c, a);
+    }
+  `
+});
+const gradQuad = new THREE.Mesh(gradGeo, gradMat);
+gradQuad.renderOrder = -1;
+scene.add(gradQuad);
+
+// film grain overlay
+const grainGeo = new THREE.PlaneGeometry(2, 2);
+const grainMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthTest: false, depthWrite: false,
+  vertexShader: `void main(){ gl_Position = vec4(position.xy, 0.998, 1.0); }`,
+  fragmentShader: `
+    uniform float uTime;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    void main(){
+      vec2 uv = gl_FragCoord.xy;
+      float n = hash(uv + fract(uTime * 0.7) * 100.0);
+      float grain = (n - 0.5) * 0.04;
+      gl_FragColor = vec4(vec3(grain), abs(grain));
+    }
+  `
+});
+const grainQuad = new THREE.Mesh(grainGeo, grainMat);
+grainQuad.renderOrder = 999;
+scene.add(grainQuad);
+
+let revealStart = 0;
+let treeCentroid = new THREE.Vector3(0, 2, 0);
+
+function regrow(seed){
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  const str = expand('F', 5, rng);
+  const segs = turtle(str, 0.78);
+  const bb = new THREE.Box3();
+  for (const s of segs) { bb.expandByPoint(s.from); bb.expandByPoint(s.to); }
+  const ctr = bb.getCenter(new THREE.Vector3());
+  const min = bb.min;
+  for (const s of segs){
+    s.from.x -= ctr.x; s.from.z -= ctr.z; s.from.y -= min.y - (-7);
+    s.to.x   -= ctr.x; s.to.z   -= ctr.z; s.to.y   -= min.y - (-7);
+  }
+
+  // compute centroid for camera tracking
+  const newBB = new THREE.Box3();
+  for (const s of segs) { newBB.expandByPoint(s.from); newBB.expandByPoint(s.to); }
+  treeCentroid = newBB.getCenter(new THREE.Vector3());
+
+  const { positions, seeds, gens, lengths } = buildParticles(segs, N);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('gen',      new THREE.BufferAttribute(gens, 1));
+    geom.setAttribute('lengthT',  new THREE.BufferAttribute(lengths, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions); geom.attributes.position.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);          geom.attributes.seed.needsUpdate = true;
+    geom.attributes.gen.array.set(gens);            geom.attributes.gen.needsUpdate = true;
+    geom.attributes.lengthT.array.set(lengths);     geom.attributes.lengthT.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+  revealStart = performance.now();
+}
+
+regrow(Math.floor(Math.random() * 1e9));
+addEventListener('click', () => regrow(Math.floor(Math.random() * 1e9)));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+  dustMat.uniforms.uTime.value = elapsed;
+  grainMat.uniforms.uTime.value = elapsed;
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (now - revealStart) / 2500);
+  }
+  // camera tracks centroid smoothly
+  controls.target.lerp(treeCentroid, 0.02);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
