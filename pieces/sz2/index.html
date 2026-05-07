@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>calyx · process (Reas rule-traces)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">sz2</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 12, 20);
+camera.lookAt(0, 2, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xddd5cb, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+let geom, points;
+
+const uniforms = {
+  uTime:     { value: 0 },
+  uPixel:    { value: renderer.getPixelRatio() },
+  uMorph:    { value: 0 },
+  uPetals:   { value: 5.0 },
+  uCupDepth: { value: 4.5 },
+  uLightAng: { value: 0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uMorph;
+    uniform float uPetals;
+    uniform float uCupDepth;
+    uniform float uLightAng;
+
+    attribute vec2 gridPos;
+    attribute float ruleId;
+
+    varying float vLight;
+    varying float vAccent;
+    varying float vAlpha;
+
+    void main(){
+      vec2 gp = gridPos;
+      float r = length(gp);
+      float maxR = 12.0;
+      float nr = clamp(r / maxR, 0.0, 1.0);
+      float theta = atan(gp.y, gp.x);
+
+      /* --- Casey Reas Process rule: deterministic agent displacement --- */
+      /* Each particle moves along a circular arc whose radius is determined
+         by its grid position modulo a rule set. No randomness, pure structure. */
+      float rule = ruleId;
+      float arcRadius = 0.3 + mod(rule * 7.0, 3.0) * 0.15;
+      float arcSpeed = 1.2 + mod(rule * 13.0, 5.0) * 0.3; // ~2x speed from parent
+      float arcPhase = rule * 6.2831 + floor(r * 2.0) * 1.047;
+
+      // Agent traces: displacement along local tangent circle
+      float traceX = arcRadius * cos(arcSpeed * uTime + arcPhase);
+      float traceY = arcRadius * sin(arcSpeed * uTime + arcPhase);
+
+      // Wave interference (deterministic, rule-based, 2x speed)
+      float rowRule = sin(gp.y * 1.1 + uTime * 1.2 + floor(gp.x * 0.5) * 0.5);
+      float colRule = sin(gp.x * 0.9 + uTime * 0.7 + floor(gp.y * 0.5) * 0.3);
+
+      /* --- Calyx morph --- */
+      float petalShape = 0.5 + 0.5 * cos(theta * uPetals);
+      float cupProfile = uCupDepth * nr * nr * (0.6 + 0.4 * petalShape);
+      float flare = 1.0 + 0.12 * nr * nr * uMorph;
+
+      float m = uMorph;
+      float cx = gp.x * flare + traceX * (0.3 + 0.7 * (1.0 - m));
+      float cy = gp.y * flare + traceY * (0.3 + 0.7 * (1.0 - m));
+      float cz = cupProfile * m;
+
+      // Add rule-based ripple to surface (not noise — modular arithmetic)
+      float ruleRipple = sin(theta * uPetals * 2.0 + r * 1.8 + uTime * 0.4)
+                       * 0.15 * m * nr;
+      cz += ruleRipple;
+
+      vec3 p = vec3(cx + rowRule * 0.3 * (1.0 - 0.6 * m),
+                    cy + colRule * 0.3 * (1.0 - 0.6 * m),
+                    cz);
+
+      /* --- Turrell-style drifting light --- */
+      // Single directional light slowly orbiting, revealing curvature
+      vec3 lightDir = normalize(vec3(cos(uLightAng), 0.4, sin(uLightAng)));
+      // Approximate surface normal from cup geometry
+      vec3 normal = normalize(vec3(
+        -2.0 * gp.x * nr / maxR * uCupDepth * m,
+        -2.0 * gp.y * nr / maxR * uCupDepth * m,
+        1.0
+      ));
+      float ndotl = dot(normal, lightDir);
+      vLight = 0.25 + 0.75 * clamp(ndotl, 0.0, 1.0);
+
+      // Accent: only at petal fold convergence points (rule-based threshold)
+      float foldProximity = abs(sin(theta * uPetals * 0.5)) * nr;
+      vAccent = step(0.88, foldProximity) * step(0.4, nr) * m;
+
+      // Rim decay (entangled_others suggestion)
+      float rimDecay = smoothstep(0.85, 1.0, nr);
+      vAlpha = mix(1.0, 0.2, rimDecay * m);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * max(1.2, 2.5 - dist * 0.05);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vLight;
+    varying float vAccent;
+    varying float vAlpha;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // Near-monochrome: warm charcoal to pale warm gray
+      // Saturation < 0.1, value range driven by light
+      vec3 dark = vec3(0.12, 0.11, 0.10);
+      vec3 mid  = vec3(0.35, 0.33, 0.31);
+      vec3 pale = vec3(0.78, 0.75, 0.72);
+
+      vec3 col = mix(dark, pale, vLight);
+
+      // Single accent: deep muted terracotta, used sparingly
+      vec3 accent = vec3(0.45, 0.18, 0.12);
+      col = mix(col, accent, vAccent * 0.7);
+
+      float alpha = vAlpha * (1.0 - smoothstep(0.15, 0.25, r));
+      gl_FragColor = vec4(col, alpha * 0.85);
+    }
+  `
+});
+
+function buildGrid(seed){
+  const positions = new Float32Array(N * 3);
+  const gridPositions = new Float32Array(N * 2);
+  const ruleIds = new Float32Array(N);
+
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const rows = 100, cols = 100;
+  const width = 24, height = 24;
+  const cellW = width / cols, cellH = height / rows;
+
+  let idx = 0;
+  for (let i = 0; i < rows && idx < N; i++){
+    for (let j = 0; j < cols && idx < N; j++){
+      const pointsPerCell = Math.floor(N / (rows * cols));
+      for (let k = 0; k < pointsPerCell && idx < N; k++){
+        const x = (j + rng() * 0.8 + 0.1) * cellW - width * 0.5;
+        const y = (i + rng() * 0.8 + 0.1) * cellH - height * 0.5;
+        positions[idx * 3] = x;
+        positions[idx * 3 + 1] = y;
+        positions[idx * 3 + 2] = 0;
+        gridPositions[idx * 2] = x;
+        gridPositions[idx * 2 + 1] = y;
+        // Deterministic rule assignment based on grid cell
+        ruleIds[idx] = ((i * 101 + j * 37 + k * 7) % 64) / 64.0;
+        idx++;
+      }
+    }
+  }
+  while (idx < N){
+    const x = (rng() - 0.5) * width;
+    const y = (rng() - 0.5) * height;
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = 0;
+    gridPositions[idx * 2] = x;
+    gridPositions[idx * 2 + 1] = y;
+    ruleIds[idx] = (idx % 64) / 64.0;
+    idx++;
+  }
+  return { positions, gridPositions, ruleIds };
+}
+
+function init(){
+  const seed = 42; // deterministic — Casey Reas spirit
+  const { positions, gridPositions, ruleIds } = buildGrid(seed);
+
+  geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('gridPos', new THREE.BufferAttribute(gridPositions, 2));
+  geom.setAttribute('ruleId', new THREE.BufferAttribute(ruleIds, 1));
+  points = new THREE.Points(geom, mat);
+  scene.add(points);
+  geom.computeBoundingSphere();
+}
+
+init();
+
+/* --- Background: warm gallery wall with subtle vertical gradient --- */
+const bgGeom = new THREE.PlaneGeometry(80, 80);
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false,
+  uniforms: { uLightAng: uniforms.uLightAng },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uLightAng;
+    varying vec2 vUv;
+    void main(){
+      // Warm gallery wall with subtle light wash (Turrell/Eliasson)
+      vec3 wallBase = vec3(0.855, 0.827, 0.788);
+      // Soft light bleed from the piece's directional light
+      float lightWash = 0.5 + 0.5 * cos(uLightAng - 3.14159 * (vUv.x - 0.5));
+      vec3 warmWash = vec3(0.88, 0.84, 0.79);
+      vec3 coolWash = vec3(0.82, 0.83, 0.82);
+      vec3 wall = mix(coolWash, warmWash, lightWash * 0.4 + 0.6);
+      // Vertical darkening at bottom edge (gallery floor shadow)
+      wall *= 0.95 + 0.05 * vUv.y;
+      gl_FragColor = vec4(wall, 1.0);
+    }
+  `
+});
+const bgMesh = new THREE.Mesh(bgGeom, bgMat);
+bgMesh.position.set(0, 2, -20);
+scene.add(bgMesh);
+
+/* --- Orbit drag --- */
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 0.55;
+const canvas = renderer.domElement;
+
+canvas.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi = Math.max(0.1, Math.min(1.4, orbitPhi - (e.clientY - prevY) * 0.005));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Morph to calyx over 5 seconds
+  uniforms.uMorph.value += (1.0 - uniforms.uMorph.value) * 0.012;
+
+  // Turrell light: very slow drift (~40s full rotation)
+  uniforms.uLightAng.value = t * 0.157;
+
+  // Slow auto-orbit + manual
+  const autoTheta = t * 0.05;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 23;
+
+  const centroidY = 1.8 * uniforms.uMorph.value;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    centroidY + radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, centroidY, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
