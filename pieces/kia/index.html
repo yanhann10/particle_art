@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kia · sound (Cardiff motet chamber)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0e; overflow:hidden;
+               color:#ccc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; color:#666; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; color:#666; }
+</style>
+</head>
+<body>
+<div class="id">kia</div>
+<div class="hint">click to recompose · orbit drag</div>
+<div class="src">Cardiff · 40-part motet resonance · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 14, 24);
+camera.lookAt(0, 2, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0e, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+const NUM_VOICES = 40;
+let geom, points;
+
+const uniforms = {
+  uTime:      { value: 0 },
+  uPixel:     { value: renderer.getPixelRatio() },
+  uMorph:     { value: 0 },
+  uWaveSpeed: { value: 1.8 },
+  uDecay:     { value: 0.12 },
+  uBowlDepth: { value: 5.0 },
+  uBowlRadius:{ value: 10.0 },
+  uVoices:    { value: NUM_VOICES },
+  uVoicePhases: { value: new Float32Array(NUM_VOICES) },
+  uVoiceAngles: { value: new Float32Array(NUM_VOICES) },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uMorph;
+    uniform float uWaveSpeed;
+    uniform float uDecay;
+    uniform float uBowlDepth;
+    uniform float uBowlRadius;
+    uniform float uVoicePhases[${NUM_VOICES}];
+    uniform float uVoiceAngles[${NUM_VOICES}];
+
+    attribute vec2 gridPos;
+    attribute float seed;
+
+    varying float vIntensity;
+    varying float vHeight;
+    varying float vRadius;
+
+    void main(){
+      vec2 gp = gridPos;
+      float r = length(gp);
+      float maxR = uBowlRadius;
+      float nr = clamp(r / maxR, 0.0, 1.0);
+      float theta = atan(gp.y, gp.x);
+
+      // Acoustic bowl shape — parabolic reflector
+      float bowlZ = -uBowlDepth * (1.0 - nr * nr);
+      // Slight rim lip
+      float rimLip = smoothstep(0.85, 1.0, nr) * 1.2;
+      bowlZ += rimLip * uBowlDepth * 0.3;
+
+      vec3 p = vec3(gp.x, gp.y, bowlZ * uMorph);
+
+      // Wavefront interference from 40 voice sources on the rim
+      float totalWave = 0.0;
+      float activeVoices = 0.0;
+      for (int i = 0; i < ${NUM_VOICES}; i++){
+        float vAngle = uVoiceAngles[i];
+        vec2 srcPos = vec2(cos(vAngle), sin(vAngle)) * maxR;
+        float dist = length(gp - srcPos);
+
+        // Each voice emits a spherical wavefront
+        float phase = uVoicePhases[i];
+        float wave = sin(dist * uWaveSpeed - uTime * 2.5 + phase);
+        // Decay with distance from source
+        float atten = exp(-dist * uDecay);
+        // Voices enter staggered (Cardiff's motet: voices layer in)
+        float voiceOnset = float(i) * 0.4;
+        float voiceGain = smoothstep(voiceOnset, voiceOnset + 2.0, uTime) * atten;
+        totalWave += wave * voiceGain;
+        activeVoices += voiceGain;
+      }
+
+      // Normalize interference
+      float normWave = activeVoices > 0.0 ? totalWave / max(activeVoices, 1.0) : 0.0;
+
+      // Displace particles along bowl normal by wave amplitude
+      float displace = normWave * 0.6 * uMorph;
+      // Normal of bowl is roughly (0,0,1) adjusted by slope
+      vec3 normal = normalize(vec3(-2.0 * gp.x * uBowlDepth / (maxR*maxR),
+                                    -2.0 * gp.y * uBowlDepth / (maxR*maxR),
+                                    1.0));
+      p += normal * displace;
+
+      vIntensity = normWave;
+      vHeight = bowlZ * uMorph + displace;
+      vRadius = nr;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist2 = -mv.z;
+      gl_PointSize = uPixel * max(1.5, 3.2 - dist2 * 0.05);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vIntensity;
+    varying float vHeight;
+    varying float vRadius;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // Monochrome palette: warm white peaks, cool dark troughs
+      // Like sound pressure — bright where waves constructively interfere
+      float pressure = vIntensity * 0.5 + 0.5; // 0..1
+
+      // Cool slate base, warm ivory at peaks
+      vec3 trough = vec3(0.12, 0.13, 0.16);
+      vec3 peak = vec3(0.92, 0.88, 0.82);
+
+      // Subtle amber warmth at constructive interference nodes
+      vec3 warm = vec3(0.85, 0.65, 0.40);
+      vec3 col = mix(trough, peak, pressure);
+      col = mix(col, warm, smoothstep(0.75, 1.0, pressure) * 0.3);
+
+      // Rim particles slightly dimmer
+      float rimFade = smoothstep(0.95, 1.0, vRadius);
+      float alpha = (1.0 - smoothstep(0.18, 0.25, r)) * (1.0 - rimFade * 0.5);
+      alpha *= 0.85;
+
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+function buildBowl(seed){
+  const positions = new Float32Array(N * 3);
+  const gridPositions = new Float32Array(N * 2);
+  const seeds = new Float32Array(N);
+
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const radius = uniforms.uBowlRadius.value;
+
+  // Distribute particles in disk with slight density increase toward center
+  // (sound focuses at focal point)
+  for (let i = 0; i < N; i++){
+    // Sqrt distribution for uniform disk, biased slightly inward
+    let r = Math.sqrt(rng()) * radius;
+    // Bias: 30% more density in inner half
+    if (rng() < 0.3) r *= 0.6;
+    const angle = rng() * Math.PI * 2;
+    const x = Math.cos(angle) * r;
+    const y = Math.sin(angle) * r;
+
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = 0;
+    gridPositions[i * 2] = x;
+    gridPositions[i * 2 + 1] = y;
+    seeds[i] = rng();
+  }
+  return { positions, gridPositions, seeds };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random() * 1e9);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  uniforms.uMorph.value = 0;
+  uniforms.uWaveSpeed.value = 1.4 + rng() * 1.2;
+  uniforms.uDecay.value = 0.08 + rng() * 0.1;
+  uniforms.uBowlDepth.value = 4.0 + rng() * 3.0;
+
+  // 40 voices arranged in elliptical ring (like Cardiff's motet speakers)
+  const phases = uniforms.uVoicePhases.value;
+  const angles = uniforms.uVoiceAngles.value;
+  for (let i = 0; i < NUM_VOICES; i++){
+    angles[i] = (i / NUM_VOICES) * Math.PI * 2 + (rng() - 0.5) * 0.08;
+    phases[i] = rng() * Math.PI * 2;
+  }
+
+  const { positions, gridPositions, seeds } = buildBowl(seed);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('gridPos', new THREE.BufferAttribute(gridPositions, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.gridPos.array.set(gridPositions);
+    geom.attributes.gridPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);
+    geom.attributes.seed.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+}
+
+regenerate();
+addEventListener('click', (e) => {
+  if (e.target.tagName === 'CANVAS') regenerate();
+});
+
+/* --- Orbit drag --- */
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 0.5;
+const canvas = renderer.domElement;
+
+canvas.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi = Math.max(0.15, Math.min(1.3, orbitPhi - (e.clientY - prevY) * 0.005));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Slow morph: bowl emerges over 8 seconds (Cardiff's meditative pacing)
+  uniforms.uMorph.value += (1.0 - uniforms.uMorph.value) * 0.008;
+
+  // Very slow orbit — walking pace, contemplative
+  const autoTheta = t * 0.04;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 20;
+
+  // Track centroid as bowl forms
+  const centroidZ = -uniforms.uBowlDepth.value * 0.4 * uniforms.uMorph.value;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, 0, centroidZ);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
