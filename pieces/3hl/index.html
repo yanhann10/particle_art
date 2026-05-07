@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3hl · kuramoto phase-space · bifurcation traverse</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0814; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; color:#cdd2dc; letter-spacing:0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size:11px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .info { position:fixed; right:14px; bottom:12px; opacity:0.6; font-size:10px; text-align:right;
+          font-variant-numeric:tabular-nums; line-height:1.5; }
+</style>
+</head>
+<body>
+<div class="id">3hl</div>
+<div class="hint">move pointer horizontally to drive coupling · watch synchronization emerge</div>
+<div class="src">kuramoto 1975 · yoshiki kuramoto chemical oscillations</div>
+<div class="info" id="info"></div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 45);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0814, 1);
+document.body.appendChild(renderer.domElement);
+
+// Kuramoto model: N coupled phase oscillators
+// dθᵢ/dt = ωᵢ + (K/N) Σⱼ sin(θⱼ - θᵢ)
+// K = coupling strength (control parameter)
+// ωᵢ = natural frequency
+// We render trajectories in (θ,dθ/dt) phase space for each oscillator,
+// plus a global order parameter visualization
+
+const N = 64; // oscillator count
+const theta = new Float32Array(N);
+const omega = new Float32Array(N);
+const dtheta = new Float32Array(N);
+const trajectory = []; // ring buffer of past states for each oscillator
+
+// Initialize natural frequencies from a Gaussian-like distribution
+const omegaMean = 1.0;
+const omegaStd = 0.8;
+for (let i = 0; i < N; i++) {
+  omega[i] = omegaMean + omegaStd * (Math.random() + Math.random() - 1.0);
+  theta[i] = Math.random() * Math.PI * 2;
+}
+
+// Coupling strength K — user control via pointer X
+let K = 0.0; // 0 → 3.5 (below critical → above critical)
+const Kmin = 0.0;
+const Kmax = 3.5;
+
+// Phase-space trace
+const TRACE_LENGTH = 240;
+const tracePositions = new Float32Array(N * TRACE_LENGTH * 3);
+const traceColors = new Float32Array(N * TRACE_LENGTH * 3);
+const traceGeom = new THREE.BufferGeometry();
+traceGeom.setAttribute('position', new THREE.BufferAttribute(tracePositions, 3));
+traceGeom.setAttribute('color', new THREE.BufferAttribute(traceColors, 3));
+
+const traceMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime: { value: 0 }
+  },
+  vertexColors: true,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uPixel;
+    uniform float uTime;
+    attribute vec3 color;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vCol = color;
+      // fade out older points
+      float idx = float(gl_VertexID % ${TRACE_LENGTH});
+      vAlpha = idx / ${TRACE_LENGTH}.0;
+      vec3 p = position;
+      gl_PointSize = (2.0 + 1.5 * vAlpha) * uPixel;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float core = exp(-r * 20.0);
+      float a = core * vAlpha * 0.8;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const tracePoints = new THREE.Points(traceGeom, traceMat);
+scene.add(tracePoints);
+
+// Order parameter circle: visualize global synchronization
+const ORDER_SEGMENTS = 120;
+const orderGeom = new THREE.BufferGeometry();
+const orderPos = new Float32Array((ORDER_SEGMENTS + 1) * 3);
+const orderCol = new Float32Array((ORDER_SEGMENTS + 1) * 3);
+for (let i = 0; i <= ORDER_SEGMENTS; i++) {
+  const a = (i / ORDER_SEGMENTS) * Math.PI * 2;
+  orderPos[i * 3] = Math.cos(a) * 8;
+  orderPos[i * 3 + 1] = Math.sin(a) * 8;
+  orderPos[i * 3 + 2] = 0;
+  orderCol[i * 3] = 0.3;
+  orderCol[i * 3 + 1] = 0.5;
+  orderCol[i * 3 + 2] = 0.7;
+}
+orderGeom.setAttribute('position', new THREE.BufferAttribute(orderPos, 3));
+orderGeom.setAttribute('color', new THREE.BufferAttribute(orderCol, 3));
+const orderLine = new THREE.Line(orderGeom, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.25 }));
+scene.add(orderLine);
+
+// Order parameter arrow
+const arrowGeom = new THREE.BufferGeometry();
+const arrowPos = new Float32Array(6);
+arrowGeom.setAttribute('position', new THREE.BufferAttribute(arrowPos, 3));
+const arrowMat = new THREE.LineBasicMaterial({ color: 0xf0c080, transparent: true, opacity: 0.9, linewidth: 2 });
+const arrowLine = new THREE.Line(arrowGeom, arrowMat);
+scene.add(arrowLine);
+
+// Oscillator-space ring: small circle showing each oscillator's phase
+const oscGeom = new THREE.BufferGeometry();
+const oscPos = new Float32Array(N * 3);
+const oscCol = new Float32Array(N * 3);
+oscGeom.setAttribute('position', new THREE.BufferAttribute(oscPos, 3));
+oscGeom.setAttribute('color', new THREE.BufferAttribute(oscCol, 3));
+const oscMat = new THREE.PointsMaterial({ size: 3 * renderer.getPixelRatio(), vertexColors: true, transparent: true, opacity: 0.7, sizeAttenuation: false });
+const oscPoints = new THREE.Points(oscGeom, oscMat);
+oscPoints.position.set(18, 0, 0);
+scene.add(oscPoints);
+
+// Grid backdrop for phase-space
+const gridMat = new THREE.LineBasicMaterial({ color: 0x1a1828, transparent: true, opacity: 0.2 });
+const gridGeom = new THREE.BufferGeometry();
+const gridVerts = [];
+for (let i = -10; i <= 10; i++) {
+  gridVerts.push(i * 2, -20, 0, i * 2, 20, 0);
+  gridVerts.push(-20, i * 2, 0, 20, i * 2, 0);
+}
+gridGeom.setAttribute('position', new THREE.Float32BufferAttribute(gridVerts, 3));
+const gridLines = new THREE.LineSegments(gridGeom, gridMat);
+gridLines.position.set(-10, 0, -5);
+scene.add(gridLines);
+
+// Axes labels (phase space)
+const axesGeom = new THREE.BufferGeometry();
+const axesPos = [];
+axesPos.push(-25, 0, 0, 5, 0, 0); // x-axis (theta)
+axesPos.push(-10, -20, 0, -10, 20, 0); // y-axis (dtheta/dt)
+axesGeom.setAttribute('position', new THREE.Float32BufferAttribute(axesPos, 3));
+const axesMat = new THREE.LineBasicMaterial({ color: 0x3a3050, transparent: true, opacity: 0.4 });
+const axesLines = new THREE.LineSegments(axesGeom, axesMat);
+scene.add(axesLines);
+
+// State ring buffer
+for (let i = 0; i < N; i++) {
+  trajectory[i] = [];
+}
+
+// Euler integration step
+const dt = 0.016;
+function stepKuramoto() {
+  // compute coupling terms
+  for (let i = 0; i < N; i++) {
+    let sum = 0;
+    for (let j = 0; j < N; j++) {
+      sum += Math.sin(theta[j] - theta[i]);
+    }
+    dtheta[i] = omega[i] + (K / N) * sum;
+  }
+  // integrate
+  for (let i = 0; i < N; i++) {
+    theta[i] += dtheta[i] * dt;
+    // wrap to [-π, π]
+    while (theta[i] > Math.PI) theta[i] -= Math.PI * 2;
+    while (theta[i] < -Math.PI) theta[i] += Math.PI * 2;
+  }
+}
+
+// Compute order parameter R e^(iΨ) = (1/N) Σⱼ e^(iθⱼ)
+function computeOrderParameter() {
+  let real = 0, imag = 0;
+  for (let i = 0; i < N; i++) {
+    real += Math.cos(theta[i]);
+    imag += Math.sin(theta[i]);
+  }
+  real /= N;
+  imag /= N;
+  const R = Math.sqrt(real * real + imag * imag);
+  const Psi = Math.atan2(imag, real);
+  return { R, Psi };
+}
+
+// Pointer control
+let pointerX = 0.5;
+addEventListener('pointermove', (e) => {
+  pointerX = e.clientX / innerWidth;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const infoEl = document.getElementById('info');
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  traceMat.uniforms.uTime.value = t;
+
+  // map pointer X to coupling strength
+  K = Kmin + (Kmax - Kmin) * pointerX;
+
+  // integrate
+  stepKuramoto();
+
+  // update trajectory ring buffers
+  for (let i = 0; i < N; i++) {
+    trajectory[i].push({ th: theta[i], dth: dtheta[i] });
+    if (trajectory[i].length > TRACE_LENGTH) trajectory[i].shift();
+  }
+
+  // render phase-space trajectories
+  for (let i = 0; i < N; i++) {
+    const hue = i / N;
+    const col = new THREE.Color().setHSL(hue, 0.7, 0.6);
+    for (let j = 0; j < TRACE_LENGTH; j++) {
+      const idx = (i * TRACE_LENGTH + j) * 3;
+      if (j < trajectory[i].length) {
+        const state = trajectory[i][j];
+        // map theta to x, dtheta/dt to y
+        // theta ∈ [-π,π] → x ∈ [-10, 10]
+        // dtheta/dt ∈ [-3, 3] (approx) → y ∈ [-10, 10]
+        tracePositions[idx] = (state.th / Math.PI) * 10 - 10;
+        tracePositions[idx + 1] = (state.dth / 3) * 10;
+        tracePositions[idx + 2] = 0;
+        traceColors[idx] = col.r;
+        traceColors[idx + 1] = col.g;
+        traceColors[idx + 2] = col.b;
+      } else {
+        tracePositions[idx] = 0;
+        tracePositions[idx + 1] = 0;
+        tracePositions[idx + 2] = 0;
+        traceColors[idx] = 0;
+        traceColors[idx + 1] = 0;
+        traceColors[idx + 2] = 0;
+      }
+    }
+  }
+  traceGeom.attributes.position.needsUpdate = true;
+  traceGeom.attributes.color.needsUpdate = true;
+
+  // order parameter
+  const order = computeOrderParameter();
+  // arrow from origin to R*e^(iΨ) scaled to fit in circle
+  arrowPos[0] = 0;
+  arrowPos[1] = 0;
+  arrowPos[2] = 0;
+  arrowPos[3] = Math.cos(order.Psi) * order.R * 8;
+  arrowPos[4] = Math.sin(order.Psi) * order.R * 8;
+  arrowPos[5] = 0;
+  arrowGeom.attributes.position.needsUpdate = true;
+
+  // oscillator phase ring (right side)
+  for (let i = 0; i < N; i++) {
+    const a = theta[i];
+    oscPos[i * 3] = Math.cos(a) * 6;
+    oscPos[i * 3 + 1] = Math.sin(a) * 6;
+    oscPos[i * 3 + 2] = 0;
+    const hue = i / N;
+    const col = new THREE.Color().setHSL(hue, 0.7, 0.6);
+    oscCol[i * 3] = col.r;
+    oscCol[i * 3 + 1] = col.g;
+    oscCol[i * 3 + 2] = col.b;
+  }
+  oscGeom.attributes.position.needsUpdate = true;
+  oscGeom.attributes.color.needsUpdate = true;
+
+  // info panel
+  let regime = 'incoherent';
+  if (order.R > 0.85) regime = 'fully synchronized';
+  else if (order.R > 0.6) regime = 'partial sync';
+  else if (order.R > 0.3) regime = 'clustering';
+  infoEl.innerHTML = `K = ${K.toFixed(3)}<br>R = ${order.R.toFixed(3)}<br>${regime}`;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
