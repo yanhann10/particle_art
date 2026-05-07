@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>p9n · process structure (vertical)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">p9n</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ────────────── process compendium approach: agents moving by simple local rules
+// Structure: N agents each frame read neighborhood state → steer → leave trace
+// No noise. Deterministic from initial seed positions. Black/white/single-accent only.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0c);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 14, 28);
+camera.lookAt(0, 10, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── agents: each has (x,y,z), velocity vector, state (0=seeking, 1=leaving_trace)
+// Rule system (inspired by Reas Process 11 / Casey's agent studies):
+//   - agents seek vertical alignment (climb toward shared vertical axis)
+//   - when density threshold met locally, transition to trace-leaving mode
+//   - trace agents spiral slowly around the vertical and deposit line segments
+//   - after N steps in trace mode, reset to seeking
+// Result: emergent vertical structure with horizontal trace layers
+
+const N_AGENTS = 280;
+const agents = [];
+const CELL_SIZE = 0.8;
+const GRID_W = 32, GRID_H = 48, GRID_D = 32;
+const grid = new Uint8Array(GRID_W * GRID_H * GRID_D);  // 3D occupancy grid for density sensing
+
+function gridIdx(x, y, z){
+  const ix = Math.floor((x + GRID_W/2 * CELL_SIZE) / CELL_SIZE);
+  const iy = Math.floor(y / CELL_SIZE);
+  const iz = Math.floor((z + GRID_D/2 * CELL_SIZE) / CELL_SIZE);
+  if (ix < 0 || ix >= GRID_W || iy < 0 || iy >= GRID_H || iz < 0 || iz >= GRID_D) return -1;
+  return ix + iy * GRID_W + iz * GRID_W * GRID_H;
+}
+
+function gridDensity(x, y, z, r){
+  let count = 0;
+  for (let dy = -1; dy <= 1; dy++){
+    for (let dx = -1; dx <= 1; dx++){
+      for (let dz = -1; dz <= 1; dz++){
+        const idx = gridIdx(x + dx*CELL_SIZE, y + dy*CELL_SIZE, z + dz*CELL_SIZE);
+        if (idx >= 0) count += grid[idx];
+      }
+    }
+  }
+  return count;
+}
+
+// seed agents in a horizontal disc near y=2
+const rng = (() => { let s = 0x2F6E2B1; return () => { s = (s + 0x9E3779B9) | 0;
+  let t = Math.imul(s ^ s >>> 16, 0x21F0AAAD); t ^= t >>> 15;
+  t = Math.imul(t, 0x735A2D97); return ((t ^ t >>> 15) >>> 0) / 4294967296; }; })();
+
+for (let i = 0; i < N_AGENTS; i++){
+  const th = rng() * Math.PI * 2;
+  const r = 2.5 + rng() * 5;
+  agents.push({
+    x: Math.cos(th) * r,
+    y: 2 + rng() * 0.5,
+    z: Math.sin(th) * r,
+    vx: 0, vy: 0, vz: 0,
+    state: 0,   // 0=seek, 1=trace
+    traceSteps: 0,
+    seed: rng()
+  });
+}
+
+// ────────────── trace geometry: line segments deposited by trace-mode agents
+const MAX_TRACES = 60000;
+const tracePositions = new Float32Array(MAX_TRACES * 2 * 3);
+const traceColors = new Float32Array(MAX_TRACES * 2 * 3);
+let traceCount = 0;
+
+function addTrace(x0, y0, z0, x1, y1, z1, hue){
+  if (traceCount >= MAX_TRACES) return;
+  const i = traceCount * 6;
+  tracePositions[i]   = x0; tracePositions[i+1] = y0; tracePositions[i+2] = z0;
+  tracePositions[i+3] = x1; tracePositions[i+4] = y1; tracePositions[i+5] = z1;
+  // monochrome: base white 0.88 brightness, accent (hue==1) is muted orange
+  const c = hue === 1
+    ? [0.72, 0.48, 0.32]   // single accent color: desaturated rust
+    : [0.88, 0.88, 0.88];
+  traceColors[i]   = c[0]; traceColors[i+1] = c[1]; traceColors[i+2] = c[2];
+  traceColors[i+3] = c[0]; traceColors[i+4] = c[1]; traceColors[i+5] = c[2];
+  traceCount++;
+}
+
+const traceGeom = new THREE.BufferGeometry();
+traceGeom.setAttribute('position', new THREE.BufferAttribute(tracePositions, 3));
+traceGeom.setAttribute('color', new THREE.BufferAttribute(traceColors, 3));
+const traceMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.5 });
+const traceLines = new THREE.LineSegments(traceGeom, traceMat);
+scene.add(traceLines);
+
+// ────────────── agent dots (small particles at current agent positions)
+const agentGeom = new THREE.BufferGeometry();
+const agentPos = new Float32Array(N_AGENTS * 3);
+const agentCol = new Float32Array(N_AGENTS * 3);
+agentGeom.setAttribute('position', new THREE.BufferAttribute(agentPos, 3));
+agentGeom.setAttribute('color', new THREE.BufferAttribute(agentCol, 3));
+const agentMat = new THREE.PointsMaterial({ size: 0.15, vertexColors: true, transparent: true, opacity: 0.9 });
+const agentPoints = new THREE.Points(agentGeom, agentMat);
+scene.add(agentPoints);
+
+// ────────────── update loop
+function updateAgents(){
+  grid.fill(0);
+  // mark grid occupancy
+  for (const a of agents){
+    const idx = gridIdx(a.x, a.y, a.z);
+    if (idx >= 0) grid[idx] = Math.min(grid[idx] + 1, 255);
+  }
+
+  for (let i = 0; i < agents.length; i++){
+    const a = agents[i];
+    const prevX = a.x, prevY = a.y, prevZ = a.z;
+
+    if (a.state === 0){
+      // SEEK mode: agents move toward vertical axis + upward
+      const toCenter = Math.sqrt(a.x*a.x + a.z*a.z);
+      const centerForce = Math.min(0.12, toCenter * 0.04);
+      a.vx += -(a.x / (toCenter + 0.001)) * centerForce;
+      a.vz += -(a.z / (toCenter + 0.001)) * centerForce;
+      a.vy += 0.08;   // climb
+      // check local density
+      const dens = gridDensity(a.x, a.y, a.z, 1.2);
+      if (dens > 5 && a.y > 4){
+        a.state = 1;
+        a.traceSteps = 0;
+      }
+    } else {
+      // TRACE mode: spiral slowly around vertical, deposit line segment each step
+      const toCenter = Math.sqrt(a.x*a.x + a.z*a.z) + 0.001;
+      const r = toCenter;
+      const orbitSpeed = 0.03;
+      a.vx = -(a.z / r) * orbitSpeed * r;
+      a.vz =  (a.x / r) * orbitSpeed * r;
+      a.vy = 0.05 + a.seed * 0.02;   // slow climb
+      a.traceSteps++;
+      if (a.traceSteps > 180 || a.y > 24){
+        // reset to seek mode at new y-level
+        a.state = 0;
+        a.traceSteps = 0;
+      }
+    }
+
+    // damping
+    a.vx *= 0.85;
+    a.vy *= 0.92;
+    a.vz *= 0.85;
+    const maxV = 0.25;
+    const spd = Math.sqrt(a.vx*a.vx + a.vy*a.vy + a.vz*a.vz);
+    if (spd > maxV){
+      a.vx = a.vx / spd * maxV;
+      a.vy = a.vy / spd * maxV;
+      a.vz = a.vz / spd * maxV;
+    }
+
+    a.x += a.vx;
+    a.y += a.vy;
+    a.z += a.vz;
+
+    // bounds
+    if (a.y < 0){ a.y = 0; a.vy *= -0.2; }
+    if (a.y > 26){ a.y = 26; a.vy *= -0.2; }
+    const lim = 12;
+    if (Math.abs(a.x) > lim){ a.x = Math.sign(a.x) * lim; a.vx *= -0.3; }
+    if (Math.abs(a.z) > lim){ a.z = Math.sign(a.z) * lim; a.vz *= -0.3; }
+
+    // deposit trace if in trace mode and moved at least 0.05 units
+    if (a.state === 1){
+      const moved = Math.sqrt((a.x-prevX)**2 + (a.y-prevY)**2 + (a.z-prevZ)**2);
+      if (moved > 0.05){
+        // accent color for every 20th agent (5% accent)
+        const hue = (i % 20 === 0) ? 1 : 0;
+        addTrace(prevX, prevY, prevZ, a.x, a.y, a.z, hue);
+      }
+    }
+
+    // update agent point positions + colors
+    agentPos[i*3]   = a.x;
+    agentPos[i*3+1] = a.y;
+    agentPos[i*3+2] = a.z;
+    // agent color: white if seeking, accent if tracing + is accent agent
+    if (a.state === 1 && i % 20 === 0){
+      agentCol[i*3]   = 0.72;
+      agentCol[i*3+1] = 0.48;
+      agentCol[i*3+2] = 0.32;
+    } else {
+      agentCol[i*3]   = 0.88;
+      agentCol[i*3+1] = 0.88;
+      agentCol[i*3+2] = 0.88;
+    }
+  }
+
+  agentGeom.attributes.position.needsUpdate = true;
+  agentGeom.attributes.color.needsUpdate = true;
+  traceGeom.setDrawRange(0, traceCount * 2);
+  traceGeom.attributes.position.needsUpdate = true;
+  traceGeom.attributes.color.needsUpdate = true;
+}
+
+// ────────────── animation
+let frame = 0;
+function loop(){
+  frame++;
+  if (frame % 2 === 0) updateAgents();   // 30 updates/sec (half render rate)
+  
+  // slow camera orbit
+  const t = frame * 0.0008;
+  camera.position.x = Math.sin(t) * 28;
+  camera.position.z = Math.cos(t) * 28;
+  camera.lookAt(0, 10, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
