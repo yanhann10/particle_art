@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kjn · data-flow cascade · Refik Anadol GPGPU</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08060c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">kjn</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 2000);
+camera.position.set(0, 0, 180);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08060c, 1);
+document.body.appendChild(renderer.domElement);
+
+// GPGPU simulation setup
+const WIDTH = 512;
+const N = WIDTH * WIDTH; // 262144 particles
+
+const gpuCompute = {
+  renderer: new THREE.WebGLRenderer(),
+  scene: new THREE.Scene(),
+  camera: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+};
+
+// Initialize position and velocity textures
+const posData = new Float32Array(WIDTH * WIDTH * 4);
+const velData = new Float32Array(WIDTH * WIDTH * 4);
+
+for (let i = 0; i < WIDTH * WIDTH; i++){
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const r = 15 + Math.random() * 25;
+  
+  posData[i*4]   = r * Math.sin(phi) * Math.cos(theta);
+  posData[i*4+1] = r * Math.sin(phi) * Math.sin(theta) - 20;
+  posData[i*4+2] = r * Math.cos(phi);
+  posData[i*4+3] = Math.random();
+  
+  velData[i*4]   = (Math.random() - 0.5) * 0.2;
+  velData[i*4+1] = Math.random() * 0.5 + 0.3;
+  velData[i*4+2] = (Math.random() - 0.5) * 0.2;
+  velData[i*4+3] = Math.random();
+}
+
+const posTex = new THREE.DataTexture(posData, WIDTH, WIDTH, THREE.RGBAFormat, THREE.FloatType);
+posTex.needsUpdate = true;
+const velTex = new THREE.DataTexture(velData, WIDTH, WIDTH, THREE.RGBAFormat, THREE.FloatType);
+velTex.needsUpdate = true;
+
+const rtOptions = { 
+  minFilter: THREE.NearestFilter, 
+  magFilter: THREE.NearestFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.FloatType
+};
+
+let posRT = new THREE.WebGLRenderTarget(WIDTH, WIDTH, rtOptions);
+let velRT = new THREE.WebGLRenderTarget(WIDTH, WIDTH, rtOptions);
+let posRT2 = new THREE.WebGLRenderTarget(WIDTH, WIDTH, rtOptions);
+let velRT2 = new THREE.WebGLRenderTarget(WIDTH, WIDTH, rtOptions);
+
+// Copy initial data to render targets
+const copyMaterial = new THREE.ShaderMaterial({
+  uniforms: { tInput: { value: null } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tInput;
+    varying vec2 vUv;
+    void main(){ gl_FragColor = texture2D(tInput, vUv); }
+  `
+});
+
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), copyMaterial);
+gpuCompute.scene.add(quad);
+
+function copyTexture(source, target){
+  copyMaterial.uniforms.tInput.value = source;
+  gpuCompute.renderer.setRenderTarget(target);
+  gpuCompute.renderer.render(gpuCompute.scene, gpuCompute.camera);
+}
+
+copyTexture(posTex, posRT);
+copyTexture(velTex, velRT);
+
+// Simulation shader - Anadol-style smooth data-flow field
+const simMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    tPos: { value: null },
+    tVel: { value: null },
+    uTime: { value: 0 },
+    uDelta: { value: 0.016 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tPos;
+    uniform sampler2D tVel;
+    uniform float uTime;
+    uniform float uDelta;
+    varying vec2 vUv;
+    
+    vec3 flowField(vec3 p, float t){
+      // Smooth, large-scale flow inspired by trained neural network patterns
+      float scale1 = 0.008;
+      float scale2 = 0.015;
+      float scale3 = 0.022;
+      
+      vec3 flow = vec3(0.0);
+      
+      // Primary cascade - downward architectural flow
+      flow.x += sin(p.y * scale1 + t * 0.3) * cos(p.z * scale1) * 2.5;
+      flow.y += -1.8 + sin(p.x * scale2 - t * 0.2) * 0.8;
+      flow.z += cos(p.x * scale1 + t * 0.25) * sin(p.y * scale1) * 2.5;
+      
+      // Secondary swirl - neural convolution-like
+      float swirl = sin(p.x * scale2 + t * 0.15) * cos(p.z * scale2 - t * 0.18);
+      flow.x += swirl * 1.5;
+      flow.z += swirl * -1.5;
+      
+      // Tertiary drift - dreaming machine motion
+      flow += vec3(
+        sin(p.y * scale3 + t * 0.12) * 0.6,
+        cos((p.x + p.z) * scale3 + t * 0.08) * 0.4,
+        sin(p.x * scale3 - t * 0.1) * 0.6
+      );
+      
+      return flow;
+    }
+    
+    void main(){
+      vec4 pos = texture2D(tPos, vUv);
+      vec4 vel = texture2D(tVel, vUv);
+      
+      vec3 p = pos.xyz;
+      vec3 v = vel.xyz;
+      
+      // Flow field influence
+      vec3 flow = flowField(p, uTime);
+      v += flow * 0.015;
+      
+      // Soft boundary attraction - keep flow contained
+      float boundaryRadius = 70.0;
+      float dist = length(p);
+      if(dist > boundaryRadius * 0.6){
+        float force = pow((dist - boundaryRadius * 0.6) / (boundaryRadius * 0.4), 1.5);
+        v += normalize(-p) * force * 0.3;
+      }
+      
+      // Damping for smooth motion
+      v *= 0.98;
+      
+      // Speed normalization
+      float speed = length(v);
+      if(speed > 3.0) v *= 3.0 / speed;
+      if(speed < 0.2) v *= 0.2 / speed;
+      
+      p += v * uDelta * 60.0;
+      
+      gl_FragColor = vec4(p, pos.w);
+    }
+  `
+});
+
+const velUpdateMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    tPos: { value: null },
+    tVel: { value: null },
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tVel;
+    varying vec2 vUv;
+    void main(){ gl_FragColor = texture2D(tVel, vUv); }
+  `
+});
+
+function simulateStep(dt){
+  simMaterial.uniforms.tPos.value = posRT.texture;
+  simMaterial.uniforms.tVel.value = velRT.texture;
+  simMaterial.uniforms.uTime.value = performance.now() * 0.001;
+  simMaterial.uniforms.uDelta.value = dt;
+  
+  quad.material = simMaterial;
+  gpuCompute.renderer.setRenderTarget(posRT2);
+  gpuCompute.renderer.render(gpuCompute.scene, gpuCompute.camera);
+  
+  velUpdateMaterial.uniforms.tVel.value = velRT.texture;
+  quad.material = velUpdateMaterial;
+  gpuCompute.renderer.setRenderTarget(velRT2);
+  gpuCompute.renderer.render(gpuCompute.scene, gpuCompute.camera);
+  
+  [posRT, posRT2] = [posRT2, posRT];
+  [velRT, velRT2] = [velRT2, velRT];
+}
+
+// Particle rendering
+const uvs = new Float32Array(N * 2);
+for (let i = 0; i < WIDTH; i++){
+  for (let j = 0; j < WIDTH; j++){
+    const idx = i * WIDTH + j;
+    uvs[idx*2] = j / WIDTH;
+    uvs[idx*2+1] = i / WIDTH;
+  }
+}
+
+const particleUniforms = {
+  tPos: { value: null },
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const particleMaterial = new THREE.ShaderMaterial({
+  uniforms: particleUniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D tPos;
+    uniform float uTime;
+    uniform float uPixel;
+    attribute vec2 uv2;
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    void main(){
+      vec4 posData = texture2D(tPos, uv2);
+      vec3 p = posData.xyz;
+      float seed = posData.w;
+      
+      // Pearlescent cyan-violet duotone with white-hot core
+      float phase = seed * 6.28 + uTime * 0.4;
+      float pulse = 0.5 + 0.5 * sin(phase);
+      
+      vec3 coldCyan = vec3(0.45, 0.75, 0.88);
+      vec3 deepViolet = vec3(0.52, 0.38, 0.72);
+      vec3 whiteHot = vec3(1.0, 0.98, 0.95);
+      
+      float heat = smoothstep(0.7, 1.0, pulse);
+      vCol = mix(coldCyan, deepViolet, smoothstep(0.2, 0.6, pulse));
+      vCol = mix(vCol, whiteHot, heat * 0.7);
+      
+      vAlpha = 0.35 + 0.45 * pulse;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + 0.8 * pulse) * uPixel * (120.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if(r > 0.25) discard;
+      
+      // Soft glow falloff
+      float core = exp(-r * 20.0);
+      float glow = exp(-r * 8.0);
+      float bloom = exp(-r * 3.0);
+      
+      float a = (core * 0.6 + glow * 0.3 + bloom * 0.1) * vAlpha;
+      vec3 col = vCol * (1.0 + core * 0.5);
+      
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const particleGeom = new THREE.BufferGeometry();
+particleGeom.setAttribute('uv2', new THREE.BufferAttribute(uvs, 2));
+const particleSystem = new THREE.Points(particleGeom, particleMaterial);
+scene.add(particleSystem);
+
+// Background gradient - architectural depth
+const bgMaterial = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.999, 1.0); }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    void main(){
+      vec2 p = vUv - 0.5;
+      float d = length(p);
+      
+      vec3 deep = vec3(0.03, 0.02, 0.05);
+      vec3 mid = vec3(0.08, 0.06, 0.12);
+      
+      float gradient = smoothstep(0.0, 0.7, d);
+      vec3 col = mix(mid, deep, gradient);
+      
+      // Subtle drift
+      col += vec3(0.01, 0.015, 0.02) * sin(p.y * 3.0 + uTime * 0.1);
+      
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+  depthTest: false,
+  depthWrite: false
+});
+
+const bgGeom = new THREE.PlaneGeometry(2, 2);
+const bgMesh = new THREE.Mesh(bgGeom, bgMaterial);
+scene.add(bgMesh);
+
+// Camera tracking centroid
+const centroid = new THREE.Vector3();
+let trackPos = new THREE.Vector3(0, 0, 180);
+
+function updateCamera(){
+  // Sample centroid from position texture
+  gpuCompute.renderer.readRenderTargetPixels(posRT, 0, 0, WIDTH, WIDTH, posData);
+  centroid.set(0, 0, 0);
+  for(let i = 0; i < N; i++){
+    centroid.x += posData[i*4];
+    centroid.y += posData[i*4+1];
+    centroid.z += posData[i*4+2];
+  }
+  centroid.multiplyScalar(1 / N);
+  
+  // Smooth camera follow
+  const targetDist = 180;
+  const angle = performance.now() * 0.00005;
+  const targetPos = new THREE.Vector3(
+    centroid.x + Math.cos(angle) * targetDist * 0.4,
+    centroid.y + 25,
+    centroid.z + Math.sin(angle) * targetDist + targetDist * 0.5
+  );
+  
+  trackPos.lerp(targetPos, 0.02);
+  camera.position.copy(trackPos);
+  camera.lookAt(centroid);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastTime = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  const t = now * 0.001;
+  
+  simulateStep(dt);
+  
+  particleUniforms.tPos.value = posRT.texture;
+  particleUniforms.uTime.value = t;
+  bgMaterial.uniforms.uTime.value = t;
+  
+  if(now % 120 < 16) updateCamera();
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>

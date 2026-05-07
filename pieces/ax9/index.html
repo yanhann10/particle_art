@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ax9 · physarum trails</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0410; overflow:hidden;
+               color:#e5d6f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size: 11px; letter-spacing: 0.04em; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #150a25; color:#e5d6f0; border:1px solid #4a2a6a;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; }
+  button.start:hover { background:#22113a; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · shape the trails</button>
+<div class="id">ax9</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const W = 1024, H = 1024;
+const N = 20000;
+
+// agent state: x, y, angle (stored in texture)
+const agentData = new Float32Array(N * 4);
+const cx = W * 0.5, cy = H * 0.5;
+for (let i = 0; i < N; i++) {
+  const angle = Math.random() * Math.PI * 2;
+  const r = Math.random() * 120 + 40;
+  agentData[i*4]   = cx + r * Math.cos(angle);
+  agentData[i*4+1] = cy + r * Math.sin(angle);
+  agentData[i*4+2] = angle;
+  agentData[i*4+3] = Math.random();
+}
+const agentTexture = new THREE.DataTexture(agentData, N, 1, THREE.RGBAFormat, THREE.FloatType);
+agentTexture.needsUpdate = true;
+
+// trail texture (ping-pong)
+const rtOptions = { 
+  format: THREE.RGBAFormat, 
+  type: THREE.FloatType,
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  wrapS: THREE.ClampToEdgeWrapping,
+  wrapT: THREE.ClampToEdgeWrapping
+};
+let trailA = new THREE.WebGLRenderTarget(W, H, rtOptions);
+let trailB = new THREE.WebGLRenderTarget(W, H, rtOptions);
+
+// audio
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+let analyser = null, freqData = null;
+const uBands = new THREE.Vector4(0,0,0,0);
+let uTreble = 0;
+async function startAudio(){
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting mic…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.75;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'live · slime seeks sound';
+  } catch (e) {
+    hint.textContent = 'mic denied — autonomous mode';
+  }
+}
+startBtn.addEventListener('click', startAudio);
+
+function bandEnergy(arr, lo, hi){
+  let s = 0;
+  for (let i = lo; i < hi; i++) s += arr[i];
+  return (s / (hi-lo)) / 255;
+}
+
+// agent update shader
+const agentMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uAgents: { value: agentTexture },
+    uTrail: { value: trailA.texture },
+    uRes: { value: new THREE.Vector2(W, H) },
+    uTime: { value: 0 },
+    uBands: { value: uBands },
+    uTreble: { value: 0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uAgents;
+    uniform sampler2D uTrail;
+    uniform vec2 uRes;
+    uniform float uTime;
+    uniform vec4 uBands;
+    uniform float uTreble;
+    varying vec2 vUv;
+
+    float sense(vec2 pos, float ang, float offset){
+      float sensorDist = 9.0 + uBands.x * 12.0;
+      vec2 sensorPos = pos + vec2(cos(ang + offset), sin(ang + offset)) * sensorDist;
+      vec2 st = sensorPos / uRes;
+      if (st.x < 0.0 || st.x > 1.0 || st.y < 0.0 || st.y > 1.0) return 0.0;
+      return texture2D(uTrail, st).r;
+    }
+
+    void main(){
+      vec4 agent = texture2D(uAgents, vUv);
+      vec2 pos = agent.xy;
+      float ang = agent.z;
+      float seed = agent.w;
+
+      float sensorAngle = 0.4 + uBands.z * 0.3;
+      float left   = sense(pos, ang, -sensorAngle);
+      float center = sense(pos, ang, 0.0);
+      float right  = sense(pos, ang,  sensorAngle);
+
+      float turnSpeed = 0.08 + uTreble * 0.15;
+      if (center > left && center > right) {
+        // keep going
+      } else if (left > right) {
+        ang -= turnSpeed;
+      } else if (right > left) {
+        ang += turnSpeed;
+      } else {
+        ang += (seed - 0.5) * turnSpeed * 2.0;
+      }
+
+      float speed = 1.2 + uBands.y * 1.8;
+      pos.x += cos(ang) * speed;
+      pos.y += sin(ang) * speed;
+
+      // wrap
+      if (pos.x < 0.0) pos.x += uRes.x;
+      if (pos.x >= uRes.x) pos.x -= uRes.x;
+      if (pos.y < 0.0) pos.y += uRes.y;
+      if (pos.y >= uRes.y) pos.y -= uRes.y;
+
+      gl_FragColor = vec4(pos, ang, seed);
+    }
+  `
+});
+
+// deposit shader (draw agents into trail)
+const depositMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uAgents: { value: agentTexture },
+    uTrailPrev: { value: trailA.texture },
+    uRes: { value: new THREE.Vector2(W, H) },
+    uBands: { value: uBands }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uAgents;
+    uniform sampler2D uTrailPrev;
+    uniform vec2 uRes;
+    uniform vec4 uBands;
+    varying vec2 vUv;
+    void main(){
+      vec4 prev = texture2D(uTrailPrev, vUv);
+      vec2 pixelPos = vUv * uRes;
+      
+      float deposit = 0.0;
+      float searchRadius = 1.5;
+      int agentCount = ${N};
+      for (int i = 0; i < ${Math.min(N, 8192)}; i++) {
+        if (i >= agentCount) break;
+        float u = (float(i) + 0.5) / float(agentCount);
+        vec4 agent = texture2D(uAgents, vec2(u, 0.5));
+        vec2 diff = agent.xy - pixelPos;
+        float d = length(diff);
+        if (d < searchRadius) {
+          deposit += (1.0 - d / searchRadius) * 0.3;
+        }
+      }
+
+      float val = prev.r + deposit;
+      gl_FragColor = vec4(val, val, val, 1.0);
+    }
+  `
+});
+
+// diffuse/decay shader
+const diffuseMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTrail: { value: trailA.texture },
+    uRes: { value: new THREE.Vector2(W, H) },
+    uDecay: { value: 0.96 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uTrail;
+    uniform vec2 uRes;
+    uniform float uDecay;
+    varying vec2 vUv;
+    void main(){
+      vec2 px = 1.0 / uRes;
+      float c = texture2D(uTrail, vUv).r;
+      float n = texture2D(uTrail, vUv + vec2(0, px.y)).r;
+      float s = texture2D(uTrail, vUv - vec2(0, px.y)).r;
+      float e = texture2D(uTrail, vUv + vec2(px.x, 0)).r;
+      float w = texture2D(uTrail, vUv - vec2(px.x, 0)).r;
+      float blur = (c + n + s + e + w) * 0.2;
+      float val = blur * uDecay;
+      gl_FragColor = vec4(val, val, val, 1.0);
+    }
+  `
+});
+
+// display shader
+const displayMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTrail: { value: trailA.texture },
+    uBands: { value: uBands },
+    uTreble: { value: 0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uTrail;
+    uniform vec4 uBands;
+    uniform float uTreble;
+    varying vec2 vUv;
+    void main(){
+      float val = texture2D(uTrail, vUv).r;
+      val = pow(val * 0.5, 0.8);
+      
+      // palette drift: bass → amber glow, treble → cyan threads
+      vec3 amber = vec3(0.98, 0.68, 0.22);
+      vec3 cyan = vec3(0.25, 0.85, 0.95);
+      vec3 deep = vec3(0.05, 0.02, 0.08);
+      
+      float mix_k = uBands.x * 0.4 + uTreble * 0.6;
+      vec3 hot = mix(amber, cyan, mix_k);
+      
+      vec3 col = mix(deep, hot, val);
+      col += vec3(0.1, 0.05, 0.15) * val * val * (1.0 + uBands.z * 2.0);
+      
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), displayMat);
+const updateScene = new THREE.Scene();
+updateScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), agentMat));
+
+const depositScene = new THREE.Scene();
+depositScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), depositMat));
+
+const diffuseScene = new THREE.Scene();
+diffuseScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), diffuseMat));
+
+const displayScene = new THREE.Scene();
+displayScene.add(quad);
+
+// agent render target
+const agentRT = new THREE.WebGLRenderTarget(N, 1, {
+  format: THREE.RGBAFormat,
+  type: THREE.FloatType,
+  minFilter: THREE.NearestFilter,
+  magFilter: THREE.NearestFilter
+});
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  agentMat.uniforms.uTime.value = t;
+
+  if (analyser){
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    uBands.x = bandEnergy(freqData, 0, Math.floor(n*0.04));
+    uBands.y = bandEnergy(freqData, Math.floor(n*0.04), Math.floor(n*0.12));
+    uBands.z = bandEnergy(freqData, Math.floor(n*0.12), Math.floor(n*0.30));
+    uBands.w = bandEnergy(freqData, Math.floor(n*0.30), Math.floor(n*0.55));
+    uTreble = bandEnergy(freqData, Math.floor(n*0.55), n);
+  } else {
+    uBands.x = 0.35 + 0.25 * Math.sin(t*1.3);
+    uBands.y = 0.30 + 0.20 * Math.sin(t*2.1 + 1.1);
+    uBands.z = 0.25 + 0.15 * Math.sin(t*3.0 + 2.0);
+    uBands.w = 0.20 + 0.12 * Math.sin(t*4.7 + 0.4);
+    uTreble = 0.18 + 0.12 * Math.sin(t*7.0);
+  }
+  agentMat.uniforms.uTreble.value = uTreble;
+  displayMat.uniforms.uTreble.value = uTreble;
+
+  // update agents
+  agentMat.uniforms.uTrail.value = trailA.texture;
+  renderer.setRenderTarget(agentRT);
+  renderer.render(updateScene, camera);
+  agentTexture.image.data = new Float32Array(N * 4);
+  renderer.readRenderTargetPixels(agentRT, 0, 0, N, 1, agentTexture.image.data);
+  agentTexture.needsUpdate = true;
+
+  // deposit
+  depositMat.uniforms.uAgents.value = agentTexture;
+  depositMat.uniforms.uTrailPrev.value = trailA.texture;
+  renderer.setRenderTarget(trailB);
+  renderer.render(depositScene, camera);
+
+  // diffuse/decay
+  diffuseMat.uniforms.uTrail.value = trailB.texture;
+  renderer.setRenderTarget(trailA);
+  renderer.render(diffuseScene, camera);
+
+  // display
+  displayMat.uniforms.uTrail.value = trailA.texture;
+  renderer.setRenderTarget(null);
+  renderer.render(displayScene, camera);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
