@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>e9c · courier heatmap</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1d22; overflow:hidden;
+               color:#d0f0d5; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">e9c</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x1a1d22, 30, 90);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 55, 35);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1d22, 1);
+document.body.appendChild(renderer.domElement);
+
+// Generate Voronoi-like city grid as graph
+const SITES = 60;
+const GRID_SIZE = 40;
+const sites = [];
+for (let i = 0; i < SITES; i++){
+  sites.push({
+    x: (Math.random()-0.5) * GRID_SIZE,
+    z: (Math.random()-0.5) * GRID_SIZE,
+    h: 2 + Math.random() * 8
+  });
+}
+
+// Build street graph: connect each site to 2-4 nearest neighbors
+const graph = sites.map(() => []);
+for (let i = 0; i < SITES; i++){
+  const dists = [];
+  for (let j = 0; j < SITES; j++){
+    if (i === j) continue;
+    const dx = sites[i].x - sites[j].x;
+    const dz = sites[i].z - sites[j].z;
+    dists.push({ idx: j, d: Math.sqrt(dx*dx + dz*dz) });
+  }
+  dists.sort((a,b) => a.d - b.d);
+  const n = 2 + Math.floor(Math.random()*3);
+  for (let k = 0; k < Math.min(n, dists.length); k++){
+    const target = dists[k].idx;
+    if (!graph[i].includes(target)) graph[i].push(target);
+    if (!graph[target].includes(i)) graph[target].push(i);
+  }
+}
+
+// Render buildings as wireframe boxes
+const buildingGroup = new THREE.Group();
+sites.forEach(s => {
+  const geom = new THREE.BoxGeometry(1.2, s.h, 1.2);
+  const edges = new THREE.EdgesGeometry(geom);
+  const mat = new THREE.LineBasicMaterial({ color: 0x3a4a52, transparent: true, opacity: 0.5 });
+  const wire = new THREE.LineSegments(edges, mat);
+  wire.position.set(s.x, s.h * 0.5, s.z);
+  buildingGroup.add(wire);
+});
+scene.add(buildingGroup);
+
+// Render street graph as thin lines
+const streetPoints = [];
+for (let i = 0; i < SITES; i++){
+  for (const j of graph[i]){
+    if (j > i){
+      streetPoints.push(new THREE.Vector3(sites[i].x, 0.05, sites[i].z));
+      streetPoints.push(new THREE.Vector3(sites[j].x, 0.05, sites[j].z));
+    }
+  }
+}
+const streetGeom = new THREE.BufferGeometry().setFromPoints(streetPoints);
+const streetMat = new THREE.LineBasicMaterial({ color: 0x4a5560, transparent: true, opacity: 0.3 });
+const streetLines = new THREE.LineSegments(streetGeom, streetMat);
+scene.add(streetLines);
+
+// Ground plane
+const planeGeom = new THREE.PlaneGeometry(GRID_SIZE*1.4, GRID_SIZE*1.4);
+const planeMat = new THREE.MeshBasicMaterial({ color: 0x0f1215, side: THREE.DoubleSide });
+const plane = new THREE.Mesh(planeGeom, planeMat);
+plane.rotation.x = -Math.PI / 2;
+plane.position.y = -0.1;
+scene.add(plane);
+
+// Courier particles: each has a path (sequence of site indices)
+const COURIERS = 120;
+const couriers = [];
+for (let i = 0; i < COURIERS; i++){
+  const start = Math.floor(Math.random() * SITES);
+  let path = [start];
+  let current = start;
+  const hops = 8 + Math.floor(Math.random() * 12);
+  for (let h = 0; h < hops; h++){
+    const neighbors = graph[current];
+    if (!neighbors.length) break;
+    const next = neighbors[Math.floor(Math.random() * neighbors.length)];
+    path.push(next);
+    current = next;
+  }
+  couriers.push({
+    path,
+    segmentIdx: 0,
+    t: 0,
+    speed: 0.3 + Math.random() * 0.5,
+    trail: [],
+    color: Math.random() > 0.5 ? new THREE.Color(0xa0ff5a) : new THREE.Color(0xff4a9a)
+  });
+}
+
+// Trail rendering: each courier appends to its own BufferGeometry line
+const trailMeshes = couriers.map(c => {
+  const geom = new THREE.BufferGeometry();
+  const mat = new THREE.LineBasicMaterial({ 
+    vertexColors: true, 
+    transparent: true, 
+    blending: THREE.AdditiveBlending,
+    linewidth: 1
+  });
+  const mesh = new THREE.Line(geom, mat);
+  scene.add(mesh);
+  return { geom, mesh };
+});
+
+function updateCourier(c, dt){
+  if (c.segmentIdx >= c.path.length - 1) {
+    // restart
+    c.segmentIdx = 0;
+    c.t = 0;
+    c.trail = [];
+    return;
+  }
+  c.t += c.speed * dt;
+  if (c.t >= 1){
+    c.segmentIdx++;
+    c.t = 0;
+  }
+  const i0 = c.path[c.segmentIdx];
+  const i1 = c.path[Math.min(c.segmentIdx + 1, c.path.length - 1)];
+  const s0 = sites[i0];
+  const s1 = sites[i1];
+  const x = THREE.MathUtils.lerp(s0.x, s1.x, c.t);
+  const z = THREE.MathUtils.lerp(s0.z, s1.z, c.t);
+  const y = 0.2;
+  c.trail.push({ x, y, z, age: 0 });
+  if (c.trail.length > 400) c.trail.shift();
+}
+
+function renderTrail(c, idx){
+  const trail = c.trail;
+  if (trail.length < 2) return;
+  const positions = new Float32Array(trail.length * 3);
+  const colors = new Float32Array(trail.length * 3);
+  for (let i = 0; i < trail.length; i++){
+    positions[i*3]   = trail[i].x;
+    positions[i*3+1] = trail[i].y;
+    positions[i*3+2] = trail[i].z;
+    const fade = (i / trail.length) * 0.6;
+    colors[i*3]   = c.color.r * fade;
+    colors[i*3+1] = c.color.g * fade;
+    colors[i*3+2] = c.color.b * fade;
+  }
+  const { geom, mesh } = trailMeshes[idx];
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+}
+
+// Ambient light
+const ambient = new THREE.AmbientLight(0x505a66, 0.6);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.4);
+dirLight.position.set(10, 30, 20);
+scene.add(dirLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let lastT = start;
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  const dt = (now - lastT) / 1000;
+  lastT = now;
+
+  // Slow camera rotation
+  const angle = t * 0.05;
+  const radius = 50;
+  camera.position.x = Math.cos(angle) * radius * 0.7;
+  camera.position.z = Math.sin(angle) * radius;
+  camera.lookAt(0, 0, 0);
+
+  // Update couriers
+  couriers.forEach((c, i) => {
+    updateCourier(c, dt);
+    renderTrail(c, i);
+  });
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
