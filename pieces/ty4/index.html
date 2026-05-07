@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the flock that loses one and finds it again · planes of light</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               background: #0c0b0f;
+               font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#a8b8d0; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size:10px; letter-spacing:0.06em; color:#d09060; }
+</style>
+</head>
+<body>
+<div class="id">ty4</div>
+<div class="arc" id="arc">together · 100%</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Olafur Eliasson — The Weather Project (Tate Modern, 2003)
+// A half-sun of sodium-amber mono-frequency light reflected in a mirrored ceiling,
+// fog machines filling the Turbine Hall so visitors became silhouettes in atmosphere.
+// Here: the boids narrative arc rendered as translucent PLANES — each bird is a small
+// billboard quad. Overlap accumulates light. The flock becomes a sun-disc when together,
+// dispersing into lonely fog-sheets when the straggler is lost.
+// Background: inhabited atmosphere — subtle starfield grain, low horizon glow.
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0c0b0f, 1);
+document.body.appendChild(renderer.domElement);
+
+// ── starfield background texture (subtle grain, not blank)
+const starCanvas = document.createElement('canvas');
+starCanvas.width = 512; starCanvas.height = 512;
+const sctx = starCanvas.getContext('2d');
+sctx.fillStyle = '#0c0b0f';
+sctx.fillRect(0, 0, 512, 512);
+// scatter faint stars
+for (let i = 0; i < 300; i++){
+  const x = Math.random() * 512, y = Math.random() * 512;
+  const a = 0.08 + Math.random() * 0.15;
+  sctx.fillStyle = `rgba(200,190,170,${a})`;
+  sctx.fillRect(x, y, 1, 1);
+}
+// low horizon glow
+const hGrad = sctx.createLinearGradient(0, 400, 0, 512);
+hGrad.addColorStop(0, 'rgba(60,35,20,0)');
+hGrad.addColorStop(1, 'rgba(60,35,20,0.25)');
+sctx.fillStyle = hGrad;
+sctx.fillRect(0, 400, 512, 112);
+const starTex = new THREE.CanvasTexture(starCanvas);
+const bgGeom = new THREE.PlaneGeometry(80, 80);
+const bgMat = new THREE.MeshBasicMaterial({ map: starTex, depthWrite: false });
+const bgMesh = new THREE.Mesh(bgGeom, bgMat);
+bgMesh.position.z = -40;
+scene.add(bgMesh);
+
+// ── boids simulation (same narrative arc as parent sav)
+const N = 481;
+const STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+
+for (let i = 0; i < N; i++){
+  const r = Math.random() * 1.6 + 0.4;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI - Math.PI * 0.5;
+  pos[i*3]     = Math.cos(th) * Math.cos(ph) * r;
+  pos[i*3+1]   = Math.sin(ph) * r;
+  pos[i*3+2]   = Math.sin(th) * Math.cos(ph) * r;
+  vel[i*3]     = 0.3 + (Math.random() - 0.5) * 0.4;
+  vel[i*3+1]   = (Math.random() - 0.5) * 0.3;
+  vel[i*3+2]   = (Math.random() - 0.5) * 0.4;
+}
+pos[0] = -1.2; pos[1] = 0.6; pos[2] = 0.0;
+
+const PERCEPTION_R = 4.0, SEPARATION_R = 0.9;
+const W_COH = 0.018, W_ALI = 0.060, W_SEP = 0.080;
+const MAX_SPEED = 1.4, MAX_FORCE = 0.030;
+
+let cohesion = 1.0;
+let arcStage = 'together';
+const arcEl = document.getElementById('arc');
+
+function step(dt){
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 1; i < N; i++){
+    cx += pos[i*3]; cy += pos[i*3+1]; cz += pos[i*3+2];
+  }
+  cx /= (N-1); cy /= (N-1); cz /= (N-1);
+
+  const sx = pos[0] - cx, sy = pos[1] - cy, sz = pos[2] - cz;
+  const stragDist = Math.sqrt(sx*sx + sy*sy + sz*sz);
+  const targetCohesion = Math.max(0, Math.min(1, 1 - stragDist / 8));
+  cohesion += (targetCohesion - cohesion) * dt * 0.45;
+
+  if (cohesion > 0.85) arcStage = 'together';
+  else if (cohesion > 0.5 && stragDist > 4.5) arcStage = 'loss';
+  else if (cohesion < 0.5) arcStage = 'seeking';
+  else if (arcStage === 'seeking' && cohesion > 0.65) arcStage = 'return';
+  arcEl.textContent = `${arcStage} · ${Math.round(cohesion * 100)}%`;
+
+  const acc = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++){
+    let cohX=0,cohY=0,cohZ=0,cohN=0;
+    let aliX=0,aliY=0,aliZ=0,aliN=0;
+    let sepX=0,sepY=0,sepZ=0;
+    const px=pos[i*3], py=pos[i*3+1], pz=pos[i*3+2];
+    const isS = (i === STRAGGLER);
+    const pR = isS ? PERCEPTION_R * 0.55 : PERCEPTION_R;
+
+    for (let j = 0; j < N; j++){
+      if (i===j) continue;
+      const dx=pos[j*3]-px, dy=pos[j*3+1]-py, dz=pos[j*3+2]-pz;
+      const d2=dx*dx+dy*dy+dz*dz;
+      if (d2 > pR*pR || d2 < 1e-6) continue;
+      cohX+=pos[j*3]; cohY+=pos[j*3+1]; cohZ+=pos[j*3+2]; cohN++;
+      aliX+=vel[j*3]; aliY+=vel[j*3+1]; aliZ+=vel[j*3+2]; aliN++;
+      if (d2 < SEPARATION_R*SEPARATION_R){
+        const inv=1/Math.sqrt(d2);
+        sepX-=dx*inv; sepY-=dy*inv; sepZ-=dz*inv;
+      }
+    }
+
+    if (isS){
+      const drift = Math.sin(performance.now()*0.0003)*0.4;
+      acc[i*3] += drift;
+      acc[i*3+1] += -0.25 + Math.cos(performance.now()*0.0002)*0.2;
+      acc[i*3+2] += drift*0.6;
+    }
+
+    if (!isS && (arcStage==='seeking'||arcStage==='return')){
+      const tx=pos[0]-px, ty=pos[1]-py, tz=pos[2]-pz;
+      const td=Math.sqrt(tx*tx+ty*ty+tz*tz)+1e-3;
+      const seek = arcStage==='seeking' ? 0.020 : 0.012;
+      acc[i*3]+=tx/td*seek; acc[i*3+1]+=ty/td*seek; acc[i*3+2]+=tz/td*seek;
+    }
+
+    if (cohN>0){
+      acc[i*3]+=(cohX/cohN-px)*W_COH;
+      acc[i*3+1]+=(cohY/cohN-py)*W_COH;
+      acc[i*3+2]+=(cohZ/cohN-pz)*W_COH;
+    }
+    if (aliN>0){
+      acc[i*3]+=(aliX/aliN-vel[i*3])*W_ALI;
+      acc[i*3+1]+=(aliY/aliN-vel[i*3+1])*W_ALI;
+      acc[i*3+2]+=(aliZ/aliN-vel[i*3+2])*W_ALI;
+    }
+    acc[i*3]+=sepX*W_SEP; acc[i*3+1]+=sepY*W_SEP; acc[i*3+2]+=sepZ*W_SEP;
+
+    const d2c=px*px+py*py+pz*pz;
+    if (d2c>90){
+      const inv=0.012/Math.sqrt(d2c);
+      acc[i*3]-=px*inv; acc[i*3+1]-=py*inv; acc[i*3+2]-=pz*inv;
+    }
+  }
+
+  const speedMul = (arcStage==='loss'||arcStage==='seeking') ? 0.55
+                 : arcStage==='return' ? 0.85 : 1.0;
+  for (let i = 0; i < N; i++){
+    let ax=acc[i*3],ay=acc[i*3+1],az=acc[i*3+2];
+    const af=Math.sqrt(ax*ax+ay*ay+az*az);
+    if (af>MAX_FORCE){ax*=MAX_FORCE/af;ay*=MAX_FORCE/af;az*=MAX_FORCE/af;}
+    vel[i*3]+=ax; vel[i*3+1]+=ay; vel[i*3+2]+=az;
+    let vx=vel[i*3],vy=vel[i*3+1],vz=vel[i*3+2];
+    const sp=Math.sqrt(vx*vx+vy*vy+vz*vz);
+    if (sp>MAX_SPEED){vx*=MAX_SPEED/sp;vy*=MAX_SPEED/sp;vz*=MAX_SPEED/sp;vel[i*3]=vx;vel[i*3+1]=vy;vel[i*3+2]=vz;}
+    pos[i*3]+=vel[i*3]*dt*speedMul;
+    pos[i*3+1]+=vel[i*3+1]*dt*speedMul;
+    pos[i*3+2]+=vel[i*3+2]*dt*speedMul;
+  }
+}
+
+// ── instanced planes (Eliasson atmospheric sheets)
+const planeGeo = new THREE.PlaneGeometry(0.7, 0.7);
+const planeMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uCohesion: { value: 1.0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uCohesion;
+    varying float vOpacity;
+    varying vec3 vColor;
+
+    void main(){
+      // instanceMatrix carries position + rotation
+      vec4 mvPos = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mvPos;
+
+      float depth = -mvPos.z;
+      // opacity: low base so overlap builds up the image
+      // straggler (instance 0) gets slightly higher opacity
+      float baseFade = smoothstep(50.0, 8.0, depth);
+      vOpacity = 0.055 * baseFade;
+
+      // sodium amber mono-frequency (Weather Project)
+      // when cohesion drops, shift toward a cooler amber-grey
+      vec3 sodiumWarm = vec3(0.95, 0.55, 0.08);  // sodium lamp amber
+      vec3 sodiumCool = vec3(0.45, 0.35, 0.25);  // dim tungsten
+      vColor = mix(sodiumCool, sodiumWarm, smoothstep(0.0, 1.0, uCohesion));
+    }
+  `,
+  fragmentShader: `
+    varying float vOpacity;
+    varying vec3 vColor;
+    void main(){
+      // soft-edged quad — radial falloff from center
+      vec2 uv = gl_PointCoord;
+      // use frag position relative to quad center
+      // PlaneGeometry UVs go 0..1, remap to -1..1
+      // Actually for plane geometry, we use the built-in UV isn't passed —
+      // use screen-space softness via distance from center of the quad
+      // Simple: full quad with slight edge fade
+      gl_FragColor = vec4(vColor, vOpacity);
+    }
+  `
+});
+
+const mesh = new THREE.InstancedMesh(planeGeo, planeMat, N);
+mesh.frustumCulled = false;
+scene.add(mesh);
+
+const dummy = new THREE.Object3D();
+const seeds = new Float32Array(N);
+for (let i = 0; i < N; i++) seeds[i] = Math.random() * Math.PI * 2;
+
+function updateInstances(time){
+  for (let i = 0; i < N; i++){
+    dummy.position.set(pos[i*3], pos[i*3+1], pos[i*3+2]);
+    // billboard: face camera with slight flutter
+    dummy.lookAt(camera.position);
+    // add gentle rotation wobble for atmospheric turbulence
+    const wobble = Math.sin(time * 0.8 + seeds[i]) * 0.15;
+    dummy.rotateZ(wobble);
+    // straggler is larger
+    const s = i === STRAGGLER ? 2.2 : 0.8 + Math.sin(time * 0.3 + seeds[i]) * 0.2;
+    dummy.scale.set(s, s, s);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+}
+
+// ── atmospheric fog planes — large translucent sheets at depth layers
+// These create the Eliasson fog density effect
+const fogPlanes = [];
+for (let i = 0; i < 12; i++){
+  const fGeo = new THREE.PlaneGeometry(40, 40);
+  const fMat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(0.12, 0.07, 0.03),
+    transparent: true,
+    opacity: 0.025,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide
+  });
+  const fMesh = new THREE.Mesh(fGeo, fMat);
+  fMesh.position.z = -15 + i * 2.5;
+  fMesh.rotation.x = (Math.random() - 0.5) * 0.1;
+  fMesh.rotation.y = (Math.random() - 0.5) * 0.1;
+  scene.add(fMesh);
+  fogPlanes.push(fMesh);
+}
+
+// ── sun disc (Eliasson's half-circle, here a glowing circular plane behind flock)
+const sunGeo = new THREE.CircleGeometry(3.5, 64);
+const sunMat = new THREE.MeshBasicMaterial({
+  color: new THREE.Color(0.95, 0.45, 0.05),
+  transparent: true,
+  opacity: 0.18,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false
+});
+const sunMesh = new THREE.Mesh(sunGeo, sunMat);
+sunMesh.position.z = -12;
+scene.add(sunMesh);
+
+// second layer for glow
+const sunGeo2 = new THREE.CircleGeometry(5.5, 64);
+const sunMat2 = new THREE.MeshBasicMaterial({
+  color: new THREE.Color(0.6, 0.25, 0.02),
+  transparent: true,
+  opacity: 0.08,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false
+});
+const sunMesh2 = new THREE.Mesh(sunGeo2, sunMat2);
+sunMesh2.position.z = -14;
+scene.add(sunMesh2);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm
+for (let s = 0; s < 250; s++) step(0.05);
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  const time = now / 1000;
+
+  planeMat.uniforms.uTime.value = time;
+  planeMat.uniforms.uCohesion.value = cohesion;
+
+  step(dt);
+  updateInstances(time);
+
+  // sun disc pulses with cohesion — brighter when together (relief)
+  sunMat.opacity = 0.12 + cohesion * 0.12;
+  sunMat2.opacity = 0.05 + cohesion * 0.06;
+
+  // fog planes drift gently
+  for (let i = 0; i < fogPlanes.length; i++){
+    fogPlanes[i].position.x = Math.sin(time * 0.05 + i * 1.2) * 2;
+    fogPlanes[i].material.opacity = 0.018 + (1 - cohesion) * 0.012;
+  }
+
+  // camera: slow orbit tracking flock centroid
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < N; i++){
+    cx += pos[i*3]; cy += pos[i*3+1]; cz += pos[i*3+2];
+  }
+  cx /= N; cy /= N; cz /= N;
+
+  const ang = now * 0.00008;
+  camera.position.x = Math.sin(ang) * 26 + cx * 0.3;
+  camera.position.y = cy * 0.2 + 2;
+  camera.position.z = Math.cos(ang) * 26 + cz * 0.3;
+  camera.lookAt(cx, cy, cz);
+
+  // keep sun behind flock from camera's perspective
+  sunMesh.position.x = cx;
+  sunMesh.position.y = cy;
+  sunMesh2.position.x = cx;
+  sunMesh2.position.y = cy;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
