@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: trace, intensity: gentle -->
+<title>pjw · speculative cartography</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0f12; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,monospace; }
+</style>
+</head>
+<body>
+<div class="id">pjw</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── Ayoung Kim — speculative AI cartography ──
+   A fictive city seen from above: Voronoi-ish building footprints as
+   wireframe extrusions, delivery couriers tracing glowing routes across
+   the street graph. Trails accumulate like data-sediment — the map
+   remembers every path taken. Chartreuse + magenta on slate. */
+
+const W = innerWidth, H = innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.setClearColor(0x0d0f12, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, W / H, 0.5, 500);
+camera.position.set(0, 85, 45);
+camera.lookAt(0, 0, 0);
+
+// ── Seeded RNG ──
+let _s = 91827364;
+const rng = () => { _s ^= _s << 13; _s ^= _s >> 17; _s ^= _s << 5; return ((_s >>> 0) / 4294967296); };
+const rngRange = (a, b) => a + rng() * (b - a);
+
+// ── City generation ──
+const CITY_R = 38;
+const BLDG_COUNT = 280;
+const buildings = [];
+const nodes = []; // graph nodes = building centers
+
+// Poisson-ish distribution via dart throwing
+for (let i = 0; i < BLDG_COUNT * 4 && buildings.length < BLDG_COUNT; i++) {
+  const x = rngRange(-CITY_R, CITY_R);
+  const z = rngRange(-CITY_R, CITY_R);
+  // Elliptical city boundary
+  if (x * x + z * z > CITY_R * CITY_R * 0.92) continue;
+  // Min separation
+  let ok = true;
+  for (const b of buildings) {
+    const dx = b.x - x, dz = b.z - z;
+    if (dx * dx + dz * dz < 3.8) { ok = false; break; }
+  }
+  if (!ok) continue;
+  // Leaf-shaped footprint dimensions — elongated, tapered
+  const aspect = rngRange(1.4, 2.8);
+  const baseW = rngRange(0.6, 1.6);
+  const h = rngRange(0.8, 7.5) * (1.0 - Math.sqrt(x * x + z * z) / (CITY_R * 1.1) * 0.6);
+  buildings.push({ x, z, w: baseW, d: baseW * aspect, h: Math.max(0.5, h), rot: rng() * Math.PI });
+  nodes.push(new THREE.Vector3(x, 0, z));
+}
+
+// ── Build street graph (k-nearest neighbors) ──
+const edges = [];
+const adjList = new Array(nodes.length).fill(null).map(() => []);
+
+for (let i = 0; i < nodes.length; i++) {
+  const dists = [];
+  for (let j = 0; j < nodes.length; j++) {
+    if (i === j) continue;
+    dists.push({ j, d: nodes[i].distanceTo(nodes[j]) });
+  }
+  dists.sort((a, b) => a.d - b.d);
+  const k = 3 + Math.floor(rng() * 3);
+  for (let n = 0; n < Math.min(k, dists.length); n++) {
+    const j = dists[n].j;
+    if (dists[n].d > 8.0) break;
+    const edgeKey = Math.min(i, j) * 10000 + Math.max(i, j);
+    if (!edges.find(e => e.key === edgeKey)) {
+      edges.push({ a: i, b: j, key: edgeKey });
+      adjList[i].push({ node: j, edge: edges.length - 1 });
+      adjList[j].push({ node: i, edge: edges.length - 1 });
+    }
+  }
+}
+
+// ── Render buildings as wireframe extrusions ──
+const bldgMat = new THREE.LineBasicMaterial({ color: 0x2a3040, transparent: true, opacity: 0.45 });
+const bldgHighMat = new THREE.LineBasicMaterial({ color: 0x3a4a5a, transparent: true, opacity: 0.3 });
+
+for (const b of buildings) {
+  const hw = b.w * 0.5, hd = b.d * 0.5;
+  // Leaf-ish footprint: 6-sided polygon (pointed at ends)
+  const pts = [
+    [-hw * 0.3, -hd],    // bottom tip
+    [-hw, -hd * 0.4],
+    [-hw * 0.9, hd * 0.3],
+    [0, hd],             // top tip (leaf point)
+    [hw * 0.9, hd * 0.3],
+    [hw, -hd * 0.4],
+    [hw * 0.3, -hd],
+  ];
+  const verts = [];
+  // Bottom face
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, z1] = pts[i];
+    const [x2, z2] = pts[(i + 1) % pts.length];
+    verts.push(x1, 0, z1, x2, 0, z2);
+  }
+  // Top face
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, z1] = pts[i];
+    const [x2, z2] = pts[(i + 1) % pts.length];
+    verts.push(x1, b.h, z1, x2, b.h, z2);
+  }
+  // Verticals
+  for (const [px, pz] of pts) {
+    verts.push(px, 0, pz, px, b.h, pz);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  const line = new THREE.LineSegments(geo, b.h > 3.5 ? bldgHighMat : bldgMat);
+  line.rotation.y = b.rot;
+  line.position.set(b.x, 0, b.z);
+  scene.add(line);
+}
+
+// ── Street lines (subtle) ──
+const streetVerts = [];
+for (const e of edges) {
+  const a = nodes[e.a], b = nodes[e.b];
+  streetVerts.push(a.x, 0.01, a.z, b.x, 0.01, b.z);
+}
+const streetGeo = new THREE.BufferGeometry();
+streetGeo.setAttribute('position', new THREE.Float32BufferAttribute(streetVerts, 3));
+const streetMat = new THREE.LineBasicMaterial({ color: 0x1a2028, transparent: true, opacity: 0.25 });
+scene.add(new THREE.LineSegments(streetGeo, streetMat));
+
+// ── Ground plane — dark with subtle noise ──
+const groundGeo = new THREE.PlaneGeometry(CITY_R * 2.6, CITY_R * 2.6);
+const groundMat = new THREE.ShaderMaterial({
+  transparent: true,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uTime;
+    void main(){
+      vec2 c = vUv - 0.5;
+      float d = length(c);
+      float city = smoothstep(0.52, 0.42, d);
+      // Subtle grid lines
+      vec2 g = fract(vUv * 40.0);
+      float grid = smoothstep(0.02, 0.0, min(g.x, g.y)) * 0.06;
+      vec3 col = mix(vec3(0.05,0.06,0.07), vec3(0.08,0.09,0.11), city);
+      col += grid * city;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.05;
+scene.add(ground);
+
+// ── Courier particles + trail system ──
+const COURIER_COUNT = 60;
+const TRAIL_MAX = 120000; // max trail segments
+const TRAIL_LIFE = 18.0;  // seconds before trail fades
+
+// Trail geometry — pre-allocated, ring buffer
+const trailPositions = new Float32Array(TRAIL_MAX * 6); // 2 verts per segment
+const trailColors = new Float32Array(TRAIL_MAX * 8);    // 2 colors per segment (RGBA)
+const trailBirths = new Float32Array(TRAIL_MAX);
+let trailHead = 0, trailCount = 0;
+
+const trailGeo = new THREE.BufferGeometry();
+trailGeo.setAttribute('position', new THREE.Float32BufferAttribute(trailPositions, 3));
+trailGeo.setAttribute('color', new THREE.Float32BufferAttribute(trailColors, 4));
+trailGeo.setDrawRange(0, 0);
+
+const trailMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexColors: true,
+  vertexShader: `
+    attribute vec4 color;
+    varying vec4 vColor;
+    void main(){
+      vColor = color;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec4 vColor;
+    void main(){
+      gl_FragColor = vColor;
+    }
+  `
+});
+const trailMesh = new THREE.LineSegments(trailGeo, trailMat);
+scene.add(trailMesh);
+
+// Courier state
+const couriers = [];
+// Palette: chartreuse (#b5ff3c), magenta (#e83a8e), warm pink (#ff6b9d), cyan-teal (#3affc8)
+const courierPalette = [
+  new THREE.Color(0xb5ff3c), // chartreuse
+  new THREE.Color(0xe83a8e), // magenta
+  new THREE.Color(0xff6b9d), // warm pink
+  new THREE.Color(0x3affc8), // teal accent
+  new THREE.Color(0xd4ff70), // light chartreuse
+];
+
+for (let i = 0; i < COURIER_COUNT; i++) {
+  const startNode = Math.floor(rng() * nodes.length);
+  const col = courierPalette[Math.floor(rng() * courierPalette.length)];
+  couriers.push({
+    node: startNode,
+    target: -1,
+    pos: nodes[startNode].clone(),
+    prevPos: nodes[startNode].clone(),
+    speed: rngRange(3.5, 8.0),
+    color: col,
+    t: 0,
+    active: true,
+    pauseTimer: 0,
+    brightness: rngRange(0.4, 1.0),
+  });
+}
+
+function pickNextNode(courier) {
+  const adj = adjList[courier.node];
+  if (adj.length === 0) {
+    courier.node = Math.floor(rng() * nodes.length);
+    courier.pos.copy(nodes[courier.node]);
+    return pickNextNode(courier);
+  }
+  const idx = Math.floor(rng() * adj.length);
+  courier.target = adj[idx].node;
+  courier.t = 0;
+  courier.prevPos.copy(courier.pos);
+}
+
+function addTrailSegment(x1, y1, z1, x2, y2, z2, color, brightness, time) {
+  const idx = trailHead;
+  const p = idx * 6;
+  trailPositions[p] = x1; trailPositions[p + 1] = y1; trailPositions[p + 2] = z1;
+  trailPositions[p + 3] = x2; trailPositions[p + 4] = y2; trailPositions[p + 5] = z2;
+  const c = idx * 8;
+  const a = brightness * 0.55;
+  trailColors[c] = color.r * brightness; trailColors[c + 1] = color.g * brightness;
+  trailColors[c + 2] = color.b * brightness; trailColors[c + 3] = a;
+  trailColors[c + 4] = color.r * brightness; trailColors[c + 5] = color.g * brightness;
+  trailColors[c + 6] = color.b * brightness; trailColors[c + 7] = a;
+  trailBirths[idx] = time;
+  trailHead = (trailHead + 1) % TRAIL_MAX;
+  if (trailCount < TRAIL_MAX) trailCount++;
+}
+
+// ── Courier dot rendering (instanced) ──
+const dotGeo = new THREE.CircleGeometry(0.25, 8);
+const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 });
+const dotIM = new THREE.InstancedMesh(dotGeo, dotMat, COURIER_COUNT);
+dotIM.rotation.x = -Math.PI / 2;
+dotIM.position.y = 0.15;
+scene.add(dotIM);
+const _dm = new THREE.Matrix4();
+const _dc = new THREE.Color();
+
+// ── Atmospheric haze — vertical gradient overlay ──
+const hazeMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      float f = smoothstep(0.0, 0.7, vUv.y);
+      vec3 col = mix(vec3(0.04,0.05,0.06), vec3(0.02,0.02,0.04), f);
+      gl_FragColor = vec4(col, 0.15 * (1.0 - f));
+    }
+  `
+});
+const haze = new THREE.Mesh(new THREE.PlaneGeometry(120, 40), hazeMat);
+haze.position.set(0, 20, 0);
+haze.lookAt(camera.position);
+scene.add(haze);
+
+// ── Film grain overlay (Lia Halloran influence) ──
+const grainPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2),
+  new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false,
+    uniforms: { uTime: { value: 0 } },
+    vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.0,1.0); }`,
+    fragmentShader: `
+      varying vec2 vUv;
+      uniform float uTime;
+      float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+      void main(){
+        float g = hash(vUv * 800.0 + uTime * 7.3);
+        gl_FragColor = vec4(vec3(g), 0.035);
+      }
+    `
+  })
+);
+grainPlane.renderOrder = 999;
+grainPlane.frustumCulled = false;
+scene.add(grainPlane);
+
+// ── Ambient light for building edges ──
+scene.add(new THREE.AmbientLight(0x3a4a5a, 0.3));
+
+// ── Resize ──
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Animation ──
+const startTime = performance.now();
+let lastTime = startTime;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const time = (now - startTime) / 1000;
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+
+  // Camera: slow high-angle orbit
+  const cAngle = time * 0.04;
+  const cR = 80 + Math.sin(time * 0.02) * 12;
+  const cY = 65 + Math.sin(time * 0.015) * 8;
+  camera.position.set(Math.sin(cAngle) * cR * 0.5, cY, Math.cos(cAngle) * cR * 0.5);
+  camera.lookAt(0, 0, 0);
+
+  // Update haze orientation
+  haze.lookAt(camera.position);
+
+  // Update couriers
+  for (let i = 0; i < couriers.length; i++) {
+    const c = couriers[i];
+
+    if (c.pauseTimer > 0) {
+      c.pauseTimer -= dt;
+      _dm.makeScale(0.5, 0.5, 0.5);
+      _dm.setPosition(c.pos.x, 0, c.pos.z);
+      dotIM.setMatrixAt(i, _dm);
+      _dc.copy(c.color).multiplyScalar(c.brightness * 0.4);
+      dotIM.setColorAt(i, _dc);
+      continue;
+    }
+
+    if (c.target < 0) pickNextNode(c);
+
+    const from = nodes[c.node];
+    const to = nodes[c.target];
+    const dist = from.distanceTo(to);
+    const step = (c.speed * dt) / Math.max(dist, 0.01);
+    c.t += step;
+
+    const oldPos = c.pos.clone();
+
+    if (c.t >= 1.0) {
+      c.pos.copy(to);
+      // Add final trail segment
+      addTrailSegment(oldPos.x, 0.08, oldPos.z, c.pos.x, 0.08, c.pos.z, c.color, c.brightness, time);
+      c.node = c.target;
+      c.target = -1;
+      // Brief pause at intersection
+      if (rng() < 0.15) c.pauseTimer = rngRange(0.2, 0.8);
+      pickNextNode(c);
+    } else {
+      c.pos.lerpVectors(from, to, c.t);
+      addTrailSegment(oldPos.x, 0.08, oldPos.z, c.pos.x, 0.08, c.pos.z, c.color, c.brightness, time);
+    }
+
+    // Update instanced dot
+    const pulse = 0.7 + 0.3 * Math.sin(time * 3.0 + i);
+    _dm.makeScale(pulse, pulse, pulse);
+    _dm.setPosition(c.pos.x, 0, c.pos.z);
+    dotIM.setMatrixAt(i, _dm);
+    _dc.copy(c.color).multiplyScalar(c.brightness);
+    dotIM.setColorAt(i, _dc);
+  }
+  dotIM.instanceMatrix.needsUpdate = true;
+  if (dotIM.instanceColor) dotIM.instanceColor.needsUpdate = true;
+
+  // Fade old trails
+  for (let i = 0; i < trailCount; i++) {
+    const age = time - trailBirths[i];
+    if (age > TRAIL_LIFE) {
+      const c = i * 8;
+      trailColors[c + 3] = 0; trailColors[c + 7] = 0;
+    } else {
+      const fade = 1.0 - (age / TRAIL_LIFE);
+      const baseFade = fade * fade; // quadratic falloff
+      const c = i * 8;
+      // Keep RGB, modulate alpha
+      trailColors[c + 3] = baseFade * 0.45;
+      trailColors[c + 7] = baseFade * 0.45;
+    }
+  }
+
+  trailGeo.attributes.position.needsUpdate = true;
+  trailGeo.attributes.color.needsUpdate = true;
+  trailGeo.setDrawRange(0, trailCount * 2);
+
+  // Film grain time
+  grainPlane.material.uniforms.uTime.value = time;
+
+  renderer.render(scene, camera);
+}
+
+animate();
+</script>
+</body>
+</html>
