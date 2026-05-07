@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ekm · blind camera · audio reconstruction</title>
+<!-- MOTION: pulsing, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1712; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 10px; letter-spacing: 0.04em; }
+  .listening { position:fixed; right:14px; bottom:12px; opacity:0.65; font-size: 11px; letter-spacing: 0.08em; }
+</style>
+</head>
+<body>
+<div class="id">ekm · blind camera</div>
+<div class="hint">speak or play sound · reconstructs city from noise</div>
+<div class="listening" id="listening">listening...</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Diego Trujillo Pisanty 'Blind Camera' — audio-driven particle field
+// that hallucinations urban silhouettes from ambient sound. FFT bins
+// drive local attractor zones; high-energy bands pull points into
+// recognizable forms (building edges, street grids, vendor silhouettes)
+// before dispersing back to noise. Palette: sun-bleached concrete,
+// smog ochre, oxidized metal — Mexico City remembered through its sound.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1712, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x1a1712, 8, 28);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 50);
+camera.position.set(0, 4, 16);
+camera.lookAt(0, 0, 0);
+
+// particle system: 40k points scattered, then pulled toward attractor zones
+// driven by FFT bins. Each bin controls one zone (x/z position derived from
+// bin index, y from magnitude). When bin energy is high, particles drift
+// toward that zone; when low, they drift outward (Brownian).
+
+const N = 40000;
+const geom = new THREE.BufferGeometry();
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const basePos = new Float32Array(N * 3);
+const zoneAffinity = new Float32Array(N); // which zone this particle prefers
+
+for (let i = 0; i < N; i++){
+  const angle = Math.random() * Math.PI * 2;
+  const rad = 8 + Math.random() * 6;
+  const x = Math.cos(angle) * rad;
+  const z = Math.sin(angle) * rad;
+  const y = (Math.random() - 0.5) * 4;
+  
+  pos[i*3]   = basePos[i*3]   = x;
+  pos[i*3+1] = basePos[i*3+1] = y;
+  pos[i*3+2] = basePos[i*3+2] = z;
+  
+  vel[i*3] = vel[i*3+1] = vel[i*3+2] = 0;
+  zoneAffinity[i] = Math.floor(Math.random() * 16); // 16 FFT zones
+}
+
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('zoneAffinity', new THREE.BufferAttribute(zoneAffinity, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() },
+    uZoneStrengths: { value: new Float32Array(16) }, // FFT bin magnitudes
+    uGlobalEnergy: { value: 0.0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uZoneStrengths[16];
+    uniform float uGlobalEnergy;
+    attribute float zoneAffinity;
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying float vFogDepth;
+    
+    // sun-bleached concrete + smog ochre palette
+    vec3 palConcrete = vec3(0.82, 0.78, 0.70);
+    vec3 palOchre = vec3(0.76, 0.62, 0.38);
+    vec3 palOxide = vec3(0.52, 0.44, 0.36);
+    
+    void main(){
+      int zone = int(zoneAffinity);
+      float strength = uZoneStrengths[zone];
+      
+      // color from zone energy
+      float t = strength * 2.0;
+      vec3 col = mix(palOxide, palConcrete, smoothstep(0.0, 0.6, t));
+      col = mix(col, palOchre, smoothstep(0.6, 1.0, t));
+      
+      // grain from position hash
+      float noise = fract(sin(dot(position.xz, vec2(12.9898, 78.233))) * 43758.5453);
+      col *= 0.85 + 0.15 * noise;
+      
+      vColor = col;
+      vAlpha = 0.5 + strength * 0.5;
+      
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vFogDepth = -mv.z;
+      
+      // size varies with zone energy + global level
+      float sz = 1.8 + strength * 3.0 + uGlobalEnergy * 1.5;
+      gl_PointSize = sz * uPixel * (5.0 / vFogDepth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying float vFogDepth;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      
+      float a = exp(-r * 12.0) * vAlpha;
+      
+      // fog toward background
+      float fogF = smoothstep(8.0, 28.0, vFogDepth);
+      vec3 col = mix(vColor, vec3(0.10, 0.09, 0.07), fogF);
+      
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// depth-warped ground plane (city substrate, minimal)
+const planeGeom = new THREE.PlaneGeometry(40, 40, 64, 64);
+planeGeom.rotateX(-Math.PI / 2);
+const planePos = planeGeom.attributes.position;
+for (let i = 0; i < planePos.count; i++){
+  const x = planePos.getX(i);
+  const z = planePos.getZ(i);
+  const dist = Math.sqrt(x*x + z*z);
+  const warp = Math.sin(dist * 0.08) * 0.5;
+  planePos.setY(i, warp - 2.0);
+}
+planeGeom.attributes.position.needsUpdate = true;
+
+const planeMat = new THREE.MeshBasicMaterial({ 
+  color: 0x2a241d, 
+  fog: true,
+  transparent: true,
+  opacity: 0.35
+});
+const plane = new THREE.Mesh(planeGeom, planeMat);
+scene.add(plane);
+
+// audio setup: request mic, analyze FFT, drive zone strengths
+let audioCtx, analyser, dataArray, bufferLength;
+let micGranted = false;
+
+async function initAudio(){
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new AudioContext();
+    const source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    bufferLength = analyser.frequencyBinCount;
+    dataArray = new Uint8Array(bufferLength);
+    source.connect(analyser);
+    micGranted = true;
+    document.getElementById('listening').textContent = 'listening · speak or play sound';
+  } catch (e) {
+    // fallback: synthetic pulse if mic denied
+    document.getElementById('listening').textContent = 'mic denied · using synthetic pulse';
+  }
+}
+initAudio();
+
+// attractor zones (16 zones, arranged in rough grid around origin)
+const zones = [];
+for (let i = 0; i < 16; i++){
+  const row = Math.floor(i / 4);
+  const col = i % 4;
+  const x = (col - 1.5) * 5;
+  const z = (row - 1.5) * 5;
+  zones.push(new THREE.Vector3(x, 0, z));
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  
+  mat.uniforms.uTime.value = now / 1000;
+  
+  // read FFT or fallback synthetic
+  const strengths = new Float32Array(16);
+  let globalEnergy = 0;
+  
+  if (micGranted && analyser){
+    analyser.getByteFrequencyData(dataArray);
+    // bin 16 zones from FFT (group ~16 bins per zone)
+    const binsPerZone = Math.floor(bufferLength / 16);
+    for (let i = 0; i < 16; i++){
+      let sum = 0;
+      for (let j = 0; j < binsPerZone; j++){
+        const idx = i * binsPerZone + j;
+        if (idx < bufferLength) sum += dataArray[idx];
+      }
+      strengths[i] = (sum / binsPerZone) / 255.0;
+      globalEnergy += strengths[i];
+    }
+    globalEnergy /= 16.0;
+  } else {
+    // synthetic pulse: 3 zones pulse in sequence
+    const cycle = (now / 1000) % 6.0;
+    const activeZone = Math.floor(cycle / 2.0);
+    const pulse = Math.sin(cycle * Math.PI) ** 2;
+    strengths[activeZone * 5] = pulse;
+    strengths[activeZone * 5 + 1] = pulse * 0.7;
+    strengths[activeZone * 5 + 2] = pulse * 0.5;
+    globalEnergy = pulse * 0.4;
+  }
+  
+  mat.uniforms.uZoneStrengths.value = strengths;
+  mat.uniforms.uGlobalEnergy.value = globalEnergy;
+  
+  // particle dynamics: drift toward assigned zone when strength high,
+  // Brownian otherwise
+  const positions = geom.attributes.position.array;
+  for (let i = 0; i < N; i++){
+    const zone = Math.floor(zoneAffinity[i]);
+    const strength = strengths[zone];
+    const zonePos = zones[zone];
+    
+    const px = positions[i*3];
+    const py = positions[i*3+1];
+    const pz = positions[i*3+2];
+    
+    const dx = zonePos.x - px;
+    const dy = -py; // pull toward y=0
+    const dz = zonePos.z - pz;
+    
+    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    
+    // high strength → attraction, low strength → drift
+    const pull = strength * 0.6;
+    const brownian = (1.0 - strength) * 0.3;
+    
+    vel[i*3]   += (dx / (dist + 1.0)) * pull * dt + (Math.random() - 0.5) * brownian;
+    vel[i*3+1] += (dy / (dist + 1.0)) * pull * dt * 0.5 + (Math.random() - 0.5) * brownian * 0.5;
+    vel[i*3+2] += (dz / (dist + 1.0)) * pull * dt + (Math.random() - 0.5) * brownian;
+    
+    // damping
+    vel[i*3]   *= 0.88;
+    vel[i*3+1] *= 0.88;
+    vel[i*3+2] *= 0.88;
+    
+    positions[i*3]   += vel[i*3] * dt * 10.0;
+    positions[i*3+1] += vel[i*3+1] * dt * 10.0;
+    positions[i*3+2] += vel[i*3+2] * dt * 10.0;
+    
+    // soft boundary (keep in 20-unit radius)
+    const r = Math.sqrt(positions[i*3]**2 + positions[i*3+2]**2);
+    if (r > 20){
+      const scale = 20 / r;
+      positions[i*3] *= scale;
+      positions[i*3+2] *= scale;
+    }
+  }
+  geom.attributes.position.needsUpdate = true;
+  
+  // slow camera orbit
+  const angle = now * 0.00012;
+  camera.position.x = Math.sin(angle) * 16;
+  camera.position.z = Math.cos(angle) * 16;
+  camera.position.y = 4 + Math.sin(angle * 0.6) * 1.5;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
