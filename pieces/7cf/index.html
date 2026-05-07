@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: propagate, intensity: gentle -->
+<title>7cf · the flock that loses one and finds it again</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#a8b8d0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  /* muted dawn gradient — desaturated from sav, no longer reads as loud blank sky */
+  body {
+    background:
+      linear-gradient(to bottom,
+        #121220 0%,
+        #1a1628 22%,
+        #261e2a 45%,
+        #33272a 68%,
+        #3d3028 88%,
+        #463828 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+          letter-spacing:0.06em; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size:10px;
+          letter-spacing:0.06em; color:#8a7060; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+</style>
+</head>
+<body>
+<div class="id">7cf</div>
+<div class="arc" id="arc">together · 100%</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// PROPAGATE mutation of sav: the flock's emotion doesn't just change —
+// it TRAVELS. When the straggler separates, a wavefront of unease ripples
+// outward through the flock at finite speed (like a neural action potential,
+// like starlings passing a turn-signal through the murmuration). When the
+// straggler returns, a warm wave of relief washes back.
+//
+// Each bird is a leaf — the leaf-as-basic-unit principle. Leaves carried
+// on wind, leaves that signal autumn, leaves that scatter and gather.
+//
+// Background: muted gradient + starfield specks + paper grain overlay
+// (user feedback: sav's dawn-sky was too loud/blank).
+//
+// Reference: Craig Reynolds' boids (1987) for base positions,
+// but the PRIMARY motion is Huygens wavefront propagation —
+// each bird relays the signal to its neighbors with a distance-delay.
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ─── starfield: low-opacity specks to break the gradient's emptiness
+const starCount = 320;
+const starGeo = new THREE.BufferGeometry();
+const starPos = new Float32Array(starCount * 3);
+const starAlpha = new Float32Array(starCount);
+for (let i = 0; i < starCount; i++){
+  starPos[i*3]     = (Math.random() - 0.5) * 120;
+  starPos[i*3 + 1] = (Math.random() - 0.5) * 80;
+  starPos[i*3 + 2] = -30 - Math.random() * 40;
+  starAlpha[i] = 0.15 + Math.random() * 0.35;
+}
+starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+starGeo.setAttribute('alpha', new THREE.BufferAttribute(starAlpha, 1));
+const starMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, fog: false,
+  vertexShader: `
+    attribute float alpha;
+    varying float vA;
+    void main(){
+      vA = alpha;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = 1.2;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      gl_FragColor = vec4(0.7, 0.72, 0.78, vA * (1.0 - r * 4.0));
+    }
+  `
+});
+scene.add(new THREE.Points(starGeo, starMat));
+
+// ─── atmospheric dust: very faint, slow-moving particles for grain/texture
+const dustCount = 180;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+const dustSeed = new Float32Array(dustCount);
+for (let i = 0; i < dustCount; i++){
+  dustPos[i*3]     = (Math.random() - 0.5) * 50;
+  dustPos[i*3 + 1] = (Math.random() - 0.5) * 30;
+  dustPos[i*3 + 2] = -5 - Math.random() * 25;
+  dustSeed[i] = Math.random();
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeo.setAttribute('seed', new THREE.BufferAttribute(dustSeed, 1));
+const dustMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, fog: false,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    uniform float uTime;
+    attribute float seed;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      p.x += sin(uTime * 0.12 + seed * 40.0) * 0.8;
+      p.y += cos(uTime * 0.08 + seed * 30.0) * 0.5;
+      vA = 0.04 + 0.03 * sin(uTime * 0.3 + seed * 20.0);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 1.0 + seed * 0.8;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      gl_FragColor = vec4(0.6, 0.55, 0.5, vA);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeo, dustMat));
+
+// ─── ground horizon: a subtle warm line at the bottom third
+const horizGeo = new THREE.PlaneGeometry(120, 0.08);
+const horizMat = new THREE.MeshBasicMaterial({
+  color: 0x4a3828, transparent: true, opacity: 0.12, fog: false
+});
+const horizon = new THREE.Mesh(horizGeo, horizMat);
+horizon.position.set(0, -8, -20);
+scene.add(horizon);
+
+// ────────────── flock: 481 leaves (480 ordinary + 1 straggler)
+const N = 481;
+const STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const wavePhase = new Float32Array(N);   // 0 = unexcited, >0 = excited (decays)
+const waveDelay = new Float32Array(N);   // time until this bird relays the wave
+const leafAngle = new Float32Array(N);   // per-leaf rotation for variety
+
+for (let i = 0; i < N; i++){
+  const r = Math.random() * 2.0 + 0.3;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI - Math.PI * 0.5;
+  pos[i*3]     = Math.cos(th) * Math.cos(ph) * r;
+  pos[i*3 + 1] = Math.sin(ph) * r;
+  pos[i*3 + 2] = Math.sin(th) * Math.cos(ph) * r;
+  vel[i*3]     = 0.2 + (Math.random() - 0.5) * 0.3;
+  vel[i*3 + 1] = (Math.random() - 0.5) * 0.2;
+  vel[i*3 + 2] = (Math.random() - 0.5) * 0.3;
+  wavePhase[i] = 0;
+  waveDelay[i] = 0;
+  leafAngle[i] = Math.random() * Math.PI * 2;
+}
+
+// boid parameters (lighter than sav — boids provide formation, not the show)
+const PERCEPTION_R = 3.5;
+const SEPARATION_R = 0.8;
+const W_COH = 0.012;
+const W_ALI = 0.040;
+const W_SEP = 0.065;
+const MAX_SPEED = 1.0;
+const MAX_FORCE = 0.022;
+
+// wave propagation state
+const WAVE_SPEED = 6.0;       // units/second — how fast the wavefront travels
+const WAVE_DECAY = 0.92;      // per-frame decay
+const WAVE_RELAY_DIST = 3.0;  // a bird within this range catches the wave
+let waveOrigin = new Float32Array(3);
+let waveRadius = 0;
+let waveActive = false;
+let waveSign = 1;             // +1 = loss wave (cool), -1 = return wave (warm)
+
+// emotional arc state
+let cohesion = 1.0;
+let arcStage = 'together';
+const arcEl = document.getElementById('arc');
+let lastWaveTrigger = 0;
+
+function emitWave(ox, oy, oz, sign){
+  waveOrigin[0] = ox; waveOrigin[1] = oy; waveOrigin[2] = oz;
+  waveRadius = 0;
+  waveActive = true;
+  waveSign = sign;
+  lastWaveTrigger = performance.now();
+}
+
+function step(dt){
+  // flock centroid (excluding straggler)
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 1; i < N; i++){
+    cx += pos[i*3]; cy += pos[i*3+1]; cz += pos[i*3+2];
+  }
+  cx /= (N-1); cy /= (N-1); cz /= (N-1);
+
+  // straggler distance
+  const sx = pos[0] - cx, sy = pos[1] - cy, sz = pos[2] - cz;
+  const stragDist = Math.sqrt(sx*sx + sy*sy + sz*sz);
+  const targetCoh = Math.max(0.0, Math.min(1.0, 1.0 - stragDist / 8.0));
+  cohesion += (targetCoh - cohesion) * dt * 0.45;
+
+  // arc state machine + wave emission
+  const prevStage = arcStage;
+  if (cohesion > 0.85) arcStage = 'together';
+  else if (cohesion > 0.5 && stragDist > 4.5) arcStage = 'loss';
+  else if (cohesion < 0.5) arcStage = 'seeking';
+  else if (arcStage === 'seeking' && cohesion > 0.65) arcStage = 'return';
+
+  // emit wave on stage transitions
+  const now = performance.now();
+  if (prevStage !== arcStage && now - lastWaveTrigger > 2000){
+    if (arcStage === 'loss' || arcStage === 'seeking'){
+      emitWave(pos[0], pos[1], pos[2], 1);   // loss wave from straggler
+    } else if (arcStage === 'return' || arcStage === 'together'){
+      emitWave(pos[0], pos[1], pos[2], -1);  // reunion wave
+    }
+  }
+
+  // also emit periodic gentle waves during loss/seeking
+  if ((arcStage === 'loss' || arcStage === 'seeking') && now - lastWaveTrigger > 3500){
+    emitWave(pos[0], pos[1], pos[2], 1);
+  }
+  // and during together — gentle warm pulses from the centroid
+  if (arcStage === 'together' && now - lastWaveTrigger > 5000){
+    emitWave(cx, cy, cz, -1);
+  }
+
+  arcEl.textContent = `${arcStage} · ${Math.round(cohesion * 100)}%`;
+
+  // propagate wavefront
+  if (waveActive){
+    waveRadius += WAVE_SPEED * dt;
+    if (waveRadius > 30) waveActive = false;
+    for (let i = 0; i < N; i++){
+      const dx = pos[i*3] - waveOrigin[0];
+      const dy = pos[i*3+1] - waveOrigin[1];
+      const dz = pos[i*3+2] - waveOrigin[2];
+      const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      // the wavefront has a thickness of ~1.5 units
+      if (Math.abs(d - waveRadius) < 1.5){
+        const intensity = 1.0 - Math.abs(d - waveRadius) / 1.5;
+        wavePhase[i] = Math.max(wavePhase[i], intensity * 0.85);
+      }
+    }
+  }
+
+  // decay wave phase
+  for (let i = 0; i < N; i++){
+    wavePhase[i] *= WAVE_DECAY;
+    if (wavePhase[i] < 0.005) wavePhase[i] = 0;
+  }
+
+  // boid update (lighter than sav — formation-keeping, not the star of the show)
+  const acc = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++){
+    let cohX=0,cohY=0,cohZ=0,cohN=0;
+    let aliX=0,aliY=0,aliZ=0,aliN=0;
+    let sepX=0,sepY=0,sepZ=0;
+    const px=pos[i*3], py=pos[i*3+1], pz=pos[i*3+2];
+    const isStrag = (i === STRAGGLER);
+    const percR = isStrag ? PERCEPTION_R * 0.45 : PERCEPTION_R;
+
+    for (let j = 0; j < N; j++){
+      if (i===j) continue;
+      const dx=pos[j*3]-px, dy=pos[j*3+1]-py, dz=pos[j*3+2]-pz;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 > percR*percR || d2 < 1e-6) continue;
+      cohX+=pos[j*3]; cohY+=pos[j*3+1]; cohZ+=pos[j*3+2]; cohN++;
+      aliX+=vel[j*3]; aliY+=vel[j*3+1]; aliZ+=vel[j*3+2]; aliN++;
+      if (d2 < SEPARATION_R*SEPARATION_R){
+        const inv = 1.0/Math.sqrt(d2);
+        sepX-=dx*inv; sepY-=dy*inv; sepZ-=dz*inv;
+      }
+    }
+
+    // straggler drift — a remembered direction pulling it away
+    if (isStrag){
+      const t = now * 0.001;
+      const drift = Math.sin(t * 0.3) * 0.35;
+      acc[i*3]   += drift;
+      acc[i*3+1] += -0.22 + Math.cos(t * 0.2) * 0.18;
+      acc[i*3+2] += drift * 0.5;
+    }
+
+    // wave displacement: when a bird is in an active wave phase,
+    // it gets a transverse kick (perpendicular to wave direction)
+    // THIS is the propagate motion — the visible wavefront
+    if (wavePhase[i] > 0.01){
+      const toOriginX = waveOrigin[0] - px;
+      const toOriginY = waveOrigin[1] - py;
+      const toOriginZ = waveOrigin[2] - pz;
+      const toDist = Math.sqrt(toOriginX*toOriginX + toOriginY*toOriginY + toOriginZ*toOriginZ) + 1e-3;
+      // transverse: cross product with up vector for a perpendicular kick
+      const crossX = toOriginZ / toDist;
+      const crossZ = -toOriginX / toDist;
+      const kick = wavePhase[i] * 0.6;
+      acc[i*3]   += crossX * kick + (toOriginX/toDist) * kick * 0.15 * waveSign;
+      acc[i*3+1] += wavePhase[i] * 0.3;  // slight lift when excited
+      acc[i*3+2] += crossZ * kick + (toOriginZ/toDist) * kick * 0.15 * waveSign;
+    }
+
+    // flock seeks straggler during loss/seeking (emotional pacing)
+    if (!isStrag && (arcStage === 'seeking' || arcStage === 'return')){
+      const tx=pos[0]-px, ty=pos[1]-py, tz=pos[2]-pz;
+      const td = Math.sqrt(tx*tx+ty*ty+tz*tz)+1e-3;
+      const seek = arcStage === 'seeking' ? 0.016 : 0.010;
+      acc[i*3]+=tx/td*seek; acc[i*3+1]+=ty/td*seek; acc[i*3+2]+=tz/td*seek;
+    }
+
+    if (cohN>0){
+      acc[i*3]  +=(cohX/cohN-px)*W_COH;
+      acc[i*3+1]+=(cohY/cohN-py)*W_COH;
+      acc[i*3+2]+=(cohZ/cohN-pz)*W_COH;
+    }
+    if (aliN>0){
+      acc[i*3]  +=(aliX/aliN-vel[i*3])*W_ALI;
+      acc[i*3+1]+=(aliY/aliN-vel[i*3+1])*W_ALI;
+      acc[i*3+2]+=(aliZ/aliN-vel[i*3+2])*W_ALI;
+    }
+    acc[i*3]+=sepX*W_SEP; acc[i*3+1]+=sepY*W_SEP; acc[i*3+2]+=sepZ*W_SEP;
+
+    // soft bounds
+    const d2c = px*px+py*py+pz*pz;
+    if (d2c>90){
+      const inv = 0.012/Math.sqrt(d2c);
+      acc[i*3]+=-px*inv; acc[i*3+1]+=-py*inv; acc[i*3+2]+=-pz*inv;
+    }
+  }
+
+  // integrate
+  const speedMul = (arcStage==='loss'||arcStage==='seeking') ? 0.6
+                 : arcStage==='return' ? 0.8 : 1.0;
+  for (let i = 0; i < N; i++){
+    let ax=acc[i*3], ay=acc[i*3+1], az=acc[i*3+2];
+    const af=Math.sqrt(ax*ax+ay*ay+az*az);
+    if(af>MAX_FORCE){ax*=MAX_FORCE/af;ay*=MAX_FORCE/af;az*=MAX_FORCE/af;}
+    vel[i*3]+=ax; vel[i*3+1]+=ay; vel[i*3+2]+=az;
+    let vx=vel[i*3],vy=vel[i*3+1],vz=vel[i*3+2];
+    const sp=Math.sqrt(vx*vx+vy*vy+vz*vz);
+    if(sp>MAX_SPEED){vx*=MAX_SPEED/sp;vy*=MAX_SPEED/sp;vz*=MAX_SPEED/sp;
+      vel[i*3]=vx;vel[i*3+1]=vy;vel[i*3+2]=vz;}
+    pos[i*3]  +=vel[i*3]*dt*speedMul;
+    pos[i*3+1]+=vel[i*3+1]*dt*speedMul;
+    pos[i*3+2]+=vel[i*3+2]*dt*speedMul;
+  }
+}
+
+// ────────────── render: leaf-shaped point sprites
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+const seedArr = new Float32Array(N);
+for (let i = 0; i < N; i++) seedArr[i] = Math.random();
+geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+const isStragArr = new Float32Array(N);
+isStragArr[STRAGGLER] = 1.0;
+geom.setAttribute('strag', new THREE.BufferAttribute(isStragArr, 1));
+geom.setAttribute('wave', new THREE.BufferAttribute(wavePhase, 1));
+geom.setAttribute('leafAng', new THREE.BufferAttribute(leafAngle, 1));
+
+const uniforms = {
+  uTime:     { value: 0 },
+  uPixel:    { value: renderer.getPixelRatio() },
+  uCohesion: { value: 1.0 },
+  uWaveSign: { value: -1.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending, fog: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uCohesion;
+    uniform float uWaveSign;
+    attribute float seed;
+    attribute float strag;
+    attribute float wave;
+    attribute float leafAng;
+    varying vec3  vCol;
+    varying float vFade;
+    varying float vWave;
+    varying float vLeafAng;
+    varying float vStrag;
+    void main(){
+      vec3 p = position;
+      // subtle flutter: wave-excited birds flicker more
+      float t = uTime * 0.5 + seed * 6.28;
+      float flutter = sin(t * 2.0 + wave * 8.0) * wave * 0.15;
+      p.y += flutter;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // leaf size: straggler is larger, wave-excited birds swell slightly
+      float baseSize = 2.0 + 0.6 * sin(t);
+      float waveSize = wave * 1.8;
+      float stragSize = strag * 3.0;
+      gl_PointSize = (baseSize + waveSize + stragSize) * uPixel * (18.0 / max(dist, 1.0));
+      vFade = clamp(1.0 - (dist - 24.0) / 30.0, 0.0, 1.0);
+
+      // palette — 5 hand-picked colors:
+      // warm cluster:  #d4955a (burnt sienna), #e8c896 (wheat)
+      // cool cluster:  #5a7a9e (steel slate), #7b5a82 (muted plum)
+      // wave accent:   #c07848 (terracotta) for warm waves, #6888a8 (horizon blue) for cool
+      vec3 sienna  = vec3(0.83, 0.58, 0.35);
+      vec3 wheat   = vec3(0.91, 0.78, 0.59);
+      vec3 slate   = vec3(0.35, 0.48, 0.62);
+      vec3 plum    = vec3(0.48, 0.35, 0.51);
+      vec3 terra   = vec3(0.75, 0.47, 0.28);
+      vec3 hblue   = vec3(0.41, 0.53, 0.66);
+
+      vec3 warmBase = mix(sienna, wheat, smoothstep(0.3, 0.7, seed));
+      vec3 coolBase = mix(slate, plum, smoothstep(0.3, 0.7, seed));
+      vec3 base = mix(coolBase, warmBase, smoothstep(0.0, 1.0, uCohesion));
+
+      // wave coloring: cool waves tint toward horizon blue, warm toward terracotta
+      vec3 waveCol = uWaveSign > 0.0 ? hblue : terra;
+      vCol = mix(base, waveCol, wave * 0.65);
+
+      // straggler: always wheat-bright so the eye finds it
+      vCol = mix(vCol, wheat * 1.15, strag * 0.8);
+
+      vWave = wave;
+      vLeafAng = leafAng + uTime * 0.15;
+      vStrag = strag;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vFade;
+    varying float vWave;
+    varying float vLeafAng;
+    varying float vStrag;
+    void main(){
+      // leaf SDF: an ellipse with a pointed tip
+      vec2 uv = gl_PointCoord - 0.5;
+      // rotate by per-leaf angle for variety
+      float c = cos(vLeafAng), s = sin(vLeafAng);
+      vec2 ruv = vec2(c * uv.x - s * uv.y, s * uv.x + c * uv.y);
+      // leaf shape: ellipse stretched on x, narrowing toward +x tip
+      float taper = 1.0 - ruv.x * 1.2;  // narrower toward tip
+      float ex = ruv.x * 1.8;
+      float ey = ruv.y * 3.2 / max(taper, 0.3);
+      float d = ex * ex + ey * ey;
+      if (d > 1.0) discard;
+
+      // midrib vein: a faint dark line along the x-axis
+      float vein = exp(-abs(ruv.y) * 40.0) * 0.12;
+      // soft edge
+      float alpha = exp(-d * 2.5) * vFade;
+      // wave-excited leaves glow brighter
+      alpha *= (1.0 + vWave * 0.6);
+      // straggler: slightly more opaque
+      alpha *= (1.0 + vStrag * 0.3);
+
+      vec3 col = vCol * (1.0 - vein);
+      gl_FragColor = vec4(col * alpha * 0.92, alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ─── subtle fog plane: horizontal atmospheric scatter band
+const fogPlaneGeo = new THREE.PlaneGeometry(80, 3);
+const fogPlaneMat = new THREE.MeshBasicMaterial({
+  color: 0x2a2230, transparent: true, opacity: 0.06, fog: false
+});
+const fogPlane = new THREE.Mesh(fogPlaneGeo, fogPlaneMat);
+fogPlane.position.set(0, -3, -8);
+scene.add(fogPlane);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm: run enough steps that the arc has had time to develop
+for (let s = 0; s < 300; s++) step(0.04);
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  const t = now / 1000;
+  uniforms.uTime.value = t;
+  uniforms.uCohesion.value = cohesion;
+  uniforms.uWaveSign.value = waveSign;
+
+  step(dt);
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.wave.needsUpdate = true;
+  dustMat.uniforms.uTime.value = t;
+
+  // camera: slow orbit tracking flock centroid (not fixed at origin)
+  let cx=0,cy=0,cz=0;
+  for (let i=0;i<N;i++){cx+=pos[i*3];cy+=pos[i*3+1];cz+=pos[i*3+2];}
+  cx/=N; cy/=N; cz/=N;
+  const ang = now * 0.00008;
+  const camR = 26;
+  camera.position.x = cx + Math.sin(ang) * camR;
+  camera.position.y = cy + 2;
+  camera.position.z = cz + Math.cos(ang) * camR;
+  camera.lookAt(cx, cy, cz);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
