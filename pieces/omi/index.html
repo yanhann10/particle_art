@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: breathe, intensity: calm -->
+<title>omi · tender breath strings</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">omi</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Felix Gonzalez-Torres · paired light strings · breathing</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Two paired light strings — Felix Gonzalez-Torres' doubled forms
+   (the absent lover, the second pillow, the paired clocks).
+   Two differential-growth catenary drapes hang side by side,
+   breathing together: the whole form gently expands and contracts
+   on a ~6 second cycle, like two people sleeping beside each other.
+   Bulb warmth brightens on inhale, dims on exhale. */
+
+const BG = 0x0a0807;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 2, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, -1, 0);
+
+// --- curve parameters ---
+const MAX_VERTS = 1800;
+const ATTRACT   = 0.05;
+const REPEL_R   = 0.48;
+const REPEL_STR = 0.10;
+const NOISE     = 0.002;
+const PRESSURE  = 0.002;
+const GRAVITY   = 0.008;
+const MAX_D     = 0.36;
+const ANCHOR_N  = 6;
+
+// breathing parameters
+const BREATH_PERIOD = 6.0;  // seconds per full breath cycle
+const BREATH_AMP    = 0.04; // radial expansion amplitude
+const BREATH_Y_AMP  = 0.06; // vertical lift on inhale
+
+function makeString(offsetZ) {
+  const verts = [];
+  const NV0 = 40;
+  for (let i = 0; i < NV0; i++) {
+    const t = (i / (NV0 - 1)) * 2 - 1;
+    const x = t * 6;
+    const y = -Math.abs(t) * 1.2 + Math.sin(t * Math.PI * 2) * 0.3;
+    verts.push({
+      x, z: offsetZ + (Math.random() - 0.5) * 0.05,
+      y, age: 0,
+      pinY: i < ANCHOR_N || i >= NV0 - ANCHOR_N
+    });
+  }
+  return verts;
+}
+
+// two strings, slightly offset in z — paired like lovers
+const strings = [makeString(-0.6), makeString(0.6)];
+
+// spatial hash per-string
+const CELL = REPEL_R;
+function rebuildGrid(verts) {
+  const grid = new Map();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i];
+    const k = Math.floor(v.x / CELL) + ',' + Math.floor(v.z / CELL);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+  return grid;
+}
+function nearby(v, grid) {
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function stepString(verts) {
+  if (verts.length >= MAX_VERTS) return;
+  const grid = rebuildGrid(verts);
+  const n = verts.length;
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v, grid)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? verts[i - 1] : null;
+    const next = i < n - 1 ? verts[i + 1] : null;
+    const v = verts[i];
+    if (prev) {
+      dx[i] += (prev.x - v.x) * ATTRACT;
+      dz[i] += (prev.z - v.z) * ATTRACT;
+      dy[i] += (prev.y - v.y) * ATTRACT;
+    }
+    if (next) {
+      dx[i] += (next.x - v.x) * ATTRACT;
+      dz[i] += (next.z - v.z) * ATTRACT;
+      dy[i] += (next.y - v.y) * ATTRACT;
+    }
+  }
+  let ccx = 0, ccz = 0;
+  for (let i = 0; i < n; i++) { ccx += verts[i].x; ccz += verts[i].z; }
+  ccx /= n; ccz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - ccx, oz = verts[i].z - ccz;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dz[i] += (oz / d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++) {
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+    const grav = verts[i].pinY ? GRAVITY * 0.05 : GRAVITY;
+    verts[i].y += dy[i] - grav + (Math.random() - 0.5) * NOISE * 0.5;
+    verts[i].age += 0.0004;
+  }
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    grown.push(a);
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    if (ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({
+        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.02,
+        z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.02,
+        y: (a.y + b.y) * 0.5,
+        age: Math.max(a.age, b.age) * 0.7,
+        pinY: false
+      });
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// --- rendering: 40k particles across both strings ---
+const N_RENDER = 40000;
+const N_PER_STRING = N_RENDER / 2;
+const rPos   = new Float32Array(N_RENDER * 3);
+const rSeeds = new Float32Array(N_RENDER);
+const rAge   = new Float32Array(N_RENDER);
+const rString = new Float32Array(N_RENDER); // which string (0 or 1)
+for (let i = 0; i < N_RENDER; i++) {
+  rSeeds[i] = Math.random();
+  rString[i] = i < N_PER_STRING ? 0.0 : 1.0;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('stringId', new THREE.BufferAttribute(rString, 1));
+
+const uniforms = {
+  uTime:       { value: 0 },
+  uPixel:      { value: renderer.getPixelRatio() },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.032 },
+  uBreath:     { value: 0 }  // -1..1 sine of breath cycle
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uBreath;
+    uniform float uFogDensity;
+    attribute float seed;
+    attribute float age;
+    attribute float stringId;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+
+    void main() {
+      vec3 p = position;
+
+      // breathing: gentle radial expansion/contraction
+      // the form expands on inhale (uBreath > 0), contracts on exhale
+      float breathScale = 1.0 + uBreath * 0.035;
+      // also slight vertical lift on inhale — chest rising
+      float breathLift = uBreath * 0.05;
+      p.x *= breathScale;
+      p.z *= breathScale;
+      p.y += breathLift * (1.0 - abs(p.y) * 0.1); // more lift near center
+
+      // very gentle sway — like bulbs barely moving in still air
+      float t = uTime * 0.15 + seed * 6.28;
+      float sway = sin(t) * 0.005 * (1.0 + seed);
+      p.x += sway;
+      p.z += cos(t * 0.7) * 0.003;
+
+      // per-bulb flicker: tied to breath phase
+      // brighter on inhale, dimmer on exhale — like embers fed by breath
+      float breathGlow = 0.92 + 0.08 * uBreath;
+      float flicker = 0.9 + 0.1 * sin(uTime * 0.8 + seed * 30.0);
+
+      // palette: warm filament amber → soft rose → pale cream
+      // two strings get subtly different warmth — one slightly rosier
+      vec3 amber  = vec3(1.0, 0.72, 0.32);
+      vec3 rose   = vec3(1.0, 0.78, 0.62);
+      vec3 cream  = vec3(1.0, 0.94, 0.88);
+      float k = clamp(age * 1.2, 0.0, 1.0);
+
+      // string 0: amber→cream; string 1: slightly rosier
+      vec3 base = stringId < 0.5 ? amber : mix(amber, rose, 0.4);
+      vec3 mid  = stringId < 0.5 ? mix(amber, cream, 0.5) : rose;
+      vCol = mix(base, mid, k);
+      vCol = mix(vCol, cream, smoothstep(0.7, 1.0, k) * 0.25);
+      vCol *= flicker * breathGlow;
+
+      vAlpha = 0.5 + 0.18 * flicker * breathGlow;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 1.7 * uPixel * (42.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // soft warm halo — incandescent bulb glow
+      float core = exp(-r * 26.0);
+      float halo = exp(-r * 7.0) * 0.3;
+      float a = (core + halo) * vAlpha;
+
+      vec3 col = vCol;
+      col = mix(col, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.8);
+
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// wires for both strings
+const wires = strings.map(() => {
+  const wGeom = new THREE.BufferGeometry();
+  const wPos = new Float32Array(MAX_VERTS * 3);
+  wGeom.setAttribute('position', new THREE.BufferAttribute(wPos, 3));
+  const wMat = new THREE.LineBasicMaterial({
+    color: 0x2a2420,
+    transparent: true,
+    opacity: 0.25
+  });
+  const wLine = new THREE.Line(wGeom, wMat);
+  scene.add(wLine);
+  return { geom: wGeom, positions: wPos, line: wLine };
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow
+for (let s = 0; s < 500; s++) {
+  strings.forEach(v => stepString(v));
+}
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function distributeParticles(verts, offset, count) {
+  const n = verts.length;
+  if (n < 2) return;
+  const lengths = [];
+  let total = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    const L = Math.sqrt(
+      (b.x - a.x) ** 2 + (b.z - a.z) ** 2 + (b.y - a.y) ** 2
+    );
+    lengths.push(L);
+    total += L;
+  }
+  if (total <= 0) return;
+  let written = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const share = (i === n - 2)
+      ? count - written
+      : Math.max(1, Math.floor(count * lengths[i] / total));
+    const a = verts[i], b = verts[i + 1];
+    for (let k = 0; k < share && written < count; k++) {
+      const u = Math.random();
+      const cu = u < 0.5 ? u * u * 2 : 1 - (1 - u) * (1 - u) * 2;
+      const spread = 0.014;
+      const idx = (offset + written) * 3;
+      rPos[idx]     = a.x + (b.x - a.x) * cu + (Math.random() - 0.5) * spread;
+      rPos[idx + 1] = a.y + (b.y - a.y) * cu + (Math.random() - 0.5) * spread * 0.5;
+      rPos[idx + 2] = a.z + (b.z - a.z) * cu + (Math.random() - 0.5) * spread;
+      rAge[offset + written] = Math.max(a.age, b.age);
+      written++;
+    }
+  }
+}
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // breath: smooth sine cycle, ~6 seconds
+  // slightly asymmetric — inhale slower than exhale (natural breathing)
+  const breathPhase = (t % BREATH_PERIOD) / BREATH_PERIOD;
+  const rawBreath = Math.sin(breathPhase * Math.PI * 2);
+  // soften with cubic smoothing for organic feel
+  const breath = rawBreath * (0.7 + 0.3 * Math.abs(rawBreath));
+  uniforms.uBreath.value = breath;
+
+  if (!paused) {
+    for (let s = 0; s < 3; s++) {
+      strings.forEach(v => stepString(v));
+    }
+  }
+
+  const totalVerts = strings[0].length + strings[1].length;
+
+  // update wires with breath modulation
+  let gcx = 0, gcy = 0, gcz = 0, gn = 0;
+  strings.forEach((verts, si) => {
+    const w = wires[si];
+    const n = verts.length;
+    const breathScale = 1.0 + breath * 0.035;
+    const breathLift = breath * 0.05;
+    for (let i = 0; i < n; i++) {
+      w.positions[i * 3]     = verts[i].x * breathScale;
+      w.positions[i * 3 + 1] = verts[i].y + breathLift * (1.0 - Math.abs(verts[i].y) * 0.1);
+      w.positions[i * 3 + 2] = verts[i].z * breathScale;
+      gcx += verts[i].x; gcy += verts[i].y; gcz += verts[i].z;
+    }
+    gn += n;
+    w.geom.setDrawRange(0, n);
+    w.geom.attributes.position.needsUpdate = true;
+  });
+
+  // camera tracks centroid
+  if (gn > 0) {
+    gcx /= gn; gcy /= gn; gcz /= gn;
+    controls.target.lerp(new THREE.Vector3(gcx, gcy, gcz), 0.02);
+  }
+
+  // distribute particles across both strings
+  distributeParticles(strings[0], 0, N_PER_STRING);
+  distributeParticles(strings[1], N_PER_STRING, N_PER_STRING);
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+
+  statEl.textContent = `vertices=${totalVerts}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
