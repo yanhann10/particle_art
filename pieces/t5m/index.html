@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>umbra · eclipse web · saraceno</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#050608; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">t5m</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const N_NODES = 1200;
+const K_NEIGHBORS = 8;
+const INTEGRATION_SUBSTEPS = 3;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050608, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 25);
+
+// ────────────────────────── graph construction ──────────────────────────
+class Node {
+  constructor(x, y, z) {
+    this.pos = new THREE.Vector3(x, y, z);
+    this.vel = new THREE.Vector3(0, 0, 0);
+    this.force = new THREE.Vector3(0, 0, 0);
+    this.mass = 1.0;
+    this.neighbors = [];
+  }
+}
+
+const nodes = [];
+for (let i = 0; i < N_NODES; i++){
+  const x = (Math.random() - 0.5) * 8;
+  const y = (Math.random() - 0.5) * 8;
+  const z = 20 + (Math.random() - 0.5) * 16;
+  nodes.push(new Node(x, y, z));
+}
+
+function distSq(a, b){
+  const dx = a.pos.x - b.pos.x, dy = a.pos.y - b.pos.y, dz = a.pos.z - b.pos.z;
+  return dx*dx + dy*dy + dz*dz;
+}
+
+for (let i = 0; i < nodes.length; i++){
+  const candidates = [];
+  for (let j = 0; j < nodes.length; j++){
+    if (i === j) continue;
+    candidates.push({ node: nodes[j], d2: distSq(nodes[i], nodes[j]) });
+  }
+  candidates.sort((a, b) => a.d2 - b.d2);
+  for (let k = 0; k < K_NEIGHBORS && k < candidates.length; k++){
+    const nb = candidates[k].node;
+    if (!nodes[i].neighbors.includes(nb)) nodes[i].neighbors.push(nb);
+    if (!nb.neighbors.includes(nodes[i])) nb.neighbors.push(nodes[i]);
+  }
+}
+
+class Edge {
+  constructor(a, b) {
+    this.a = a; this.b = b;
+    this.restLength = a.pos.distanceTo(b.pos);
+  }
+}
+
+const edges = [];
+const edgeSet = new Set();
+for (const node of nodes){
+  for (const nb of node.neighbors){
+    const ki = nodes.indexOf(node), kj = nodes.indexOf(nb);
+    const key = ki < kj ? `${ki},${kj}` : `${kj},${ki}`;
+    if (!edgeSet.has(key)){
+      edgeSet.add(key);
+      edges.push(new Edge(node, nb));
+    }
+  }
+}
+
+// ────────────────────────── physics ──────────────────────────
+const STIFFNESS = 0.4;
+const DAMPING = 0.88;
+const ATTRACTOR_STRENGTH = 0.015;
+const UMBRA_PULL = 0.008; // gentle inward pull toward centroid (shadow gravity)
+
+function lorenzField(p){
+  return new THREE.Vector3(
+    10.0 * (p.y - p.x),
+    p.x * (28.0 - p.z) - p.y,
+    p.x * p.y - (8.0/3.0) * p.z
+  );
+}
+
+const centroid = new THREE.Vector3();
+
+function integrate(dt){
+  for (const n of nodes) n.force.set(0, 0, 0);
+
+  for (const e of edges){
+    const delta = new THREE.Vector3().subVectors(e.b.pos, e.a.pos);
+    const dist = delta.length();
+    if (dist < 0.001) continue;
+    const stretch = dist - e.restLength;
+    const forceMag = STIFFNESS * stretch;
+    delta.normalize().multiplyScalar(forceMag);
+    e.a.force.add(delta);
+    e.b.force.sub(delta);
+  }
+
+  for (const n of nodes){
+    const field = lorenzField(n.pos).multiplyScalar(ATTRACTOR_STRENGTH);
+    n.force.add(field);
+    // umbra gravity: gentle pull toward centroid, creating density at core
+    const toCenter = new THREE.Vector3().subVectors(centroid, n.pos);
+    const d = toCenter.length();
+    if (d > 0.5) {
+      toCenter.normalize().multiplyScalar(UMBRA_PULL * Math.min(d, 5.0));
+      n.force.add(toCenter);
+    }
+  }
+
+  for (const n of nodes){
+    n.vel.addScaledVector(n.force, dt / n.mass);
+    n.vel.multiplyScalar(DAMPING);
+    n.pos.addScaledVector(n.vel, dt);
+  }
+}
+
+// ────────────────────────── umbra sphere (dark occluder) ──────────────────────────
+const umbraRadius = 2.2;
+const umbraGeo = new THREE.SphereGeometry(umbraRadius, 48, 48);
+const umbraMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    varying vec3 vNormal;
+    varying vec3 vViewDir;
+    void main(){
+      vNormal = normalize(normalMatrix * normal);
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vViewDir = normalize(-mv.xyz);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vNormal;
+    varying vec3 vViewDir;
+    void main(){
+      float rim = 1.0 - max(dot(vNormal, vViewDir), 0.0);
+      // corona glow at the rim — deep amber
+      vec3 corona = vec3(0.85, 0.45, 0.12) * pow(rim, 3.0) * 0.6;
+      // core is near-black
+      vec3 core = vec3(0.012, 0.014, 0.02);
+      vec3 col = core + corona;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const umbraMesh = new THREE.Mesh(umbraGeo, umbraMat);
+scene.add(umbraMesh);
+
+// ────────────────────────── corona ring particles ──────────────────────────
+const N_CORONA = 4000;
+const coronaPos = new Float32Array(N_CORONA * 3);
+const coronaPhase = new Float32Array(N_CORONA);
+for (let i = 0; i < N_CORONA; i++){
+  const theta = Math.random() * Math.PI * 2;
+  const phi = (Math.random() - 0.5) * Math.PI * 0.35;
+  const r = umbraRadius + 0.3 + Math.random() * 1.8;
+  coronaPos[i*3]   = Math.cos(theta) * Math.cos(phi) * r;
+  coronaPos[i*3+1] = Math.sin(phi) * r;
+  coronaPos[i*3+2] = Math.sin(theta) * Math.cos(phi) * r;
+  coronaPhase[i] = Math.random() * 6.28;
+}
+const coronaGeo = new THREE.BufferGeometry();
+coronaGeo.setAttribute('position', new THREE.BufferAttribute(coronaPos, 3));
+coronaGeo.setAttribute('aPhase', new THREE.BufferAttribute(coronaPhase, 1));
+
+const coronaMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime: { value: 0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float aPhase;
+    uniform float uPixel;
+    uniform float uTime;
+    varying float vAlpha;
+    void main(){
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float flicker = 0.4 + 0.6 * sin(uTime * 1.5 + aPhase);
+      vAlpha = flicker * 0.35;
+      gl_PointSize = (1.5 + flicker * 1.5) * uPixel * (5.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 10.0) * vAlpha;
+      vec3 col = vec3(0.9, 0.5, 0.15);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const coronaPoints = new THREE.Points(coronaGeo, coronaMat);
+scene.add(coronaPoints);
+
+// ────────────────────────── thread rendering ──────────────────────────
+const threadPositions = new Float32Array(edges.length * 6);
+const threadColors = new Float32Array(edges.length * 6);
+const threadGeom = new THREE.BufferGeometry();
+threadGeom.setAttribute('position', new THREE.BufferAttribute(threadPositions, 3));
+threadGeom.setAttribute('color', new THREE.BufferAttribute(threadColors, 3));
+
+const threadMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute vec3 color;
+    varying vec3 vColor;
+    varying float vFogDepth;
+    void main(){
+      vColor = color;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vFogDepth = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vFogDepth;
+    void main(){
+      float fogF = 1.0 - exp(-0.004 * vFogDepth * vFogDepth);
+      vec3 fogColor = vec3(0.02, 0.023, 0.03);
+      vec3 col = mix(vColor, fogColor, fogF);
+      gl_FragColor = vec4(col, 0.28);
+    }
+  `
+});
+const threads = new THREE.LineSegments(threadGeom, threadMat);
+scene.add(threads);
+
+// ────────────────────────── node points ──────────────────────────
+const nodePositions = new Float32Array(nodes.length * 3);
+const nodeColors = new Float32Array(nodes.length * 3);
+const nodeGeom = new THREE.BufferGeometry();
+nodeGeom.setAttribute('position', new THREE.BufferAttribute(nodePositions, 3));
+nodeGeom.setAttribute('color', new THREE.BufferAttribute(nodeColors, 3));
+
+const nodeMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uPixel;
+    attribute vec3 color;
+    varying vec3 vColor;
+    varying float vFogDepth;
+    void main(){
+      vColor = color;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vFogDepth = -mv.z;
+      gl_PointSize = 2.5 * uPixel * (4.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vFogDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      float fogF = 1.0 - exp(-0.004 * vFogDepth * vFogDepth);
+      vec3 fogColor = vec3(0.02, 0.023, 0.03);
+      vec3 col = mix(vColor, fogColor, fogF);
+      gl_FragColor = vec4(col * a, a * 0.7);
+    }
+  `
+});
+const nodePoints = new THREE.Points(nodeGeom, nodeMat);
+scene.add(nodePoints);
+
+// ────────────────────────── color helpers ──────────────────────────
+// umbra palette: threads/nodes colored by distance to centroid
+// close = deep shadow (near black), mid = warm amber corona, far = cool silver
+const colShadow = new THREE.Color(0.04, 0.03, 0.02);
+const colCorona = new THREE.Color(0.85, 0.42, 0.10);
+const colOuter  = new THREE.Color(0.55, 0.58, 0.65);
+
+function umbraColor(dist, target){
+  const penumbraInner = umbraRadius * 0.9;
+  const penumbraOuter = umbraRadius * 3.5;
+  if (dist < penumbraInner){
+    target.copy(colShadow);
+  } else if (dist < penumbraOuter){
+    const t = (dist - penumbraInner) / (penumbraOuter - penumbraInner);
+    // shadow → corona → outer
+    if (t < 0.4){
+      target.copy(colShadow).lerp(colCorona, t / 0.4);
+    } else {
+      target.copy(colCorona).lerp(colOuter, (t - 0.4) / 0.6);
+    }
+  } else {
+    target.copy(colOuter);
+  }
+}
+
+// ────────────────────────── update geometry ──────────────────────────
+const tmpColor = new THREE.Color();
+
+function updateGeometry(){
+  for (let i = 0; i < edges.length; i++){
+    const e = edges[i];
+    threadPositions[i*6]   = e.a.pos.x;
+    threadPositions[i*6+1] = e.a.pos.y;
+    threadPositions[i*6+2] = e.a.pos.z;
+    threadPositions[i*6+3] = e.b.pos.x;
+    threadPositions[i*6+4] = e.b.pos.y;
+    threadPositions[i*6+5] = e.b.pos.z;
+
+    const dA = e.a.pos.distanceTo(centroid);
+    umbraColor(dA, tmpColor);
+    threadColors[i*6]   = tmpColor.r;
+    threadColors[i*6+1] = tmpColor.g;
+    threadColors[i*6+2] = tmpColor.b;
+    const dB = e.b.pos.distanceTo(centroid);
+    umbraColor(dB, tmpColor);
+    threadColors[i*6+3] = tmpColor.r;
+    threadColors[i*6+4] = tmpColor.g;
+    threadColors[i*6+5] = tmpColor.b;
+  }
+  threadGeom.attributes.position.needsUpdate = true;
+  threadGeom.attributes.color.needsUpdate = true;
+
+  for (let i = 0; i < nodes.length; i++){
+    nodePositions[i*3]   = nodes[i].pos.x;
+    nodePositions[i*3+1] = nodes[i].pos.y;
+    nodePositions[i*3+2] = nodes[i].pos.z;
+    const d = nodes[i].pos.distanceTo(centroid);
+    umbraColor(d, tmpColor);
+    nodeColors[i*3]   = tmpColor.r;
+    nodeColors[i*3+1] = tmpColor.g;
+    nodeColors[i*3+2] = tmpColor.b;
+  }
+  nodeGeom.attributes.position.needsUpdate = true;
+  nodeGeom.attributes.color.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+
+  // compute centroid
+  centroid.set(0, 0, 0);
+  for (const n of nodes) centroid.add(n.pos);
+  centroid.divideScalar(nodes.length);
+
+  // physics substeps
+  for (let i = 0; i < INTEGRATION_SUBSTEPS; i++){
+    integrate(dt / INTEGRATION_SUBSTEPS);
+  }
+
+  // position umbra sphere at centroid
+  umbraMesh.position.copy(centroid);
+  coronaPoints.position.copy(centroid);
+  // slowly rotate corona
+  coronaPoints.rotation.y = now * 0.00008;
+  coronaPoints.rotation.x = now * 0.00005;
+
+  coronaMat.uniforms.uTime.value = now * 0.001;
+
+  updateGeometry();
+
+  // camera tracks centroid, close orbit
+  const ang = now * 0.00015;
+  camera.position.x = centroid.x + Math.sin(ang) * 16;
+  camera.position.z = centroid.z + Math.cos(ang) * 16;
+  camera.position.y = centroid.y + Math.sin(ang * 0.6) * 5;
+  camera.lookAt(centroid);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
