@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yy3 · tender geometry</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f4f0e8; overflow:hidden;
+               color:#1a1a1a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#1a1a1a; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">yy3</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">F. G.-T. + Bauhaus · primary leaves on grid · differential drift</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Tender geometry: Felix Gonzalez-Torres meets Bauhaus grid.
+   The differential-growth curve now generates as a sequence of
+   geometric primitives (squares, circles, triangles) in Bauhaus
+   primary palette (red, yellow, blue) laid on a subtle grid.
+   Each vertex becomes a leaf: a flat primitive shape.
+   The curve still grows and drifts, but the form reads as
+   an intimate arrangement of paper cutouts on canvas. */
+
+const BG = 0xf4f0e8; // warm off-white paper
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(BG, 14, 35);
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 1, 16);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 0, 0);
+
+// Bauhaus primary palette
+const BAUHAUS_COLORS = [
+  0xed1c24, // red
+  0xffdd00, // yellow
+  0x0071bc  // blue
+];
+
+// --- curve parameters, slower drift for tender register ---
+const MAX_VERTS = 600;
+const ATTRACT   = 0.04;
+const REPEL_R   = 0.55;
+const REPEL_STR = 0.08;
+const NOISE     = 0.0015;
+const PRESSURE  = 0.0015;
+const GRAVITY   = 0.002;
+const MAX_D     = 0.42;
+
+// initialize: horizontal line on grid-aligned positions
+const verts = [];
+const NV0 = 12;
+for (let i = 0; i < NV0; i++) {
+  const t = (i / (NV0 - 1)) * 2 - 1;
+  const x = Math.round(t * 5);
+  const y = 0;
+  const z = 0;
+  verts.push({ 
+    x, y, z, 
+    age: 0, 
+    shape: i % 3, // 0=square, 1=circle, 2=triangle
+    color: BAUHAUS_COLORS[i % 3]
+  });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i], k = gridKey(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function nearby(v) {
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function step() {
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? verts[i - 1] : null;
+    const next = i < n - 1 ? verts[i + 1] : null;
+    const v = verts[i];
+    if (prev) {
+      dx[i] += (prev.x - v.x) * ATTRACT;
+      dz[i] += (prev.z - v.z) * ATTRACT;
+      dy[i] += (prev.y - v.y) * ATTRACT;
+    }
+    if (next) {
+      dx[i] += (next.x - v.x) * ATTRACT;
+      dz[i] += (next.z - v.z) * ATTRACT;
+      dy[i] += (next.y - v.y) * ATTRACT;
+    }
+  }
+
+  let cx = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cz += verts[i].z; }
+  cx /= n; cz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - cx, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dz[i] += (oz / d) * PRESSURE;
+  }
+
+  for (let i = 0; i < n; i++) {
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].y += dy[i] - GRAVITY + (Math.random() - 0.5) * NOISE * 0.3;
+    verts[i].age += 0.0003;
+  }
+
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    grown.push(a);
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    if (ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      const newShape = [0, 1, 2][Math.floor(Math.random() * 3)];
+      grown.push({
+        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.03,
+        z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.03,
+        y: (a.y + b.y) * 0.5,
+        age: Math.max(a.age, b.age) * 0.7,
+        shape: newShape,
+        color: BAUHAUS_COLORS[newShape]
+      });
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// --- leaf geometry: each vertex becomes a geometric primitive ---
+const leafGroup = new THREE.Group();
+scene.add(leafGroup);
+
+const leafMeshes = [];
+const SIZE = 0.28;
+
+// square geometry
+const squareGeom = new THREE.PlaneGeometry(SIZE, SIZE);
+// circle geometry (octagon approximation)
+const circleGeom = new THREE.CircleGeometry(SIZE * 0.5, 8);
+// triangle geometry
+const triGeom = new THREE.BufferGeometry();
+const h = SIZE * 0.866;
+triGeom.setAttribute('position', new THREE.Float32BufferAttribute([
+  0, h * 0.5, 0,
+  -SIZE * 0.5, -h * 0.5, 0,
+  SIZE * 0.5, -h * 0.5, 0
+], 3));
+
+function createLeaf(v) {
+  let geom;
+  if (v.shape === 0) geom = squareGeom;
+  else if (v.shape === 1) geom = circleGeom;
+  else geom = triGeom;
+
+  const mat = new THREE.MeshBasicMaterial({
+    color: v.color,
+    side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.85
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.userData.vertex = v;
+  mesh.userData.rotSpeed = (Math.random() - 0.5) * 0.02;
+  leafGroup.add(mesh);
+  leafMeshes.push(mesh);
+}
+
+// thin connecting line (like pencil sketch)
+const wireGeom = new THREE.BufferGeometry();
+const wirePositions = new Float32Array(MAX_VERTS * 3);
+wireGeom.setAttribute('position', new THREE.BufferAttribute(wirePositions, 3));
+const wireMat = new THREE.LineBasicMaterial({
+  color: 0x1a1a1a,
+  transparent: true,
+  opacity: 0.15,
+  linewidth: 1
+});
+const wireLine = new THREE.Line(wireGeom, wireMat);
+scene.add(wireLine);
+
+// subtle grid plane
+const gridHelper = new THREE.GridHelper(20, 20, 0xd0c8b8, 0xd0c8b8);
+gridHelper.position.y = -1.5;
+gridHelper.material.opacity = 0.12;
+gridHelper.material.transparent = true;
+scene.add(gridHelper);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow
+for (let s = 0; s < 300; s++) step();
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+
+  for (let s = 0; s < 2; s++) step();
+
+  const n = verts.length;
+
+  // sync leaf meshes with vertices
+  while (leafMeshes.length < n) {
+    createLeaf(verts[leafMeshes.length]);
+  }
+  for (let i = 0; i < leafMeshes.length; i++) {
+    const mesh = leafMeshes[i];
+    if (i < n) {
+      const v = verts[i];
+      mesh.position.set(v.x, v.y, v.z);
+      mesh.rotation.z += mesh.userData.rotSpeed;
+      mesh.visible = true;
+    } else {
+      mesh.visible = false;
+    }
+  }
+
+  // update wire
+  for (let i = 0; i < n; i++) {
+    wirePositions[i * 3]     = verts[i].x;
+    wirePositions[i * 3 + 1] = verts[i].y;
+    wirePositions[i * 3 + 2] = verts[i].z;
+  }
+  wireGeom.setDrawRange(0, n);
+  wireGeom.attributes.position.needsUpdate = true;
+
+  // camera tracks centroid
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) {
+    cx += verts[i].x; cy += verts[i].y; cz += verts[i].z;
+  }
+  if (n > 0) {
+    cx /= n; cy /= n; cz /= n;
+    controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.015);
+  }
+
+  statEl.textContent = `leaves=${n}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
