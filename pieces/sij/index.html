@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>sij · folded leaves in cumulus</title>
+<style>
+html, body { margin:0; padding:0; height:100%; background:#0a0806; overflow:hidden; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+      letter-spacing:0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+</style>
+</head>
+<body>
+<div class="id">sij</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 120);
+camera.position.set(0, 1.5, 9);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0806, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0.8, 0);
+
+/* ── Background gradient ── */
+const bgMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2),
+  new THREE.ShaderMaterial({
+    depthWrite: false, depthTest: false,
+    vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.999,1.0); }`,
+    fragmentShader: `
+      varying vec2 vUv;
+      void main(){
+        vec3 top = vec3(0.065, 0.052, 0.04);
+        vec3 bot = vec3(0.028, 0.022, 0.018);
+        vec3 c = mix(bot, top, vUv.y);
+        float glow = exp(-pow(length(vUv - vec2(0.5, 0.55)) * 2.2, 2.0)) * 0.028;
+        c += vec3(glow*1.3, glow*0.85, glow*0.3);
+        gl_FragColor = vec4(c, 1.0);
+      }`
+  })
+);
+bgMesh.renderOrder = -1; bgMesh.frustumCulled = false;
+scene.add(bgMesh);
+
+/* ── Leaf geometry builder ── */
+function makeLeaf(width, length, segsL, curl, twist, taper, asymmetry){
+  const segsW = 14;
+  const pos = [], uvs = [], idx = [];
+  for(let j=0; j<=segsL; j++){
+    const v = j/segsL;
+    const taperF = Math.pow(Math.sin(v * Math.PI), taper);
+    const localW = width * taperF;
+    for(let i=0; i<=segsW; i++){
+      const u = i/segsW;
+      let x = (u - 0.5) * localW;
+      const y = v * length;
+      /* asymmetric curl — one edge curls more */
+      const side = u < 0.5 ? -1 : 1;
+      const edgeDist = Math.abs(u - 0.5) * 2;
+      const curlK = curl * (1 + asymmetry * side * 0.4);
+      const curlAng = edgeDist * edgeDist * curlK * (0.6 + 0.7 * v);
+      let z = Math.sin(curlAng) * edgeDist * localW * 0.5;
+      const xC = Math.cos(curlAng) * x;
+      /* twist */
+      const tw = v * twist;
+      const ct = Math.cos(tw), st = Math.sin(tw);
+      const xT = xC * ct - z * st;
+      const zT = xC * st + z * ct;
+      /* mid-vein ridge */
+      const vein = Math.exp(-Math.pow((u-0.5)*10, 2)) * 0.07 * localW;
+      pos.push(xT, y, zT + vein);
+      uvs.push(u, v);
+    }
+  }
+  for(let j=0; j<segsL; j++){
+    for(let i=0; i<segsW; i++){
+      const a = j*(segsW+1)+i, b=a+1, c=a+(segsW+1), d=c+1;
+      idx.push(a,c,b, b,c,d);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setIndex(idx);
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  g.computeVertexNormals();
+  return g;
+}
+
+/* ── Leaf shader ── */
+function leafMaterial(hueShift){
+  return new THREE.ShaderMaterial({
+    uniforms: { uTime:{value:0}, uHue:{value:hueShift} },
+    side: THREE.DoubleSide, transparent: true, depthWrite: true,
+    vertexShader: `
+      uniform float uTime;
+      varying vec2 vUv;
+      varying vec3 vNormal;
+      varying vec3 vWorld;
+      void main(){
+        vUv = uv;
+        vNormal = normalize(normalMatrix * normal);
+        vec3 p = position;
+        float sway = sin(uTime*0.35 + p.y*0.4)*0.06;
+        p.x += sway;
+        p.z += sin(uTime*0.28 + p.y*0.6)*0.03;
+        vWorld = (modelMatrix * vec4(p,1.0)).xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(p,1.0);
+      }`,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uHue;
+      varying vec2 vUv;
+      varying vec3 vNormal;
+      varying vec3 vWorld;
+      void main(){
+        /* 5-color hand-picked palette: burnt umber, raw sienna, amber, copper oxide, parchment */
+        vec3 umber    = vec3(0.38, 0.22, 0.12);
+        vec3 sienna   = vec3(0.58, 0.34, 0.18);
+        vec3 amber    = vec3(0.82, 0.56, 0.22);
+        vec3 copperOx = vec3(0.65, 0.40, 0.20);
+        vec3 parchment= vec3(0.90, 0.80, 0.58);
+
+        float v = vUv.y;
+        float u = vUv.x;
+        /* per-leaf hue shift */
+        float h = uHue;
+        vec3 base = mix(sienna, amber, v + h*0.15);
+        base = mix(base, copperOx, abs(u-0.5)*1.6);
+        base = mix(base, umber, smoothstep(0.85,1.0,v));
+        /* tip lightens to parchment */
+        base = mix(base, parchment, smoothstep(0.7,0.95,v)*0.25);
+
+        /* veins */
+        float mainVein = exp(-pow((u-0.5)*16.0, 2.0));
+        float branch = 0.0;
+        for(float i=1.0; i<7.0; i++){
+          float vy = i*0.13 + h*0.02;
+          float ang = 0.55 + i*0.06;
+          float bv = smoothstep(vy-0.01,vy+0.01,v)*smoothstep(vy+0.12,vy+0.01,v);
+          branch += exp(-pow((u - 0.5 - (v-vy)*ang)*20.0,2.0))*bv*0.35;
+          branch += exp(-pow((u - 0.5 + (v-vy)*ang)*20.0,2.0))*bv*0.35;
+        }
+        float vein = max(mainVein, branch);
+        vec3 veinCol = umber * 0.7;
+        base = mix(base, veinCol, vein*0.5);
+
+        /* lighting: warm key + cool fill + subsurface */
+        vec3 L = normalize(vec3(0.5, 1.0, 0.7));
+        float diff = max(dot(vNormal, L), 0.0)*0.55 + 0.45;
+        float sub  = max(dot(-vNormal, L), 0.0)*0.28;
+        base *= diff + sub;
+
+        /* edge fade */
+        float ef = smoothstep(0.0,0.06,u)*smoothstep(1.0,0.94,u);
+        float tf = smoothstep(0.0,0.04,v)*smoothstep(1.0,0.94,v);
+        float alpha = 0.88 * ef * tf;
+
+        /* film grain — Lia Halloran */
+        float grain = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233))+uTime*0.1)*43758.5453);
+        base += (grain - 0.5)*0.035;
+
+        gl_FragColor = vec4(base, alpha);
+      }`
+  });
+}
+
+/* ── 8 leaf-twirl elements: different species of curl ── */
+const leafGroup = new THREE.Group();
+const leafDefs = [
+  /* fern-uncurling: tight curl, medium twist, tapered */
+  { w:1.4, l:4.5, seg:32, curl:2.2, twist:1.0, taper:0.55, asym:0.3,
+    pos:[0,-0.5,0], rot:[0.15,0,0.05], sc:1.05, hue:0 },
+  /* palm-frond: wide, gentle curl, long */
+  { w:1.8, l:5.0, seg:34, curl:0.9, twist:0.5, taper:0.7, asym:-0.2,
+    pos:[-2.0,0.3,0.6], rot:[-0.4,0.7,-0.5], sc:0.85, hue:0.15 },
+  /* autumn-twist: dramatic twist, asymmetric curl */
+  { w:1.1, l:3.5, seg:26, curl:2.8, twist:-1.6, taper:0.5, asym:0.6,
+    pos:[1.6,0.8,-0.7], rot:[0.5,-0.6,0.35], sc:0.9, hue:-0.1 },
+  /* banana-leaf fold: wide, single deep fold */
+  { w:2.0, l:4.2, seg:30, curl:1.3, twist:0.3, taper:0.65, asym:0.8,
+    pos:[-0.8,1.8,1.0], rot:[-0.55,1.1,0.15], sc:0.7, hue:0.08 },
+  /* tight fiddlehead */
+  { w:0.8, l:3.0, seg:24, curl:3.5, twist:2.2, taper:0.45, asym:0.1,
+    pos:[2.2,0.2,0.4], rot:[-0.3,-0.9,0.5], sc:0.75, hue:0.2 },
+  /* dried magnolia: stiff, curled back, parchment-like */
+  { w:1.5, l:3.8, seg:28, curl:1.8, twist:-0.7, taper:0.6, asym:-0.5,
+    pos:[-1.8,1.2,-1.3], rot:[0.4,0.4,-0.6], sc:0.8, hue:-0.05 },
+  /* kelp ribbon: very narrow, extreme twist */
+  { w:0.6, l:4.8, seg:36, curl:1.2, twist:3.0, taper:0.4, asym:0.0,
+    pos:[0.5,-0.8,-1.5], rot:[0.6,-0.2,-0.3], sc:0.85, hue:0.12 },
+  /* oak-curl: broad, modest curl, stubborn */
+  { w:1.6, l:3.2, seg:26, curl:1.5, twist:0.6, taper:0.75, asym:-0.3,
+    pos:[-0.3,2.5,0.2], rot:[-0.7,-0.1,0.2], sc:0.65, hue:-0.08 },
+];
+
+const leafInstances = [];
+for(const d of leafDefs){
+  const geo = makeLeaf(d.w, d.l, d.seg, d.curl, d.twist, d.taper, d.asym);
+  const mat = leafMaterial(d.hue);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(d.pos[0], d.pos[1] + d.l*d.sc*0.3, d.pos[2]);
+  mesh.rotation.set(d.rot[0], d.rot[1], d.rot[2]);
+  mesh.scale.setScalar(d.sc);
+  leafGroup.add(mesh);
+  leafInstances.push({ mesh, d, baseRot: d.rot.slice(), basePos: d.pos.slice() });
+}
+leafGroup.position.set(0, -1.2, 0);
+scene.add(leafGroup);
+
+/* ── Atmospheric mist particles — Morakana cumulus drift ── */
+const MIST_N = 20000;
+const mGeo = new THREE.BufferGeometry();
+const mP = new Float32Array(MIST_N*3), mS = new Float32Array(MIST_N);
+for(let i=0; i<MIST_N; i++){
+  mP[i*3]   = (Math.random()-0.5)*18;
+  mP[i*3+1] = (Math.random()-0.5)*14 + 1.5;
+  mP[i*3+2] = (Math.random()-0.5)*18;
+  mS[i] = Math.random();
+}
+mGeo.setAttribute('position', new THREE.Float32BufferAttribute(mP, 3));
+mGeo.setAttribute('seed', new THREE.Float32BufferAttribute(mS, 1));
+const mistMat = new THREE.ShaderMaterial({
+  uniforms: { uTime:{value:0}, uPx:{value:renderer.getPixelRatio()} },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime; uniform float uPx;
+    attribute float seed;
+    varying float vA; varying vec3 vC;
+    void main(){
+      vec3 p = position;
+      float t = uTime*0.06 + seed*6.28;
+      /* slow horizontal drift — like border clouds */
+      p.x += sin(t*0.5 + p.y*0.08)*1.2 + uTime*0.04;
+      p.z += cos(t*0.4 + p.x*0.06)*0.9;
+      p.y += sin(t*0.25)*0.25;
+      /* wrap */
+      p.x = mod(p.x+9.0, 18.0)-9.0;
+      p.z = mod(p.z+9.0, 18.0)-9.0;
+      vec4 mv = modelViewMatrix * vec4(p,1.0);
+      float dist = -mv.z;
+      gl_PointSize = (2.5 + seed*2.5)*uPx*(28.0/dist);
+      gl_Position = projectionMatrix * mv;
+      /* warm earth mist low, cool gray mist high */
+      vec3 warm = vec3(0.40, 0.30, 0.20);
+      vec3 cool = vec3(0.28, 0.30, 0.35);
+      vC = mix(warm, cool, smoothstep(-1.0, 5.0, p.y));
+      float cd = length(p.xz)/9.0;
+      vA = 0.10 * (1.0 - cd*cd) * (0.4 + 0.6*sin(t*1.2)*0.5+0.5);
+      vA = max(0.0, vA);
+    }`,
+  fragmentShader: `
+    varying float vA; varying vec3 vC;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r>0.25) discard;
+      float a = exp(-r*6.0)*vA;
+      gl_FragColor = vec4(vC*a, a);
+    }`
+});
+scene.add(new THREE.Points(mGeo, mistMat));
+
+/* ── Dust motes — close, warm, slow ── */
+const DUST_N = 3000;
+const dGeo = new THREE.BufferGeometry();
+const dP = new Float32Array(DUST_N*3), dS = new Float32Array(DUST_N);
+for(let i=0; i<DUST_N; i++){
+  dP[i*3]   = (Math.random()-0.5)*8;
+  dP[i*3+1] = (Math.random()-0.5)*8 + 1;
+  dP[i*3+2] = (Math.random()-0.5)*8;
+  dS[i] = Math.random();
+}
+dGeo.setAttribute('position', new THREE.Float32BufferAttribute(dP, 3));
+dGeo.setAttribute('seed', new THREE.Float32BufferAttribute(dS, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime:{value:0}, uPx:{value:renderer.getPixelRatio()} },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime; uniform float uPx;
+    attribute float seed;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      float t = uTime*0.12 + seed*6.28;
+      p.x += sin(t*0.3)*0.4;
+      p.y += sin(t*0.2 + 1.0)*0.3;
+      p.z += cos(t*0.25)*0.35;
+      vec4 mv = modelViewMatrix * vec4(p,1.0);
+      float dist = -mv.z;
+      gl_PointSize = (0.8 + seed*1.2)*uPx*(20.0/dist);
+      gl_Position = projectionMatrix * mv;
+      vA = 0.25 * (0.3 + 0.7*pow(sin(t*0.8)*0.5+0.5, 2.0));
+    }`,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r>0.25) discard;
+      float a = exp(-r*12.0)*vA;
+      vec3 c = vec3(0.75, 0.58, 0.32);
+      gl_FragColor = vec4(c*a, a);
+    }`
+});
+scene.add(new THREE.Points(dGeo, dustMat));
+
+/* ── Lighting ── */
+scene.add(new THREE.AmbientLight(0x3a2a18, 0.35));
+const keyLight = new THREE.DirectionalLight(0xd4a060, 1.3);
+keyLight.position.set(3, 5, 4);
+scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0x2a3040, 0.25);
+fillLight.position.set(-2, -3, -1);
+scene.add(fillLight);
+
+/* ── Resize ── */
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── Animation ── */
+const centroid = new THREE.Vector3();
+const t0 = performance.now();
+
+(function loop(){
+  const elapsed = (performance.now() - t0) / 1000;
+
+  /* update leaf materials & gentle individual sway */
+  for(const leaf of leafInstances){
+    leaf.mesh.material.uniforms.uTime.value = elapsed;
+    const ph = leaf.d.pos[0]*0.6 + leaf.d.pos[2]*0.4;
+    leaf.mesh.rotation.x = leaf.baseRot[0] + Math.sin(elapsed*0.22 + ph)*0.055;
+    leaf.mesh.rotation.z = leaf.baseRot[2] + Math.cos(elapsed*0.18 + ph*1.2)*0.04;
+    leaf.mesh.rotation.y = leaf.d.rot[1] + Math.sin(elapsed*0.12 + ph*0.7)*0.03;
+    leaf.mesh.position.y = leaf.basePos[1] + leaf.d.l*leaf.d.sc*0.3 - 1.2 +
+      Math.sin(elapsed*0.14 + ph)*0.12;
+  }
+
+  mistMat.uniforms.uTime.value = elapsed;
+  dustMat.uniforms.uTime.value = elapsed;
+
+  /* centroid tracking */
+  centroid.set(0, 0, 0);
+  for(const leaf of leafInstances) centroid.add(leaf.mesh.getWorldPosition(new THREE.Vector3()));
+  centroid.divideScalar(leafInstances.length);
+  controls.target.lerp(centroid, 0.015);
+  controls.update();
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
