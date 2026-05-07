@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: orbit, intensity: gentle -->
+<title>50i · gravitational ribbon · n-body soft gravity</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06060b; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">50i</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*
+  n-body soft gravity ribbon — descended from ajo (differential growth ribbon).
+  Motion law replaced: each particle attracts every other via softened gravity
+  F = G·m/(r² + ε²), with close-range repulsion to prevent collapse.
+  Particles carry velocity; ribbon connects them in birth order, creating
+  orbital braids. Inspired by Jorinde Voigt's notation of invisible forces —
+  wind, gravity, rotation — as precise drawn arcs on paper.
+
+  Narrative arc: ring begins orderly → gravitational perturbations tangle
+  the ribbon into knotted orbital paths → system finds quasi-stable
+  choreography — separation becoming entanglement becoming dance.
+*/
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x06060b, 0.018);
+
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 250);
+camera.position.set(0, 12, 22);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06060b, 1);
+document.body.appendChild(renderer.domElement);
+
+// Lighting — warm key from above-right, cool fill from below-left
+const keyLight = new THREE.DirectionalLight(0xffe8c0, 1.2);
+keyLight.position.set(5, 14, 6);
+scene.add(keyLight);
+scene.add(new THREE.AmbientLight(0x0c0818, 0.6));
+const fillLight = new THREE.DirectionalLight(0x3a4a6e, 0.35);
+fillLight.position.set(-8, -2, -5);
+scene.add(fillLight);
+// Warm rim from behind
+const rimLight = new THREE.DirectionalLight(0xc87040, 0.3);
+rimLight.position.set(-3, 8, -10);
+scene.add(rimLight);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.target.set(0, 4, 0);
+
+// ─────────── n-body soft gravity system
+const N = 90;
+const G = 0.008;          // gravitational constant
+const SOFTENING = 0.6;    // softening length — prevents singularity
+const REPEL_R = 0.45;     // close-range repulsion radius
+const REPEL_STR = 0.05;   // repulsion strength
+const DAMPING = 0.9985;   // very mild drag to prevent runaway
+const BREATH_AMP = 0.002; // gentle breathing perturbation
+const DT = 0.35;          // timestep
+
+// Masses — varied for asymmetry (3 heavier "attractor" particles)
+const mass = new Float32Array(N);
+const px = new Float32Array(N), py = new Float32Array(N), pz = new Float32Array(N);
+const vx = new Float32Array(N), vy = new Float32Array(N), vz = new Float32Array(N);
+
+// Initialize: two interlocking rings at slight vertical offset
+// with tangential velocities — like a Calder mobile set spinning
+for (let i = 0; i < N; i++) {
+  const ring = i < N / 2 ? 0 : 1;
+  const idx = ring === 0 ? i : i - Math.floor(N / 2);
+  const count = ring === 0 ? Math.floor(N / 2) : N - Math.floor(N / 2);
+  const th = (idx / count) * Math.PI * 2 + ring * 0.4;
+  const r = 3.2 + ring * 1.1 + (Math.random() - 0.5) * 0.3;
+  const tilt = ring === 0 ? 0 : Math.PI * 0.35;
+
+  px[i] = Math.cos(th) * r;
+  py[i] = ring * 2.5 + Math.sin(th) * r * Math.sin(tilt) + (Math.random() - 0.5) * 0.2;
+  pz[i] = Math.sin(th) * r * Math.cos(tilt);
+
+  // Tangential velocity
+  const speed = 0.012 + Math.random() * 0.004;
+  vx[i] = -Math.sin(th) * speed * (ring === 0 ? 1 : -0.7);
+  vy[i] = (Math.random() - 0.5) * 0.002;
+  vz[i] = Math.cos(th) * speed * (ring === 0 ? 1 : -0.7) * Math.cos(tilt);
+
+  // 3 heavier particles as gravitational anchors
+  mass[i] = (i === 0 || i === Math.floor(N / 3) || i === Math.floor(2 * N / 3)) ? 3.0 : 1.0;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function stepSim() {
+  if (paused) return;
+
+  // Compute forces — O(n²) with softened gravity + close repulsion
+  const fx = new Float32Array(N), fy = new Float32Array(N), fz = new Float32Array(N);
+
+  for (let i = 0; i < N; i++) {
+    for (let j = i + 1; j < N; j++) {
+      const ex = px[j] - px[i];
+      const ey = py[j] - py[i];
+      const ez = pz[j] - pz[i];
+      const r2 = ex * ex + ey * ey + ez * ez;
+      const r = Math.sqrt(r2);
+
+      // Softened gravity — attraction
+      const denom = (r2 + SOFTENING * SOFTENING);
+      const fGrav = G * mass[i] * mass[j] / denom;
+      const inv = fGrav / (r + 1e-6);
+      fx[i] += ex * inv; fy[i] += ey * inv; fz[i] += ez * inv;
+      fx[j] -= ex * inv; fy[j] -= ey * inv; fz[j] -= ez * inv;
+
+      // Close-range repulsion
+      if (r < REPEL_R && r > 1e-6) {
+        const rep = REPEL_STR * (1.0 - r / REPEL_R) / r;
+        fx[i] -= ex * rep; fy[i] -= ey * rep; fz[i] -= ez * rep;
+        fx[j] += ex * rep; fy[j] += ey * rep; fz[j] += ez * rep;
+      }
+    }
+  }
+
+  // Integrate (symplectic Euler)
+  const time = performance.now() * 0.001;
+  for (let i = 0; i < N; i++) {
+    // Breathing perturbation — keeps particles alive
+    const breath = BREATH_AMP * Math.sin(time * 1.7 + i * 0.8);
+    const breathY = BREATH_AMP * 0.6 * Math.cos(time * 1.3 + i * 1.1);
+
+    vx[i] = (vx[i] + fx[i] / mass[i] * DT + breath) * DAMPING;
+    vy[i] = (vy[i] + fy[i] / mass[i] * DT + breathY) * DAMPING;
+    vz[i] = (vz[i] + fz[i] / mass[i] * DT + breath * 0.7) * DAMPING;
+
+    px[i] += vx[i] * DT;
+    py[i] += vy[i] * DT;
+    pz[i] += vz[i] * DT;
+  }
+}
+
+// Pre-simulate to get past initial transient
+for (let s = 0; s < 600; s++) stepSim();
+
+// ─────────── ribbon renderer
+// Palette: 5 hand-picked colors — tarnished brass, deep rose, pale bone, midnight indigo, warm umber
+const PAL = [
+  new THREE.Color(0xb8923e), // tarnished brass
+  new THREE.Color(0x8c3a4a), // deep rose
+  new THREE.Color(0xd8cdb8), // pale bone
+  new THREE.Color(0x1a2040), // midnight indigo
+  new THREE.Color(0x6b4430), // warm umber
+];
+
+let ribbonMesh = null;
+const ribbonMat = new THREE.MeshStandardMaterial({
+  vertexColors: true,
+  roughness: 0.38,
+  metalness: 0.55,
+  side: THREE.DoubleSide,
+  emissive: new THREE.Color(0x1a0e04),
+  emissiveIntensity: 0.3,
+});
+
+// Dust motes — sparse, tiny, atmosphere
+const dustGeo = new THREE.BufferGeometry();
+const DUST_N = 300;
+const dustPos = new Float32Array(DUST_N * 3);
+for (let i = 0; i < DUST_N; i++) {
+  dustPos[i * 3]     = (Math.random() - 0.5) * 30;
+  dustPos[i * 3 + 1] = Math.random() * 20;
+  dustPos[i * 3 + 2] = (Math.random() - 0.5) * 30;
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({ color: 0xc8b888, size: 0.04, transparent: true, opacity: 0.2 });
+scene.add(new THREE.Points(dustGeo, dustMat));
+
+// Subtle ground plane — atmospheric gradient, not a floor
+const groundGeo = new THREE.PlaneGeometry(60, 60);
+const groundMat = new THREE.MeshStandardMaterial({
+  color: 0x0a0a12, transparent: true, opacity: 0.3, roughness: 1.0,
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -1;
+scene.add(ground);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const tmpColor = new THREE.Color();
+const upVec = new THREE.Vector3(0, 1, 0);
+
+function buildRibbon() {
+  // Build two ribbons: ring1 and ring2, each a closed loop
+  const rings = [
+    { start: 0, count: Math.floor(N / 2) },
+    { start: Math.floor(N / 2), count: N - Math.floor(N / 2) },
+  ];
+
+  const allPositions = [];
+  const allColors = [];
+  const allIndices = [];
+  let vertOffset = 0;
+
+  for (const ring of rings) {
+    const pts = [];
+    for (let i = ring.start; i < ring.start + ring.count; i++) {
+      pts.push(new THREE.Vector3(px[i], py[i], pz[i]));
+    }
+    if (pts.length < 4) continue;
+
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.0);
+    const SAMPLES = Math.min(600, ring.count * 6);
+    const time = performance.now() * 0.001;
+
+    for (let i = 0; i < SAMPLES; i++) {
+      const tt = i / SAMPLES;
+      const p = curve.getPointAt(tt);
+      const tangent = curve.getTangentAt(tt).normalize();
+
+      let lateral = new THREE.Vector3().crossVectors(tangent, upVec);
+      if (lateral.lengthSq() < 0.001) lateral.set(1, 0, 0);
+      lateral.normalize();
+
+      // Width modulation — wider at heavy particles, breathing oscillation
+      const nearIdx = ring.start + Math.floor(tt * ring.count) % ring.count;
+      const massInfluence = mass[nearIdx] > 2.0 ? 1.4 : 1.0;
+      const speed2 = vx[nearIdx] ** 2 + vy[nearIdx] ** 2 + vz[nearIdx] ** 2;
+      const speedFactor = 0.8 + Math.min(speed2 * 800, 0.6);
+      const width = (0.14 + 0.10 * Math.sin(tt * 28.0 + time * 0.5)) * massInfluence * speedFactor;
+
+      const left  = p.clone().addScaledVector(lateral, -width);
+      const right = p.clone().addScaledVector(lateral,  width);
+      allPositions.push(left.x, left.y, left.z, right.x, right.y, right.z);
+
+      // Color by local velocity — faster = warmer
+      const palIdx = Math.floor(tt * ring.count) % PAL.length;
+      const blend = Math.min(speed2 * 2000, 1.0);
+      tmpColor.copy(PAL[palIdx]).lerp(PAL[0], blend * 0.5);
+      allColors.push(tmpColor.r, tmpColor.g, tmpColor.b);
+      allColors.push(tmpColor.r, tmpColor.g, tmpColor.b);
+    }
+
+    for (let i = 0; i < SAMPLES; i++) {
+      const ni = (i + 1) % SAMPLES;
+      const a = vertOffset + i * 2, b = a + 1;
+      const c = vertOffset + ni * 2, d = c + 1;
+      allIndices.push(a, b, c, b, d, c);
+    }
+    vertOffset += SAMPLES * 2;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(allPositions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(allColors, 3));
+  geo.setIndex(allIndices);
+  geo.computeVertexNormals();
+
+  if (ribbonMesh) { scene.remove(ribbonMesh); ribbonMesh.geometry.dispose(); }
+  ribbonMesh = new THREE.Mesh(geo, ribbonMat);
+  scene.add(ribbonMesh);
+}
+
+// ─────────── attractor glow markers (3 heavy particles)
+const glowGeo = new THREE.SphereGeometry(0.12, 12, 8);
+const glowMat = new THREE.MeshStandardMaterial({
+  color: 0xd4a84a, emissive: 0xc89030, emissiveIntensity: 0.9,
+  transparent: true, opacity: 0.6, roughness: 0.2, metalness: 0.8,
+});
+const attractors = [];
+for (let i = 0; i < N; i++) {
+  if (mass[i] > 2.0) {
+    const m = new THREE.Mesh(glowGeo, glowMat);
+    scene.add(m);
+    attractors.push({ mesh: m, idx: i });
+  }
+}
+
+function loop() {
+  for (let s = 0; s < 3; s++) stepSim();
+  buildRibbon();
+
+  // Update attractor positions
+  for (const a of attractors) {
+    a.mesh.position.set(px[a.idx], py[a.idx], pz[a.idx]);
+    const pulse = 0.9 + 0.3 * Math.sin(performance.now() * 0.003 + a.idx);
+    a.mesh.scale.setScalar(pulse);
+  }
+
+  // Camera tracks centroid
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < N; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+  cx /= N; cy /= N; cz /= N;
+  controls.target.x += (cx - controls.target.x) * 0.03;
+  controls.target.y += (cy - controls.target.y) * 0.03;
+  controls.target.z += (cz - controls.target.z) * 0.03;
+
+  // Gentle dust drift
+  for (let i = 0; i < DUST_N; i++) {
+    dustPos[i * 3 + 1] += 0.003;
+    if (dustPos[i * 3 + 1] > 20) dustPos[i * 3 + 1] = -1;
+  }
+  dustGeo.attributes.position.needsUpdate = true;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
