@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yrq · sublime aizawa</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#020204;overflow:hidden}
+  canvas{display:block}
+  .vignette{position:fixed;inset:0;pointer-events:none;z-index:1;
+    background:radial-gradient(ellipse at center,transparent 15%,rgba(2,2,4,0.55) 60%,rgba(2,2,4,0.95) 100%)}
+  .id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;z-index:2;
+      font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;letter-spacing:0.06em}
+</style>
+</head>
+<body>
+<div class="vignette"></div>
+<div class="id">yrq</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── constants ── */
+const W = 320, H = 320, N = W * H, SCALE = 8.0;
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020204, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── GPGPU targets ── */
+const rtP = {
+  type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false
+};
+let rtA = new THREE.WebGLRenderTarget(W, H, rtP);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtP);
+
+/* ── seed particles near attractor basin ── */
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  init[i * 4]     = (Math.random() * 2 - 1) * 0.5;
+  init[i * 4 + 1] = (Math.random() * 2 - 1) * 0.5;
+  init[i * 4 + 2] = Math.random() * 1.6;
+  init[i * 4 + 3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const quadGeo = new THREE.PlaneGeometry(2, 2);
+const camO = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader:   `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(quadGeo, blitMat));
+renderer.setRenderTarget(rtA);
+renderer.render(blitScene, camO);
+renderer.setRenderTarget(null);
+
+/* ── Aizawa simulation shader ── */
+const simU = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.010 },
+  uA: { value: 0.95 }, uB: { value: 0.70 }, uC: { value: 0.60 },
+  uD: { value: 3.50 }, uE: { value: 0.25 }, uF: { value: 0.10 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simU,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vec3 dp = vec3(
+        (p.z - uB) * p.x - uD * p.y,
+        uD * p.x + (p.z - uB) * p.y,
+        uC + uA * p.z - p.z*p.z*p.z / 3.0
+          - (p.x*p.x + p.y*p.y) * (1.0 + uE * p.z)
+          + uF * p.z * p.x*p.x*p.x
+      );
+      p += dp * uDt;
+      age = mod(age + uDt * 0.04, 1.0);
+      gl_FragColor = vec4(p, age);
+    }`
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(quadGeo, simMat));
+
+/* ── display scene ── */
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.01, 300);
+
+/* ── particle cloud ── */
+const pGeom = new THREE.BufferGeometry();
+const uvIdx = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = y * W + x;
+  uvIdx[i * 2]     = (x + 0.5) / W;
+  uvIdx[i * 2 + 1] = (y + 0.5) / H;
+}
+pGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+pGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(uvIdx, 2));
+
+const pMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtA.texture },
+    uPx:    { value: renderer.getPixelRatio() },
+    uScale: { value: SCALE }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPx, uScale;
+    attribute vec2 uvIdx;
+    varying float vDist;
+    varying float vAge;
+    varying float vSpeed;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz * uScale;
+      vAge   = s.w;
+      vSpeed = clamp(length(s.xyz) * 0.4, 0.0, 1.0);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDist = -mv.z;
+      float sz = (1.0 + vSpeed * 2.0) * uPx * (5.0 / max(vDist, 0.08));
+      gl_PointSize = clamp(sz, 0.3, 32.0);
+      gl_Position  = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying float vDist;
+    varying float vAge;
+    varying float vSpeed;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float soft = exp(-r * 12.0);
+
+      /* depth palette — Burke/Turrell: warm gold near, cool slate mid, deep void far */
+      vec3 nearC = vec3(1.0, 0.82, 0.42);
+      vec3 midC  = vec3(0.40, 0.52, 0.86);
+      vec3 farC  = vec3(0.10, 0.07, 0.20);
+      float dn   = clamp(vDist / 50.0, 0.0, 1.0);
+      vec3 col   = mix(nearC, midC, smoothstep(0.0, 0.35, dn));
+      col        = mix(col,   farC, smoothstep(0.25, 1.0, dn));
+
+      float bright = (0.25 + vSpeed * 0.75) * (0.75 + 0.25 * sin(vAge * 6.2832));
+      float fog    = exp(-vDist * 0.045);
+      float alpha  = soft * bright * fog;
+      gl_FragColor = vec4(col * alpha * 1.6, alpha);
+    }`
+});
+const pts = new THREE.Points(pGeom, pMat);
+scene.add(pts);
+
+/* ── central luminous point — the beacon in the void ── */
+const glowGeo = new THREE.BufferGeometry();
+glowGeo.setAttribute('position',
+  new THREE.Float32BufferAttribute([0, 0, SCALE * 0.92], 3));
+const glowMat = new THREE.ShaderMaterial({
+  uniforms: { uPx: { value: renderer.getPixelRatio() } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uPx;
+    varying float vDist;
+    void main(){
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vDist = -mv.z;
+      gl_PointSize = clamp(uPx * 260.0 / max(vDist, 0.4), 6.0, 200.0);
+      gl_Position  = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying float vDist;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d) * 2.0;
+      float g = exp(-r*r*3.5) * 0.55 + exp(-r*r*0.7) * 0.3;
+      float fog = exp(-vDist * 0.025);
+      vec3 col = mix(vec3(1.0, 0.92, 0.65), vec3(0.55, 0.65, 1.0),
+                     clamp(vDist / 35.0, 0.0, 1.0));
+      float a = g * fog;
+      gl_FragColor = vec4(col * a, a);
+    }`
+});
+scene.add(new THREE.Points(glowGeo, glowMat));
+
+/* ── second glow ring — faint halo at the disk plane ── */
+const ringN = 64;
+const ringPos = new Float32Array(ringN * 3);
+for (let i = 0; i < ringN; i++) {
+  const a = (i / ringN) * Math.PI * 2;
+  ringPos[i * 3]     = Math.cos(a) * 1.1 * SCALE * 0.14;
+  ringPos[i * 3 + 1] = Math.sin(a) * 1.1 * SCALE * 0.14;
+  ringPos[i * 3 + 2] = SCALE * 0.55;
+}
+const ringGeo = new THREE.BufferGeometry();
+ringGeo.setAttribute('position', new THREE.Float32BufferAttribute(ringPos, 3));
+const ringMat = new THREE.ShaderMaterial({
+  uniforms: { uPx: { value: renderer.getPixelRatio() } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uPx;
+    varying float vDist;
+    void main(){
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vDist = -mv.z;
+      gl_PointSize = clamp(uPx * 80.0 / max(vDist, 0.3), 2.0, 60.0);
+      gl_Position  = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying float vDist;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d) * 2.0;
+      float g = exp(-r*r*2.0) * 0.15;
+      float fog = exp(-vDist * 0.04);
+      vec3 col = vec3(0.55, 0.50, 0.85);
+      float a = g * fog;
+      gl_FragColor = vec4(col * a, a);
+    }`
+});
+scene.add(new THREE.Points(ringGeo, ringMat));
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── subtle pointer nudge ── */
+const tgt = { a: 0.95, c: 0.60 };
+addEventListener('pointermove', e => {
+  const nx = e.clientX / innerWidth  - 0.5;
+  const ny = e.clientY / innerHeight - 0.5;
+  tgt.a = 0.95 + nx * 0.03;
+  tgt.c = 0.60 + ny * 0.04;
+});
+
+/* ── animation ── */
+const t0 = performance.now();
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  simU.uA.value += (tgt.a - simU.uA.value) * 0.015;
+  simU.uC.value += (tgt.c - simU.uC.value) * 0.015;
+
+  /* 4 substeps */
+  for (let i = 0; i < 4; i++) {
+    simU.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camO);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+  pMat.uniforms.state.value = rtA.texture;
+
+  /* sublime drift — very slow Lissajous through the attractor interior
+     the viewer is a mote inside the structure, never outside it */
+  const t = elapsed * 0.035;
+  const cx = Math.sin(t * 0.71) * 3.2;
+  const cy = Math.cos(t * 0.53) * 2.0;
+  const cz = SCALE * 0.55 + Math.sin(t * 0.29) * SCALE * 0.32;
+  camera.position.set(cx, cy, cz);
+
+  /* look toward the luminous core with gentle wander */
+  const lx = Math.sin(t * 0.13) * 0.7;
+  const ly = Math.cos(t * 0.11) * 0.5;
+  const lz = SCALE * 0.92 + Math.sin(t * 0.07) * 0.8;
+  camera.lookAt(lx, ly, lz);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
