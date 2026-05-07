@@ -43,32 +43,29 @@ jobs:
           # use the repo owner's verified email so Vercel can attribute the commit
           git config user.name  "particle-art-bot"
           git config user.email "yanhann10@gmail.com"
-          git add thumbs/
-          if git diff --staged --quiet; then
-            echo "no thumbnail changes"
-            exit 0
-          fi
-          git commit -m "render thumbnails [skip ci]"
-          # retry push w/ rebase against any newer mutations.
-          # binary PNGs can't auto-merge, so on conflict we keep OUR freshly-rendered
-          # thumbs (-X theirs in rebase semantics = the side being rebased = us).
+
+          # HERMETIC PATTERN — each retry: reset to fresh origin/main, restore our
+          # rendered thumbs from /tmp, stage thumbs/ only, commit, push. This makes
+          # it structurally impossible for this workflow to commit reversions of
+          # unrelated files (like scripts/, pieces/, lineage.json) when retrying
+          # against a fast-moving main. Earlier "soft reset + index keeps prior
+          # state" pattern was reverting mutation worker commits.
+          mkdir -p /tmp/our-thumbs
+          cp -r thumbs/. /tmp/our-thumbs/
+
           for i in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            cp -r /tmp/our-thumbs/. thumbs/
+
+            git add thumbs/
+            if git diff --staged --quiet; then
+              echo "no thumbnail changes vs origin/main"; exit 0
+            fi
+            git commit -m "render thumbnails [skip ci]"
             if git push; then
               echo "pushed on attempt $i"; exit 0
             fi
-            echo "push rejected, rebasing (attempt $i)"
-            if ! git pull --rebase -X theirs --autostash; then
-              echo "rebase failed at attempt $i — aborting"
-              git rebase --abort 2>/dev/null || true
-              # last-ditch: fetch and reset our index keeping our thumbs, redo the commit
-              git fetch origin main
-              git reset --soft origin/main
-              git add thumbs/
-              if git diff --staged --quiet; then
-                echo "no thumb changes vs remote, exiting clean"; exit 0
-              fi
-              git commit -m "render thumbnails [skip ci]" --allow-empty-message --reuse-message=HEAD@{1} 2>/dev/null \
-                || git commit -m "render thumbnails [skip ci]"
-            fi
+            echo "push rejected on attempt $i, refetching"
           done
           echo "push failed after 5 attempts"; exit 1
