@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>19b · cosmic web · IllustrisTNG filaments</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#020108;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;letter-spacing:0.06em;color:#cdd2dc;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+</style>
+</head>
+<body>
+<div class="id">19b</div>
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import*as THREE from'three';
+import{OrbitControls}from'three/addons/controls/OrbitControls.js';
+
+/* ── seeded RNG ── */
+let _s=91731;
+function rng(){_s=(_s*1664525+1013904223)&0x7fffffff;return _s/0x7fffffff}
+function gaussRng(){let u=0,v=0;while(u===0)u=rng();while(v===0)v=rng();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)}
+
+/* ── Cosmic Web: node-filament graph ── */
+const CUBE=55;
+const NODE_N=140;
+const TOTAL_P=65000;
+const CLUSTER_P=14000;
+const FIL_P=TOTAL_P-CLUSTER_P;
+
+const nodes=[];
+for(let i=0;i<NODE_N;i++){
+  nodes.push(new THREE.Vector3(
+    (rng()-0.5)*CUBE*1.9,
+    (rng()-0.5)*CUBE*1.9,
+    (rng()-0.5)*CUBE*1.9
+  ));
+}
+
+/* K-nearest-neighbor edges → filament skeleton */
+const edges=[];
+const edgeSet=new Set();
+const K=4;
+const MAX_D=CUBE*0.75;
+for(let i=0;i<NODE_N;i++){
+  const dists=[];
+  for(let j=0;j<NODE_N;j++){
+    if(i===j)continue;
+    dists.push({j,d:nodes[i].distanceTo(nodes[j])});
+  }
+  dists.sort((a,b)=>a.d-b.d);
+  for(let k=0;k<K&&k<dists.length;k++){
+    if(dists[k].d>MAX_D)break;
+    const lo=Math.min(i,dists[k].j),hi=Math.max(i,dists[k].j);
+    const key=lo*1000+hi;
+    if(!edgeSet.has(key)){edgeSet.add(key);edges.push([i,dists[k].j])}
+  }
+}
+
+/* node degrees for cluster sizing */
+const deg=new Float32Array(NODE_N);
+for(const[a,b]of edges){deg[a]++;deg[b]++}
+const maxDeg=Math.max(...deg)||1;
+
+/* edge lengths */
+const eLens=edges.map(([a,b])=>nodes[a].distanceTo(nodes[b]));
+const totalLen=eLens.reduce((s,l)=>s+l,0)||1;
+
+/* ── particle buffers ── */
+const pos=new Float32Array(TOTAL_P*3);
+const seed=new Float32Array(TOTAL_P);
+const nProx=new Float32Array(TOTAL_P);   // 0=mid-filament, 1=node
+const drift=new Float32Array(TOTAL_P*3); // infall direction
+const temp=new Float32Array(TOTAL_P);    // color temperature
+
+const v=new THREE.Vector3();
+const d=new THREE.Vector3();
+const perp1=new THREE.Vector3();
+const perp2=new THREE.Vector3();
+const arb=new THREE.Vector3();
+
+let idx=0;
+
+/* filament particles along edges with Gaussian radial falloff */
+for(let e=0;e<edges.length&&idx<FIL_P;e++){
+  const[ai,bi]=edges[e];
+  const a=nodes[ai],b=nodes[bi];
+  const count=Math.max(4,Math.round(FIL_P*eLens[e]/totalLen));
+  d.subVectors(b,a).normalize();
+  /* robust perpendicular frame */
+  arb.set(1,0,0);if(Math.abs(d.x)>0.85)arb.set(0,1,0);
+  perp1.crossVectors(d,arb).normalize();
+  perp2.crossVectors(d,perp1).normalize();
+
+  for(let k=0;k<count&&idx<FIL_P;k++){
+    const t=rng();
+    v.lerpVectors(a,b,t);
+    /* Gaussian spread ⊥ filament axis — thin threads */
+    const sigma=0.55+0.25*rng();
+    const r=Math.abs(gaussRng())*sigma;
+    const th=rng()*Math.PI*2;
+    v.addScaledVector(perp1,r*Math.cos(th));
+    v.addScaledVector(perp2,r*Math.sin(th));
+
+    pos[idx*3]=v.x; pos[idx*3+1]=v.y; pos[idx*3+2]=v.z;
+    seed[idx]=rng();
+
+    /* proximity to nearest endpoint */
+    const dA=v.distanceTo(a),dB=v.distanceTo(b);
+    const near=Math.min(dA,dB);
+    nProx[idx]=Math.max(0,1-near/(eLens[e]*0.45));
+
+    /* drift toward nearest node */
+    const nNode=dA<dB?a:b;
+    const dd=new THREE.Vector3().subVectors(nNode,v);
+    const ddl=dd.length()||1;
+    drift[idx*3]=dd.x/ddl; drift[idx*3+1]=dd.y/ddl; drift[idx*3+2]=dd.z/ddl;
+
+    temp[idx]=nProx[idx]*0.55+rng()*0.15;
+    idx++;
+  }
+}
+
+/* cluster particles at nodes — denser for higher-degree nodes */
+const totalDegWeight=Array.from(deg).reduce((s,d)=>s+1+d*0.6,0);
+for(let n=0;n<NODE_N&&idx<TOTAL_P;n++){
+  const w=(1+deg[n]*0.6)/totalDegWeight;
+  const count=Math.max(8,Math.round(CLUSTER_P*w));
+  const cR=1.8+deg[n]*0.5;
+  for(let k=0;k<count&&idx<TOTAL_P;k++){
+    const r=cR*Math.pow(rng(),0.6)*Math.abs(gaussRng())*0.5;
+    const th=rng()*Math.PI*2;
+    const phi=Math.acos(2*rng()-1);
+    pos[idx*3]=nodes[n].x+r*Math.sin(phi)*Math.cos(th);
+    pos[idx*3+1]=nodes[n].y+r*Math.sin(phi)*Math.sin(th);
+    pos[idx*3+2]=nodes[n].z+r*Math.cos(phi);
+    seed[idx]=rng();
+    nProx[idx]=0.75+0.25*rng();
+    drift[idx*3]=0; drift[idx*3+1]=0; drift[idx*3+2]=0;
+    temp[idx]=0.6+0.4*rng()*(deg[n]/maxDeg);
+    idx++;
+  }
+}
+/* remaining → faint void particles */
+while(idx<TOTAL_P){
+  pos[idx*3]=(rng()-0.5)*CUBE*2;
+  pos[idx*3+1]=(rng()-0.5)*CUBE*2;
+  pos[idx*3+2]=(rng()-0.5)*CUBE*2;
+  seed[idx]=rng(); nProx[idx]=0; drift[idx*3]=0;drift[idx*3+1]=0;drift[idx*3+2]=0;
+  temp[idx]=rng()*0.06; idx++;
+}
+
+/* ── Three.js ── */
+const scene=new THREE.Scene();
+const cam=new THREE.PerspectiveCamera(48,innerWidth/innerHeight,0.5,600);
+cam.position.set(0,15,CUBE*1.6);
+const ren=new THREE.WebGLRenderer({antialias:true});
+ren.setPixelRatio(Math.min(devicePixelRatio,2));
+ren.setSize(innerWidth,innerHeight);
+ren.setClearColor(0x020108,1);
+document.body.appendChild(ren.domElement);
+
+const ctrl=new OrbitControls(cam,ren.domElement);
+ctrl.enableDamping=true; ctrl.dampingFactor=0.035;
+ctrl.autoRotate=true; ctrl.autoRotateSpeed=0.06;
+ctrl.minDistance=15; ctrl.maxDistance=250;
+
+const u={
+  uTime:{value:0},
+  uPx:{value:ren.getPixelRatio()},
+  uReveal:{value:0},
+};
+
+const geom=new THREE.BufferGeometry();
+geom.setAttribute('position',new THREE.BufferAttribute(pos,3));
+geom.setAttribute('seed',new THREE.BufferAttribute(seed,1));
+geom.setAttribute('nodeProx',new THREE.BufferAttribute(nProx,1));
+geom.setAttribute('drift',new THREE.BufferAttribute(drift,3));
+geom.setAttribute('temp',new THREE.BufferAttribute(temp,1));
+
+const mat=new THREE.ShaderMaterial({
+  uniforms:u, transparent:true, depthWrite:false,
+  blending:THREE.AdditiveBlending,
+  vertexShader:`
+uniform float uTime, uPx, uReveal;
+attribute float seed, nodeProx, temp;
+attribute vec3 drift;
+varying vec3 vCol;
+varying float vAlpha;
+void main(){
+  vec3 p=position;
+  float t=uTime*0.12+seed*6.2832;
+
+  /* reveal: particles fall in from dispersed cloud */
+  vec3 scattered=p*2.5+(vec3(seed,fract(seed*13.7),fract(seed*7.3))-0.5)*80.0;
+  p=mix(scattered,p,smoothstep(0.0,1.0,uReveal));
+
+  /* gravitational infall along filament */
+  float driftAmt=0.25*(1.0-nodeProx)*sin(t*0.25+seed*4.0);
+  p+=drift*driftAmt;
+
+  /* thermal jitter at cluster nodes */
+  float jit=nodeProx*0.35;
+  p.x+=jit*sin(t*2.3+seed*22.0);
+  p.y+=jit*cos(t*1.8+seed*17.0);
+  p.z+=jit*sin(t*1.5+seed*28.0);
+
+  /* ── IllustrisTNG-inspired palette ── */
+  /* deep indigo void → teal filament → amber warm → magenta-rose cluster */
+  vec3 cVoid    =vec3(0.06,0.04,0.14);
+  vec3 cFilCool =vec3(0.10,0.22,0.52);
+  vec3 cFilWarm =vec3(0.82,0.52,0.14);
+  vec3 cCluster =vec3(0.90,0.22,0.50);
+  vec3 cWhiteHot=vec3(1.0,0.85,0.75);
+
+  float tv=temp;
+  vec3 col;
+  if(tv<0.15){
+    col=mix(cVoid,cFilCool,tv/0.15);
+  } else if(tv<0.45){
+    col=mix(cFilCool,cFilWarm,(tv-0.15)/0.30);
+  } else if(tv<0.75){
+    col=mix(cFilWarm,cCluster,(tv-0.45)/0.30);
+  } else {
+    col=mix(cCluster,cWhiteHot,(tv-0.75)/0.25);
+  }
+  /* subtle flicker */
+  col+=0.025*sin(t*0.9+seed*15.0);
+
+  vCol=col;
+
+  /* alpha: bright at nodes, dim in voids */
+  float baseA=0.12+0.78*pow(max(nodeProx,temp),0.8);
+  /* void stragglers very faint */
+  baseA*=smoothstep(0.0,0.08,max(nodeProx,temp))*0.9+0.1;
+  baseA*=uReveal;
+  vAlpha=baseA;
+
+  vec4 mv=modelViewMatrix*vec4(p,1.0);
+  float dist=-mv.z;
+  float sz=(1.0+2.8*nodeProx)*uPx*(160.0/max(dist,1.0));
+  gl_PointSize=clamp(sz,0.4,7.0);
+  gl_Position=projectionMatrix*mv;
+}`,
+  fragmentShader:`
+varying vec3 vCol;
+varying float vAlpha;
+void main(){
+  vec2 d=gl_PointCoord-0.5;
+  float r=dot(d,d);
+  if(r>0.25)discard;
+  float a=exp(-r*14.0)*vAlpha;
+  gl_FragColor=vec4(vCol*a,a);
+}`
+});
+
+const pts=new THREE.Points(geom,mat);
+scene.add(pts);
+
+addEventListener('resize',()=>{
+  cam.aspect=innerWidth/innerHeight;
+  cam.updateProjectionMatrix();
+  ren.setSize(innerWidth,innerHeight);
+});
+
+/* ── camera path: slow dolly through the web ── */
+const camPath=[
+  new THREE.Vector3(0,15,CUBE*1.6),
+  new THREE.Vector3(CUBE*0.6,5,CUBE*0.9),
+  new THREE.Vector3(-CUBE*0.3,-10,CUBE*1.2),
+  new THREE.Vector3(CUBE*0.2,20,CUBE*1.5),
+];
+const camCurve=new THREE.CatmullRomCurve3(camPath,true,'centripetal',0.3);
+const ORBIT_PERIOD=180; /* seconds per full camera orbit */
+
+const t0=performance.now();
+function loop(){
+  const now=performance.now();
+  const el=(now-t0)/1000;
+  u.uTime.value=el;
+  u.uReveal.value=Math.min(1,el/3.5);
+
+  /* slow dolly along catmull-rom path */
+  const pathT=(el%ORBIT_PERIOD)/ORBIT_PERIOD;
+  const camPos=camCurve.getPoint(pathT);
+  /* blend with user orbit — only when not dragging */
+  if(!ctrl.enabled||true){
+    cam.position.lerp(camPos,0.004);
+  }
+  ctrl.target.lerp(new THREE.Vector3(0,0,0),0.01);
+  ctrl.autoRotateSpeed=0.06+0.03*Math.sin(el*0.04);
+  ctrl.update();
+
+  ren.render(scene,cam);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
