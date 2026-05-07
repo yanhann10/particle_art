@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Cross-pollination: zs4 Lorenz attractor — borrowing chaotic flow-field motion
+     Particles stream across the Riley calyx surface following attractor-inspired
+     drift; Turrell-style drifting colored light reveals the bowl's curvature
+     against a warm gallery wall backdrop. -->
+<title>zv4 · calyx × Lorenz flow · Turrell light</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#1a1714; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+</style>
+</head>
+<body>
+<div class="id">zv4</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+/* ── background: warm gallery wall with vignette & paper grain ── */
+const bgScene = new THREE.Scene();
+const bgCam   = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const bgMat   = new THREE.ShaderMaterial({
+  depthWrite: false,
+  vertexShader: `varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      vec2 uv = vUv;
+      vec3 top = vec3(0.19, 0.16, 0.14);
+      vec3 mid = vec3(0.16, 0.13, 0.11);
+      vec3 bot = vec3(0.11, 0.09, 0.08);
+      vec3 col = mix(bot, mid, smoothstep(0.0, 0.5, uv.y));
+      col = mix(col, top, smoothstep(0.5, 1.0, uv.y));
+      float vig = 1.0 - 0.35 * pow(length((uv - 0.5) * vec2(1.0, 0.8)), 2.0);
+      col *= vig;
+      float grain = fract(sin(dot(uv * 512.0, vec2(12.9898, 78.233))) * 43758.5453);
+      col += (grain - 0.5) * 0.012;
+      gl_FragColor = vec4(col, 1.0);
+    }`
+});
+bgScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat));
+
+/* ── particle system ── */
+const N = 80000;
+let geom, points;
+
+const uniforms = {
+  uTime:     { value: 0 },
+  uPhase:    { value: 0 },
+  uPixel:    { value: renderer.getPixelRatio() },
+  uRowFreq:  { value: 1.2 },
+  uColFreq:  { value: 1.0 },
+  uWaveAmp:  { value: 0.5 },
+  uTwist:    { value: 0.0 },
+  uMorph:    { value: 0.0 },
+  uPetals:   { value: 5.0 },
+  uCupDepth: { value: 4.0 },
+  uLight1:   { value: new THREE.Vector3(1, 0.5, 0.3) },
+  uLight2:   { value: new THREE.Vector3(-0.5, 0.3, 1) },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime, uPixel, uPhase;
+    uniform float uRowFreq, uColFreq, uWaveAmp;
+    uniform float uTwist, uMorph, uPetals, uCupDepth;
+
+    attribute vec2 gridPos;
+    attribute float seed;
+
+    varying float vDensity, vHeight, vNR;
+    varying vec3 vPos, vNorm;
+
+    void main(){
+      float t  = uTime;
+      float m  = uMorph;
+      vec2  gp = gridPos;
+
+      float r0    = length(gp);
+      float maxR  = 12.0;
+      float nr0   = clamp(r0 / maxR, 0.0, 1.0);
+      float th0   = atan(gp.y, gp.x);
+
+      /* ── Lorenz-inspired chaotic surface flow ──
+         Sigma-rho-beta ratios drive angular & radial drift
+         so particles stream across the calyx in luminous trails */
+      float flowA = sin(th0 * 3.0 + t * 0.45) * 0.28
+                  + cos(r0 * 0.5  - t * 0.32) * 0.18;
+      float flowR = sin(r0 * 0.8 + t * 0.28 + th0 * 2.0) * 0.12;
+      vec2 drift  = vec2(
+        sin((th0 + flowA * seed) * 10.0 + t * 0.55) * nr0 * 0.35 * m,
+        cos((th0 + flowA * seed) *  7.0 + t * 0.38) * nr0 * 0.35 * m
+      );
+      vec2 fgp = gp + drift;
+
+      /* ── Riley wave interference — 2× speed ── */
+      float rowW = sin(fgp.y * uRowFreq + t * 1.2 + uPhase) * uWaveAmp;
+      float colW = sin(fgp.x * uColFreq + t * 0.70)          * uWaveAmp;
+
+      float tw = uTwist * length(fgp) * 0.04;
+      float ct = cos(tw), st = sin(tw);
+      vec2 tw2 = vec2(fgp.x * ct - fgp.y * st,
+                      fgp.x * st + fgp.y * ct);
+
+      /* ── calyx morph ── */
+      float r2  = length(fgp);
+      float nr2 = clamp(r2 / maxR, 0.0, 1.0);
+      float th2 = atan(fgp.y, fgp.x);
+
+      float petal   = 0.5 + 0.5 * cos(th2 * uPetals);
+      float cup     = uCupDepth * nr2 * nr2 * (0.6 + 0.4 * petal);
+      float flare   = 1.0 + 0.15 * nr2 * nr2 * m;
+
+      vec3 flatP = vec3(tw2.x + rowW, tw2.y + colW, 0.0);
+      float cx = tw2.x * flare + rowW * (1.0 - 0.5 * m);
+      float cy = tw2.y * flare + colW * (1.0 - 0.5 * m);
+      float cz = cup * m;
+      vec3 p = mix(flatP, vec3(cx, cy, cz), m);
+
+      /* ── approximate surface normal for Turrell lighting ── */
+      float dzdr = uCupDepth * 2.0 * nr2 / maxR * (0.6 + 0.4 * petal) * m;
+      float dzdt = uCupDepth * nr2 * nr2 * 0.4
+                 * (-sin(th2 * uPetals) * uPetals) * m;
+      float rSafe = r2 + 0.01;
+      vNorm = normalize(vec3(
+        -dzdr * cos(th2) + dzdt * sin(th2) / rSafe,
+        -dzdr * sin(th2) - dzdt * cos(th2) / rSafe,
+        1.0));
+
+      /* ── density / veining ── */
+      float interf = sin(fgp.y * uRowFreq * 2.0 + t * 1.2)
+                   * sin(fgp.x * uColFreq * 2.0 + t * 0.7);
+      float vein   = sin(th2 * uPetals * 3.0 + r2 * 1.5 + t * 0.4);
+      vDensity = mix(interf, interf * 0.6 + vein * 0.4, m);
+      vHeight  = cz;
+      vPos     = p;
+      vNR      = nr2;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * max(1.8, 3.6 - dist * 0.05);
+      gl_Position  = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    uniform float uTime;
+    uniform vec3  uLight1, uLight2;
+
+    varying float vDensity, vHeight, vNR;
+    varying vec3  vPos, vNorm;
+
+    void main(){
+      vec2 dc = gl_PointCoord - 0.5;
+      float rr = dot(dc, dc);
+      if (rr > 0.25) discard;
+
+      vec3 n = normalize(vNorm);
+
+      /* ── Turrell drifting coloured light ──
+         Two slow-orbiting sources: warm amber-rose + cool lavender */
+      float d1 = max(0.0, dot(n, normalize(uLight1)));
+      float d2 = max(0.0, dot(n, normalize(uLight2)));
+      vec3 c1  = vec3(0.95, 0.52, 0.30);   // amber-rose
+      vec3 c2  = vec3(0.35, 0.42, 0.88);   // lavender-blue
+
+      vec3 ambient = vec3(0.14, 0.11, 0.09);
+      vec3 lit     = ambient + c1 * d1 * 0.72 + c2 * d2 * 0.48;
+
+      /* ── Lorenz-inspired luminous glow on flow-dense regions ── */
+      float flowGlow = smoothstep(-0.3, 0.6, vDensity) * 0.35;
+      float phase    = sin(uTime * 0.12) * 0.5 + 0.5;
+      vec3 trailCol  = mix(c1, c2, phase) * flowGlow * 0.35;
+
+      /* ── base: warm cream modulated by lighting ── */
+      vec3 base = vec3(0.92, 0.87, 0.80);
+      vec3 col  = base * lit + trailCol;
+
+      /* rim catch-light */
+      float rim = smoothstep(0.35, 1.0, vNR) * 0.22;
+      col += rim * mix(c1, c2, 0.4) * 0.45;
+
+      /* interior shadow */
+      float inner = smoothstep(0.45, 0.0, vNR);
+      col *= 0.72 + 0.28 * (1.0 - inner * 0.45);
+
+      /* subtle height luminosity */
+      col += smoothstep(0.0, 5.0, vHeight) * vec3(0.06, 0.04, 0.02);
+
+      float alpha = (0.72 + flowGlow * 0.28)
+                  * (1.0 - smoothstep(0.17, 0.25, rr));
+      gl_FragColor = vec4(col, alpha);
+    }`
+});
+
+/* ── grid builder (from parent) ── */
+function buildGrid(rows, cols, seed){
+  const pos  = new Float32Array(N * 3);
+  const gpos = new Float32Array(N * 2);
+  const sds  = new Float32Array(N);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  const W = 24, H = 24;
+  const cW = W / cols, cH = H / rows;
+  let idx = 0;
+  const ppc = Math.floor(N / (rows * cols));
+  for (let i = 0; i < rows && idx < N; i++){
+    for (let j = 0; j < cols && idx < N; j++){
+      for (let k = 0; k < ppc && idx < N; k++){
+        const x = (j + rng() - 0.5) * cW - W * 0.5;
+        const y = (i + rng() - 0.5) * cH - H * 0.5;
+        pos[idx*3]=x; pos[idx*3+1]=y; pos[idx*3+2]=0;
+        gpos[idx*2]=x; gpos[idx*2+1]=y;
+        sds[idx] = rng(); idx++;
+      }
+    }
+  }
+  while (idx < N){
+    const x = (rng()-0.5)*W, y = (rng()-0.5)*H;
+    pos[idx*3]=x; pos[idx*3+1]=y; pos[idx*3+2]=0;
+    gpos[idx*2]=x; gpos[idx*2+1]=y;
+    sds[idx]=rng(); idx++;
+  }
+  return { positions: pos, gridPositions: gpos, seeds: sds };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random() * 1e9);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  const rows = 80 + Math.floor(rng() * 60);
+  const cols = 80 + Math.floor(rng() * 60);
+
+  uniforms.uRowFreq.value  = 0.8 + rng() * 1.0;
+  uniforms.uColFreq.value  = 0.8 + rng() * 1.0;
+  uniforms.uWaveAmp.value  = 0.3 + rng() * 0.5;
+  uniforms.uTwist.value    = rng() * 4.0;
+  uniforms.uPhase.value    = rng() * 6.28;
+  uniforms.uPetals.value   = 4 + Math.floor(rng() * 4);
+  uniforms.uCupDepth.value = 3.0 + rng() * 3.0;
+  uniforms.uMorph.value    = 0.0; // reset morph
+
+  const { positions, gridPositions, seeds } = buildGrid(rows, cols, seed);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('gridPos',  new THREE.BufferAttribute(gridPositions, 2));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.gridPos.array.set(gridPositions);
+    geom.attributes.gridPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);
+    geom.attributes.seed.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+}
+
+regenerate();
+addEventListener('click', e => { if (e.target.tagName === 'CANVAS') regenerate(); });
+
+/* ── orbit ── */
+let isDrag = false, pX = 0, pY = 0;
+let orbTh = 0, orbPh = 0.55;
+const cv = renderer.domElement;
+cv.addEventListener('pointerdown', e => { isDrag = true; pX = e.clientX; pY = e.clientY; e.preventDefault(); });
+addEventListener('pointermove', e => {
+  if (!isDrag) return;
+  orbTh -= (e.clientX - pX) * 0.005;
+  orbPh  = Math.max(0.1, Math.min(1.4, orbPh - (e.clientY - pY) * 0.005));
+  pX = e.clientX; pY = e.clientY;
+});
+addEventListener('pointerup', () => { isDrag = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+/* ── animate ── */
+const t0 = performance.now();
+function loop(){
+  const now = performance.now();
+  const t   = (now - t0) / 1000;
+  uniforms.uTime.value = t;
+
+  /* morph: flat → calyx */
+  uniforms.uMorph.value += (1.0 - uniforms.uMorph.value) * 0.015;
+
+  /* Turrell drifting lights — slow orbits at different rates */
+  const la1 = t * 0.13, la2 = t * 0.09 + 2.1;
+  uniforms.uLight1.value.set(
+    Math.sin(la1) * 0.8, 0.5 + 0.3 * Math.sin(la1 * 0.7), Math.cos(la1) * 0.6);
+  uniforms.uLight2.value.set(
+    Math.cos(la2) * 0.6, 0.3 + 0.2 * Math.cos(la2 * 0.5), Math.sin(la2) * 0.8);
+
+  /* camera: auto-orbit + manual + centroid tracking */
+  const autoTh = t * 0.08;
+  const theta  = autoTh + orbTh;
+  const phi    = orbPh;
+  const radius = 22;
+  const cY     = 1.5 * uniforms.uMorph.value;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    cY + radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi));
+  camera.lookAt(0, cY, 0);
+
+  /* render: background then particles */
+  renderer.clear();
+  renderer.render(bgScene, bgCam);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
