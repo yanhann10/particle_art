@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xh8 · parallels · rail-warp figure</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#030201; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">xh8</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Parallels — parallel line rails warped by pointer presence into figure silhouette
+// Inspired by Marc Da Costa & Matthew Niederhauser "Parallels" (Lumen 2024)
+// LED amber monochrome on black. Lines drift along rails; mouse bends them into body shape.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x030201, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+camera.lookAt(0, 0, 0);
+
+// Palette: LED amber spectrum — warm amber core, dim orange edges, pale gold highlights
+const AMBER_CORE = new THREE.Color(0.92, 0.65, 0.08);
+const AMBER_DIM  = new THREE.Color(0.45, 0.28, 0.03);
+const AMBER_HOT  = new THREE.Color(1.0, 0.85, 0.35);
+
+// Rail parameters
+const RAIL_COUNT = 120;       // horizontal rails
+const SEGMENTS = 200;         // segments per rail
+const RAIL_SPACING = 0.105;   // vertical spacing
+const RAIL_WIDTH = 14.0;      // total horizontal span
+
+// Mouse/pointer state (normalized to world coords)
+const pointer = new THREE.Vector2(999, 999); // offscreen initially
+const pointerWorld = new THREE.Vector3(999, 999, 0);
+let pointerActive = false;
+let pointerDecay = 0.0;
+
+// Human figure silhouette SDF — simplified torso/head shape
+function figureSDF(x, y) {
+  // Head (circle at top)
+  const headR = 1.2;
+  const headY = 3.2;
+  const dHead = Math.sqrt(x*x + (y-headY)*(y-headY)) - headR;
+  
+  // Neck
+  const neckW = 0.5, neckH = 0.8, neckY = 2.0;
+  const dNeck = Math.max(Math.abs(x) - neckW, Math.abs(y - neckY) - neckH);
+  
+  // Torso (ellipse)
+  const torsoW = 2.2, torsoH = 3.5, torsoY = -1.2;
+  const tx = x / torsoW, ty = (y - torsoY) / torsoH;
+  const dTorso = Math.sqrt(tx*tx + ty*ty) - 1.0;
+  
+  // Shoulders (wider ellipse)
+  const shW = 3.0, shH = 1.2, shY = 1.0;
+  const sx = x / shW, sy = (y - shY) / shH;
+  const dShoulder = Math.sqrt(sx*sx + sy*sy) - 1.0;
+  
+  return Math.min(dHead, Math.min(dNeck, Math.min(dTorso * torsoW, dShoulder * shW)));
+}
+
+// Build instanced line geometry
+const railGeo = new THREE.BufferGeometry();
+const positions = new Float32Array(RAIL_COUNT * SEGMENTS * 3);
+const railIndices = new Float32Array(RAIL_COUNT * SEGMENTS * 2); // rail index, segment index
+const alphas = new Float32Array(RAIL_COUNT * SEGMENTS);
+
+for (let r = 0; r < RAIL_COUNT; r++) {
+  const y = (r - RAIL_COUNT/2) * RAIL_SPACING;
+  for (let s = 0; s < SEGMENTS; s++) {
+    const idx = (r * SEGMENTS + s);
+    const x = (s / (SEGMENTS-1) - 0.5) * RAIL_WIDTH;
+    positions[idx*3]   = x;
+    positions[idx*3+1] = y;
+    positions[idx*3+2] = 0;
+    railIndices[idx*2]   = r;
+    railIndices[idx*2+1] = s;
+    alphas[idx] = 1.0;
+  }
+}
+
+railGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+railGeo.setAttribute('railIdx', new THREE.BufferAttribute(railIndices, 2));
+railGeo.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
+
+// Build index for line segments
+const indices = [];
+for (let r = 0; r < RAIL_COUNT; r++) {
+  for (let s = 0; s < SEGMENTS - 1; s++) {
+    const base = r * SEGMENTS + s;
+    indices.push(base, base + 1);
+  }
+}
+railGeo.setIndex(indices);
+
+const railMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPointer: { value: new THREE.Vector3(999, 999, 0) },
+    uWarpStrength: { value: 0.0 },
+    uAmberCore: { value: AMBER_CORE },
+    uAmberDim: { value: AMBER_DIM },
+    uAmberHot: { value: AMBER_HOT },
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform vec3 uPointer;
+    uniform float uWarpStrength;
+    uniform vec3 uAmberCore;
+    uniform vec3 uAmberDim;
+    uniform vec3 uAmberHot;
+    
+    attribute vec2 railIdx;
+    attribute float alpha;
+    
+    varying vec3 vColor;
+    varying float vAlpha;
+    
+    // Simplified figure SDF in shader
+    float figureSDF(vec2 p) {
+      // Head
+      float dHead = length(p - vec2(0.0, 3.2)) - 1.2;
+      // Neck
+      float dNeck = max(abs(p.x) - 0.5, abs(p.y - 2.0) - 0.8);
+      // Torso
+      vec2 te = p - vec2(0.0, -1.2);
+      float dTorso = (length(te / vec2(2.2, 3.5)) - 1.0) * 2.2;
+      // Shoulders
+      vec2 se = p - vec2(0.0, 1.0);
+      float dShoulder = (length(se / vec2(3.0, 1.2)) - 1.0) * 3.0;
+      
+      return min(min(dHead, dNeck), min(dTorso, dShoulder));
+    }
+    
+    void main() {
+      vec3 pos = position;
+      float rail = railIdx.x;
+      float seg = railIdx.y;
+      
+      // Gentle drift along rails
+      float drift = sin(uTime * 0.3 + rail * 0.17) * 0.08;
+      pos.x += drift;
+      
+      // Subtle vertical breathing
+      pos.y += sin(uTime * 0.5 + seg * 0.02) * 0.015;
+      
+      // Figure warp: displace rails toward/away from figure boundary
+      float sdf = figureSDF(pos.xy);
+      
+      // Pointer-driven warp: when pointer is near, rails warp to reveal figure
+      vec2 toPointer = pos.xy - uPointer.xy;
+      float pointerDist = length(toPointer);
+      float pointerInfluence = smoothstep(8.0, 0.0, pointerDist) * uWarpStrength;
+      
+      // Warp: push rails perpendicular (in Y) to trace the figure silhouette
+      float warpAmount = 0.0;
+      if (sdf < 0.0) {
+        // Inside figure: compress rails slightly inward
+        warpAmount = sdf * 0.15 * pointerInfluence;
+      } else {
+        // Outside: push rails away from figure edge
+        warpAmount = min(sdf, 2.0) * 0.12 * pointerInfluence;
+      }
+      pos.y += warpAmount;
+      
+      // Also add z-depth displacement for parallax
+      float zWarp = smoothstep(2.0, -1.0, sdf) * pointerInfluence * 1.5;
+      pos.z += zWarp;
+      
+      // Color: base amber, brighter near figure edge, hottest at pointer
+      float edgeGlow = exp(-abs(sdf) * 0.8) * pointerInfluence;
+      float pointerGlow = exp(-pointerDist * 0.4) * uWarpStrength * 0.5;
+      
+      vec3 col = mix(uAmberDim, uAmberCore, 0.3 + edgeGlow * 0.7);
+      col = mix(col, uAmberHot, pointerGlow + edgeGlow * 0.3);
+      
+      // Fade edges of rails
+      float edgeFade = smoothstep(0.0, 0.08, seg / ${SEGMENTS.toFixed(1)}) * 
+                       smoothstep(1.0, 0.92, seg / ${SEGMENTS.toFixed(1)});
+      // Fade top/bottom rails
+      float railFade = smoothstep(0.0, 0.1, rail / ${RAIL_COUNT.toFixed(1)}) *
+                       smoothstep(1.0, 0.9, rail / ${RAIL_COUNT.toFixed(1)});
+      
+      vColor = col;
+      vAlpha = (0.25 + edgeGlow * 0.75 + pointerGlow * 0.5) * edgeFade * railFade;
+      
+      // Subtle per-rail phase offset for organic feel
+      pos.x += sin(rail * 0.37 + uTime * 0.15) * 0.03;
+      
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vAlpha;
+    
+    void main() {
+      if (vAlpha < 0.005) discard;
+      gl_FragColor = vec4(vColor * vAlpha, vAlpha);
+    }
+  `
+});
+
+const rails = new THREE.LineSegments(railGeo, railMat);
+scene.add(rails);
+
+// Add subtle background grain — scattered dim particles for atmosphere
+const dustCount = 3000;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+for (let i = 0; i < dustCount; i++) {
+  dustPos[i*3]   = (Math.random() - 0.5) * 20;
+  dustPos[i*3+1] = (Math.random() - 0.5) * 16;
+  dustPos[i*3+2] = (Math.random() - 0.5) * 8 - 2;
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    varying float vA;
+    void main() {
+      vec3 p = position;
+      p.x += sin(uTime * 0.1 + position.y * 0.5) * 0.3;
+      p.y += cos(uTime * 0.08 + position.x * 0.3) * 0.2;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 1.5 * (8.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+      vA = 0.06 + 0.04 * sin(uTime + position.x * 3.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vA;
+      gl_FragColor = vec4(0.45, 0.3, 0.05, a);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeo, dustMat));
+
+// Pointer handling
+function updatePointer(e) {
+  const x = (e.clientX / innerWidth) * 2 - 1;
+  const y = -(e.clientY / innerHeight) * 2 + 1;
+  pointer.set(x, y);
+  
+  // Unproject to world at z=0
+  const vec = new THREE.Vector3(x, y, 0.5);
+  vec.unproject(camera);
+  const dir = vec.sub(camera.position).normalize();
+  const t = -camera.position.z / dir.z;
+  pointerWorld.copy(camera.position).add(dir.multiplyScalar(t));
+  pointerActive = true;
+}
+
+addEventListener('mousemove', updatePointer);
+addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  updatePointer(e.touches[0]);
+}, { passive: false });
+
+addEventListener('mouseleave', () => { pointerActive = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Auto-warp: slowly drift a virtual pointer in a figure-8 when no real pointer
+let autoAngle = 0;
+
+let lastT = performance.now();
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  const t = now / 1000;
+
+  railMat.uniforms.uTime.value = t;
+  dustMat.uniforms.uTime.value = t;
+
+  // Pointer decay / auto-pointer
+  if (pointerActive) {
+    pointerDecay = Math.min(1.0, pointerDecay + dt * 2.5);
+    railMat.uniforms.uPointer.value.copy(pointerWorld);
+  } else {
+    pointerDecay = Math.max(0.35, pointerDecay - dt * 0.8);
+    // Auto-figure-8 pattern to keep piece alive
+    autoAngle += dt * 0.25;
+    const ax = Math.sin(autoAngle) * 3.5;
+    const ay = Math.sin(autoAngle * 2) * 2.5 + 0.5;
+    railMat.uniforms.uPointer.value.set(ax, ay, 0);
+  }
+  
+  railMat.uniforms.uWarpStrength.value = pointerDecay;
+
+  // Gentle camera sway
+  const camSway = t * 0.06;
+  camera.position.x = Math.sin(camSway) * 0.8;
+  camera.position.y = Math.cos(camSway * 0.7) * 0.4;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
