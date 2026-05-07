@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<!-- Aesthetic anchor: Carmen Herrera — hard-edge minimalism. Two flat colors, one diagonal division, overlap is the composition. -->
+<title>lq1 · aizawa herrera planes</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#050709; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">lq1</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── constants ── */
+const W = 320, H = 320, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050709, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── GPGPU render-targets ── */
+const rtParams = {
+  type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  depthBuffer: false
+};
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+/* ── seed particles near the basin ── */
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  init[i * 4]     = (Math.random() * 2 - 1) * 0.6;
+  init[i * 4 + 1] = (Math.random() * 2 - 1) * 0.6;
+  init[i * 4 + 2] = (Math.random() * 2 - 1) * 0.6;
+  init[i * 4 + 3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const fullQuad = new THREE.PlaneGeometry(2, 2);
+const camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+/* blit seed into rtA */
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(fullQuad, new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader:   `varying vec2 v; void main(){ v=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 v; void main(){ gl_FragColor=texture2D(tex,v); }`
+})));
+renderer.setRenderTarget(rtA);
+renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+/* ── Aizawa attractor integration ── */
+const simU = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.012 },
+  uA: { value: 0.95 }, uB: { value: 0.70 },
+  uC: { value: 0.60 }, uD: { value: 3.50 },
+  uE: { value: 0.25 }, uF: { value: 0.10 }
+};
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(fullQuad, new THREE.ShaderMaterial({
+  uniforms: simU,
+  vertexShader: `varying vec2 v; void main(){ v=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF;
+    varying vec2 v;
+    void main(){
+      vec4 s = texture2D(prev, v);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vec3 dp = vec3(
+        (p.z - uB)*p.x - uD*p.y,
+        uD*p.x + (p.z - uB)*p.y,
+        uC + uA*p.z - p.z*p.z*p.z/3.0
+          - (p.x*p.x + p.y*p.y)*(1.0 + uE*p.z)
+          + uF*p.z*p.x*p.x*p.x
+      );
+      p += dp * uDt;
+      age = mod(age + uDt*0.06, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+})));
+
+/* ── instanced planes (Carmen Herrera hard-edge) ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.05, 50);
+camera.position.set(0, 0, 4);
+
+const baseGeo = new THREE.PlaneGeometry(1, 1);
+const instGeo = new THREE.InstancedBufferGeometry();
+instGeo.index = baseGeo.index;
+instGeo.attributes.position = baseGeo.attributes.position;
+instGeo.attributes.uv = baseGeo.attributes.uv;
+
+const uvIdx = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = y * W + x;
+  uvIdx[i * 2]     = (x + 0.5) / W;
+  uvIdx[i * 2 + 1] = (y + 0.5) / H;
+}
+instGeo.setAttribute('uvIdx', new THREE.InstancedBufferAttribute(uvIdx, 2));
+instGeo.instanceCount = N;
+
+/*
+  Palette — two colors only, hard-edge split.
+  Cadmium red (Herrera's Blanco y Verde inverted to warm):  rgb(0.62, 0.04, 0.012)
+  Prussian blue (deep, cold):                                rgb(0.012, 0.04, 0.16)
+  Diagonal division on every plane — overlap density
+  builds luminosity. The form is made of light.
+*/
+const planesMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:     { value: rtA.texture },
+    uScale:    { value: 0.058 },
+    uCamRight: { value: new THREE.Vector3() },
+    uCamUp:    { value: new THREE.Vector3() }
+  },
+  transparent: true,
+  depthWrite: false,
+  depthTest: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uScale;
+    uniform vec3 uCamRight;
+    uniform vec3 uCamUp;
+    attribute vec2 uvIdx;
+    varying vec2 vUV;
+
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 center = s.xyz;
+      vUV = uv;
+
+      /* billboard: orient quad to face camera */
+      vec3 offset = (position.x * uCamRight + position.y * uCamUp) * uScale;
+      vec3 wp = center + offset;
+      gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUV;
+
+    void main(){
+      /* hard-edge diagonal — one line, two colors, that's it */
+      float side = step(vUV.y, vUV.x);
+
+      vec3 warm = vec3(0.62, 0.04, 0.012);   /* cadmium red  */
+      vec3 cool = vec3(0.012, 0.04, 0.16);    /* prussian blue */
+      vec3 col = mix(cool, warm, side);
+
+      /* low opacity per plane — overlap IS the composition */
+      float a = 0.055;
+      gl_FragColor = vec4(col, a);
+    }
+  `
+});
+
+const planes = new THREE.Mesh(instGeo, planesMat);
+scene.add(planes);
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── pointer perturbation (subtle parameter nudge) ── */
+const target = { a: 0.95, c: 0.60 };
+addEventListener('pointermove', (e) => {
+  target.a = 0.95 + ((e.clientX / innerWidth) - 0.5) * 0.08;
+  target.c = 0.60 + ((e.clientY / innerHeight) - 0.5) * 0.10;
+});
+
+/* ── pre-allocated vectors for billboard extraction ── */
+const _right   = new THREE.Vector3();
+const _up      = new THREE.Vector3();
+const _forward = new THREE.Vector3();
+
+const t0 = performance.now();
+
+function loop() {
+  const now = performance.now();
+
+  /* smooth parameter interpolation */
+  simU.uA.value += (target.a - simU.uA.value) * 0.04;
+  simU.uC.value += (target.c - simU.uC.value) * 0.04;
+
+  /* 4 sub-steps per frame for stable integration */
+  for (let i = 0; i < 4; i++) {
+    simU.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  planesMat.uniforms.state.value = rtA.texture;
+
+  /* slow orbit — camera drifts around the form */
+  const ang = (now - t0) * 0.00011;
+  camera.position.x = Math.sin(ang) * 4.0;
+  camera.position.z = Math.cos(ang) * 4.0;
+  camera.position.y = Math.sin(ang * 0.55) * 0.7;
+  camera.lookAt(0, 0, 1.0);
+  camera.updateMatrixWorld();
+
+  /* extract billboard basis from camera world matrix */
+  camera.matrixWorld.extractBasis(_right, _up, _forward);
+  planesMat.uniforms.uCamRight.value.copy(_right);
+  planesMat.uniforms.uCamUp.value.copy(_up);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
