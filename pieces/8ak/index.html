@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: pulse, intensity: vigorous -->
+<title>8ak · vascular pulse · audio-reactive biomorphic growth</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0608; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">8ak</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Semiconductor-inspired (Jarman & Gerhardt) audio-reactive vascular tower ──
+   Sound as geological force: bass frequencies drive diastolic shockwaves
+   through the vessel wall, chromatic aberration splits the retinal image
+   on transients, and tube radius modulates with audio energy.
+   Without mic permission, a synthetic 58-bpm heartbeat keeps the vessel alive.
+   Palette: arterial #b04438, deep venous #2a0808, rim cyanotic #88aacc.         */
+
+const W = innerWidth, H = innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.setClearColor(0x0a0608, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0608, 0.035);
+const camera = new THREE.PerspectiveCamera(40, W / H, 0.1, 200);
+camera.position.set(8, 8, 14);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+const keyLight = new THREE.DirectionalLight(0xfff0e8, 0.9);
+keyLight.position.set(5, 10, 5);
+scene.add(keyLight);
+scene.add(new THREE.AmbientLight(0x2a141c, 0.6));
+const rimLight = new THREE.DirectionalLight(0x88aacc, 0.4);
+rimLight.position.set(-5, 3, -5);
+scene.add(rimLight);
+
+/* ── render target + post-process ── */
+const rt = new THREE.WebGLRenderTarget(W, H);
+
+const postMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tDiffuse:     { value: rt.texture },
+    uChroma:      { value: 0.0 },
+    uBass:        { value: 0.0 },
+    uShockwave:   { value: -1.0 },
+    uShockCenter: { value: new THREE.Vector2(0.5, 0.5) },
+    uRes:         { value: new THREE.Vector2(W, H) },
+    uTime:        { value: 0.0 },
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float uChroma, uBass, uShockwave, uTime;
+    uniform vec2 uShockCenter, uRes;
+    varying vec2 vUv;
+
+    void main(){
+      vec2 uv = vUv;
+
+      /* shockwave ring distortion */
+      if(uShockwave >= 0.0 && uShockwave < 1.0){
+        float dist = distance(uv, uShockCenter);
+        float ring = uShockwave * 0.8;
+        float w    = 0.08 + uShockwave * 0.14;
+        float diff = abs(dist - ring);
+        if(diff < w){
+          float intensity = 1.0 - diff / w;
+          intensity *= intensity * (1.0 - uShockwave);
+          vec2 dir = normalize(uv - uShockCenter + 1e-6);
+          uv += dir * intensity * 0.05;
+        }
+      }
+
+      /* chromatic aberration */
+      float ca = uChroma * 0.009 + 0.0012;
+      vec2 d = uv - 0.5;
+      float r = texture2D(tDiffuse, uv + d * ca).r;
+      float g = texture2D(tDiffuse, uv).g;
+      float b = texture2D(tDiffuse, uv - d * ca).b;
+
+      /* bass-driven vignette */
+      float vig = 1.0 - length(d) * (0.55 + uBass * 0.9);
+      vig = clamp(vig, 0.0, 1.0);
+
+      /* film grain — photochemical imperfection (Lia Halloran nod) */
+      float grain = fract(sin(dot(uv * uRes, vec2(12.9898,78.233)) + uTime * 7.13) * 43758.5453);
+      grain = (grain - 0.5) * 0.035;
+
+      gl_FragColor = vec4(vec3(r, g, b) * vig + grain, 1.0);
+    }
+  `,
+  depthTest: false,
+});
+
+const postScene = new THREE.Scene();
+const postCam   = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+postScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), postMat));
+
+/* ── audio analysis ── */
+let audioCtx, analyser, freqData, audioReady = false;
+
+function initAudio(){
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+    audioReady = true;
+  }).catch(() => {});
+}
+
+let audioInited = false;
+function tryAudio(){ if(!audioInited){ audioInited = true; initAudio(); } }
+document.addEventListener('click', tryAudio);
+document.addEventListener('touchstart', tryAudio);
+try { initAudio(); audioInited = true; } catch(e){}
+
+function getAudio(){
+  let bass = 0, mid = 0, high = 0;
+  if(audioReady){
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    const bEnd = Math.floor(n * 0.15), mEnd = Math.floor(n * 0.5);
+    for(let i = 0; i < bEnd; i++) bass += freqData[i];
+    bass /= (bEnd * 255);
+    for(let i = bEnd; i < mEnd; i++) mid += freqData[i];
+    mid /= ((mEnd - bEnd) * 255);
+    for(let i = mEnd; i < n; i++) high += freqData[i];
+    high /= ((n - mEnd) * 255);
+  }
+  return { bass, mid, high };
+}
+
+/* ── differential growth (inherited from t9w → 5gm) ── */
+const MAX_VERTS = 1500, ATTRACT = 0.06, REPEL_R = 0.50, REPEL_STR = 0.13;
+const NOISE = 0.003, PRESSURE = 0.0028, RISE = 0.0045, MAX_D = 0.40;
+const CELL = REPEL_R, grid = new Map();
+const verts = [];
+for(let i = 0; i < 16; i++){
+  const th = i / 16 * Math.PI * 2, r = 1.4 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th) * r, y: 0, z: Math.sin(th) * r, age: 0 });
+}
+
+function rebuildGrid(){
+  grid.clear();
+  for(let i = 0; i < verts.length; i++){
+    const v = verts[i];
+    const k = Math.floor(v.x/CELL)+','+Math.floor(v.y/CELL)+','+Math.floor(v.z/CELL);
+    if(!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++) for(let dz=-1;dz<=1;dz++){
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if(arr) for(const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+function step(){
+  if(paused) return;
+  const n = verts.length;
+  if(n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+  for(let i = 0; i < n; i++){
+    const v = verts[i];
+    for(const j of neighbors(v)){
+      if(j === i) continue;
+      const u = verts[j], ex = v.x-u.x, ey = v.y-u.y, ez = v.z-u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if(d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2), f = REPEL_STR * (1 - d/REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  for(let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x+b.x-2*v.x)*ATTRACT;
+    dy[i] += (a.y+b.y-2*v.y)*ATTRACT;
+    dz[i] += (a.z+b.z-2*v.z)*ATTRACT;
+  }
+  let cx = 0, cy = 0, cz = 0;
+  for(let i = 0; i < n; i++){ cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  for(let i = 0; i < n; i++){
+    const ox = verts[i].x-cx, oy = verts[i].y-cy, oz = verts[i].z-cz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox/d)*PRESSURE; dy[i] += (oy/d)*PRESSURE*0.4; dz[i] += (oz/d)*PRESSURE;
+  }
+  for(let i = 0; i < n; i++){
+    const a = verts[i].age, upward = RISE * (0.3 + 1.2 * Math.min(a*1.5, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE;
+    verts[i].y += dy[i] + (Math.random()-0.5)*NOISE*0.5 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE;
+    verts[i].age += 0.0014;
+  }
+  const grown = [];
+  for(let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if(ex*ex+ey*ey+ez*ez > MAX_D*MAX_D && verts.length+grown.length < MAX_VERTS){
+      grown.push({ x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5-0.05, z:(a.z+b.z)*0.5, age:Math.max(a.age,b.age)*0.5 });
+    }
+  }
+  verts.length = 0;
+  for(const v of grown) verts.push(v);
+}
+for(let s = 0; s < 600; s++) step();
+addEventListener('click', () => { paused = !paused; });
+
+/* ── vascular tube ── */
+let tubeMesh = null;
+const tubeMat = new THREE.MeshStandardMaterial({
+  color: 0xb04438, emissive: 0x2a0808, roughness: 0.5, metalness: 0.05,
+});
+
+/* ── shockwave state ── */
+let shockProgress = -1, lastBassHit = -2;
+const SHOCK_DUR = 0.55;
+let sBass = 0, sMid = 0, sHigh = 0;
+
+addEventListener('resize', () => {
+  const w = innerWidth, h = innerHeight;
+  camera.aspect = w/h; camera.updateProjectionMatrix();
+  renderer.setSize(w, h); rt.setSize(w, h);
+  postMat.uniforms.uRes.value.set(w, h);
+});
+
+const t0 = performance.now();
+function loop(){
+  const t = (performance.now() - t0) / 1000;
+  for(let s = 0; s < 2; s++) step();
+
+  /* audio or synthetic heartbeat */
+  let { bass, mid, high } = getAudio();
+  if(!audioReady){
+    const hb = Math.pow(Math.max(0, Math.sin(t * 1.52)), 12);
+    bass = hb * 0.65; mid = hb * 0.25; high = Math.random() * 0.04;
+  }
+  const dramaticK = audioReady ? 2.0 : 1.0;
+  sBass += (bass - sBass) * 0.15;
+  sMid  += (mid  - sMid)  * 0.12;
+  sHigh += (high - sHigh) * 0.1;
+
+  /* trigger shockwave on bass transient */
+  if(sBass > 0.32 && t - lastBassHit > SHOCK_DUR + 0.25){
+    shockProgress = 0; lastBassHit = t;
+  }
+  if(shockProgress >= 0){
+    shockProgress += 1.0 / (SHOCK_DUR * 60);
+    if(shockProgress > 1.0) shockProgress = -1;
+  }
+
+  /* build tube mesh */
+  if(verts.length > 8){
+    let yMin = Infinity, yMax = -Infinity;
+    for(const v of verts){ if(v.y < yMin) yMin = v.y; if(v.y > yMax) yMax = v.y; }
+    const yRange = Math.max(yMax - yMin, 0.1);
+    const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+
+    const N = Math.min(700, verts.length * 2), RAD = 8;
+    const pos = new Float32Array(N * RAD * 3), idx = [];
+    const up = new THREE.Vector3(0, 1, 0);
+    const pulse = 1.0 + (0.10 + sBass * 0.35 * dramaticK) * Math.sin(t * 1.6);
+
+    /* emissive flushes on bass */
+    const eR = Math.min(255, 42 + Math.floor(sBass * 120 * dramaticK));
+    tubeMat.emissive.setRGB(eR / 255, 0.03, 0.03);
+
+    for(let i = 0; i < N; i++){
+      const tt = i / N, p = curve.getPointAt(tt);
+      const hFrac = Math.max(0, Math.min(1, (p.y - yMin) / yRange));
+      let r = 0.40 * (1 - hFrac * 0.78);
+      r *= 1.0 + 0.18 * Math.pow(Math.sin(tt * 22) * 0.5 + 0.5, 6);
+      /* bass-reactive traveling wave along the vessel */
+      const wave = Math.sin(tt * 12.0 - t * 4.0) * 0.5 + 0.5;
+      r *= pulse + sBass * wave * 0.28 * dramaticK;
+
+      const tan = curve.getTangentAt(tt).normalize();
+      const nor = new THREE.Vector3().crossVectors(tan, up).normalize();
+      if(nor.lengthSq() < 0.001) nor.set(1, 0, 0);
+      const bin = new THREE.Vector3().crossVectors(tan, nor).normalize();
+      for(let j = 0; j < RAD; j++){
+        const ang = (j / RAD) * Math.PI * 2;
+        const vx = nor.x * Math.cos(ang) * r + bin.x * Math.sin(ang) * r + p.x;
+        const vy = nor.y * Math.cos(ang) * r + bin.y * Math.sin(ang) * r + p.y;
+        const vz = nor.z * Math.cos(ang) * r + bin.z * Math.sin(ang) * r + p.z;
+        const o = (i * RAD + j) * 3;
+        pos[o] = vx; pos[o+1] = vy; pos[o+2] = vz;
+      }
+    }
+    for(let i = 0; i < N; i++){
+      const ni = (i+1) % N;
+      for(let j = 0; j < RAD; j++){
+        const nj = (j+1) % RAD;
+        const a = i*RAD+j, b = i*RAD+nj, c = ni*RAD+j, d = ni*RAD+nj;
+        idx.push(a,b,c, b,d,c);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    if(tubeMesh){ scene.remove(tubeMesh); tubeMesh.geometry.dispose(); }
+    tubeMesh = new THREE.Mesh(g, tubeMat);
+    scene.add(tubeMesh);
+  }
+
+  /* camera follow centroid */
+  let yMean = 0;
+  for(const v of verts) yMean += v.y;
+  yMean /= Math.max(verts.length, 1);
+  const tgtY = Math.max(yMean, 2.0);
+  controls.target.y += (tgtY - controls.target.y) * 0.04;
+  camera.position.y += (tgtY + 4 - camera.position.y) * 0.04;
+
+  /* key light pulses with bass */
+  keyLight.intensity = 0.9 + sBass * 1.4 * dramaticK;
+
+  controls.update();
+
+  /* render to RT then post-process */
+  renderer.setRenderTarget(rt);
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+
+  postMat.uniforms.uChroma.value    = sBass * 3.5 * dramaticK + sHigh * 2.0;
+  postMat.uniforms.uBass.value      = sBass * dramaticK;
+  postMat.uniforms.uShockwave.value = shockProgress;
+  postMat.uniforms.uTime.value      = t;
+  renderer.render(postScene, postCam);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
