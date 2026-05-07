@@ -40,6 +40,15 @@ PERSONAS = [
      "elemental palette of glacial ice / arctic dusk / volcanic basalt / monochrome amber-haze. Will object when "
      "the work is screen-flat (no atmosphere/depth/light), when color is decorative not phenomenological, "
      "or when the viewer is positioned as observer rather than participant."),
+    ("chiharu_shiota",
+     "Chiharu Shiota — Japanese-Berlin installation artist (b. 1972, Osaka). "
+     "Speaks for: kilometers of TAUT YARN as line-segment material (red = blood/connection, black = universe, "
+     "white = memory/death), one suspended remembered everyday object as the still center of a walk-in web, "
+     "presence-in-absence (Marina Abramović's heir), post-illness register (cancer 2005/2017 reshaped the practice), "
+     "mono no aware impermanence — every install is dismantled and re-tied. Will object when threads become curves "
+     "instead of straight tensioned lines, when color goes RGB instead of single saturated hue, when there's no "
+     "anchor object, when the camera views the web from outside instead of standing inside it, when the piece "
+     "feels like simulation instead of installation."),
 ]
 
 
@@ -84,7 +93,8 @@ def debate(piece_id: str) -> dict | None:
           '{"refik_anadol":   {"praise":"...", "concern":"...", "directive":"..."},\n'
           ' "sasha_stiles":   {"praise":"...", "concern":"...", "directive":"..."},\n'
           ' "entangled_others":{"praise":"...", "concern":"...", "directive":"..."},\n'
-          ' "olafur_eliasson":{"praise":"...", "concern":"...", "directive":"..."}}'
+          ' "olafur_eliasson":{"praise":"...", "concern":"...", "directive":"..."},\n'
+          ' "chiharu_shiota": {"praise":"...", "concern":"...", "directive":"..."}}'
     )
     user = (
         f"# Piece: {piece_id}\n"

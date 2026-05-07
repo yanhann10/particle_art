@@ -241,7 +241,43 @@ def _iterate_when_chosen_block(parent_id: str) -> str:
     )
 
 
-def build_prompt(parent: dict, parent_html: str, directive: str) -> tuple[str, str]:
+def _seed_block(seed_dir_path: str | None) -> tuple[str, str | None]:
+    """Read seeds/<slug>/meta.json + artist SKILL.md and produce a prompt block.
+    Returns (prompt_text, override_directive). Both empty if no seed."""
+    if not seed_dir_path:
+        return "", None
+    seed_dir = Path(seed_dir_path)
+    if not seed_dir.is_absolute():
+        seed_dir = REPO / seed_dir_path
+    meta_path = seed_dir / "meta.json"
+    if not meta_path.exists():
+        return "", None
+    try:
+        m = json.loads(meta_path.read_text())
+    except Exception:
+        return "", None
+    skill_text = ""
+    skill_name = m.get("artist_skill")
+    if skill_name:
+        skill_path = Path.home() / ".claude/skills" / skill_name / "SKILL.md"
+        if skill_path.exists():
+            try:
+                skill_text = skill_path.read_text()[:3500]
+            except Exception:
+                pass
+    visual_brief = "\n".join(f"  - {b}" for b in (m.get("visual_brief") or []))
+    block = (
+        f"SEED-DRIVEN MUTATION — this descendant must channel a specific artist's DNA "
+        f"applied to a specific visual seed.\n"
+        f"Artist: {m.get('artist','?')}\n"
+        f"Likely work: {m.get('likely_work','?')}\n"
+        f"Visual brief from the seed image:\n{visual_brief}\n\n"
+        f"--- ARTIST SKILL DNA ({skill_name}) ---\n{skill_text}\n--- end skill ---"
+    )
+    return block, m.get("channel_directive")
+
+
+def build_prompt(parent: dict, parent_html: str, directive: str, seed_block: str = "") -> tuple[str, str]:
     rejection = _rejection_block()
     swarm = _swarm_block()
     iterate_note = _iterate_when_chosen_block(parent["id"])
@@ -255,6 +291,7 @@ def build_prompt(parent: dict, parent_html: str, directive: str) -> tuple[str, s
         "opacity 0.55, font-size 11px (the 3-char id will be supplied).\n\n"
         + (("USER TASTE GUARDRAILS — read carefully:\n" + rejection + "\n\n") if rejection else "")
         + ((iterate_note + "\n\n") if iterate_note else "")
+        + ((seed_block + "\n\n") if seed_block else "")
         + ((swarm + "\n\n") if swarm else "")
         + "If your output would violate any of the above, redesign before emitting. "
         "Better to produce a structurally simple piece that respects the guardrails "
@@ -347,6 +384,10 @@ def main():
     ap.add_argument("--no-push", action="store_true", help="commit but don't push")
     ap.add_argument("--parent", help="force a specific parent id")
     ap.add_argument("--directive", help="force a specific directive text")
+    ap.add_argument("--seed", help="path to a seeds/<slug>/ directory — injects the seed's "
+                                   "visual brief, artist DNA (artist_skill SKILL.md), and "
+                                   "channel_directive into the prompt; piece is parented "
+                                   "off the seed's lineage if descendants exist, else from a forced parent")
     args = ap.parse_args()
 
     # budget gate
@@ -371,15 +412,21 @@ def main():
 
     parent_html = (PIECES / parent["id"] / "index.html").read_text()
 
+    seed_block_text, seed_override_directive = _seed_block(args.seed)
+
     if args.directive:
         directive_id, directive = "manual", args.directive
+    elif seed_override_directive:
+        directive_id, directive = "seed_channel", seed_override_directive
     else:
         directive_id, directive = sample_directive(DIRECTIVES, parent["id"], recent)
 
     print(f"parent: {parent['id']} ({parent['title']})")
-    print(f"directive: {directive_id} — {directive}")
+    print(f"directive: {directive_id} — {directive[:120]}{'...' if len(directive) > 120 else ''}")
+    if args.seed:
+        print(f"seed: {args.seed}")
 
-    system, user = build_prompt(parent, parent_html, directive)
+    system, user = build_prompt(parent, parent_html, directive, seed_block=seed_block_text)
 
     try:
         text, provider = lib_claude.call(system, user)
@@ -448,6 +495,9 @@ def main():
         "directives_in_lineage": parent_directives + [directive_id],   # root → here, ordered
         "tags": _tags_from_directive(directive_id, parent),
     }
+    if args.seed:
+        seed_slug = Path(args.seed).name
+        new_meta["seed"] = seed_slug
     (out_dir / "meta.json").write_text(json.dumps(new_meta, indent=2))
 
     # update lineage.json
