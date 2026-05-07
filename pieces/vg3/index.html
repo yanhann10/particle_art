@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vg3 · blind camera (sound hallucination)</title>
+<!-- MOTION: coalesce, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#d4cfc4; overflow:hidden;
+               color:#3a3935; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; 
+          letter-spacing: 0.06em; color:#3a3935; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.48; font-size: 10px; 
+          letter-spacing: 0.04em; color:#3a3935; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.42; font-size: 10px; 
+          letter-spacing: 0.04em; color:#3a3935; }
+</style>
+</head>
+<body>
+<div class="id">vg3 · blind camera</div>
+<div class="hint">simulated ambient sound reconstruction</div>
+<div class="src">diego trujillo pisanty · lumen prize 2024</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Blind Camera: Neural network hallucinating Mexico City from sound.
+// A 2D point cloud that coalesces into recognizable silhouettes (plaza arch,
+// vendor stall, traffic corridor) then disperses back into noise.
+// Audio simulation: 12 FFT-style frequency bands drive local attractor strength.
+// Palette: sun-bleached concrete, smog ochre, exhaust shadow.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xd4cfc4); // bleached concrete
+const camera = new THREE.OrthographicCamera(-14, 14, 10, -10, 0.1, 100);
+camera.position.set(0, 0, 20);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// particle field — 50k points
+const N = 50000;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const seed = new Float32Array(N);
+const band = new Uint8Array(N); // which frequency band drives this particle
+
+// initialize scattered cloud
+for (let i = 0; i < N; i++){
+  const th = Math.random() * Math.PI * 2;
+  const r = Math.random() * 10;
+  pos[i*3]   = Math.cos(th) * r;
+  pos[i*3+1] = Math.sin(th) * r;
+  pos[i*3+2] = (Math.random() - 0.5) * 2;
+  vel[i*3]   = 0;
+  vel[i*3+1] = 0;
+  vel[i*3+2] = 0;
+  seed[i]    = Math.random();
+  band[i]    = Math.floor(Math.random() * 12);
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seed, 1));
+
+const uniforms = {
+  uTime: { value: 0 }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    attribute float seed;
+    varying float vDepth;
+    varying float vSeed;
+    void main(){
+      vec3 p = position;
+      vSeed = seed;
+      // slight parallax by depth
+      vDepth = (p.z + 1.0) * 0.5;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = mix(1.2, 3.0, vDepth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDepth;
+    varying float vSeed;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      // palette: sun-bleached concrete → smog ochre → exhaust shadow
+      vec3 c1 = vec3(0.88, 0.84, 0.78); // concrete
+      vec3 c2 = vec3(0.76, 0.62, 0.38); // smog ochre
+      vec3 c3 = vec3(0.28, 0.26, 0.24); // exhaust
+      vec3 col = mix(c1, c2, vDepth);
+      col = mix(col, c3, smoothstep(0.0, 0.3, vSeed) * 0.3);
+      float a = exp(-r * 12.0) * 0.55;
+      gl_FragColor = vec4(col, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// simulated audio bands — 12 frequency bins that oscillate with different periods
+const bands = new Float32Array(12);
+const bandPhase = new Float32Array(12);
+const bandPeriod = new Float32Array(12);
+for (let i = 0; i < 12; i++){
+  bands[i] = 0;
+  bandPhase[i] = Math.random() * Math.PI * 2;
+  bandPeriod[i] = 1.2 + Math.random() * 2.5;
+}
+
+// attractor set — three named structures that particles coalesce into
+// when their frequency band is loud
+const attractors = [
+  // plaza arch (vertical posts + lintel)
+  { name: 'arch', points: [] },
+  // vendor stall (rectangular cluster)
+  { name: 'stall', points: [] },
+  // traffic corridor (horizontal line)
+  { name: 'corridor', points: [] }
+];
+
+// arch: two vertical lines + horizontal top
+for (let i = 0; i < 100; i++){
+  const y = -4 + i * 0.08;
+  attractors[0].points.push([-3, y, 0]);
+  attractors[0].points.push([3, y, 0]);
+}
+for (let i = 0; i < 60; i++){
+  const x = -3 + i * 0.1;
+  attractors[0].points.push([x, 4, 0]);
+}
+
+// stall: dense rectangular region
+for (let i = 0; i < 200; i++){
+  const x = -1.5 + Math.random() * 3;
+  const y = -2 + Math.random() * 2.5;
+  attractors[1].points.push([x, y, 0]);
+}
+
+// corridor: horizontal line with depth gradient
+for (let i = 0; i < 150; i++){
+  const x = -8 + i * 0.1;
+  const y = 0.5 + (Math.random() - 0.5) * 0.4;
+  const z = (Math.random() - 0.5) * 1.2;
+  attractors[2].points.push([x, y, z]);
+}
+
+// assign particles to attractors based on band
+const particleAttractor = new Uint8Array(N);
+for (let i = 0; i < N; i++){
+  const b = band[i];
+  if (b < 4) particleAttractor[i] = 0;       // arch
+  else if (b < 8) particleAttractor[i] = 1;  // stall
+  else particleAttractor[i] = 2;             // corridor
+}
+
+const start = performance.now();
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // update simulated audio bands — each oscillates independently
+  for (let i = 0; i < 12; i++){
+    bandPhase[i] += 0.016 / bandPeriod[i];
+    bands[i] = Math.max(0, Math.sin(bandPhase[i]));
+  }
+
+  // particle update
+  for (let i = 0; i < N; i++){
+    const b = band[i];
+    const loudness = bands[b];
+    const attIdx = particleAttractor[i];
+    const att = attractors[attIdx];
+    
+    // choose nearest attractor point (or random if quiet)
+    let tx = 0, ty = 0, tz = 0;
+    if (loudness > 0.15 && att.points.length > 0){
+      // find nearest attractor point
+      let minDist = Infinity;
+      for (const ap of att.points){
+        const dx = ap[0] - pos[i*3];
+        const dy = ap[1] - pos[i*3+1];
+        const dz = ap[2] - pos[i*3+2];
+        const d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 < minDist){
+          minDist = d2;
+          tx = ap[0];
+          ty = ap[1];
+          tz = ap[2];
+        }
+      }
+      // attract toward target with strength proportional to loudness
+      const dx = tx - pos[i*3];
+      const dy = ty - pos[i*3+1];
+      const dz = tz - pos[i*3+2];
+      const force = loudness * 0.08;
+      vel[i*3]   += dx * force;
+      vel[i*3+1] += dy * force;
+      vel[i*3+2] += dz * force;
+    } else {
+      // disperse: brownian drift
+      vel[i*3]   += (Math.random() - 0.5) * 0.02;
+      vel[i*3+1] += (Math.random() - 0.5) * 0.02;
+      vel[i*3+2] += (Math.random() - 0.5) * 0.01;
+    }
+
+    // damping
+    vel[i*3]   *= 0.92;
+    vel[i*3+1] *= 0.92;
+    vel[i*3+2] *= 0.92;
+
+    // integrate
+    pos[i*3]   += vel[i*3];
+    pos[i*3+1] += vel[i*3+1];
+    pos[i*3+2] += vel[i*3+2];
+
+    // soft boundary
+    if (Math.abs(pos[i*3]) > 12){
+      pos[i*3] *= 0.95;
+      vel[i*3] *= -0.5;
+    }
+    if (Math.abs(pos[i*3+1]) > 9){
+      pos[i*3+1] *= 0.95;
+      vel[i*3+1] *= -0.5;
+    }
+    if (Math.abs(pos[i*3+2]) > 2){
+      pos[i*3+2] *= 0.95;
+      vel[i*3+2] *= -0.5;
+    }
+  }
+
+  geom.attributes.position.needsUpdate = true;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+addEventListener('resize', () => {
+  const aspect = innerWidth / innerHeight;
+  const h = 10;
+  camera.left = -h * aspect;
+  camera.right = h * aspect;
+  camera.top = h;
+  camera.bottom = -h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+addEventListener('resize', () => {
+  const aspect = innerWidth / innerHeight;
+  const h = 10;
+  camera.left = -h * aspect;
+  camera.right = h * aspect;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+loop();
+</script>
+</body>
+</html>
