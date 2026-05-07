@@ -3,372 +3,321 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>zhn · coup-de-théâtre (calyx inversion)</title>
+<title>zhn · macroblock glitch · DCT basis drift</title>
 <style>
-  html, body { margin:0; padding:0; height:100%; background:#f8f6f2; overflow:hidden;
-               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  html, body { margin:0; padding:0; height:100%; background:#1a1c1e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   canvas { display:block; }
-  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
-  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
-  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 10px; letter-spacing: 0.04em; }
+  .src   { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
 </style>
 </head>
 <body>
-<div class="id">zhn</div>
-<div class="hint">click to regenerate · orbit drag</div>
-<div class="src">coup-de-théâtre · calyx inversion · 80k particles</div>
-
+<!-- MOTION: drift, intensity: gentle -->
+<div class="id">zhn · macroblock glitch</div>
+<div class="hint">DCT basis ripple · bit-flip teleport every 7s</div>
+<div class="src">102k GPGPU · chroma-subsampled palette</div>
 <script type="importmap">
-{ "imports": {
-    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
-  } }
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
 </script>
 <script type="module">
 import * as THREE from 'three';
 
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
-camera.position.set(0, 12, 18);
-camera.lookAt(0, 2, 0);
+// Rosa Menkman vernacular of file formats: JPEG as native visual language
+// Particles live in 8x8 macroblock lattice, drift via 2D DCT basis functions
+// Occasional bit-flip events: entire 8x8 blocks teleport to random locations
+// Palette: chroma-subsampled magenta/cyan/yellow on ringing-artifact gray
+
+const W = 320, H = 320;
+const N = W * H;
+const GRID = 8; // macroblock size
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
-renderer.setClearColor(0xf8f6f2, 1);
+renderer.setClearColor(0x1a1c1e, 1);
 document.body.appendChild(renderer.domElement);
 
-const N = 80000;
-let geom, points;
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
 
-/* Track when we last regenerated for morph timing */
-let regenTime = 0;
+function makeInitTexture(){
+  const init = new Float32Array(N * 4);
+  // distribute particles across 40×40 grid of macroblocks, each 8×8 units
+  const gridW = 40, gridH = 40;
+  for (let i = 0; i < N; i++){
+    const gx = Math.floor(Math.random() * gridW);
+    const gy = Math.floor(Math.random() * gridH);
+    // within the 8×8 block
+    const bx = Math.random() * GRID;
+    const by = Math.random() * GRID;
+    init[i*4]   = (gx * GRID + bx) - (gridW * GRID * 0.5); // center the grid
+    init[i*4+1] = (gy * GRID + by) - (gridH * GRID * 0.5);
+    init[i*4+2] = 0;
+    init[i*4+3] = Math.random(); // age/phase
+  }
+  const t = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+  t.needsUpdate = true; return t;
+}
 
-const uniforms = {
-  uTime:     { value: 0 },
-  uPhase:    { value: 0 },
-  uPixel:    { value: renderer.getPixelRatio() },
-  uRowFreq:  { value: 1.2 },
-  uColFreq:  { value: 1.0 },
-  uWaveAmp:  { value: 0.5 },
-  uTwist:    { value: 0.0 },
-  uMorph:    { value: 0.0 },
-  uPetals:   { value: 5.0 },
-  uCupDepth: { value: 4.0 },
-  uCoup:     { value: 0.0 },   // 0 = normal, 1 = fully inverted
-  uCoupHue:  { value: 0.0 },   // blends color during coup
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: makeInitTexture() } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(rtB); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// simulation: DCT basis drift + bit-flip teleport
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt:   { value: 0.0 },
+  uTime: { value: 0.0 },
+  uBitFlipActive: { value: 0 },
+  uBitFlipBlock: { value: new THREE.Vector2(0, 0) },
+  uBitFlipTarget: { value: new THREE.Vector2(0, 0) }
 };
-
-const mat = new THREE.ShaderMaterial({
-  uniforms,
-  transparent: true,
-  depthWrite: false,
-  vertexShader: `
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
     uniform float uTime;
-    uniform float uPixel;
-    uniform float uPhase;
-    uniform float uRowFreq;
-    uniform float uColFreq;
-    uniform float uWaveAmp;
-    uniform float uTwist;
-    uniform float uMorph;
-    uniform float uPetals;
-    uniform float uCupDepth;
-    uniform float uCoup;
+    uniform int uBitFlipActive;
+    uniform vec2 uBitFlipBlock;
+    uniform vec2 uBitFlipTarget;
+    varying vec2 vUv;
 
-    attribute vec2 gridPos;
-    attribute float seed;
+    const float GRID = 8.0;
+    const float PI = 3.14159265359;
 
-    varying float vDensity;
-    varying float vHeight;
-    varying float vRadius;
+    // 2D DCT basis function (low-frequency only for smooth ripple)
+    float dctBasis(vec2 coord, float u, float v){
+      float cu = u == 0.0 ? 0.70710678 : 1.0;
+      float cv = v == 0.0 ? 0.70710678 : 1.0;
+      return cu * cv * cos(PI * u * (coord.x + 0.5) / GRID) * cos(PI * v * (coord.y + 0.5) / GRID);
+    }
 
     void main(){
-      vec2 gp = gridPos;
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
 
-      /* Riley wave interference */
-      float rowWave = sin(gp.y * uRowFreq + uTime * 0.6 + uPhase) * uWaveAmp;
-      float colWave = sin(gp.x * uColFreq + uTime * 0.35) * uWaveAmp;
+      // identify which macroblock this particle belongs to
+      vec2 blockOrigin = floor((p.xy + vec2(160.0)) / GRID) * GRID - 160.0;
+      vec2 localCoord = p.xy - blockOrigin; // 0..GRID
 
-      float twist = uTwist * length(gp) * 0.04;
-      float ct = cos(twist); float st = sin(twist);
-      vec2 twisted = vec2(gp.x * ct - gp.y * st, gp.x * st + gp.y * ct);
+      // bit-flip teleport: if this block is being flipped, jump to target block
+      if (uBitFlipActive == 1){
+        vec2 currentBlock = floor((p.xy + vec2(160.0)) / GRID);
+        if (distance(currentBlock, uBitFlipBlock) < 0.5){
+          vec2 newOrigin = uBitFlipTarget * GRID - 160.0;
+          p.xy = newOrigin + localCoord;
+          blockOrigin = newOrigin;
+        }
+      }
 
-      /* Calyx morph */
-      float r = length(gp);
-      float maxR = 12.0;
-      float nr = clamp(r / maxR, 0.0, 1.0);
-      float theta = atan(gp.y, gp.x);
+      // DCT basis drift: sum of three low-frequency basis functions with time offsets
+      float drift1 = dctBasis(localCoord, 1.0, 0.0) * sin(uTime * 0.8 + age * 6.28);
+      float drift2 = dctBasis(localCoord, 0.0, 1.0) * cos(uTime * 1.1 + age * 6.28);
+      float drift3 = dctBasis(localCoord, 1.0, 1.0) * sin(uTime * 0.6 + age * 3.14);
+      
+      vec2 driftVec = vec2(drift1 + drift3, drift2 + drift3) * 0.15;
+      p.xy += driftVec * uDt * 12.0;
 
-      float petalShape = 0.5 + 0.5 * cos(theta * uPetals);
-      float cupProfile = uCupDepth * nr * nr * (0.6 + 0.4 * petalShape);
-      float flare = 1.0 + 0.15 * nr * nr * uMorph;
+      // keep within macroblock boundary (hard wrap)
+      p.xy = blockOrigin + mod(p.xy - blockOrigin + GRID * 0.5, GRID) - GRID * 0.5;
 
-      float m = uMorph;
-      vec3 flatPos = vec3(twisted.x + rowWave, twisted.y + colWave, 0.0);
+      age = mod(age + uDt * 0.15, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
 
-      float cx = twisted.x * flare + rowWave * (1.0 - 0.5 * m);
-      float cy = twisted.y * flare + colWave * (1.0 - 0.5 * m);
-      float cz = cupProfile * m;
+// render scene
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 1, 1000);
+camera.position.set(0, 0, 280);
+camera.lookAt(0, 0, 0);
 
-      vec3 p = mix(flatPos, vec3(cx, cy, cz), m);
+// background plane with subtle banding (quantization artifact)
+const bgGeom = new THREE.PlaneGeometry(800, 800);
+const bgMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    void main(){
+      float band = floor(vUv.y * 32.0) / 32.0;
+      float gray = 0.10 + band * 0.04 + sin(uTime * 0.3 + vUv.x * 6.28) * 0.01;
+      gl_FragColor = vec4(vec3(gray), 1.0);
+    }
+  `,
+  depthWrite: true
+});
+const bgPlane = new THREE.Mesh(bgGeom, bgMat);
+bgPlane.position.z = -10;
+scene.add(bgPlane);
 
-      /* === COUP-DE-THÉÂTRE: invert the cup === */
-      // During the coup, petals flip downward (negate z) and splay outward
-      float coup = uCoup;
-      // Outer petals flip more dramatically
-      float flipAmount = coup * nr;
-      // Invert the cup height, and push outer rim downward past center
-      float invertedZ = -cz * 1.3 - coup * nr * 2.0;
-      // Splay outward during flip
-      float splayFactor = 1.0 + coup * nr * 0.4;
-      vec3 coupPos = vec3(cx * splayFactor, cy * splayFactor, mix(cz, invertedZ, coup) * m);
+// points geometry
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
 
-      p = mix(flatPos, mix(vec3(cx, cy, cz), coupPos, coup), m);
+// chroma-subsampled palette: magenta, cyan, yellow + gray
+const palette = [
+  new THREE.Vector3(0.92, 0.28, 0.68), // magenta
+  new THREE.Vector3(0.18, 0.72, 0.88), // cyan
+  new THREE.Vector3(0.98, 0.88, 0.32), // yellow
+  new THREE.Vector3(0.42, 0.44, 0.46)  // ringing gray
+];
 
-      /* Interference / veining */
-      float interference = sin(gp.y * uRowFreq * 2.0 + uTime * 0.6)
-                         * sin(gp.x * uColFreq * 2.0 + uTime * 0.35);
-      float vein = sin(theta * uPetals * 3.0 + r * 1.5 + uTime * 0.2);
-      vDensity = mix(interference, interference * 0.6 + vein * 0.4, m);
-      vHeight = p.z;
-      vRadius = nr;
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtA.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uPal0:  { value: palette[0] },
+    uPal1:  { value: palette[1] },
+    uPal2:  { value: palette[2] },
+    uPal3:  { value: palette[3] },
+    uTime:  { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform vec3 uPal0, uPal1, uPal2, uPal3;
+    uniform float uTime;
+    attribute vec2 uvIdx;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      // macroblock-aware color: which block are we in?
+      vec2 blockCoord = floor((p.xy + vec2(160.0)) / 8.0);
+      float blockHash = fract(sin(dot(blockCoord, vec2(12.9898, 78.233))) * 43758.5453);
+      
+      // chroma subsampling: adjacent blocks share color channel
+      float chromaU = floor(blockCoord.x / 2.0);
+      float chromaV = floor(blockCoord.y / 2.0);
+      float chromaHash = fract(sin(dot(vec2(chromaU, chromaV), vec2(91.3176, 41.789))) * 19134.5312);
+      
+      int paletteIdx = int(chromaHash * 4.0);
+      vec3 col;
+      if (paletteIdx == 0)      col = uPal0;
+      else if (paletteIdx == 1) col = uPal1;
+      else if (paletteIdx == 2) col = uPal2;
+      else                      col = uPal3;
+      
+      // age-based brightness modulation (DCT coefficient intensity)
+      float brightness = 0.6 + 0.4 * sin(age * 6.28);
+      vCol = col * brightness;
+      vAlpha = 0.7 + 0.3 * sin(age * 6.28 + blockHash * 6.28);
 
       vec4 mv = modelViewMatrix * vec4(p, 1.0);
-      float dist = -mv.z;
-      gl_PointSize = uPixel * max(1.5, 3.0 - dist * 0.06);
+      gl_PointSize = 2.5 * uPixel * (200.0 / -mv.z);
       gl_Position = projectionMatrix * mv;
     }
   `,
   fragmentShader: `
-    varying float vDensity;
-    varying float vHeight;
-    varying float vRadius;
-
-    uniform float uCoup;
-    uniform float uCoupHue;
-
+    varying vec3 vCol;
+    varying float vAlpha;
     void main(){
       vec2 d = gl_PointCoord - 0.5;
-      float r = dot(d, d);
+      float r = dot(d,d);
       if (r > 0.25) discard;
-
-      float val = step(0.0, vDensity);
-
-      // Normal: warm brown ink on cream
-      float tint = smoothstep(0.0, 4.0, vHeight);
-      vec3 darkNormal  = mix(vec3(0.08, 0.07, 0.06), vec3(0.12, 0.14, 0.08), tint * 0.5);
-      vec3 lightNormal = mix(vec3(0.97, 0.95, 0.92), vec3(0.93, 0.94, 0.88), tint * 0.3);
-
-      // Coup reveal: deep theatrical crimson, exposed on the underside
-      // The "inside" of the flower is revealed — a hidden blush
-      float underside = smoothstep(0.0, -3.0, vHeight); // visible when z goes negative
-      vec3 darkCoup  = mix(vec3(0.08, 0.07, 0.06), vec3(0.38, 0.06, 0.08), underside * 0.9);
-      vec3 lightCoup = mix(vec3(0.97, 0.95, 0.92), vec3(0.95, 0.85, 0.84), underside * 0.5);
-
-      // Blend between normal and coup colors
-      vec3 dark  = mix(darkNormal, darkCoup, uCoupHue);
-      vec3 light = mix(lightNormal, lightCoup, uCoupHue);
-
-      vec3 col = mix(dark, light, val);
-
-      float alpha = 1.0 - smoothstep(0.18, 0.25, r);
-      gl_FragColor = vec4(col, alpha);
+      float a = exp(-r * 12.0);
+      gl_FragColor = vec4(vCol * a * vAlpha, a * vAlpha);
     }
   `
 });
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
 
-function buildGrid(rows, cols, seed){
-  const positions = new Float32Array(N * 3);
-  const gridPositions = new Float32Array(N * 2);
-  const seeds = new Float32Array(N);
+// bit-flip event scheduler
+let bitFlipActive = false;
+let bitFlipEndTime = 0;
 
-  let s = seed >>> 0;
-  const rng = () => {
-    s |= 0; s = s + 0x6D2B79F5 | 0;
-    let t = Math.imul(s ^ s >>> 15, 1 | s);
-    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  };
-
-  const width = 24, height = 24;
-  const cellW = width / cols, cellH = height / rows;
-
-  let idx = 0;
-  for (let i = 0; i < rows && idx < N; i++){
-    for (let j = 0; j < cols && idx < N; j++){
-      const pointsPerCell = Math.floor(N / (rows * cols));
-      for (let k = 0; k < pointsPerCell && idx < N; k++){
-        const x = (j + rng() - 0.5) * cellW - width * 0.5;
-        const y = (i + rng() - 0.5) * cellH - height * 0.5;
-        positions[idx * 3] = x;
-        positions[idx * 3 + 1] = y;
-        positions[idx * 3 + 2] = 0;
-        gridPositions[idx * 2] = x;
-        gridPositions[idx * 2 + 1] = y;
-        seeds[idx] = rng();
-        idx++;
-      }
-    }
-  }
-  while (idx < N){
-    const x = (rng() - 0.5) * width;
-    const y = (rng() - 0.5) * height;
-    positions[idx * 3] = x;
-    positions[idx * 3 + 1] = y;
-    positions[idx * 3 + 2] = 0;
-    gridPositions[idx * 2] = x;
-    gridPositions[idx * 2 + 1] = y;
-    seeds[idx] = rng();
-    idx++;
-  }
-  return { positions, gridPositions, seeds };
+function triggerBitFlip(){
+  if (bitFlipActive) return;
+  bitFlipActive = true;
+  bitFlipEndTime = performance.now() + 400; // 0.4s teleport window
+  
+  // pick random source and target blocks
+  const srcX = Math.floor(Math.random() * 40);
+  const srcY = Math.floor(Math.random() * 40);
+  const tgtX = Math.floor(Math.random() * 40);
+  const tgtY = Math.floor(Math.random() * 40);
+  
+  simUniforms.uBitFlipBlock.value.set(srcX, srcY);
+  simUniforms.uBitFlipTarget.value.set(tgtX, tgtY);
+  simUniforms.uBitFlipActive.value = 1;
 }
 
-function regenerate(){
-  const seed = Math.floor(Math.random() * 1e9);
-  let s = seed >>> 0;
-  const rng = () => {
-    s |= 0; s = s + 0x6D2B79F5 | 0;
-    let t = Math.imul(s ^ s >>> 15, 1 | s);
-    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-    return ((t ^ t >>> 14) >>> 0) / 4294967296;
-  };
-
-  const rows = 80 + Math.floor(rng() * 60);
-  const cols = 80 + Math.floor(rng() * 60);
-
-  uniforms.uRowFreq.value = 0.8 + rng() * 1.0;
-  uniforms.uColFreq.value = 0.8 + rng() * 1.0;
-  uniforms.uWaveAmp.value = 0.3 + rng() * 0.5;
-  uniforms.uTwist.value = rng() * 4.0;
-  uniforms.uPhase.value = rng() * 6.28;
-  uniforms.uPetals.value = 4 + Math.floor(rng() * 4);
-  uniforms.uCupDepth.value = 3.0 + rng() * 3.0;
-  uniforms.uMorph.value = 0.0;
-  uniforms.uCoup.value = 0.0;
-  uniforms.uCoupHue.value = 0.0;
-
-  regenTime = performance.now();
-
-  const { positions, gridPositions, seeds } = buildGrid(rows, cols, seed);
-
-  if (!geom){
-    geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geom.setAttribute('gridPos', new THREE.BufferAttribute(gridPositions, 2));
-    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
-    points = new THREE.Points(geom, mat);
-    scene.add(points);
-  } else {
-    geom.attributes.position.array.set(positions);
-    geom.attributes.position.needsUpdate = true;
-    geom.attributes.gridPos.array.set(gridPositions);
-    geom.attributes.gridPos.needsUpdate = true;
-    geom.attributes.seed.array.set(seeds);
-    geom.attributes.seed.needsUpdate = true;
-  }
-  geom.computeBoundingSphere();
-}
-
-regenerate();
-addEventListener('click', (e) => {
-  if (e.target.tagName === 'CANVAS') regenerate();
-});
-
-/* --- Orbit drag --- */
-let isDragging = false, prevX = 0, prevY = 0;
-let orbitTheta = 0.0, orbitPhi = 0.55;
-const canvas = renderer.domElement;
-
-canvas.addEventListener('pointerdown', (e) => {
-  isDragging = true; prevX = e.clientX; prevY = e.clientY;
-  e.preventDefault();
-});
-addEventListener('pointermove', (e) => {
-  if (!isDragging) return;
-  orbitTheta -= (e.clientX - prevX) * 0.005;
-  orbitPhi = Math.max(0.1, Math.min(1.4, orbitPhi - (e.clientY - prevY) * 0.005));
-  prevX = e.clientX; prevY = e.clientY;
-});
-addEventListener('pointerup', () => { isDragging = false; });
+setInterval(triggerBitFlip, 7000); // bit-flip every 7s
 
 addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
+  camera.aspect = innerWidth/innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
-  uniforms.uPixel.value = renderer.getPixelRatio();
 });
 
-/*
-  Coup-de-théâtre timing (Jean Tinguely-inspired):
-  The calyx forms peacefully over ~6s, holds serenely for ~4s,
-  then suddenly flips inside-out over ~1.2s (the coup!),
-  holds the reveal for ~2s, then gracefully recovers over ~3s.
-  Cycle repeats every ~22s after the initial morph.
-*/
-function coupEnvelope(localT) {
-  // localT = seconds since morph completed (~6s after regen)
-  const cycle = 18.0; // cycle length in seconds
-  const t = ((localT % cycle) + cycle) % cycle;
-
-  // 0–4s:   serene hold (coup=0)
-  // 4–5.2s: sudden flip (coup ramps to 1) — fast, theatrical
-  // 5.2–7.2s: hold reveal (coup=1)
-  // 7.2–10.2s: gentle recovery (coup eases back to 0)
-  // 10.2–18s: rest
-
-  if (t < 4.0) return 0.0;
-  if (t < 5.2) {
-    // Sharp ease-in: dramatic snap
-    const p = (t - 4.0) / 1.2;
-    return p * p * (3.0 - 2.0 * p); // smoothstep
-  }
-  if (t < 7.2) return 1.0;
-  if (t < 10.2) {
-    // Gentle ease-out: graceful recovery
-    const p = (t - 7.2) / 3.0;
-    const s = p * p * (3.0 - 2.0 * p);
-    return 1.0 - s;
-  }
-  return 0.0;
-}
-
-const globalStart = performance.now();
-
+let lastT = performance.now();
 function loop(){
   const now = performance.now();
-  const t = (now - globalStart) / 1000;
-  const sinceRegen = (now - regenTime) / 1000;
-  uniforms.uTime.value = t;
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  
+  const t = now / 1000;
+  simUniforms.uDt.value = dt;
+  simUniforms.uTime.value = t;
+  pointsMat.uniforms.uTime.value = t;
+  bgMat.uniforms.uTime.value = t;
+  
+  // deactivate bit-flip after window
+  if (bitFlipActive && now > bitFlipEndTime){
+    bitFlipActive = false;
+    simUniforms.uBitFlipActive.value = 0;
+  }
 
-  // Morph: flat → calyx over first ~6 seconds
-  uniforms.uMorph.value += (1.0 - uniforms.uMorph.value) * 0.015;
+  // sim substeps
+  for (let i = 0; i < 3; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
 
-  // Coup only activates after initial morph is mostly done
-  const morphDone = sinceRegen > 6.0;
-  const coupTarget = morphDone ? coupEnvelope(sinceRegen - 6.0) : 0.0;
-  // Smooth the coup value slightly for silky transitions
-  uniforms.uCoup.value += (coupTarget - uniforms.uCoup.value) * 0.12;
-  // Color follows coup with slight lag for dramatic effect
-  uniforms.uCoupHue.value += (coupTarget - uniforms.uCoupHue.value) * 0.08;
+  pointsMat.uniforms.state.value = rtA.texture;
 
-  // Auto-orbit + manual
-  const autoTheta = t * 0.08;
-  const theta = autoTheta + orbitTheta;
-  const phi = orbitPhi;
-  const radius = 22;
-
-  // Camera tracks centroid; during coup, dip slightly to see underside
-  const centroidY = 1.5 * uniforms.uMorph.value - uniforms.uCoup.value * 1.0;
-  // Slight zoom impulse during coup (camera pulls back to see the drama)
-  const coupRadius = radius + uniforms.uCoup.value * 4.0;
-
-  camera.position.set(
-    coupRadius * Math.sin(theta) * Math.sin(phi),
-    centroidY + coupRadius * Math.cos(phi),
-    coupRadius * Math.cos(theta) * Math.sin(phi)
-  );
-  camera.lookAt(0, centroidY, 0);
+  // gentle camera drift (not rotation — drift motion word)
+  camera.position.x = Math.sin(t * 0.08) * 12;
+  camera.position.y = Math.cos(t * 0.12) * 8;
+  camera.lookAt(0, 0, 0);
 
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
