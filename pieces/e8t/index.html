@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>e8t · Cumulus — border as weather</title>
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#0d0b09; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">e8t</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0b09);
+
+const camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 12, 45);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ── Deterministic RNG
+let rngState = 48291053;
+function rng(){ rngState |= 0; rngState = rngState + 0x6d2b79f5 | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// ── The border — a hard geopolitical line at x=0
+const BORDER_X = 0.0;
+
+// ── Cloud sprite texture — soft radial gradient
+function makeCloudTexture(){
+  const size = 64;
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const grad = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.3, 'rgba(255,255,255,0.6)');
+  grad.addColorStop(0.7, 'rgba(255,255,255,0.15)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(c);
+}
+const cloudTex = makeCloudTexture();
+
+// ── Particle system — instanced cloud sprites
+const NUM_PARTICLES = 60000;
+const positions = new Float32Array(NUM_PARTICLES * 3);
+const velocities = new Float32Array(NUM_PARTICLES * 3);
+const phases = new Float32Array(NUM_PARTICLES);
+const sizes = new Float32Array(NUM_PARTICLES);
+const crossings = new Float32Array(NUM_PARTICLES); // how far past border
+
+// Field dimensions — a wide horizontal band
+const FIELD_W = 80, FIELD_H = 20, FIELD_D = 40;
+
+for (let i = 0; i < NUM_PARTICLES; i++){
+  // Distribute in cloud-like clusters
+  const cluster = Math.floor(rng() * 12);
+  const cx = (rng() - 0.5) * FIELD_W;
+  const cy = rng() * FIELD_H - 2;
+  const cz = (rng() - 0.5) * FIELD_D;
+  positions[i*3]   = cx + (rng()-0.5) * 8;
+  positions[i*3+1] = cy + (rng()-0.5) * 4;
+  positions[i*3+2] = cz + (rng()-0.5) * 8;
+  velocities[i*3]   = 0.3 + rng() * 0.4; // eastward drift
+  velocities[i*3+1] = (rng()-0.5) * 0.05;
+  velocities[i*3+2] = (rng()-0.5) * 0.1;
+  phases[i] = rng() * Math.PI * 2;
+  sizes[i] = 0.3 + rng() * 1.2;
+  crossings[i] = 0;
+}
+
+// Custom shader material for particles
+const vertexShader = `
+  attribute float size;
+  attribute float crossing;
+  varying float vCrossing;
+  varying float vFog;
+  void main(){
+    vCrossing = crossing;
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = size * (180.0 / -mvPosition.z);
+    gl_PointSize = clamp(gl_PointSize, 1.0, 40.0);
+    gl_Position = projectionMatrix * mvPosition;
+    vFog = smoothstep(5.0, 80.0, -mvPosition.z);
+  }
+`;
+
+const fragmentShader = `
+  uniform sampler2D uTex;
+  uniform float uTime;
+  varying float vCrossing;
+  varying float vFog;
+  void main(){
+    vec2 uv = gl_PointCoord;
+    float alpha = texture2D(uTex, uv).r;
+    // Color: bone-white to oxidized red based on crossing amount
+    vec3 bone = vec3(0.92, 0.88, 0.82);
+    vec3 dust = vec3(0.78, 0.72, 0.62);
+    vec3 oxidized = vec3(0.72, 0.18, 0.08);
+    float cx = clamp(vCrossing, 0.0, 1.0);
+    vec3 col = mix(mix(bone, dust, cx * 0.5), oxidized, cx * cx);
+    // Atmospheric fade
+    col = mix(col, vec3(0.05, 0.04, 0.035), vFog * 0.85);
+    alpha *= (1.0 - vFog * 0.7) * 0.35;
+    if(alpha < 0.003) discard;
+    gl_FragColor = vec4(col, alpha);
+  }
+`;
+
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+geo.setAttribute('crossing', new THREE.BufferAttribute(crossings, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTex: { value: cloudTex },
+    uTime: { value: 0 }
+  },
+  vertexShader,
+  fragmentShader,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const particles = new THREE.Points(geo, mat);
+scene.add(particles);
+
+// ── The border line — a faint hard vertical plane rendered as lines
+const borderGeo = new THREE.BufferGeometry();
+const borderVerts = [];
+const borderSegments = 80;
+for (let i = 0; i < borderSegments; i++){
+  const z = (i / borderSegments - 0.5) * FIELD_D;
+  borderVerts.push(BORDER_X, -4, z, BORDER_X, FIELD_H + 2, z);
+}
+// Horizontal lines along the border
+for (let j = 0; j < 12; j++){
+  const y = j * (FIELD_H / 11) - 2;
+  borderVerts.push(BORDER_X, y, -FIELD_D/2, BORDER_X, y, FIELD_D/2);
+}
+borderGeo.setAttribute('position', new THREE.Float32BufferAttribute(borderVerts, 3));
+const borderMat = new THREE.LineBasicMaterial({
+  color: 0x3a2020,
+  transparent: true,
+  opacity: 0.25,
+  depthWrite: false
+});
+const borderMesh = new THREE.LineSegments(borderGeo, borderMat);
+scene.add(borderMesh);
+
+// ── Ground plane — dust/earth
+const groundGeo = new THREE.PlaneGeometry(120, 80);
+const groundMat = new THREE.MeshBasicMaterial({
+  color: 0x1a1510,
+  transparent: true,
+  opacity: 0.6
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.set(0, -4, 0);
+scene.add(ground);
+
+// ── Curl noise for advection
+function noise3D(x, y, z){
+  // Simple value noise via sine products
+  const a = Math.sin(x * 1.1 + y * 0.7) * Math.cos(z * 0.9 + x * 0.4);
+  const b = Math.sin(y * 1.3 + z * 0.5) * Math.cos(x * 0.8 + z * 0.6);
+  const c = Math.sin(z * 0.9 + x * 1.2) * Math.cos(y * 0.7 + x * 0.3);
+  return [a, b, c];
+}
+
+function curlNoise(x, y, z, scale){
+  const e = 0.01;
+  const [,, nz0] = noise3D(x, y + e, z * scale);
+  const [,, nz1] = noise3D(x, y - e, z * scale);
+  const [, ny0] = noise3D(x, y, (z + e) * scale);
+  const [, ny1] = noise3D(x, y, (z - e) * scale);
+  const [nx0] = noise3D(x, (y + e), z * scale);
+  const [nx1] = noise3D(x, (y - e), z * scale);
+  const curlX = (nz0 - nz1) / (2 * e) - (ny0 - ny1) / (2 * e);
+  const curlY = (nx1 - nx0) / (2 * e);
+  const curlZ = (ny0 - ny1) / (2 * e);
+  return [curlX * 0.15, curlY * 0.08, curlZ * 0.12];
+}
+
+// ── Resize
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Centroid tracking
+const centroid = new THREE.Vector3(0, 8, 0);
+
+// ── Animation
+const start = performance.now();
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+  const dt = 0.016;
+
+  mat.uniforms.uTime.value = elapsed;
+
+  const posAttr = geo.attributes.position;
+  const crossAttr = geo.attributes.crossing;
+  const posArr = posAttr.array;
+  const crossArr = crossAttr.array;
+
+  let cx = 0, cy = 0, cz = 0;
+
+  // Advect particles
+  for (let i = 0; i < NUM_PARTICLES; i++){
+    const ix = i * 3, iy = i * 3 + 1, iz = i * 3 + 2;
+    let px = posArr[ix], py = posArr[iy], pz = posArr[iz];
+
+    // Curl noise turbulence
+    const noiseScale = 0.04;
+    const [cnx, cny, cnz] = curlNoise(
+      px * noiseScale + elapsed * 0.02,
+      py * noiseScale,
+      pz * noiseScale,
+      1.0
+    );
+
+    // Eastward wind + curl
+    const windSpeed = velocities[ix] * (0.8 + 0.2 * Math.sin(elapsed * 0.1 + phases[i]));
+    px += (windSpeed + cnx) * dt;
+    py += (velocities[iy] + cny) * dt;
+    pz += (velocities[iz] + cnz) * dt;
+
+    // Gentle buoyancy — particles slowly rise
+    py += 0.02 * dt * (1.0 + Math.sin(elapsed * 0.3 + phases[i]) * 0.5);
+
+    // Wrap horizontally
+    if (px > FIELD_W / 2) { px -= FIELD_W; crossArr[i] = 0; }
+    if (px < -FIELD_W / 2) { px += FIELD_W; crossArr[i] = 0; }
+    if (pz > FIELD_D / 2) pz -= FIELD_D;
+    if (pz < -FIELD_D / 2) pz += FIELD_D;
+    // Vertical soft bounds
+    if (py > FIELD_H + 3) py = -2 + rng() * 2;
+    if (py < -4) py = FIELD_H + rng();
+
+    // Border crossing detection — distance past BORDER_X going eastward
+    if (px > BORDER_X){
+      const penetration = (px - BORDER_X) / (FIELD_W * 0.3);
+      crossArr[i] = Math.min(crossArr[i] + dt * 0.8, Math.min(penetration * 2, 1.0));
+    } else {
+      crossArr[i] = Math.max(crossArr[i] - dt * 0.3, 0);
+    }
+
+    posArr[ix] = px; posArr[iy] = py; posArr[iz] = pz;
+    cx += px; cy += py; cz += pz;
+  }
+
+  posAttr.needsUpdate = true;
+  crossAttr.needsUpdate = true;
+
+  // Centroid smooth follow
+  cx /= NUM_PARTICLES; cy /= NUM_PARTICLES; cz /= NUM_PARTICLES;
+  centroid.lerp(new THREE.Vector3(cx, cy, cz), 0.01);
+
+  // Camera: elevated view looking down at the cloud field, slow orbit
+  const camAngle = elapsed * 0.008;
+  const camRadius = 38;
+  const camHeight = 18 + Math.sin(elapsed * 0.02) * 3;
+  camera.position.set(
+    centroid.x + Math.cos(camAngle) * camRadius,
+    camHeight,
+    centroid.z + Math.sin(camAngle) * camRadius
+  );
+  camera.lookAt(centroid.x, centroid.y - 2, centroid.z);
+
+  // Pulse border opacity with time — breathing line
+  borderMat.opacity = 0.15 + 0.1 * Math.sin(elapsed * 0.5);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
