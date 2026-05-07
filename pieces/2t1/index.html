@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2t1 · Hash-seeded Choreography</title>
+<!-- MOTION: sway, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0806; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.48; font-size: 10px; letter-spacing: 0.04em; }
+  .hash { position:fixed; right:14px; top:14px; opacity:0.38; font-size: 9px; letter-spacing: 0.08em; 
+          font-family: "Courier New", monospace; }
+</style>
+</head>
+<body>
+<div class="id">2t1 · Hash-seeded Choreography</div>
+<div class="hint">drag to orbit · scroll to zoom · click to reseed</div>
+<div class="hash" id="hashDisplay"></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Hash-seeded choreography — each figure is a skeleton of joints driven by
+// cryptographic hash-derived parameters. Bodies move as emergent point-cloud
+// dancers, no polygonal mesh, pure motion notation.
+
+function sha256hex(str) {
+  // minimal SHA-256 for browser (synchronous, no crypto.subtle)
+  // using a deterministic seeded RNG from hex digest instead
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = Math.imul(31, h) + str.charCodeAt(i) | 0;
+  }
+  // expand to 64-char hex via repeated hashing
+  let s = Math.abs(h).toString(16).padStart(8, '0');
+  while (s.length < 64) {
+    h = Math.imul(h, 1103515245) + 12345 | 0;
+    s += Math.abs(h).toString(16).padStart(8, '0');
+  }
+  return s.slice(0, 64);
+}
+
+class HashRNG {
+  constructor(hex) {
+    this.state = parseInt(hex.slice(0, 8), 16) >>> 0;
+  }
+  next() {
+    this.state |= 0;
+    this.state = this.state + 0x6D2B79F5 | 0;
+    let t = Math.imul(this.state ^ this.state >>> 15, 1 | this.state);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  }
+  range(a, b) { return a + this.next() * (b - a); }
+}
+
+// Skeleton archetype: human-like 15-joint rig
+const SKELETON = [
+  { name: 'pelvis',     parent: null,      offset: [0, 0, 0] },
+  { name: 'spine1',     parent: 'pelvis',  offset: [0, 0.4, 0] },
+  { name: 'spine2',     parent: 'spine1',  offset: [0, 0.4, 0] },
+  { name: 'neck',       parent: 'spine2',  offset: [0, 0.35, 0] },
+  { name: 'head',       parent: 'neck',    offset: [0, 0.25, 0] },
+  { name: 'lShoulder',  parent: 'spine2',  offset: [-0.25, 0.3, 0] },
+  { name: 'lElbow',     parent: 'lShoulder', offset: [-0.5, 0, 0] },
+  { name: 'lHand',      parent: 'lElbow',  offset: [-0.45, 0, 0] },
+  { name: 'rShoulder',  parent: 'spine2',  offset: [0.25, 0.3, 0] },
+  { name: 'rElbow',     parent: 'rShoulder', offset: [0.5, 0, 0] },
+  { name: 'rHand',      parent: 'rElbow',  offset: [0.45, 0, 0] },
+  { name: 'lHip',       parent: 'pelvis',  offset: [-0.15, 0, 0] },
+  { name: 'lKnee',      parent: 'lHip',    offset: [0, -0.55, 0] },
+  { name: 'lFoot',      parent: 'lKnee',   offset: [0, -0.5, 0] },
+  { name: 'rHip',       parent: 'pelvis',  offset: [0.15, 0, 0] },
+  { name: 'rKnee',      parent: 'rHip',    offset: [0, -0.55, 0] },
+  { name: 'rFoot',      parent: 'rKnee',   offset: [0, -0.5, 0] },
+];
+
+function createFigure(rng, idx, total) {
+  // each figure gets unique phase offsets, amplitudes, and frequencies from RNG
+  const joints = SKELETON.map(j => ({
+    name: j.name,
+    parent: j.parent,
+    baseOffset: new THREE.Vector3(...j.offset),
+    phase: [rng.next() * Math.PI * 2, rng.next() * Math.PI * 2, rng.next() * Math.PI * 2],
+    freq: [rng.range(0.3, 1.2), rng.range(0.3, 1.2), rng.range(0.3, 1.2)],
+    amp: [rng.range(0.05, 0.25), rng.range(0.05, 0.25), rng.range(0.05, 0.25)],
+    pos: new THREE.Vector3()
+  }));
+  // position figure in horizontal line across stage
+  const spacing = 3.5;
+  const baseX = (idx - (total - 1) / 2) * spacing;
+  const baseY = -1.5;
+  const baseZ = 0;
+  return { joints, base: new THREE.Vector3(baseX, baseY, baseZ) };
+}
+
+function updateFigure(figure, t) {
+  // forward kinematics with sinusoidal motion per joint
+  for (const j of figure.joints) {
+    if (j.parent === null) {
+      j.pos.copy(figure.base);
+      j.pos.x += j.amp[0] * Math.sin(t * j.freq[0] + j.phase[0]);
+      j.pos.y += j.amp[1] * Math.sin(t * j.freq[1] + j.phase[1]);
+      j.pos.z += j.amp[2] * Math.sin(t * j.freq[2] + j.phase[2]);
+    } else {
+      const parent = figure.joints.find(p => p.name === j.parent);
+      j.pos.copy(parent.pos).add(j.baseOffset);
+      j.pos.x += j.amp[0] * Math.sin(t * j.freq[0] + j.phase[0]);
+      j.pos.y += j.amp[1] * Math.sin(t * j.freq[1] + j.phase[1]);
+      j.pos.z += j.amp[2] * Math.sin(t * j.freq[2] + j.phase[2]);
+    }
+  }
+}
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 2.5, 12);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0806, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 1, 0);
+
+// stage gradient light — warm cyc from below
+const gradLight1 = new THREE.DirectionalLight(0xff8844, 0.8);
+gradLight1.position.set(0, -1, 1);
+scene.add(gradLight1);
+const gradLight2 = new THREE.DirectionalLight(0xffbb66, 0.5);
+gradLight2.position.set(0, 1, -1);
+scene.add(gradLight2);
+const ambient = new THREE.AmbientLight(0x443322, 0.3);
+scene.add(ambient);
+
+let figures = [];
+let pointsObjects = [];
+let currentHash = '';
+
+function initialize(seed) {
+  currentHash = sha256hex(seed.toString());
+  document.getElementById('hashDisplay').textContent = currentHash;
+  const rng = new HashRNG(currentHash);
+  const figCount = 3 + Math.floor(rng.next() * 3); // 3–5 figures
+  
+  // clear old
+  for (const p of pointsObjects) scene.remove(p);
+  pointsObjects = [];
+  figures = [];
+  
+  for (let i = 0; i < figCount; i++) {
+    const fig = createFigure(rng, i, figCount);
+    figures.push(fig);
+    
+    // each joint = one particle; connections drawn as lines
+    const jointPositions = new Float32Array(fig.joints.length * 3);
+    const jointColors = new Float32Array(fig.joints.length * 3);
+    const jointSeeds = new Float32Array(fig.joints.length);
+    
+    for (let j = 0; j < fig.joints.length; j++) {
+      jointPositions[j * 3] = 0;
+      jointPositions[j * 3 + 1] = 0;
+      jointPositions[j * 3 + 2] = 0;
+      // stage cyc palette: warm amber to cool teal per figure
+      const hue = 0.05 + (i / figCount) * 0.15; // 0.05=orange, 0.20=yellow-green
+      const col = new THREE.Color().setHSL(hue, 0.7, 0.6);
+      jointColors[j * 3] = col.r;
+      jointColors[j * 3 + 1] = col.g;
+      jointColors[j * 3 + 2] = col.b;
+      jointSeeds[j] = rng.next();
+    }
+    
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(jointPositions, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(jointColors, 3));
+    geom.setAttribute('seed', new THREE.BufferAttribute(jointSeeds, 1));
+    
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uPixel: { value: renderer.getPixelRatio() },
+      },
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      vertexShader: `
+        uniform float uTime;
+        uniform float uPixel;
+        attribute float seed;
+        varying vec3 vCol;
+        varying float vPulse;
+        void main() {
+          vCol = color;
+          float t = uTime * 0.6 + seed * 6.28;
+          vPulse = 0.5 + 0.5 * sin(t);
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          float dist = -mv.z;
+          gl_PointSize = (3.0 + 2.0 * vPulse) * uPixel * (30.0 / dist);
+          gl_Position = projectionMatrix * mv;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vCol;
+        varying float vPulse;
+        void main() {
+          vec2 d = gl_PointCoord - 0.5;
+          float r = dot(d, d);
+          if (r > 0.25) discard;
+          float a = exp(-r * 12.0) * (0.6 + 0.4 * vPulse);
+          gl_FragColor = vec4(vCol * a, a);
+        }
+      `
+    });
+    
+    const pts = new THREE.Points(geom, mat);
+    scene.add(pts);
+    pointsObjects.push(pts);
+    
+    // skeleton connection lines
+    const pairs = [];
+    for (const j of fig.joints) {
+      if (j.parent !== null) {
+        const pIdx = fig.joints.findIndex(x => x.name === j.parent);
+        const cIdx = fig.joints.findIndex(x => x === j);
+        pairs.push(pIdx, cIdx);
+      }
+    }
+    const linePositions = new Float32Array(pairs.length * 3);
+    const lineGeom = new THREE.BufferGeometry();
+    lineGeom.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+    const lineMat = new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      opacity: 0.15,
+      transparent: true,
+      blending: THREE.AdditiveBlending
+    });
+    const lines = new THREE.LineSegments(lineGeom, lineMat);
+    scene.add(lines);
+    pointsObjects.push(lines);
+    fig.lineGeom = lineGeom;
+    fig.linePairs = pairs;
+  }
+}
+
+initialize(Date.now());
+
+addEventListener('click', () => initialize(Date.now()));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop() {
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  
+  for (let i = 0; i < figures.length; i++) {
+    const fig = figures[i];
+    updateFigure(fig, t);
+    
+    const pts = pointsObjects[i * 2];
+    const lines = pointsObjects[i * 2 + 1];
+    
+    const pos = pts.geometry.attributes.position.array;
+    for (let j = 0; j < fig.joints.length; j++) {
+      pos[j * 3] = fig.joints[j].pos.x;
+      pos[j * 3 + 1] = fig.joints[j].pos.y;
+      pos[j * 3 + 2] = fig.joints[j].pos.z;
+    }
+    pts.geometry.attributes.position.needsUpdate = true;
+    pts.material.uniforms.uTime.value = t;
+    
+    const linePos = fig.lineGeom.attributes.position.array;
+    for (let k = 0; k < fig.linePairs.length; k++) {
+      const jIdx = fig.linePairs[k];
+      linePos[k * 3] = fig.joints[jIdx].pos.x;
+      linePos[k * 3 + 1] = fig.joints[jIdx].pos.y;
+      linePos[k * 3 + 2] = fig.joints[jIdx].pos.z;
+    }
+    fig.lineGeom.attributes.position.needsUpdate = true;
+  }
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
