@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>es1 · cosmic web</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020205; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">es1</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ──────────────────────────────────────────────────────────────
+   Cosmic Web — IllustrisTNG / MillenniumTNG filament structure
+   Ref: MPA Garching 2024, "Galaxies in the Simulated Cosmic Web"
+
+   Technique: ~140 cluster nodes in a cube, connected by
+   distance-thresholded edges (filaments). ~55k particles
+   scattered along edges with Gaussian perpendicular falloff,
+   dense halos at vertices. Slow gravitational-infall drift
+   along filaments. Additive blending, IllustrisTNG palette:
+   golden-amber clusters, steel-blue filaments, indigo void.
+   ────────────────────────────────────────────────────────── */
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020205, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.5, 600);
+
+// ── seeded RNG ──
+let _s = 77491;
+const rng = () => { _s = (_s * 16807) % 2147483647; return (_s - 1) / 2147483646; };
+const rngs = () => rng() * 2 - 1; // signed
+
+// ── cluster nodes ──
+const CUBE = 55;
+const NODE_N = 140;
+const EDGE_MAX = 30;
+const MAX_CONN = 5;
+const nodes = [];
+for (let i = 0; i < NODE_N; i++) {
+  nodes.push(new THREE.Vector3(rngs()*CUBE, rngs()*CUBE, rngs()*CUBE));
+}
+
+// ── edges: connect nearby nodes (max MAX_CONN per node) ──
+const edges = [];
+const connCount = new Uint8Array(NODE_N);
+for (let i = 0; i < NODE_N; i++) {
+  const ranked = [];
+  for (let j = i+1; j < NODE_N; j++) {
+    const d = nodes[i].distanceTo(nodes[j]);
+    if (d < EDGE_MAX) ranked.push({ j, d });
+  }
+  ranked.sort((a,b) => a.d - b.d);
+  for (const { j, d } of ranked) {
+    if (connCount[i] >= MAX_CONN || connCount[j] >= MAX_CONN) continue;
+    edges.push([i, j, d]);
+    connCount[i]++; connCount[j]++;
+  }
+}
+
+// ── particle buffers ──
+const pos = [], col = [], sz = [], vel = [], ph = [];
+
+const cGold   = new THREE.Color(0.92, 0.68, 0.22);
+const cMag    = new THREE.Color(0.76, 0.24, 0.48);
+const cBlue1  = new THREE.Color(0.22, 0.36, 0.62);
+const cBlue2  = new THREE.Color(0.34, 0.52, 0.72);
+const tmpD = new THREE.Vector3(), tmpP1 = new THREE.Vector3(), tmpP2 = new THREE.Vector3();
+const c = new THREE.Color();
+
+// ── filament particles ──
+for (const [i, j, d] of edges) {
+  const a = nodes[i], b = nodes[j];
+  tmpD.copy(b).sub(a).normalize();
+  const ref = Math.abs(tmpD.y) < 0.9 ? new THREE.Vector3(0,1,0) : new THREE.Vector3(1,0,0);
+  tmpP1.crossVectors(tmpD, ref).normalize();
+  tmpP2.crossVectors(tmpD, tmpP1).normalize();
+
+  const count = Math.max(40, Math.floor(100 * d / EDGE_MAX));
+  for (let k = 0; k < count; k++) {
+    const t = rng();
+    // thinner mid-filament, slightly wider near nodes
+    const sigma = 0.35 + 0.25 * (1 - 2*Math.abs(t - 0.5));
+    const r1 = (rng()+rng()+rng()-1.5) * sigma;
+    const r2 = (rng()+rng()+rng()-1.5) * sigma;
+
+    const px = a.x + (b.x-a.x)*t + tmpP1.x*r1 + tmpP2.x*r2;
+    const py = a.y + (b.y-a.y)*t + tmpP1.y*r1 + tmpP2.y*r2;
+    const pz = a.z + (b.z-a.z)*t + tmpP1.z*r1 + tmpP2.z*r2;
+    pos.push(px, py, pz);
+
+    // proximity to nearest node end: 0=at node, 1=midpoint
+    const toMid = 2 * Math.abs(t - 0.5);    // 0 at midpoint, 1 at nodes
+    const nearNode = 1 - toMid;              // inverted
+
+    if (nearNode > 0.55) {
+      // warm cluster halo
+      c.lerpColors(cGold, cMag, rng()*0.4);
+      c.multiplyScalar(0.55 + nearNode*0.55);
+    } else {
+      c.lerpColors(cBlue1, cBlue2, rng());
+      c.multiplyScalar(0.22 + nearNode*0.25);
+    }
+    col.push(c.r, c.g, c.b);
+    sz.push(0.6 + nearNode * 2.2);
+
+    // drift toward nearest node end
+    const nearest = t < 0.5 ? a : b;
+    vel.push((nearest.x-px)*0.0008, (nearest.y-py)*0.0008, (nearest.z-pz)*0.0008);
+    ph.push(rng() * 6.2832);
+  }
+}
+
+// ── cluster halo particles ──
+for (let n = 0; n < NODE_N; n++) {
+  const nd = nodes[n];
+  const dens = connCount[n];
+  if (dens === 0) continue;
+  const count = Math.floor(100 * (0.4 + dens/MAX_CONN));
+
+  for (let k = 0; k < count; k++) {
+    const r = (rng()+rng()+rng())/3 * 2.8;
+    const th = rng()*6.2832, phi = Math.acos(rngs());
+    const sp = Math.sin(phi);
+    pos.push(nd.x + r*sp*Math.cos(th), nd.y + r*sp*Math.sin(th), nd.z + r*Math.cos(phi));
+
+    const blend = rng();
+    if (blend < 0.5) { c.copy(cGold).multiplyScalar(0.7+rng()*0.5); }
+    else { c.lerpColors(cGold, cMag, rng()); c.multiplyScalar(0.6+rng()*0.4); }
+    col.push(c.r, c.g, c.b);
+    sz.push(1.8 + (1-r/2.8)*3.0);
+
+    // slow orbit around node
+    const ang = rng()*6.2832;
+    vel.push(Math.cos(ang)*0.0002, rngs()*0.00015, Math.sin(ang)*0.0002);
+    ph.push(rng()*6.2832);
+  }
+}
+
+const N = pos.length / 3;
+
+// ── geometry ──
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+geom.setAttribute('aColor',   new THREE.BufferAttribute(new Float32Array(col), 3));
+geom.setAttribute('aSize',    new THREE.BufferAttribute(new Float32Array(sz), 1));
+geom.setAttribute('aVel',     new THREE.BufferAttribute(new Float32Array(vel), 3));
+geom.setAttribute('aPhase',   new THREE.BufferAttribute(new Float32Array(ph), 1));
+
+// ── filament line geometry for structure backbone ──
+const linePos = [];
+const lineCol = [];
+for (const [i, j] of edges) {
+  const a = nodes[i], b = nodes[j];
+  linePos.push(a.x,a.y,a.z, b.x,b.y,b.z);
+  // faint blue lines
+  lineCol.push(0.12,0.16,0.30, 0.12,0.16,0.30);
+}
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(linePos), 3));
+lineGeom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(lineCol), 3));
+const lineMat = new THREE.LineBasicMaterial({
+  vertexColors: true, transparent: true, opacity: 0.08,
+  blending: THREE.AdditiveBlending, depthWrite: false
+});
+scene.add(new THREE.LineSegments(lineGeom, lineMat));
+
+// ── point shader ──
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPx: { value: renderer.getPixelRatio() }
+  },
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPx;
+    attribute vec3 aColor;
+    attribute float aSize;
+    attribute vec3 aVel;
+    attribute float aPhase;
+    varying vec3 vCol;
+    varying float vFog;
+    varying float vBr;
+    void main() {
+      vec3 p = position;
+      // gentle oscillating drift along filament direction
+      float wave = sin(uTime * 0.08 + aPhase) * 0.6 + sin(uTime * 0.03 + aPhase * 1.7) * 0.4;
+      p += aVel * wave * 6000.0;
+      // subtle transverse shimmer
+      float shim = sin(uTime * 0.25 + aPhase * 2.3) * 0.12;
+      p.x += shim * aVel.z * 400.0;
+      p.z -= shim * aVel.x * 400.0;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      vFog = 1.0 - smoothstep(50.0, 280.0, dist);
+      gl_PointSize = aSize * uPx * (70.0 / max(dist, 1.0)) * (0.65 + 0.35*vFog);
+      gl_Position = projectionMatrix * mv;
+      vCol = aColor;
+      vBr = aSize / 4.5;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vFog;
+    varying float vBr;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d,d);
+      if (r2 > 0.25) discard;
+      float a = exp(-r2 * 12.0);
+      float alpha = a * vFog * (0.18 + vBr * 0.55);
+      vec3 c = vCol * (0.5 + vBr * 0.7);
+      // depth-blue tint
+      c = mix(c, vec3(0.06, 0.04, 0.14), (1.0-vFog)*0.35);
+      gl_FragColor = vec4(c * alpha, alpha);
+    }
+  `
+});
+scene.add(new THREE.Points(geom, mat));
+
+// ── film grain overlay (fullscreen quad) ──
+const grainMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthTest: false, depthWrite: false,
+  vertexShader: `void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    uniform float uTime;
+    // simple hash
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    void main() {
+      vec2 uv = gl_FragCoord.xy;
+      float grain = hash(uv + fract(uTime*13.7)) * 0.06;
+      gl_FragColor = vec4(vec3(grain * 0.4, grain * 0.35, grain * 0.5), grain * 0.7);
+    }
+  `
+});
+const grainScene = new THREE.Scene();
+const grainCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+grainScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), grainMat));
+
+// ── resize ──
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── camera: slow vast dolly ──
+const t0 = performance.now();
+function loop() {
+  const now = performance.now();
+  const t = (now - t0) / 1000;
+  mat.uniforms.uTime.value = t;
+  grainMat.uniforms.uTime.value = t;
+
+  // vast, contemplative orbit — slight figure-eight path
+  const a1 = t * 0.018;
+  const a2 = t * 0.011;
+  const r = 115 + Math.sin(t*0.009)*18;
+  camera.position.set(
+    Math.sin(a1) * r * Math.cos(a2*0.4),
+    Math.sin(a2) * 30 + Math.cos(t*0.007)*12,
+    Math.cos(a1) * r
+  );
+  // look slightly off-center for asymmetric composition
+  camera.lookAt(Math.sin(t*0.005)*8, Math.cos(t*0.006)*5, 0);
+
+  renderer.render(scene, camera);
+  // grain pass on top
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
