@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>cak · sublime ascent</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020305; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">cak</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ═══════════════ scene ═══════════════ */
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, 0.01, 600);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020305, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ═══════════════ deterministic rng ═══════════════ */
+const rng = (() => { let s = 0xDEADBEEF; return () => { s = (s + 0x6D2B79F5)|0;
+  let t = Math.imul(s ^ s>>>15, 1|s); t = t + Math.imul(t ^ t>>>7, 61|t) ^ t;
+  return ((t ^ t>>>14)>>>0) / 4294967296; }; })();
+
+/* ═══════════════ L-system cypress (from parent kam) ═══════════════ */
+const RULES = {
+  'F': [ { p:0.55, s:'F[+f][-f]F' }, { p:0.25, s:'FF[/f]\\F' }, { p:0.20, s:'F[+f-f][/f\\f]F' } ],
+  'f': [ { p:0.6,  s:'f[+f][-f]'  }, { p:0.4,  s:'f' } ]
+};
+const ANG = THREE.MathUtils.degToRad(11);
+const STEP = 0.55;
+
+function expand(axiom, depth){
+  let s = axiom;
+  for (let d = 0; d < depth; d++){
+    let o = '';
+    for (const ch of s){
+      if (ch in RULES){ const r = rng(); let a = 0;
+        for (const opt of RULES[ch]){ a += opt.p; if (r <= a){ o += opt.s; break; } }
+      } else o += ch;
+    } s = o;
+  } return s;
+}
+
+function turtle(str){
+  const stack = [], segs = [];
+  let pos = new THREE.Vector3(), h = new THREE.Vector3(0,1,0),
+      l = new THREE.Vector3(-1,0,0), u = new THREE.Vector3(0,0,1), gen = 0;
+  const rot = (ax,a) => { const q = new THREE.Quaternion().setFromAxisAngle(ax,a);
+    h.applyQuaternion(q); l.applyQuaternion(q); u.applyQuaternion(q); };
+  for (const ch of str){
+    switch(ch){
+      case 'F': case 'f': { const st = STEP*Math.pow(0.88,gen);
+        const nx = pos.clone().addScaledVector(h,st);
+        segs.push({from:pos.clone(),to:nx.clone(),gen}); pos=nx; break; }
+      case '+': rot(u, ANG); break;  case '-': rot(u,-ANG); break;
+      case '&': rot(l, ANG); break;  case '^': rot(l,-ANG); break;
+      case '/': rot(h, ANG*1.5); break; case '\\': rot(h,-ANG*1.5); break;
+      case '[': stack.push({pos:pos.clone(),h:h.clone(),l:l.clone(),u:u.clone(),gen}); gen++; break;
+      case ']': { const f=stack.pop(); pos=f.pos; h=f.h; l=f.l; u=f.u; gen=f.gen; break; }
+    }
+  } return segs;
+}
+
+const segs = turtle(expand('F', 6));
+
+/* ═══════════════ particle placement ═══════════════ */
+const N = 70000;
+const pos3   = new Float32Array(N*3);
+const seedA  = new Float32Array(N);
+const leafAng= new Float32Array(N);
+
+const lens = segs.map(s=>s.from.distanceTo(s.to));
+const totL = lens.reduce((a,b)=>a+b,0);
+const v = new THREE.Vector3();
+let w = 0;
+
+/* 45 % skeleton */
+const NSKEL = Math.floor(N*0.45);
+for (let i = 0; i < segs.length && w < NSKEL; i++){
+  const share = i===segs.length-1 ? NSKEL-w : Math.max(1,Math.floor(NSKEL*lens[i]/totL));
+  for (let k = 0; k < share && w < NSKEL; k++){
+    const t = rng(); v.lerpVectors(segs[i].from, segs[i].to, t);
+    const j = 0.04*Math.pow(0.85, segs[i].gen);
+    pos3[w*3]=v.x+(rng()-.5)*j; pos3[w*3+1]=v.y+(rng()-.5)*j; pos3[w*3+2]=v.z+(rng()-.5)*j;
+    seedA[w]=rng(); leafAng[w]=rng()*Math.PI*2; w++;
+  }
+}
+
+/* 55 % foliage halo — ridged + tufted */
+{
+  let yMn=Infinity, yMx=-Infinity;
+  for (const s of segs){ yMn=Math.min(yMn,s.from.y,s.to.y); yMx=Math.max(yMx,s.from.y,s.to.y); }
+  const hStart = yMn + (yMx-yMn)*0.12;
+  const RIDGES = 10, SPIRAL = 0.7;
+  const NFOL = N - NSKEL;
+  const NRIDGE = Math.floor(NFOL*0.65);
+
+  for (let k = 0; k < NRIDGE && w < N; k++){
+    const yt = rng();
+    const y = hStart + yt*(yMx-hStart);
+    const tap = Math.max(0.15, 1.0-1.6*Math.pow(yt-0.42,2));
+    const bR = 0.05+1.1*tap;
+    const ri = Math.floor(rng()*RIDGES);
+    const th = (ri/RIDGES)*Math.PI*2 + y*SPIRAL + (rng()-.5)*0.35;
+    const r = bR*(0.4+0.6*rng());
+    pos3[w*3]=Math.cos(th)*r; pos3[w*3+1]=y+(rng()-.5)*0.06; pos3[w*3+2]=Math.sin(th)*r;
+    seedA[w]=rng(); leafAng[w]=rng()*Math.PI*2; w++;
+  }
+  /* tufts */
+  const TUFT = 28;
+  const tuftY=[], tuftTh=[];
+  for (let i=0;i<TUFT;i++){ tuftY.push(hStart+(i+.5)/TUFT*(yMx-hStart)); tuftTh.push(rng()*Math.PI*2); }
+  while (w < N){
+    const ti = Math.floor(rng()*TUFT);
+    const yt = (tuftY[ti]-hStart)/(yMx-hStart);
+    const tap = Math.max(0.15,1.0-1.6*Math.pow(yt-0.42,2));
+    const bR = 0.05+1.1*tap;
+    const reach = bR + 0.1 + rng()*0.35;
+    pos3[w*3]=Math.cos(tuftTh[ti]+(rng()-.5)*0.4)*(reach+(rng()-.5)*0.18);
+    pos3[w*3+1]=tuftY[ti]+(rng()-.5)*0.4;
+    pos3[w*3+2]=Math.sin(tuftTh[ti]+(rng()-.5)*0.4)*(reach+(rng()-.5)*0.18);
+    seedA[w]=rng(); leafAng[w]=rng()*Math.PI*2; w++;
+  }
+}
+
+/* scale to sublime height: 140 units tall */
+{
+  let yMn=Infinity, yMx=-Infinity, cx=0, cz=0;
+  for (let i=0;i<N;i++){ yMn=Math.min(yMn,pos3[i*3+1]); yMx=Math.max(yMx,pos3[i*3+1]); cx+=pos3[i*3]; cz+=pos3[i*3+2]; }
+  cx/=N; cz/=N;
+  const sc = 140/(yMx-yMn);
+  for (let i=0;i<N;i++){ pos3[i*3]=(pos3[i*3]-cx)*sc; pos3[i*3+1]=(pos3[i*3+1]-yMn)*sc; pos3[i*3+2]=(pos3[i*3+2]-cz)*sc; }
+}
+
+/* ═══════════════ main leaf particles ═══════════════ */
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos3, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seedA, 1));
+geom.setAttribute('leafAng',  new THREE.BufferAttribute(leafAng, 1));
+
+const uni = {
+  uTime:  {value:0},
+  uPx:    {value:renderer.getPixelRatio()},
+  uCamY:  {value:0}
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: uni, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime, uPx, uCamY;
+    attribute float seed, leafAng;
+    varying vec3  vCol;
+    varying float vA;
+    varying float vLA;
+    void main(){
+      vec3 p = position;
+      float t = uTime*0.3 + seed*6.28;
+      float sw = 0.045*(0.25 + 0.75*(p.y/140.0));
+      p.x += sin(t + p.y*0.07)*sw;
+      p.z += cos(t*0.7 + p.y*0.05)*sw*0.8;
+
+      /* palette — 5 hand-picked colors
+         near-warm  #d4a574  (sun-touched leaf amber)
+         mid-warm   #9e7452  (bark bronze)
+         core       #6b5540  (heartwood)
+         mid-cool   #3a4a5e  (twilight slate)
+         far-cool   #141e2c  (abyssal indigo)          */
+      float rel = clamp(abs(p.y - uCamY)/60.0, 0.0, 1.0);
+      vec3 c0 = vec3(0.831,0.647,0.455);
+      vec3 c1 = vec3(0.620,0.455,0.322);
+      vec3 c2 = vec3(0.420,0.333,0.251);
+      vec3 c3 = vec3(0.227,0.290,0.369);
+      vec3 c4 = vec3(0.078,0.118,0.173);
+      vec3 col = rel<0.12 ? mix(c0,c1,rel/0.12)
+               : rel<0.30 ? mix(c1,c2,(rel-0.12)/0.18)
+               : rel<0.55 ? mix(c2,c3,(rel-0.30)/0.25)
+               :             mix(c3,c4,(rel-0.55)/0.45);
+      col += vec3(0.035,0.015,-0.01)*sin(seed*12.57);
+      vCol = col;
+      vLA  = leafAng;
+
+      vec4 mv = modelViewMatrix * vec4(p,1.0);
+      float d = -mv.z;
+      float fog = exp(-d*0.005);
+      vA = fog * (0.30 + 0.22*sin(t*0.5));
+      gl_PointSize = max(1.0, (1.1+0.5*seed)*uPx*(75.0/max(d,0.5)));
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader:`
+    varying vec3  vCol;
+    varying float vA, vLA;
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      float ca=cos(vLA), sa=sin(vLA);
+      vec2 r = vec2(ca*uv.x - sa*uv.y, sa*uv.x + ca*uv.y);
+      float ex=r.x*2.8, ey=r.y*1.6;
+      float lf = ex*ex + ey*ey + max(0.0,r.y)*1.5;
+      if(lf>0.25) discard;
+      float f = exp(-lf*12.0);
+      float vn = exp(-abs(r.x)*40.0)*0.12;
+      vec3 c = vCol + vec3(vn*0.3,vn*0.2,vn*0.05);
+      float a = f*vA;
+      gl_FragColor = vec4(c*a, a);
+    }`
+});
+scene.add(new THREE.Points(geom, mat));
+
+/* ═══════════════ apex beacon — unreachable luminous point ═══════════════ */
+{
+  const ag = new THREE.BufferGeometry();
+  ag.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0,140,0]),3));
+  const am = new THREE.ShaderMaterial({
+    uniforms: uni, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+    vertexShader:`
+      uniform float uTime, uPx;
+      void main(){
+        vec4 mv = modelViewMatrix*vec4(position,1.0);
+        float d = -mv.z;
+        float pulse = 0.8+0.2*sin(uTime*0.35);
+        gl_PointSize = max(2.0, pulse*uPx*220.0/max(d,1.0));
+        gl_Position = projectionMatrix*mv;
+      }`,
+    fragmentShader:`
+      uniform float uTime;
+      void main(){
+        vec2 d = gl_PointCoord-0.5;
+        float r = dot(d,d);
+        float g = exp(-r*6.0);
+        float p = 0.85+0.15*sin(uTime*0.35);
+        vec3 c = vec3(1.0,0.93,0.76)*g*p;
+        float a = g*0.65*p;
+        gl_FragColor = vec4(c*a, a);
+      }`
+  });
+  scene.add(new THREE.Points(ag, am));
+}
+
+/* ═══════════════ void dust — atmospheric depth cue ═══════════════ */
+{
+  const ND = 6000;
+  const dp = new Float32Array(ND*3);
+  const ds = new Float32Array(ND);
+  for (let i=0;i<ND;i++){
+    dp[i*3]  = (rng()-.5)*60;
+    dp[i*3+1]= rng()*160;
+    dp[i*3+2]= (rng()-.5)*60;
+    ds[i] = rng();
+  }
+  const dg = new THREE.BufferGeometry();
+  dg.setAttribute('position', new THREE.BufferAttribute(dp,3));
+  dg.setAttribute('seed', new THREE.BufferAttribute(ds,1));
+  const dm = new THREE.ShaderMaterial({
+    uniforms: uni, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+    vertexShader:`
+      uniform float uTime, uPx;
+      attribute float seed;
+      varying float vA;
+      void main(){
+        vec3 p = position;
+        p.y += sin(uTime*0.1+seed*20.0)*0.3;
+        vec4 mv = modelViewMatrix*vec4(p,1.0);
+        float d = -mv.z;
+        float fog = exp(-d*0.008);
+        vA = fog*0.12*(0.5+0.5*sin(uTime*0.2+seed*6.28));
+        gl_PointSize = max(1.0, uPx*30.0/max(d,1.0));
+        gl_Position = projectionMatrix*mv;
+      }`,
+    fragmentShader:`
+      varying float vA;
+      void main(){
+        vec2 d = gl_PointCoord-0.5;
+        float r = dot(d,d);
+        if(r>0.25) discard;
+        float f = exp(-r*14.0)*vA;
+        gl_FragColor = vec4(vec3(0.25,0.28,0.35)*f, f);
+      }`
+  });
+  scene.add(new THREE.Points(dg, dm));
+}
+
+/* ═══════════════ background gradient plane ═══════════════ */
+{
+  const pg = new THREE.PlaneGeometry(2,2);
+  const pm = new THREE.ShaderMaterial({
+    depthWrite:false, depthTest:false, transparent:true,
+    vertexShader:`void main(){ gl_Position = vec4(position.xy,0.9999,1.0); }`,
+    fragmentShader:`
+      void main(){
+        float y = gl_FragCoord.y / ${innerHeight.toFixed(1)};
+        vec3 bot = vec3(0.008,0.012,0.020);
+        vec3 top = vec3(0.015,0.018,0.030);
+        vec3 c = mix(bot,top,y);
+        gl_FragColor = vec4(c, 1.0);
+      }`
+  });
+  const bg = new THREE.Mesh(pg, pm);
+  bg.renderOrder = -1;
+  bg.frustumCulled = false;
+  scene.add(bg);
+}
+
+/* ═══════════════ resize ═══════════════ */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ═══════════════ animation — eternal upward drift ═══════════════ */
+camera.position.set(5, 3, 5);
+const t0 = performance.now();
+
+function loop(){
+  const el = (performance.now()-t0)/1000;
+  uni.uTime.value = el;
+
+  /* slow ascent: ~0.5 u/s → ~280s full traverse, then wraps */
+  const camY = (el*0.5) % 155;
+  const orbR = 5.5 + 1.8*Math.sin(el*0.018);
+  const orbA = el*0.025;
+  camera.position.set(Math.sin(orbA)*orbR, camY, Math.cos(orbA)*orbR);
+  camera.lookAt(0, camY + 18 + 8*Math.sin(el*0.012), 0);
+  uni.uCamY.value = camY;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
