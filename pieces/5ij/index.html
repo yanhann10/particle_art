@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>5ij · cosmic web · IllustrisTNG filaments</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#04040a;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;
+    letter-spacing:0.06em;color:#cdd2dc;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+.src{position:fixed;right:14px;top:14px;opacity:0.35;font-size:10px;
+    letter-spacing:0.04em;color:#cdd2dc;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+</style>
+</head>
+<body>
+<div class="id">5ij</div>
+<div class="src">MillenniumTNG · MPA Garching 2024</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── scene ──────────────────────────────────────────── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.5, 600);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x04040a, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── cosmic web graph ───────────────────────────────── */
+const NUM_NODES = 160;
+const K = 4;
+const CUBE_H = 44;
+const MAX_EDGE_LEN = 32;
+
+const nodes = [];
+for (let i = 0; i < NUM_NODES; i++){
+  nodes.push(new THREE.Vector3(
+    (Math.random()-0.5)*CUBE_H*2,
+    (Math.random()-0.5)*CUBE_H*2,
+    (Math.random()-0.5)*CUBE_H*2
+  ));
+}
+
+// k-nearest-neighbor graph → filament edges
+const edgeSet = new Set();
+for (let i = 0; i < NUM_NODES; i++){
+  const dists = [];
+  for (let j = 0; j < NUM_NODES; j++){
+    if (i===j) continue;
+    const d = nodes[i].distanceTo(nodes[j]);
+    if (d < MAX_EDGE_LEN) dists.push({j,d});
+  }
+  dists.sort((a,b)=>a.d-b.d);
+  for (let k = 0; k < Math.min(K, dists.length); k++){
+    const lo = Math.min(i, dists[k].j), hi = Math.max(i, dists[k].j);
+    edgeSet.add(lo*1000+hi);
+  }
+}
+const edges = [...edgeSet].map(v => [Math.floor(v/1000), v%1000]);
+
+/* ── particle placement along filaments + at nodes ── */
+const PPE = 80;            // particles per edge
+const NPC = 90;            // particles per node cluster
+const nEdge = edges.length;
+const nFilament = nEdge * PPE;
+const nCluster = NUM_NODES * NPC;
+const N = nFilament + nCluster;
+
+const pos   = new Float32Array(N*3);
+const drift = new Float32Array(N*3);
+const prox  = new Float32Array(N);
+const seed  = new Float32Array(N);
+
+function gaussRand(){ return Math.sqrt(-2*Math.log(Math.max(Math.random(),1e-8)))*Math.cos(Math.PI*2*Math.random()); }
+
+const _up  = new THREE.Vector3();
+const _p1  = new THREE.Vector3();
+const _p2  = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+
+let idx = 0;
+
+for (const [ai, bi] of edges){
+  const a = nodes[ai], b = nodes[bi];
+  _dir.subVectors(b, a);
+  const len = _dir.length();
+  _dir.normalize();
+
+  // stable perpendicular frame
+  _up.set(0,1,0);
+  if (Math.abs(_dir.y) > 0.9) _up.set(1,0,0);
+  _p1.crossVectors(_dir, _up).normalize();
+  _p2.crossVectors(_dir, _p1).normalize();
+
+  for (let p = 0; p < PPE; p++){
+    const t = Math.random();
+    const bx = a.x + (b.x-a.x)*t;
+    const by = a.y + (b.y-a.y)*t;
+    const bz = a.z + (b.z-a.z)*t;
+
+    // Gaussian scatter perpendicular, tighter at midpoint
+    const proxVal = 2*Math.abs(t-0.5);  // 1 near nodes, 0 at center
+    const sigma = 0.35 + 0.45*proxVal;
+    const r = Math.abs(gaussRand())*sigma;
+    const ang = Math.random()*Math.PI*2;
+    const ox = _p1.x*Math.cos(ang)*r + _p2.x*Math.sin(ang)*r;
+    const oy = _p1.y*Math.cos(ang)*r + _p2.y*Math.sin(ang)*r;
+    const oz = _p1.z*Math.cos(ang)*r + _p2.z*Math.sin(ang)*r;
+
+    pos[idx*3]   = bx + ox;
+    pos[idx*3+1] = by + oy;
+    pos[idx*3+2] = bz + oz;
+
+    // drift toward nearest node
+    const sign = t < 0.5 ? -1 : 1;
+    drift[idx*3]   = _dir.x * sign;
+    drift[idx*3+1] = _dir.y * sign;
+    drift[idx*3+2] = _dir.z * sign;
+
+    prox[idx] = Math.pow(proxVal, 1.8);
+    seed[idx] = Math.random();
+    idx++;
+  }
+}
+
+// node cluster particles
+for (let i = 0; i < NUM_NODES; i++){
+  const nd = nodes[i];
+  for (let p = 0; p < NPC; p++){
+    const r = Math.pow(Math.random(), 0.6) * 1.1;
+    const th = Math.random()*Math.PI*2;
+    const ph = Math.acos(2*Math.random()-1);
+    pos[idx*3]   = nd.x + r*Math.sin(ph)*Math.cos(th);
+    pos[idx*3+1] = nd.y + r*Math.sin(ph)*Math.sin(th);
+    pos[idx*3+2] = nd.z + r*Math.cos(ph);
+    drift[idx*3] = drift[idx*3+1] = drift[idx*3+2] = 0;
+    prox[idx] = 0.85 + 0.15*Math.random();
+    seed[idx] = Math.random();
+    idx++;
+  }
+}
+
+/* ── filament backbone lines ────────────────────────── */
+const linePos = new Float32Array(edges.length * 6);
+const lineAlpha = new Float32Array(edges.length * 2);
+for (let e = 0; e < edges.length; e++){
+  const a = nodes[edges[e][0]], b = nodes[edges[e][1]];
+  linePos[e*6]   = a.x; linePos[e*6+1] = a.y; linePos[e*6+2] = a.z;
+  linePos[e*6+3] = b.x; linePos[e*6+4] = b.y; linePos[e*6+5] = b.z;
+  const edgeLen = a.distanceTo(b);
+  const la = 1.0 - edgeLen/MAX_EDGE_LEN;
+  lineAlpha[e*2]   = la;
+  lineAlpha[e*2+1] = la;
+}
+
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
+lineGeom.setAttribute('alpha', new THREE.BufferAttribute(lineAlpha, 1));
+const lineMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  uniforms: { uTime: {value:0} },
+  vertexShader: `
+    attribute float alpha;
+    varying float vA;
+    void main(){
+      vA = alpha;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+    }`,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec3 c = vec3(0.14, 0.22, 0.42);
+      float a = vA * 0.08;
+      gl_FragColor = vec4(c*a, a);
+    }`
+});
+scene.add(new THREE.LineSegments(lineGeom, lineMat));
+
+/* ── particle material ──────────────────────────────── */
+const uniforms = {
+  uTime:  {value:0},
+  uPixel: {value: renderer.getPixelRatio()}
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute vec3 drift;
+    attribute float prox;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      // gravitational infall oscillation along filament
+      float phase = seed*6.2831 + uTime*0.12;
+      float disp = sin(phase) * (1.0 - prox) * 1.8;
+      p += drift * disp;
+      // subtle cluster breathing
+      float breathe = sin(uTime*0.25 + seed*4.0) * prox * 0.15;
+      p += normalize(p + vec3(0.001)) * breathe;
+
+      // IllustrisTNG palette: deep blue filament → gold → magenta at nodes
+      vec3 cFil  = vec3(0.18, 0.28, 0.55);
+      vec3 cWarm = vec3(0.85, 0.62, 0.22);
+      vec3 cHot  = vec3(0.92, 0.35, 0.55);
+      float pq = prox;
+      vec3 col = mix(cFil, cWarm, smoothstep(0.2, 0.7, pq));
+      col = mix(col, cHot, smoothstep(0.75, 1.0, pq) * 0.55);
+      // faint shimmer
+      col *= 0.9 + 0.1*sin(uTime*0.4 + seed*12.0);
+      vCol = col;
+
+      vAlpha = 0.06 + 0.85 * smoothstep(0.0, 0.8, pq);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sz = (0.7 + 2.8*pq + 0.5*sin(phase*0.7)*pq) * uPixel * (90.0/max(dist,1.0));
+      gl_PointSize = clamp(sz, 0.5, 18.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d,d);
+      if (r2 > 0.25) discard;
+      float core = exp(-r2 * 14.0);
+      float halo = exp(-r2 * 4.0) * 0.3;
+      float a = (core + halo) * vAlpha;
+      // subtle dither to break banding
+      float n = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233)))*43758.5453);
+      a *= 0.94 + 0.12*n;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('drift',    new THREE.BufferAttribute(drift, 3));
+geom.setAttribute('prox',     new THREE.BufferAttribute(prox, 1));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seed, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── camera ─────────────────────────────────────────── */
+// compute centroid once for camera target
+const centroid = new THREE.Vector3();
+for (let i = 0; i < N; i++){
+  centroid.x += pos[i*3]; centroid.y += pos[i*3+1]; centroid.z += pos[i*3+2];
+}
+centroid.multiplyScalar(1/N);
+
+const CAM_R = 115;
+const camTarget = new THREE.Vector3();
+
+function updateCamera(t){
+  // very slow orbit — one revolution per ~200 seconds
+  const a = t * 0.031;
+  const va = t * 0.017;
+  camera.position.set(
+    centroid.x + Math.cos(a) * CAM_R,
+    centroid.y + Math.sin(va) * 18,
+    centroid.z + Math.sin(a) * CAM_R
+  );
+  // camera target drifts gently around centroid
+  camTarget.set(
+    centroid.x + Math.sin(t*0.009)*4,
+    centroid.y + Math.cos(t*0.013)*3,
+    centroid.z + Math.sin(t*0.011)*4
+  );
+  camera.lookAt(camTarget);
+}
+
+/* ── resize ─────────────────────────────────────────── */
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+/* ── render loop ────────────────────────────────────── */
+const t0 = performance.now();
+function loop(){
+  const t = (performance.now() - t0) * 0.001;
+  uniforms.uTime.value = t;
+  updateCamera(t);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
