@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ss8 · double pendulum phase portrait through bifurcation</title>
+<!-- MOTION: drift, intensity: vigorous -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background: radial-gradient(ellipse at 50% 40%, #0d0d12 0%, #050508 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+  .param { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size: 10px; letter-spacing: 0.06em;
+           color: #8899bb; }
+</style>
+</head>
+<body>
+<div class="id">ss8 · double pendulum phase portrait through bifurcation</div>
+<div class="hint">move pointer horizontally to sweep damping coefficient — watch the attractor morph</div>
+<div class="src">poincaré section · edward lorenz · 1963 phase-space topology</div>
+<div class="param" id="param">γ = 0.050 · stable limit cycle</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Double pendulum in (θ₁, θ₂, ω₁, ω₂) phase space.
+// ODEs (small-angle approximation removed — full nonlinear):
+//   ω₁' = (-g(2m₁+m₂)sinθ₁ - m₂g sin(θ₁-2θ₂) - 2sinΔθ m₂(ω₂²L₂+ω₁²L₁cosΔθ)) / (L₁(2m₁+m₂-m₂cos(2Δθ))) - γω₁
+//   ω₂' = (2sinΔθ (ω₁²L₁(m₁+m₂) + g(m₁+m₂)cosθ₁ + ω₂²L₂m₂cosΔθ)) / (L₂(2m₁+m₂-m₂cos(2Δθ))) - γω₂
+//   θ₁' = ω₁
+//   θ₂' = ω₂
+// where Δθ = θ₁ - θ₂.
+//
+// Control parameter γ (damping) ranges 0..0.30:
+//   γ < 0.04:  chaotic, high-dimensional attractor
+//   0.04–0.10: period-doubling cascade
+//   0.10–0.20: stable limit cycle
+//   > 0.20:    overdamped spiral to fixed point
+//
+// Render: trail of points in (θ₁, θ₂) projection — the orbit's shape IS the visual.
+// No particles, no mesh decoration — just the raw trajectory geometry.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x050508, 0.022);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 0, 45);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// starfield backdrop — a speck texture to break computational sterility
+const starGeom = new THREE.BufferGeometry();
+const starCount = 800;
+const starPos = new Float32Array(starCount * 3);
+for (let i = 0; i < starCount; i++){
+  const r = 60 + Math.random() * 80;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI - Math.PI/2;
+  starPos[i*3]   = Math.cos(th)*Math.cos(ph)*r;
+  starPos[i*3+1] = Math.sin(ph)*r;
+  starPos[i*3+2] = Math.sin(th)*Math.cos(ph)*r;
+}
+starGeom.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+const starMat = new THREE.PointsMaterial({ color: 0x334466, size: 0.6, transparent: true, opacity: 0.25, fog: false });
+const stars = new THREE.Points(starGeom, starMat);
+scene.add(stars);
+
+// ODE state: θ₁, θ₂, ω₁, ω₂
+let theta1 = 2.8;
+let theta2 = 2.1;
+let omega1 = 0.0;
+let omega2 = 0.0;
+
+// physical constants
+const g = 9.81;
+const L1 = 1.0;
+const L2 = 1.0;
+const m1 = 1.0;
+const m2 = 1.0;
+
+let gamma = 0.05;   // damping — user controls this
+let pointerX = 0.5;
+
+addEventListener('pointermove', e => {
+  pointerX = e.clientX / innerWidth;
+});
+addEventListener('touchmove', e => {
+  pointerX = e.touches[0].clientX / innerWidth;
+}, { passive: true });
+
+const paramEl = document.getElementById('param');
+
+function deriv(t1, t2, w1, w2, g_val){
+  const dth = t1 - t2;
+  const s = Math.sin(dth);
+  const c = Math.cos(dth);
+  const denom1 = L1 * (2*m1 + m2 - m2*Math.cos(2*dth));
+  const denom2 = L2 * (2*m1 + m2 - m2*Math.cos(2*dth));
+  const num1 = -g*(2*m1+m2)*Math.sin(t1)
+               - m2*g*Math.sin(t1 - 2*t2)
+               - 2*s*m2*(w2*w2*L2 + w1*w1*L1*c);
+  const num2 = 2*s*(w1*w1*L1*(m1+m2)
+                   + g*(m1+m2)*Math.cos(t1)
+                   + w2*w2*L2*m2*c);
+  const dw1 = (num1 / denom1) - g_val * w1;
+  const dw2 = (num2 / denom2) - g_val * w2;
+  return [w1, w2, dw1, dw2];
+}
+
+function rk4_step(t1, t2, w1, w2, g_val, dt){
+  const [k1_t1, k1_t2, k1_w1, k1_w2] = deriv(t1, t2, w1, w2, g_val);
+  const [k2_t1, k2_t2, k2_w1, k2_w2] = deriv(t1+k1_t1*dt/2, t2+k1_t2*dt/2, w1+k1_w1*dt/2, w2+k1_w2*dt/2, g_val);
+  const [k3_t1, k3_t2, k3_w1, k3_w2] = deriv(t1+k2_t1*dt/2, t2+k2_t2*dt/2, w1+k2_w1*dt/2, w2+k2_w2*dt/2, g_val);
+  const [k4_t1, k4_t2, k4_w1, k4_w2] = deriv(t1+k3_t1*dt, t2+k3_t2*dt, w1+k3_w1*dt, w2+k3_w2*dt, g_val);
+  return [
+    t1 + (k1_t1 + 2*k2_t1 + 2*k3_t1 + k4_t1)*dt/6,
+    t2 + (k1_t2 + 2*k2_t2 + 2*k3_t2 + k4_t2)*dt/6,
+    w1 + (k1_w1 + 2*k2_w1 + 2*k3_w1 + k4_w1)*dt/6,
+    w2 + (k1_w2 + 2*k2_w2 + 2*k3_w2 + k4_w2)*dt/6
+  ];
+}
+
+// trail: ring buffer of last N trajectory points in (θ₁, θ₂) plane
+const TRAIL_LEN = 3600;
+const trail = new Float32Array(TRAIL_LEN * 3);
+let trailIdx = 0;
+let trailFilled = false;
+
+function addTrailPoint(t1, t2){
+  const scale = 12.0;   // visual scale for phase angles
+  trail[trailIdx*3]   = t1 * scale;
+  trail[trailIdx*3+1] = t2 * scale;
+  trail[trailIdx*3+2] = 0.0;
+  trailIdx = (trailIdx + 1) % TRAIL_LEN;
+  if (trailIdx === 0) trailFilled = true;
+}
+
+// render trail as additive line segments
+const trailGeom = new THREE.BufferGeometry();
+trailGeom.setAttribute('position', new THREE.BufferAttribute(trail, 3));
+const uniforms = {
+  uTime: { value: 0 },
+  uGamma: { value: gamma }
+};
+const trailMat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: true,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uGamma;
+    varying float vAge;
+    void main(){
+      float idx = float(gl_VertexID);
+      vAge = idx / ${TRAIL_LEN.toFixed(1)};
+      vec3 p = position;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uGamma;
+    varying float vAge;
+    void main(){
+      // color: bifurcation-driven palette
+      // chaos (γ<0.04): cyan + magenta mix
+      // limit cycle (0.10–0.20): warm amber
+      // fixed point (>0.20): cool steel blue
+      vec3 chaos = mix(vec3(0.2, 0.9, 0.9), vec3(0.9, 0.3, 0.85), fract(vAge*8.0));
+      vec3 cycle = vec3(0.92, 0.68, 0.38);
+      vec3 fixed = vec3(0.45, 0.62, 0.88);
+      vec3 col = uGamma < 0.04 ? chaos
+               : uGamma < 0.10 ? mix(chaos, cycle, (uGamma - 0.04)/0.06)
+               : uGamma < 0.20 ? cycle
+               : mix(cycle, fixed, (uGamma - 0.20)/0.10);
+      float alpha = (1.0 - vAge) * 0.28;
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+const trailLine = new THREE.Line(trailGeom, trailMat);
+scene.add(trailLine);
+
+// current-point marker — a small bright dot at the live state
+const markerGeom = new THREE.BufferGeometry();
+markerGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0,0,0]), 3));
+const markerMat = new THREE.PointsMaterial({ color: 0xffffff, size: 3.0, transparent: true, opacity: 0.85, fog: false });
+const marker = new THREE.Points(markerGeom, markerMat);
+scene.add(marker);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+let integrationSteps = 0;
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = now / 1000;
+
+  // user sweeps damping via pointer X
+  gamma = pointerX * 0.30;
+  uniforms.uGamma.value = gamma;
+
+  // update parameter display
+  let regime = '';
+  if (gamma < 0.04) regime = 'chaotic attractor';
+  else if (gamma < 0.10) regime = 'period-doubling';
+  else if (gamma < 0.20) regime = 'stable limit cycle';
+  else regime = 'overdamped spiral';
+  paramEl.textContent = `γ = ${gamma.toFixed(3)} · ${regime}`;
+
+  // integrate ODE (multiple sub-steps per frame for smooth trajectory)
+  const substeps = 4;
+  const subdt = dt / substeps;
+  for (let s = 0; s < substeps; s++){
+    [theta1, theta2, omega1, omega2] = rk4_step(theta1, theta2, omega1, omega2, gamma, subdt * 0.016);
+    integrationSteps++;
+    // sample trail every N steps to avoid over-dense point cloud
+    if (integrationSteps % 2 === 0){
+      addTrailPoint(theta1, theta2);
+    }
+  }
+
+  // update marker position
+  const scale = 12.0;
+  markerGeom.attributes.position.array[0] = theta1 * scale;
+  markerGeom.attributes.position.array[1] = theta2 * scale;
+  markerGeom.attributes.position.array[2] = 0.0;
+  markerGeom.attributes.position.needsUpdate = true;
+
+  trailGeom.attributes.position.needsUpdate = true;
+
+  // camera: slow auto-orbit around origin with slight tilt
+  const ang = now * 0.00008;
+  camera.position.x = Math.sin(ang) * 45;
+  camera.position.y = Math.cos(ang * 0.7) * 8;
+  camera.position.z = Math.cos(ang) * 45;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+// pre-warm integration so first frame isn't blank
+for (let w = 0; w < 300; w++){
+  [theta1, theta2, omega1, omega2] = rk4_step(theta1, theta2, omega1, omega2, gamma, 0.016);
+  if (w % 2 === 0) addTrailPoint(theta1, theta2);
+}
+
+loop();
+</script>
+</body>
+</html>
