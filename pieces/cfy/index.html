@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cfy · chromatic squeegee tower · Richter</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0608; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">cfy</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+const fogColor = new THREE.Color(0x0a0608);
+scene.fog = new THREE.FogExp2(0x0a0608, 0.035);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0608, 1);
+document.body.appendChild(renderer.domElement);
+
+const lightKey = new THREE.DirectionalLight(0xfff0e8, 0.9);
+lightKey.position.set(5, 10, 5);
+scene.add(lightKey);
+scene.add(new THREE.AmbientLight(0x2a141c, 0.6));
+const lightRim = new THREE.DirectionalLight(0x88aacc, 0.4);
+lightRim.position.set(-5, 3, -5);
+scene.add(lightRim);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+// ─────────── differential growth (3D, inherited from t9w/5gm)
+const MAX_VERTS = 1500;
+const ATTRACT   = 0.06;
+const REPEL_R   = 0.50;
+const REPEL_STR = 0.13;
+const NOISE     = 0.003;
+const PRESSURE  = 0.0028;
+const RISE      = 0.0045;
+const MAX_D     = 0.40;
+
+const verts = [];
+for (let i = 0; i < 16; i++){
+  const th = i / 16 * Math.PI * 2;
+  const r = 1.4 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+}
+
+const CELL = REPEL_R, grid = new Map();
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i];
+    const k = Math.floor(v.x/CELL)+','+Math.floor(v.y/CELL)+','+Math.floor(v.z/CELL);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++){
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+function step(){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    for (const j of neighbors(v)){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d/REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x + b.x - 2*v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2*v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2*v.z) * ATTRACT;
+  }
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++){ cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x - cx, oy = verts[i].y - cy, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox/d) * PRESSURE;
+    dy[i] += (oy/d) * PRESSURE * 0.4;
+    dz[i] += (oz/d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[i].age;
+    const upward = RISE * (0.3 + 1.2 * Math.min(a * 1.5, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE;
+    verts[i].y += dy[i] + (Math.random()-0.5)*NOISE * 0.5 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE;
+    verts[i].age += 0.0014;
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if (ex*ex+ey*ey+ez*ez > MAX_D*MAX_D && verts.length + grown.length < MAX_VERTS){
+      grown.push({
+        x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5 - 0.05, z:(a.z+b.z)*0.5,
+        age: Math.max(a.age, b.age) * 0.5
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+for (let s = 0; s < 600; s++) step();
+addEventListener('click', () => { paused = !paused; });
+
+// ─────────── Richter squeegee shader material
+const richterVert = `
+  varying vec3 vWorldPos;
+  varying vec3 vNormal;
+  varying vec3 vViewPos;
+  void main(){
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    vWorldPos = worldPos.xyz;
+    vNormal = normalize(normalMatrix * normal);
+    vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+    vViewPos = mvPos.xyz;
+    gl_Position = projectionMatrix * mvPos;
+  }
+`;
+
+const richterFrag = `
+  uniform float uTime;
+  uniform float uYMin;
+  uniform float uYMax;
+  uniform vec3 uFogColor;
+  uniform float uFogDensity;
+  varying vec3 vWorldPos;
+  varying vec3 vNormal;
+  varying vec3 vViewPos;
+
+  // --- hash / noise ---
+  float hash(vec2 p){
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+  }
+  float hash3(vec3 p){
+    return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453123);
+  }
+  float noise2(vec2 p){
+    vec2 i = floor(p); vec2 f = fract(p);
+    f = f*f*(3.0 - 2.0*f);
+    float a = hash(i); float b = hash(i + vec2(1,0));
+    float c = hash(i + vec2(0,1)); float d = hash(i + vec2(1,1));
+    return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+  }
+  float fbm(vec2 p){
+    float v = 0.0; float a = 0.5;
+    for(int i = 0; i < 4; i++){
+      v += a * noise2(p); p *= 2.07; a *= 0.5;
+    }
+    return v;
+  }
+
+  // Richter palette: cadmium red, cerulean, yellow ochre, viridian, 
+  // titanium white, mars black, alizarin crimson
+  vec3 palette[7];
+
+  vec3 getRichterColor(float t, float circumAngle, float squeegeePhase){
+    palette[0] = vec3(0.84, 0.15, 0.12);  // cadmium red
+    palette[1] = vec3(0.10, 0.36, 0.68);  // cerulean blue
+    palette[2] = vec3(0.88, 0.78, 0.22);  // yellow ochre
+    palette[3] = vec3(0.12, 0.52, 0.35);  // viridian
+    palette[4] = vec3(0.92, 0.91, 0.88);  // titanium white
+    palette[5] = vec3(0.08, 0.07, 0.06);  // mars black
+    palette[6] = vec3(0.68, 0.08, 0.22);  // alizarin crimson
+
+    float numBands = 7.0;
+
+    // --- squeegee displacement: horizontal drag based on circumferential angle ---
+    // large amplitude wobble that shifts band boundaries per-angle
+    float dragNoise = fbm(vec2(circumAngle * 1.8, t * 3.5 + squeegeePhase)) * 2.0 - 1.0;
+    float dragNoise2 = fbm(vec2(circumAngle * 3.2 + 5.0, t * 5.0 - 1.3)) * 2.0 - 1.0;
+    // directional smearing: bands get pushed harder in one circumferential direction
+    float dragDir = sin(circumAngle * 0.7 + 1.5) * 0.6;
+    float totalDrag = dragNoise * 0.35 + dragNoise2 * 0.15 + dragDir * 0.2;
+
+    float displaced = t + totalDrag;
+    // wrap to 0-1
+    displaced = fract(displaced * 0.5 + 0.5);
+    float bandPos = displaced * numBands;
+    float bandIdx = floor(bandPos);
+    float bandFrac = fract(bandPos);
+
+    int idx0 = int(mod(bandIdx, numBands));
+    int idx1 = int(mod(bandIdx + 1.0, numBands));
+
+    vec3 c0 = palette[idx0];
+    vec3 c1 = palette[idx1];
+
+    // --- variable-width bleeding between adjacent bands ---
+    // Noise-driven blend width that varies with circumference
+    float bleedWidth = 0.12 + 0.28 * fbm(vec2(circumAngle * 2.5 + 3.0, bandIdx * 1.7));
+    // additional fine-grain smear texture within the bleed zone
+    float smearDetail = fbm(vec2(circumAngle * 6.0, t * 12.0 + bandIdx)) * 0.5 + 0.5;
+    
+    // paint-drag transition: not a clean smoothstep but a ragged smear
+    float edge = smoothstep(1.0 - bleedWidth, 1.0, bandFrac);
+    // break uniformity: randomize the transition per-circumference position
+    float circumNoise = fbm(vec2(circumAngle * 4.0 + bandIdx * 2.3, t * 8.0));
+    edge = smoothstep(0.0, 1.0, edge + (circumNoise - 0.5) * 0.6);
+    edge = clamp(edge, 0.0, 1.0);
+
+    vec3 baseColor = mix(c0, c1, edge);
+
+    // --- oil-paint materiality: subtle impasto texture ---
+    float impasto = fbm(vec2(circumAngle * 8.0 + t * 20.0, squeegeePhase * 3.0));
+    baseColor *= 0.88 + 0.24 * impasto;
+
+    // --- occasional paint-scrape revealing underlayer ---
+    float scrape = fbm(vec2(t * 6.0 + circumAngle * 1.2, circumAngle * 3.0 + 7.0));
+    if(scrape > 0.78){
+      int underIdx = int(mod(bandIdx + 3.0, numBands));
+      vec3 underColor = palette[underIdx];
+      float scrapeAmt = smoothstep(0.78, 0.92, scrape);
+      baseColor = mix(baseColor, underColor * 0.7, scrapeAmt * 0.5);
+    }
+
+    return baseColor;
+  }
+
+  void main(){
+    float yRange = max(uYMax - uYMin, 0.1);
+    float heightT = (vWorldPos.y - uYMin) / yRange;
+    float circumAngle = atan(vWorldPos.z, vWorldPos.x);  // -PI to PI
+    float circumNorm = circumAngle / 3.14159265;          // -1 to 1
+
+    float squeegeePhase = uTime * 0.04; // very slow drift
+
+    vec3 color = getRichterColor(heightT, circumNorm * 3.14159265, squeegeePhase);
+
+    // simple directional lighting
+    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.4));
+    float diff = max(dot(vNormal, lightDir), 0.0) * 0.5 + 0.5;
+    // slight specular for oil-paint sheen
+    vec3 viewDir = normalize(-vViewPos);
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(vNormal, halfDir), 0.0), 24.0) * 0.3;
+
+    color = color * diff + vec3(1.0) * spec;
+
+    // manual fog (FogExp2)
+    float fogDist = length(vViewPos);
+    float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDist * fogDist);
+    color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
+
+    gl_FragColor = vec4(color, 1.0);
+  }
+`;
+
+const tubeMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime:       { value: 0 },
+    uYMin:       { value: 0 },
+    uYMax:       { value: 10 },
+    uFogColor:   { value: fogColor },
+    uFogDensity: { value: 0.035 },
+  },
+  vertexShader: richterVert,
+  fragmentShader: richterFrag,
+});
+
+// ─────────── vascular tube renderer
+let tubeMesh = null;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  for (let s = 0; s < 2; s++) step();
+
+  if (verts.length > 8){
+    let yMin = Infinity, yMax = -Infinity;
+    for (const v of verts){ if (v.y < yMin) yMin = v.y; if (v.y > yMax) yMax = v.y; }
+    const yRange = Math.max(yMax - yMin, 0.1);
+
+    const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+
+    const N_SAMPLES = Math.min(700, verts.length * 2);
+    const RADIAL = 10;
+    const positions = new Float32Array(N_SAMPLES * RADIAL * 3);
+    const indices = [];
+    const up = new THREE.Vector3(0, 1, 0);
+    const pulse = 1.0 + 0.06 * Math.sin(t * 1.6);
+
+    for (let i = 0; i < N_SAMPLES; i++){
+      const tt = i / N_SAMPLES;
+      const p = curve.getPointAt(tt);
+      const heightFrac = Math.max(0, Math.min(1, (p.y - yMin) / yRange));
+      let r = 0.42 * (1 - heightFrac * 0.72);
+      const node = Math.sin(tt * 22.0) * 0.5 + 0.5;
+      r *= (1.0 + 0.14 * Math.pow(node, 6));
+      r *= pulse;
+
+      const tangent = curve.getTangentAt(tt).normalize();
+      const normal = new THREE.Vector3().crossVectors(tangent, up).normalize();
+      if (normal.lengthSq() < 0.001) normal.set(1, 0, 0);
+      const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+      for (let j = 0; j < RADIAL; j++){
+        const ang = (j / RADIAL) * Math.PI * 2;
+        const v = new THREE.Vector3()
+          .copy(normal).multiplyScalar(Math.cos(ang) * r)
+          .add(binormal.clone().multiplyScalar(Math.sin(ang) * r))
+          .add(p);
+        positions[(i * RADIAL + j) * 3]     = v.x;
+        positions[(i * RADIAL + j) * 3 + 1] = v.y;
+        positions[(i * RADIAL + j) * 3 + 2] = v.z;
+      }
+    }
+    for (let i = 0; i < N_SAMPLES; i++){
+      const ni = (i + 1) % N_SAMPLES;
+      for (let j = 0; j < RADIAL; j++){
+        const nj = (j + 1) % RADIAL;
+        const a = i * RADIAL + j, b = i * RADIAL + nj;
+        const c = ni * RADIAL + j, d = ni * RADIAL + nj;
+        indices.push(a, b, c);
+        indices.push(b, d, c);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.setIndex(indices);
+    g.computeVertexNormals();
+
+    if (tubeMesh){ scene.remove(tubeMesh); tubeMesh.geometry.dispose(); }
+    tubeMesh = new THREE.Mesh(g, tubeMat);
+    scene.add(tubeMesh);
+
+    tubeMat.uniforms.uTime.value = t;
+    tubeMat.uniforms.uYMin.value = yMin;
+    tubeMat.uniforms.uYMax.value = yMax;
+  }
+
+  let yMean = 0; for (const v of verts) yMean += v.y; yMean /= Math.max(verts.length, 1);
+  const targetY = Math.max(yMean, 2.0);
+  controls.target.y += (targetY - controls.target.y) * 0.04;
+  const desiredCamY = targetY + 4;
+  camera.position.y += (desiredCamY - camera.position.y) * 0.04;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
