@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: oscillation, intensity: gentle -->
+<title>fj2 · désordres · entropy gradient</title>
+<style>
+html, body { margin:0; padding:0; height:100%; background:#efe8da; overflow:hidden; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">fj2</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ═══════════════════════════════════════════════════════════════════
+   Vera Molnár — Désordres (1976) / (Dés)Ordres series
+   32×32 grid of short line-segments on cream paper.
+   Row 0 (top): perfect orthogonal order.
+   Row 31 (bottom): full Gaussian disorder.
+   Entropy gradient is the subject — the eye descends from
+   certainty into noise. Cobalt ink on aged French cartridge paper.
+   Camera orbits slowly so the z-displacement of disordered
+   segments becomes visible — the flat drawing lifts into 3D relief.
+   ═══════════════════════════════════════════════════════════════════ */
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xefe8da); // warm cream — cartridge paper
+
+const camera = new THREE.PerspectiveCamera(34, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0, 19);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.15; // glacial contemplative orbit
+controls.target.set(0, 0, 0);
+controls.minDistance = 10;
+controls.maxDistance = 30;
+
+// ─────────── grid parameters
+const COLS = 32, ROWS = 32;
+const SPACING = 0.31;
+const COUNT = COLS * ROWS;
+
+// segment geometry — thin flat box, plotter-pen cross-section
+// width 0.016 ≈ 1.5px at default distance; height 0.25 = the stroke
+const segGeo = new THREE.BoxGeometry(0.016, 0.25, 0.008);
+
+// deep cobalt-black — Molnár's plotter ink on paper
+const segMat = new THREE.MeshBasicMaterial({ color: 0x141832 });
+
+const mesh = new THREE.InstancedMesh(segGeo, segMat, COUNT);
+
+// ─────────── Gaussian via Box-Muller
+function gaussian() {
+  let u, v, s;
+  do {
+    u = Math.random() * 2 - 1;
+    v = Math.random() * 2 - 1;
+    s = u * u + v * v;
+  } while (s >= 1 || s === 0);
+  return u * Math.sqrt(-2 * Math.log(s) / s);
+}
+
+// ─────────── per-instance seed data
+const baseData = new Array(COUNT);
+const dummy = new THREE.Object3D();
+
+for (let row = 0; row < ROWS; row++) {
+  for (let col = 0; col < COLS; col++) {
+    const idx = row * COLS + col;
+
+    // chaos grows quadratically from top to bottom
+    // pow 1.8 keeps the first ~5 rows almost perfectly ordered
+    const chaosAmount = Math.pow(row / (ROWS - 1), 1.8);
+
+    const baseX = (col - (COLS - 1) / 2) * SPACING;
+    const baseY = ((ROWS - 1) / 2 - row) * SPACING; // top = positive Y
+
+    baseData[idx] = {
+      baseX, baseY, chaosAmount,
+      rotSeed:  gaussian(),
+      oxSeed:   gaussian(),
+      oySeed:   gaussian(),
+      ozSeed:   gaussian(),
+      // slight per-segment length variation for handmade feel
+      scaleSeed: 0.85 + Math.random() * 0.3,
+      // phase offset for breathing wave
+      phase: baseX * 1.7 + baseY * 2.3 + Math.random() * 0.5
+    };
+  }
+}
+
+// ─────────── update all instance matrices
+function updateInstances(t) {
+  for (let i = 0; i < COUNT; i++) {
+    const d = baseData[i];
+
+    // subtle breathing: chaos modulates ±6% with a slow spatial wave
+    const breath = 1.0 + 0.06 * Math.sin(t * 0.35 + d.phase);
+    const chaos = d.chaosAmount * breath;
+
+    // rotation around Z — up to ±81° at full chaos
+    const rot = d.rotSeed * chaos * Math.PI * 0.45;
+
+    // position offsets — proportional to spacing so segments
+    // never wander more than ~35% into a neighbor's cell
+    const ox = d.oxSeed * chaos * SPACING * 0.32;
+    const oy = d.oySeed * chaos * SPACING * 0.12;
+    // z-displacement gives the 3D relief visible on orbit
+    const oz = d.ozSeed * chaos * SPACING * 0.4;
+
+    dummy.position.set(d.baseX + ox, d.baseY + oy, oz);
+    dummy.rotation.set(0, 0, rot);
+    dummy.scale.set(1, d.scaleSeed, 1);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+}
+
+updateInstances(0);
+scene.add(mesh);
+
+// ─────────── paper grain + vignette overlay
+const grainScene = new THREE.Scene();
+const grainCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+const grainMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthTest: false,
+  depthWrite: false,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    varying vec2 vUv;
+    uniform float uTime;
+
+    // paper-grain hash
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+
+    void main() {
+      // fine grain — shifts subtly over time like scanning a physical print
+      float grain = hash(vUv * 900.0 + fract(uTime * 0.15) * 137.0);
+      grain = (grain - 0.5) * 0.055;
+
+      // warm vignette — slight darkening at edges, aged print feel
+      vec2 c = vUv - 0.5;
+      float vig = dot(c, c);
+      float vigAlpha = smoothstep(0.06, 0.55, vig) * 0.14;
+
+      // combine: grain adds slight noise, vignette adds warmth at edges
+      float alpha = max(0.0, grain) + vigAlpha;
+      gl_FragColor = vec4(0.12, 0.08, 0.04, alpha);
+    }
+  `
+});
+grainScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), grainMat));
+
+// ─────────── resize
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─────────── render loop
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+
+  updateInstances(t);
+  controls.update();
+
+  renderer.render(scene, camera);
+
+  // overlay grain pass
+  grainMat.uniforms.uTime.value = t;
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
