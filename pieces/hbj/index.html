@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hbj · aizawa disrupted weave</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">hbj</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080a, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 0.6;
+  init[i*4+1] = (Math.random()*2-1) * 0.6;
+  init[i*4+2] = (Math.random()*2-1) * 0.6;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// Simulation — Aizawa with 3 disruption repellers that push particles,
+// creating intentional voids like pulled threads in the weave
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.012 },
+  uA:  { value: 0.95 },
+  uB:  { value: 0.70 },
+  uC:  { value: 0.60 },
+  uD:  { value: 3.50 },
+  uE:  { value: 0.25 },
+  uF:  { value: 0.10 },
+  uTime: { value: 0.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF, uTime;
+    varying vec2 vUv;
+
+    // 3 void zones that drift slowly — hand-placed to cut into the torus ring
+    // and 1 density attractor that pulls threads tight
+    vec3 voidCenter0(float t){ return vec3( 0.7 + sin(t*0.13)*0.15, 0.0, 0.9 + cos(t*0.09)*0.1); }
+    vec3 voidCenter1(float t){ return vec3(-0.5 + cos(t*0.11)*0.12, 0.3, 0.7 + sin(t*0.07)*0.15); }
+    vec3 voidCenter2(float t){ return vec3( 0.1, -0.6 + sin(t*0.08)*0.1, 1.3); }
+    vec3 knotCenter(float t) { return vec3(-0.4 + sin(t*0.06)*0.08, 0.15, 1.0 + cos(t*0.1)*0.05); }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      // Aizawa field
+      vec3 dp = vec3(
+        (p.z - uB) * p.x - uD * p.y,
+        uD * p.x + (p.z - uB) * p.y,
+        uC + uA * p.z - (p.z*p.z*p.z)/3.0
+              - (p.x*p.x + p.y*p.y)*(1.0 + uE*p.z)
+              + uF * p.z * p.x*p.x*p.x
+      );
+
+      // Void repellers — push particles away from these zones
+      // creating deliberate empty patches in the weave
+      float voidR = 0.38;
+      vec3 v0 = voidCenter0(uTime);
+      vec3 v1 = voidCenter1(uTime);
+      vec3 v2 = voidCenter2(uTime);
+      vec3 toV0 = p - v0; float d0 = length(toV0);
+      vec3 toV1 = p - v1; float d1 = length(toV1);
+      vec3 toV2 = p - v2; float d2 = length(toV2);
+
+      float repelStr = 2.8;
+      if(d0 < voidR) dp += normalize(toV0) * repelStr * (1.0 - d0/voidR);
+      if(d1 < voidR) dp += normalize(toV1) * repelStr * (1.0 - d1/voidR);
+      if(d2 < voidR * 0.7) dp += normalize(toV2) * repelStr * 1.2 * (1.0 - d2/(voidR*0.7));
+
+      // Density knot — gentle attractor that bunches threads
+      vec3 kc = knotCenter(uTime);
+      vec3 toK = kc - p; float dk = length(toK);
+      if(dk < 0.6 && dk > 0.02) dp += normalize(toK) * 0.8 * smoothstep(0.6, 0.1, dk);
+
+      p += dp * uDt;
+      age = mod(age + uDt * 0.06, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// Render scene
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.05, 50);
+camera.position.set(0, 0, 4);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel, uTime;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vSpeed;
+    varying float vDensityProx;
+    varying float vEdgeFade;
+    varying vec3 vWorldPos;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vWorldPos = p;
+      float speed = length(p) * 0.5;
+      vSpeed = clamp(speed, 0.0, 1.0);
+      vAge = s.w;
+
+      // Density knot proximity — particles near it get larger
+      vec3 kc = vec3(-0.4 + sin(uTime*0.06)*0.08, 0.15, 1.0 + cos(uTime*0.1)*0.05);
+      float dk = length(p - kc);
+      vDensityProx = smoothstep(0.5, 0.05, dk);
+
+      // Broken edge — particles on +x side beyond threshold fade sharply
+      // like a torn edge in the weave
+      float edgeCut = 0.85 + sin(uTime * 0.05) * 0.1;
+      vEdgeFade = 1.0 - smoothstep(edgeCut - 0.05, edgeCut, p.x);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float baseSize = 1.1 + 1.5 * vSpeed + vDensityProx * 2.5;
+      gl_PointSize = baseSize * uPixel * (8.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vSpeed;
+    varying float vDensityProx;
+    varying float vEdgeFade;
+    varying vec3 vWorldPos;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0);
+
+      // Hand-tuned palette: deep teal → dusty violet → warm bone
+      // Teal #1a6b5a, Violet #7a3d8f, Bone #e8ddd0, Accent copper #c47a4a
+      vec3 teal   = vec3(0.10, 0.42, 0.35);
+      vec3 violet = vec3(0.48, 0.24, 0.56);
+      vec3 bone   = vec3(0.91, 0.87, 0.82);
+      vec3 copper = vec3(0.77, 0.48, 0.29);
+
+      float k = mod(vAge + vSpeed * 0.4, 1.0);
+      vec3 col = mix(teal, violet, smoothstep(0.0, 0.45, k));
+      col = mix(col, bone, smoothstep(0.5, 0.95, k));
+
+      // Density knot accent — particles bunched here shift toward copper
+      col = mix(col, copper, vDensityProx * 0.7);
+
+      // Brightness: density-proximate particles glow hotter
+      float brightness = 0.40 + vSpeed * 0.85 + vDensityProx * 0.6;
+      a *= brightness * vEdgeFade;
+
+      if(a < 0.003) discard;
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// Atmospheric dust motes — sparse, slow, warm
+const dustCount = 120;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+const dustAlpha = new Float32Array(dustCount);
+for(let i = 0; i < dustCount; i++){
+  dustPos[i*3]   = (Math.random()-0.5)*6;
+  dustPos[i*3+1] = (Math.random()-0.5)*4;
+  dustPos[i*3+2] = (Math.random()-0.5)*4 + 1;
+  dustAlpha[i]   = Math.random();
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('alpha', new THREE.BufferAttribute(dustAlpha, 1));
+
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPixel: { value: renderer.getPixelRatio() } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float alpha;
+    uniform float uTime, uPixel;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      p.y += sin(uTime * 0.03 + alpha * 6.28) * 0.15;
+      p.x += cos(uTime * 0.02 + alpha * 4.0) * 0.1;
+      vA = alpha;
+      vec4 mv = modelViewMatrix * vec4(p,1.0);
+      gl_PointSize = (1.5 + alpha) * uPixel * (5.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r*10.0) * 0.04 * (0.5 + vA*0.5);
+      gl_FragColor = vec4(0.85, 0.78, 0.65, a);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+// Background gradient — warm top, cold bottom (subtle)
+const bgGeom = new THREE.PlaneGeometry(2, 2);
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false, depthTest: false, transparent: true,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      float y = vUv.y;
+      vec3 top = vec3(0.035, 0.028, 0.022);
+      vec3 bot = vec3(0.020, 0.025, 0.038);
+      vec3 col = mix(bot, top, y);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const bgScene = new THREE.Scene();
+bgScene.add(new THREE.Mesh(bgGeom, bgMat));
+const bgCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const target = { a: 0.95, c: 0.60 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth) - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.a = 0.95 + nx * 0.08;
+  target.c = 0.60 + ny * 0.10;
+});
+
+const t0 = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  simUniforms.uA.value += (target.a - simUniforms.uA.value) * 0.04;
+  simUniforms.uC.value += (target.c - simUniforms.uC.value) * 0.04;
+  simUniforms.uTime.value = elapsed;
+
+  for (let i = 0; i < 4; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = elapsed;
+  dustMat.uniforms.uTime.value = elapsed;
+
+  // Camera: decentered orbit — lookAt drifts off-axis
+  // not a clean circle, slight figure-8 wobble
+  const ang = elapsed * 0.12;
+  const r = 3.8 + Math.sin(elapsed * 0.07) * 0.3;
+  camera.position.x = Math.sin(ang) * r + Math.sin(elapsed * 0.05) * 0.25;
+  camera.position.z = Math.cos(ang) * r;
+  camera.position.y = Math.sin(ang * 0.6) * 0.8 + 0.15;
+  // lookAt offset — slightly off-center, drifting
+  const lx = Math.sin(elapsed * 0.04) * 0.12;
+  const ly = Math.cos(elapsed * 0.03) * 0.08;
+  camera.lookAt(lx, ly, 0.95);
+
+  // Render bg gradient, then scene
+  renderer.autoClear = false;
+  renderer.clear();
+  renderer.render(bgScene, bgCam);
+  renderer.render(scene, camera);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
