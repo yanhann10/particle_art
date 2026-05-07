@@ -258,7 +258,17 @@ def build_prompt(parent: dict, parent_html: str, directive: str) -> tuple[str, s
         + ((swarm + "\n\n") if swarm else "")
         + "If your output would violate any of the above, redesign before emitting. "
         "Better to produce a structurally simple piece that respects the guardrails "
-        "than an ambitious piece that breaks them."
+        "than an ambitious piece that breaks them.\n\n"
+        "MANDATORY RENDER GATE — the piece WILL be opened in a headless browser within "
+        "5 seconds of generation and the screenshot must contain ≥0.5% non-background "
+        "pixels or it is auto-rejected and DELETED. This means: (a) do NOT design pieces "
+        "that stay blank until a peer connects / a websocket pulses / mic permission is "
+        "granted / a user clicks. The default-state-with-zero-input must already be "
+        "visually meaningful. (b) avoid silent shader-compile failures — never reference "
+        "three.js auto-injected uniforms (fogColor/fogDensity/etc.) without #include. "
+        "(c) keep the camera framed on the form (track centroid for growing forms). "
+        "(d) if you fetch external resources (GLB, websocket), have a fallback geometry "
+        "that paints something on load failure."
     )
     user = f"""# Mutation request
 
@@ -389,11 +399,33 @@ def main():
         return 5
 
     new_id = codes.generate(LINEAGE, n=1)[0]
-    html = html.replace("<NEW_ID>", new_id)
+    # tolerant replace — covers `<NEW_ID>` and HTML-escaped `&lt;NEW_ID&gt;`
+    html = html.replace("<NEW_ID>", new_id).replace("&lt;NEW_ID&gt;", new_id)
 
     out_dir = PIECES / new_id
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "index.html").write_text(html)
+
+    # render-content gate — blank pieces (shader compile fail, design that waits
+    # for interaction/network input that never comes, misframed camera, etc.)
+    # must NEVER ship to Vercel. Validate via Playwright before proceeding.
+    try:
+        import shutil
+        from validate_render import validate as render_validate
+        rc = render_validate([new_id], record_clip=False)
+        if rc != 0:
+            rej = REPO / "scripts" / f"reject_{new_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
+            rej.write_text(html)
+            print(f"render gate: REJECTED {new_id} (saved to {rej.name})")
+            shutil.rmtree(out_dir, ignore_errors=True)
+            thumb = REPO / "thumbs" / f"{new_id}.png"
+            if thumb.exists():
+                thumb.unlink()
+            return 7
+    except ImportError as e:
+        print(f"render gate: SKIPPED ({e}) — pip install playwright pillow numpy && playwright install chromium")
+    except Exception as e:
+        print(f"render gate: SKIPPED on exception ({e})")
 
     pieces_now = lineage["pieces"]
     parent_chain = _lineage_chain(parent["id"], pieces_now)            # parent → … → root
