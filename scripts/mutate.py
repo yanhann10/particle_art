@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 import budget
 import codes
+import element_counts
 import lib_claude
 
 LINEAGE = REPO / "lineage.json"
@@ -166,6 +167,11 @@ def sample_directive(spec_path: Path, parent_id: str, recent: list[dict]) -> tup
         candidates.append(d); weights.append(w)
     if not candidates:                       # all used → reset for this parent
         candidates = spec["directives"]; weights = [d["weight"] for d in spec["directives"]]
+    # variety-bias: under-used directives across the whole log get more weight
+    weights = element_counts.bias_weights(
+        candidates, weights, element_counts.directive_counts(),
+        key=lambda d: d["id"], beta=1.0,
+    )
     chosen = random.choices(candidates, weights=weights, k=1)[0]
     text = chosen["directive"]
     if "{" in text and "params" in chosen:

@@ -47,6 +47,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 
 import budget          # noqa
+import element_counts  # noqa
 import lib_claude      # noqa
 
 PIECES = REPO / "pieces"
@@ -70,7 +71,13 @@ def sample_word(target_id: str) -> str:
     # avoid the last 6 used words; if the pool is exhausted, allow repeats
     recent = set(used[-6:])
     candidates = [w for w in pool if w not in recent] or pool
-    return random.choice(candidates)
+    # variety-bias: under-used words across all logs get more weight
+    counts = element_counts.word_counts()
+    weights = element_counts.bias_weights(
+        candidates, [1.0] * len(candidates), counts,
+        key=lambda w: w, beta=1.0,
+    )
+    return random.choices(candidates, weights=weights, k=1)[0]
 
 
 def build_prompt(parent_html: str, word: str, target_id: str, parent_meta: dict) -> tuple[str, str]:

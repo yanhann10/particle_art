@@ -38,6 +38,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 import budget
 import codes
+import element_counts
 import lib_claude
 
 LINEAGE = REPO / "lineage.json"
@@ -119,7 +120,8 @@ def _load_word_pool(path: Path, key: str) -> list:
 
 
 def sample_word(mode: str, recent: list[dict]) -> tuple[str, dict]:
-    """Pick a word for this mode, skipping the last 12 system-wide.
+    """Pick a word for this mode, skipping the last 12 system-wide and
+    inverse-frequency-biasing toward under-used items across all logs.
 
     Returns (word, extra_meta).
         extra_meta carries mode-specific extras (e.g. artist name+practice).
@@ -129,7 +131,13 @@ def sample_word(mode: str, recent: list[dict]) -> tuple[str, dict]:
     if mode == "artist":
         pool = _load_word_pool(ARTIST_PERSONALITIES, "personalities")
         candidates = [e for e in pool if e["word"] not in used_recent] or pool
-        chosen = random.choice(candidates)
+        # bias by per-mode count so over-channeled artists fade
+        counts = element_counts.word_counts(mode="artist")
+        weights = element_counts.bias_weights(
+            candidates, [1.0] * len(candidates), counts,
+            key=lambda e: e["word"], beta=1.0,
+        )
+        chosen = random.choices(candidates, weights=weights, k=1)[0]
         return chosen["word"], {"artist": chosen["artist"], "practice": chosen["practice"]}
 
     if mode == "surprise":
@@ -137,7 +145,12 @@ def sample_word(mode: str, recent: list[dict]) -> tuple[str, dict]:
     else:
         pool = _load_word_pool(WORDS, "words")
     candidates = [w for w in pool if w not in used_recent] or pool
-    return random.choice(candidates), {}
+    counts = element_counts.word_counts()  # global word usage across logs
+    weights = element_counts.bias_weights(
+        candidates, [1.0] * len(candidates), counts,
+        key=lambda w: w, beta=1.0,
+    )
+    return random.choices(candidates, weights=weights, k=1)[0], {}
 
 
 def _read_taste() -> dict:
