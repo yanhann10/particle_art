@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fuy · scrying · obsidian mirror</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06050a; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; z-index:10; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.6; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy · stanford 3d scanning repo …</div>
+<div class="id">fuy</div>
+<div class="src">model: stanford 3d scanning repo · technique: john dee's obsidian mirror</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 4, 32);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06050a, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 60000;
+const restPositions = new Float32Array(N * 3);
+const seeds        = new Float32Array(N);
+const jitters      = new Float32Array(N * 3);
+const markFlags    = new Float32Array(N);
+
+let rngSeed = 0x2f6e2b1;
+function rng() {
+  rngSeed = (rngSeed * 9301 + 49297) % 233280;
+  return rngSeed / 233280;
+}
+
+/* ── main figure uniforms ── */
+const uniforms = {
+  uTime:    { value: 0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+  uReady:   { value: 0.0 },
+  uVision:  { value: 0.0 },  // vision pulse 0→1→0
+  uBreath:  { value: 0.0 }
+};
+
+/* ── reflection uniforms (shared time) ── */
+const reflUniforms = {
+  uTime:    uniforms.uTime,
+  uPixel:   uniforms.uPixel,
+  uReady:   uniforms.uReady,
+  uVision:  uniforms.uVision,
+  uBreath:  uniforms.uBreath
+};
+
+/* ── main figure material ── */
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform float uVision;
+    uniform float uBreath;
+    attribute vec3  rest;
+    attribute float seed;
+    attribute vec3  jitter;
+    attribute float markFlag;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vMark;
+    void main(){
+      vec3 p = rest + jitter;
+      float t = uTime * 0.5 + seed * 6.28;
+
+      // breathing: visible inhale-exhale along Y normal
+      vec3 dir = normalize(p + vec3(0.001));
+      float breathCycle = sin(uTime * 0.6) * 0.3 * uBreath;
+      p += dir * breathCycle * (0.7 + 0.6 * seed);
+
+      // during vision pulse, particles drift slightly upward — levitation
+      float lift = uVision * sin(seed * 12.0 + uTime) * 0.4;
+      p.y += lift;
+
+      // assembly reveal
+      vec3 entry = vec3(sin(seed*40.0), cos(seed*30.0), sin(seed*22.0)) * 18.0;
+      float arrivalTime = uReady + (seed - 0.5) * 0.3;
+      p = mix(entry, p, smoothstep(0.0, 1.0, arrivalTime));
+
+      // palette: silver → pale indigo → obsidian
+      vec3 silver   = vec3(0.82, 0.84, 0.88);
+      vec3 indigo   = vec3(0.42, 0.38, 0.62);
+      vec3 obsidian = vec3(0.12, 0.10, 0.16);
+
+      float mixer = fract(seed * 3.7 + sin(t * 0.3) * 0.15);
+      vec3 col;
+      if (mixer < 0.4) {
+        col = mix(silver, indigo, mixer * 2.5);
+      } else if (mixer < 0.75) {
+        col = mix(indigo, obsidian, (mixer - 0.4) * 2.86);
+      } else {
+        col = mix(obsidian, silver * 0.6, (mixer - 0.75) * 4.0);
+      }
+
+      // vision pulse brightens toward silver
+      col = mix(col, silver * 1.2, uVision * 0.35 * (0.5 + 0.5 * sin(seed * 20.0 + uTime * 2.0)));
+
+      float energy = 0.4 + 0.6 * sin(t * 0.7 + seed * 2.0);
+      vAlpha = energy;
+      vCol = col;
+      vMark = markFlag;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sizeBase = 1.0 + 1.4 * energy;
+      if (markFlag > 0.5) sizeBase *= (3.0 + seed * 4.0);
+      gl_PointSize = sizeBase * uPixel * (45.0/dist) * (0.4 + 0.6*uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vMark;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      float cutoff = (vMark > 0.5) ? 0.28 : 0.25;
+      if (r > cutoff) discard;
+      float falloff = (vMark > 0.5) ? 9.0 : 17.0;
+      float a = exp(-r * falloff) * (0.45 + 0.55 * vAlpha);
+      if (vMark > 0.5) a *= 1.4;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+/* ── reflection material: mirrored ghost below the dark plane ── */
+const reflMat = new THREE.ShaderMaterial({
+  uniforms: reflUniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform float uVision;
+    uniform float uBreath;
+    attribute vec3  rest;
+    attribute float seed;
+    attribute vec3  jitter;
+    attribute float markFlag;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vDist;
+    void main(){
+      vec3 p = rest + jitter;
+      float t = uTime * 0.5 + seed * 6.28;
+
+      // same breathing as main
+      vec3 dir = normalize(p + vec3(0.001));
+      float breathCycle = sin(uTime * 0.6) * 0.3 * uBreath;
+      p += dir * breathCycle * (0.7 + 0.6 * seed);
+
+      float lift = uVision * sin(seed * 12.0 + uTime) * 0.4;
+      p.y += lift;
+
+      // mirror across Y = mirrorY
+      float mirrorY = -9.0;
+      p.y = 2.0 * mirrorY - p.y;
+
+      // ripple distortion in the reflection — like dark water
+      float ripple = sin(p.x * 1.5 + uTime * 0.8) * cos(p.z * 1.2 + uTime * 0.6) * 0.3;
+      p.x += ripple * uVision;
+      p.z += ripple * 0.5 * uVision;
+
+      // assembly
+      vec3 entry = vec3(sin(seed*40.0), cos(seed*30.0), sin(seed*22.0)) * 18.0;
+      entry.y = 2.0 * mirrorY - entry.y;
+      float arrivalTime = uReady + (seed - 0.5) * 0.3;
+      p = mix(entry, p, smoothstep(0.0, 1.0, arrivalTime));
+
+      // reflection palette: deeper, bluer, more ghostly
+      vec3 ghostBlue = vec3(0.30, 0.32, 0.55);
+      vec3 deepVoid  = vec3(0.08, 0.06, 0.14);
+
+      float mixer = fract(seed * 3.7 + sin(t * 0.3) * 0.15);
+      vec3 col = mix(deepVoid, ghostBlue, mixer);
+
+      // the reflection only appears during vision pulses
+      float visibility = uVision;
+      // slight shimmer
+      visibility *= (0.7 + 0.3 * sin(seed * 30.0 + uTime * 3.0));
+
+      float energy = 0.4 + 0.6 * sin(t * 0.7 + seed * 2.0);
+      vAlpha = energy * visibility;
+      vCol = col;
+
+      // fade with distance from mirror plane
+      float distFromMirror = abs(p.y - mirrorY);
+      vDist = distFromMirror;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sizeBase = 1.0 + 1.0 * energy;
+      if (markFlag > 0.5) sizeBase *= 2.5;
+      gl_PointSize = sizeBase * uPixel * (40.0/dist) * (0.4 + 0.6*uReady) * visibility;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vDist;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vAlpha * 0.5;
+      // fade reflection with distance from mirror surface
+      a *= exp(-vDist * 0.12);
+      if (a < 0.003) discard;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+/* ── dark mirror plane ── */
+const mirrorGeo = new THREE.PlaneGeometry(40, 40);
+const mirrorMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: uniforms.uTime,
+    uVision: uniforms.uVision
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uVision;
+    varying vec2 vUv;
+    void main(){
+      vec2 c = vUv - 0.5;
+      float dist = length(c);
+      // obsidian surface: nearly black, subtle edge fade
+      float edge = smoothstep(0.5, 0.3, dist);
+      // faint surface shimmer during vision
+      float shimmer = sin(c.x * 20.0 + uTime * 1.2) * sin(c.y * 18.0 + uTime * 0.9) * 0.02 * uVision;
+      vec3 col = vec3(0.04, 0.035, 0.07) + shimmer;
+      float a = edge * (0.65 + 0.15 * uVision);
+      gl_FragColor = vec4(col, a);
+    }
+  `
+});
+const mirrorPlane = new THREE.Mesh(mirrorGeo, mirrorMat);
+mirrorPlane.rotation.x = -Math.PI * 0.5;
+mirrorPlane.position.y = -9.0;
+scene.add(mirrorPlane);
+
+/* ── point clouds ── */
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const reflGeom = new THREE.BufferGeometry();
+const reflPoints = new THREE.Points(reflGeom, reflMat);
+scene.add(reflPoints);
+
+const loadingEl = document.getElementById('loading');
+
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+const loader = new PLYLoader();
+let revealStart = 0;
+
+loader.load(PLY_URL,
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scale = 15 / maxAxis;
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp = new THREE.Vector3();
+
+    const nMarks = Math.floor(800 + rng() * 600);
+    const markIndices = new Set();
+    while (markIndices.size < nMarks) {
+      markIndices.add(Math.floor(rng() * N));
+    }
+
+    for (let i = 0; i < N; i++){
+      sampler.sample(tmp);
+      restPositions[i*3]   = tmp.x;
+      restPositions[i*3+1] = tmp.y;
+      restPositions[i*3+2] = tmp.z;
+      seeds[i] = rng();
+
+      const jitterStrength = 0.08 + rng() * 0.04;
+      const jitterRadius = Math.sqrt(tmp.x*tmp.x + tmp.y*tmp.y + tmp.z*tmp.z) * jitterStrength;
+      jitters[i*3]   = (rng() - 0.5) * jitterRadius * 2.0;
+      jitters[i*3+1] = (rng() - 0.5) * jitterRadius * 2.0;
+      jitters[i*3+2] = (rng() - 0.5) * jitterRadius * 2.0;
+      if (tmp.x < 0) {
+        jitters[i*3]   *= 1.15;
+        jitters[i*3+1] *= 1.15;
+        jitters[i*3+2] *= 1.15;
+      }
+      markFlags[i] = markIndices.has(i) ? 1.0 : 0.0;
+    }
+
+    // set up both geometries
+    const pos1 = new Float32Array(N * 3);
+    const pos2 = new Float32Array(N * 3);
+
+    function setAttrs(g, pos) {
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      g.setAttribute('rest',     new THREE.BufferAttribute(restPositions.slice(), 3));
+      g.setAttribute('seed',     new THREE.BufferAttribute(seeds.slice(), 1));
+      g.setAttribute('jitter',   new THREE.BufferAttribute(jitters.slice(), 3));
+      g.setAttribute('markFlag', new THREE.BufferAttribute(markFlags.slice(), 1));
+    }
+    setAttrs(geom, pos1);
+    setAttrs(reflGeom, pos2);
+
+    loadingEl.style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      loadingEl.textContent = `loading lucy · ${pct}% · stanford 3d scanning repo`;
+    }
+  },
+  (err) => {
+    loadingEl.textContent = 'load failed — check network';
+    console.error(err);
+  });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── vision pulse cycle ── */
+// vision builds over ~8s, peaks for ~4s, fades over ~6s, then quiet for ~10s
+function visionPulse(t) {
+  const cycle = 28.0; // full cycle length
+  const phase = t % cycle;
+  if (phase < 8.0) {
+    // building — slow ease in
+    return smoothstep(0.0, 8.0, phase);
+  } else if (phase < 12.0) {
+    // peak — sustained with slight flicker
+    return 0.85 + 0.15 * Math.sin(phase * 4.0);
+  } else if (phase < 18.0) {
+    // fade
+    return smoothstep(18.0, 12.0, phase);
+  }
+  return 0.0; // quiet
+}
+
+function smoothstep(edge0, edge1, x) {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+const start = performance.now();
+const baseCamZ = 32;
+const baseCamY = 4;
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (revealStart > 0) {
+    const readiness = Math.min(1.0, (performance.now() - revealStart) / 2500);
+    uniforms.uReady.value = readiness;
+    uniforms.uBreath.value = smoothstep(0.8, 1.0, readiness);
+  }
+
+  // vision pulse
+  const vision = visionPulse(t);
+  uniforms.uVision.value = vision;
+
+  // camera: pull closer during vision peaks, drift back during quiet
+  const targetZ = baseCamZ - vision * 8.0;
+  const targetY = baseCamY - vision * 2.0;
+  camera.position.z += (targetZ - camera.position.z) * 0.02;
+  camera.position.y += (targetY - camera.position.y) * 0.02;
+
+  // gentle lateral drift
+  camera.position.x = Math.sin(t * 0.07) * 2.0;
+  camera.lookAt(0, -1, 0);
+
+  // slow rotation
+  points.rotation.y = t * 0.04 + Math.sin(t * 0.17) * 0.02;
+  reflPoints.rotation.y = points.rotation.y;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
