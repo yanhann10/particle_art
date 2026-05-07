@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v79 · AUTO{}Construccion · stochastic voxel housing</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+<!-- MOTION: assembling, intensity: vigorous -->
+</head>
+<body>
+<div class="id">v79 · AUTO{}Construccion · stochastic voxel housing</div>
+<div class="hint">drag to orbit · click to rebuild</div>
+<div class="src">after CNDSD & Abreu · L-system grid + rhythmic collapse</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// AUTO{}Construccion: speculative architecture as live-coded L-system growth
+// Informal housing assembles itself in voxel grid, then rhythmically dissolves
+// walls into falling cubes. Each rebuild uses a stochastic grammar — room sizes,
+// adjacency, wall openings all rerolled. Palette: rebar gray, cinder block,
+// neon code-flash on collapse events.
+//
+// L-SYSTEM RULES (stochastic):
+//   A → { room, then 0–3 children placed on cardinal faces }
+//   room → { foundation box, 4 wall segments (each has 50% door-cutout),
+//            ceiling (sometimes missing), floor height ∈ [2, 4] voxels }
+//
+// MOTION: assembly (grid snap from below), then downbeat-triggered collapse
+// (every 2.2s one random room's cubes gain gravity, scatter, fade out).
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a0e, 0.009);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(22, 18, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0e, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 6, 0);
+
+// ─────────── instanced cube pool
+const VOXEL = 1.0;
+const MAX_CUBES = 4000;
+const cubeGeo = new THREE.BoxGeometry(VOXEL * 0.92, VOXEL * 0.92, VOXEL * 0.92);
+const cubeMat = new THREE.MeshLambertMaterial({ color: 0x6a6a6e });
+const instancedMesh = new THREE.InstancedMesh(cubeGeo, cubeMat, MAX_CUBES);
+instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(instancedMesh);
+
+const cubeStates = [];
+for (let i = 0; i < MAX_CUBES; i++){
+  cubeStates.push({
+    active: false,
+    x: 0, y: 0, z: 0,
+    vx: 0, vy: 0, vz: 0,
+    ty: 0,             // target y for assembly
+    assembling: false,
+    falling: false,
+    life: 1.0,
+    flashIntensity: 0.0
+  });
+}
+
+let nextCubeIndex = 0;
+function allocCube(x, y, z, ty){
+  if (nextCubeIndex >= MAX_CUBES) return null;
+  const idx = nextCubeIndex++;
+  const c = cubeStates[idx];
+  c.active = true;
+  c.x = x * VOXEL;
+  c.y = -3 * VOXEL;  // start below ground
+  c.z = z * VOXEL;
+  c.ty = ty * VOXEL;
+  c.assembling = true;
+  c.falling = false;
+  c.life = 1.0;
+  c.vx = 0; c.vy = 0; c.vz = 0;
+  c.flashIntensity = 0.0;
+  return idx;
+}
+
+function resetCubes(){
+  nextCubeIndex = 0;
+  for (const c of cubeStates){
+    c.active = false;
+    c.assembling = false;
+    c.falling = false;
+    c.life = 1.0;
+  }
+}
+
+// ─────────── L-system room grammar
+// A room is a bounding box (ox, oy, oz, w, h, d) in voxel coords.
+// We fill walls (4 sides) + floor + ceiling, leaving door cutouts.
+
+const rooms = [];
+
+function randi(n){ return Math.floor(Math.random() * n); }
+function randf(a, b){ return a + Math.random() * (b - a); }
+
+function buildRoom(ox, oy, oz, w, h, d, roomId){
+  const cubes = [];
+  // floor
+  for (let x = ox; x < ox + w; x++){
+    for (let z = oz; z < oz + d; z++){
+      const idx = allocCube(x, oy, z, oy);
+      if (idx !== null) cubes.push(idx);
+    }
+  }
+  // walls with door cutouts
+  const doorNorth = Math.random() < 0.5 ? randi(w - 2) + 1 : -1;
+  const doorSouth = Math.random() < 0.5 ? randi(w - 2) + 1 : -1;
+  const doorEast  = Math.random() < 0.5 ? randi(d - 2) + 1 : -1;
+  const doorWest  = Math.random() < 0.5 ? randi(d - 2) + 1 : -1;
+  for (let y = oy + 1; y < oy + h; y++){
+    // north wall (z = oz)
+    for (let x = ox; x < ox + w; x++){
+      if (y === oy + 1 && (x - ox) === doorNorth) continue;
+      const idx = allocCube(x, y, oz, y);
+      if (idx !== null) cubes.push(idx);
+    }
+    // south wall (z = oz + d - 1)
+    for (let x = ox; x < ox + w; x++){
+      if (y === oy + 1 && (x - ox) === doorSouth) continue;
+      const idx = allocCube(x, y, oz + d - 1, y);
+      if (idx !== null) cubes.push(idx);
+    }
+    // west wall (x = ox)
+    for (let z = oz; z < oz + d; z++){
+      if (y === oy + 1 && (z - oz) === doorWest) continue;
+      const idx = allocCube(ox, y, z, y);
+      if (idx !== null) cubes.push(idx);
+    }
+    // east wall (x = ox + w - 1)
+    for (let z = oz; z < oz + d; z++){
+      if (y === oy + 1 && (z - oz) === doorEast) continue;
+      const idx = allocCube(ox + w - 1, y, z, y);
+      if (idx !== null) cubes.push(idx);
+    }
+  }
+  // ceiling (50% chance missing for open-air)
+  if (Math.random() < 0.5){
+    for (let x = ox; x < ox + w; x++){
+      for (let z = oz; z < oz + d; z++){
+        const idx = allocCube(x, oy + h - 1, z, oy + h - 1);
+        if (idx !== null) cubes.push(idx);
+      }
+    }
+  }
+  rooms.push({ ox, oy, oz, w, h, d, cubes, roomId });
+}
+
+function growLSystem(depth, ox, oy, oz, occupiedSet, roomId){
+  if (depth > 3 || nextCubeIndex > MAX_CUBES * 0.85) return;
+  const w = randi(3) + 3;  // width 3–5
+  const h = randi(3) + 2;  // height 2–4
+  const d = randi(3) + 3;  // depth 3–5
+  // check collision with occupiedSet
+  let collision = false;
+  for (let x = ox; x < ox + w; x++){
+    for (let y = oy; y < oy + h; y++){
+      for (let z = oz; z < oz + d; z++){
+        if (occupiedSet.has(`${x},${y},${z}`)){
+          collision = true;
+          break;
+        }
+      }
+      if (collision) break;
+    }
+    if (collision) break;
+  }
+  if (collision) return;
+  // mark occupied
+  for (let x = ox; x < ox + w; x++){
+    for (let y = oy; y < oy + h; y++){
+      for (let z = oz; z < oz + d; z++){
+        occupiedSet.add(`${x},${y},${z}`);
+      }
+    }
+  }
+  buildRoom(ox, oy, oz, w, h, d, roomId);
+  // spawn 0–3 children on cardinal faces
+  const nChildren = randi(4);
+  const faces = ['north', 'south', 'east', 'west'].sort(() => Math.random() - 0.5);
+  for (let i = 0; i < nChildren; i++){
+    const face = faces[i];
+    let cx, cy, cz;
+    if (face === 'north'){
+      cx = ox + randi(Math.max(1, w - 2));
+      cy = oy;
+      cz = oz - (randi(3) + 3);
+    } else if (face === 'south'){
+      cx = ox + randi(Math.max(1, w - 2));
+      cy = oy;
+      cz = oz + d;
+    } else if (face === 'east'){
+      cx = ox + w;
+      cy = oy;
+      cz = oz + randi(Math.max(1, d - 2));
+    } else {
+      cx = ox - (randi(3) + 3);
+      cy = oy;
+      cz = oz + randi(Math.max(1, d - 2));
+    }
+    growLSystem(depth + 1, cx, cy, cz, occupiedSet, roomId + 1 + i);
+  }
+}
+
+function rebuildStructure(){
+  resetCubes();
+  rooms.length = 0;
+  const occupiedSet = new Set();
+  growLSystem(0, -2, 0, -2, occupiedSet, 0);
+}
+
+rebuildStructure();
+
+addEventListener('click', rebuildStructure);
+
+// ─────────── lighting
+const ambLight = new THREE.AmbientLight(0x404040, 0.6);
+scene.add(ambLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(10, 18, 8);
+scene.add(dirLight);
+const fillLight = new THREE.DirectionalLight(0x6080ff, 0.3);
+fillLight.position.set(-6, 4, -5);
+scene.add(fillLight);
+
+// ─────────── rhythmic collapse (every 2.2s pick a random room, collapse its cubes)
+let lastCollapseTime = performance.now();
+const COLLAPSE_INTERVAL = 2200;
+
+function triggerCollapse(){
+  if (rooms.length === 0) return;
+  const roomIdx = randi(rooms.length);
+  const room = rooms[roomIdx];
+  for (const idx of room.cubes){
+    const c = cubeStates[idx];
+    if (!c.active || c.falling) continue;
+    c.assembling = false;
+    c.falling = true;
+    c.vx = randf(-0.04, 0.04);
+    c.vy = randf(0.02, 0.08);
+    c.vz = randf(-0.04, 0.04);
+    c.flashIntensity = 1.0;
+  }
+  // remove room from list
+  rooms.splice(roomIdx, 1);
+}
+
+// ─────────── animation loop
+const dummy = new THREE.Object3D();
+const colorBase = new THREE.Color(0x6a6a6e);
+const colorFlash = new THREE.Color(0x00ffcc);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(t){
+  const dt = 1 / 60;
+  // collapse downbeat
+  if (t - lastCollapseTime > COLLAPSE_INTERVAL){
+    triggerCollapse();
+    lastCollapseTime = t;
+  }
+  // update cubes
+  for (let i = 0; i < nextCubeIndex; i++){
+    const c = cubeStates[i];
+    if (!c.active) continue;
+    if (c.assembling){
+      const speed = 0.12;
+      c.y += (c.ty - c.y) * speed;
+      if (Math.abs(c.y - c.ty) < 0.02){
+        c.y = c.ty;
+        c.assembling = false;
+      }
+    }
+    if (c.falling){
+      c.vx *= 0.98;
+      c.vy -= 0.006;  // gravity
+      c.vz *= 0.98;
+      c.x += c.vx;
+      c.y += c.vy;
+      c.z += c.vz;
+      c.life -= 0.008;
+      c.flashIntensity *= 0.92;
+      if (c.life <= 0){
+        c.active = false;
+        continue;
+      }
+    }
+    dummy.position.set(c.x, c.y, c.z);
+    dummy.rotation.set(c.vx * 10, c.vy * 10, c.vz * 10);
+    dummy.updateMatrix();
+    instancedMesh.setMatrixAt(i, dummy.matrix);
+    // color flash on collapse
+    const col = colorBase.clone().lerp(colorFlash, c.flashIntensity);
+    instancedMesh.setColorAt(i, col);
+  }
+  instancedMesh.instanceMatrix.needsUpdate = true;
+  if (instancedMesh.instanceColor) instancedMesh.instanceColor.needsUpdate = true;
+  // camera track centroid of active cubes
+  let cx = 0, cy = 0, cz = 0, count = 0;
+  for (let i = 0; i < nextCubeIndex; i++){
+    const c = cubeStates[i];
+    if (c.active && !c.falling){
+      cx += c.x; cy += c.y; cz += c.z;
+      count++;
+    }
+  }
+  if (count > 0){
+    cx /= count; cy /= count; cz /= count;
+    controls.target.x += (cx - controls.target.x) * 0.02;
+    controls.target.y += (cy + 4 - controls.target.y) * 0.02;
+    controls.target.z += (cz - controls.target.z) * 0.02;
+  }
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop(performance.now());
+</script>
+</body>
+</html>
