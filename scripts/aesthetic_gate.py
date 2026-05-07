@@ -38,6 +38,18 @@ def check(html: str, piece_id: str, parent: dict, directive: str) -> tuple[bool,
     except ImportError:
         return True, [], []
 
+    # CHEAP LEXICAL CHECKS — fail before burning a Claude call when the
+    # violation is unambiguous (substring of HTML).
+    HARD_BANS = [
+        ("LeePerrySmith", "uses LeePerrySmith head model — bug.md #2 (mouth is wrong, painful)"),
+        ("lee_perry_smith", "uses LeePerrySmith head model — bug.md #2"),
+    ]
+    for needle, reason in HARD_BANS:
+        if needle in html:
+            return False, [reason], [
+                "(salvageable) re-implement against a different loaded model — Fox/BrainStem/MosquitoInAmber/SheenChair/Horse/Parrot/RobotExpressive/Soldier/Michelle/Stork"
+            ]
+
     bugs = _read_bugs()
     if not bugs:
         return True, [], []

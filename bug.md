@@ -19,11 +19,11 @@ a new piece's HTML, and concrete enough that a generator can avoid it.
 **Why it fails:** the tube is the form, the particles are the texture; when the texture density blocks the form-reading, the piece loses its subject. Worse: the camera motion exposes the occlusion as flicker, not depth.
 **Fix:** if a piece uses a tube/coil/intestine + scattered points along it, EITHER (a) reduce particle count to <5k AND make them clearly thinner than the tube radius, OR (b) drop the dot layer and keep the tube as a smooth lit surface, OR (c) keep the dots but freeze the camera (still life, not animation).
 
-## 2. LeePerrySmith head model
-**Examples:** 7y7 (culled 2026-05-07), w64 (the original, also culled).
-**Pattern:** loading `LeePerrySmith.glb` and sampling its surface as a head-shaped point cloud.
-**Why it fails:** user explicitly said "i dont like 7y7 and that guy's 3d head model. remove that pls". The mouth-area artifact in particular reads wrong; the head is rigid and uncanny.
-**Fix:** **DO NOT** include `LeePerrySmith` as the loaded model in any new piece. The `swap_object_model` and `diversify_object_pool` directives have had it stripped from their URL pools; descendants of pieces that used it must be swapped to a different model (Fox, BrainStem, MosquitoInAmber, SheenChair, Horse, Parrot, RobotExpressive, Soldier, Michelle, Stork, etc.).
+## 2. LeePerrySmith head model — HARD BAN
+**Examples (ALL CULLED):** 7y7, w64 (original), 4pt, cek, dov, hn4, ljc, and every descendant.
+**Pattern:** loading `LeePerrySmith.glb` and sampling its surface as a head-shaped point cloud — typically via `GLTFLoader` + `MeshSurfaceSampler`. The head's geometry has a malformed mouth area that reads as uncanny / painful.
+**Why it fails:** user 2026-05-07: "the mouth is wrong and painful to look at." Every single piece using this asset has been culled; this is now a hard ban, not a soft preference.
+**Fix:** **NEVER** load `LeePerrySmith.glb` in any new piece, even when the parent's HTML contains the URL. If you inherit a parent that uses LeePerrySmith, you MUST swap to a different model from the pool (Fox, BrainStem, MosquitoInAmber, SheenChair, Horse, Parrot, RobotExpressive, Soldier, Michelle, Stork, Avocado, DamagedHelmet, ABeautifulGame, etc.). The aesthetic gate will reject any piece that contains the literal string `LeePerrySmith` in its HTML — there is no exception.
 
 ## 3. sieve / dotty grid surface
 **Examples:** h97 (culled 2026-05-07).
