@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>held memory · memorial hair</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">6n5</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0c);
+
+const camera = new THREE.PerspectiveCamera(36, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+// ────────────── deterministic RNG
+const rng = (() => { let s = 0x4A7F3C1D; return () => { s = (s + 0x9E3779B9) | 0;
+  let t = Math.imul(s ^ s >>> 16, 0x21F0AAAD); t ^= t >>> 15;
+  t = Math.imul(t, 0x735A2D97); return ((t ^ t >>> 15) >>> 0) / 4294967296; }; })();
+
+function gaussRng() { return (rng() + rng() + rng() - 1.5) / 1.5; }
+
+// ────────────── generate hair strands as CatmullRomCurve3
+const NUM_STRANDS = 1100;
+const POINTS_PER_STRAND = 6;
+const SUBDIVISIONS = 12;
+
+const strandData = []; // store control points for animation
+
+// The tuft hangs from a point above center, draping downward
+const anchorY = 2.8;
+const tuftRadius = 0.6; // tight gathering at top
+
+for (let i = 0; i < NUM_STRANDS; i++) {
+  const angle = rng() * Math.PI * 2;
+  const radOffset = rng() * tuftRadius;
+  const anchorX = Math.cos(angle) * radOffset;
+  const anchorZ = Math.sin(angle) * radOffset * 0.4; // flatter in z for silhouette
+
+  const length = 3.0 + rng() * 3.5; // strand length varies
+  const curlAmount = (rng() - 0.5) * 0.8;
+  const sway = (rng() - 0.5) * 1.2;
+
+  const controls = [];
+  for (let j = 0; j < POINTS_PER_STRAND; j++) {
+    const t = j / (POINTS_PER_STRAND - 1);
+    const gravity = t * t * length;
+    const x = anchorX + sway * t * t + curlAmount * Math.sin(t * Math.PI) + gaussRng() * 0.15 * t;
+    const y = anchorY - gravity;
+    const z = anchorZ + gaussRng() * 0.2 * t;
+    controls.push(new THREE.Vector3(x, y, z));
+  }
+  strandData.push({ controls, phase: rng() * Math.PI * 2, amp: 0.003 + rng() * 0.005 });
+}
+
+// ────────────── build line segments geometry
+const positions = [];
+const alphas = [];
+
+function buildCurvePoints(controls) {
+  const curve = new THREE.CatmullRomCurve3(controls, false, 'catmullrom', 0.5);
+  return curve.getPoints(SUBDIVISIONS);
+}
+
+function rebuildGeometry(time) {
+  positions.length = 0;
+  alphas.length = 0;
+
+  for (let i = 0; i < strandData.length; i++) {
+    const strand = strandData[i];
+    // perturb controls by breath cycle
+    const breathPhase = time * 0.5236 + strand.phase; // ~12s period (2π/12)
+    const perturbedControls = strand.controls.map((p, idx) => {
+      const t = idx / (POINTS_PER_STRAND - 1);
+      const dx = Math.sin(breathPhase + idx * 0.3) * strand.amp * t * 2;
+      const dy = Math.cos(breathPhase * 0.7 + idx * 0.5) * strand.amp * t;
+      const dz = Math.sin(breathPhase * 1.1 + idx * 0.7) * strand.amp * t * 0.5;
+      return new THREE.Vector3(p.x + dx, p.y + dy, p.z + dz);
+    });
+
+    const pts = buildCurvePoints(perturbedControls);
+    // alpha varies along strand: brighter near root, fading at tips
+    for (let j = 0; j < pts.length - 1; j++) {
+      const t = j / (pts.length - 1);
+      positions.push(pts[j].x, pts[j].y, pts[j].z);
+      positions.push(pts[j+1].x, pts[j+1].y, pts[j+1].z);
+      const a = 0.7 - t * 0.4; // 0.7 at root, 0.3 at tip
+      alphas.push(a, a);
+    }
+  }
+}
+
+// Initial build
+rebuildGeometry(0);
+
+const geom = new THREE.BufferGeometry();
+const posAttr = new THREE.Float32BufferAttribute(new Float32Array(positions), 3);
+const alphaAttr = new THREE.Float32BufferAttribute(new Float32Array(alphas), 1);
+geom.setAttribute('position', posAttr);
+geom.setAttribute('alpha', alphaAttr);
+
+// Custom shader material for per-vertex alpha
+const strandMat = new THREE.ShaderMaterial({
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  vertexShader: `
+    attribute float alpha;
+    varying float vAlpha;
+    void main() {
+      vAlpha = alpha;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main() {
+      gl_FragColor = vec4(0.91, 0.90, 0.87, vAlpha * 0.55);
+    }
+  `
+});
+
+const strandMesh = new THREE.LineSegments(geom, strandMat);
+scene.add(strandMesh);
+
+// ────────────── broken-off strands (3 drifting upward-left)
+const brokenStrands = [];
+for (let b = 0; b < 3; b++) {
+  const srcIdx = Math.floor(rng() * NUM_STRANDS);
+  const src = strandData[srcIdx];
+  const controls = src.controls.map(p => p.clone());
+  // offset slightly
+  const offsetX = -0.5 + rng() * 0.3;
+  const offsetY = rng() * 0.5;
+  controls.forEach(c => { c.x += offsetX; c.y += offsetY; });
+  brokenStrands.push({
+    controls,
+    velX: -0.015 - rng() * 0.01,
+    velY: 0.02 + rng() * 0.01,
+    phase: rng() * Math.PI * 2,
+    startTime: rng() * 60 // stagger start
+  });
+}
+
+const brokenPositions = new Float32Array(3 * SUBDIVISIONS * 2 * 3);
+const brokenAlphas = new Float32Array(3 * SUBDIVISIONS * 2);
+const brokenGeom = new THREE.BufferGeometry();
+brokenGeom.setAttribute('position', new THREE.BufferAttribute(brokenPositions, 3));
+brokenGeom.setAttribute('alpha', new THREE.BufferAttribute(brokenAlphas, 1));
+
+const brokenMat = new THREE.ShaderMaterial({
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  vertexShader: `
+    attribute float alpha;
+    varying float vAlpha;
+    void main() {
+      vAlpha = alpha;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main() {
+      gl_FragColor = vec4(0.91, 0.90, 0.87, vAlpha * 0.35);
+    }
+  `
+});
+
+const brokenMesh = new THREE.LineSegments(brokenGeom, brokenMat);
+scene.add(brokenMesh);
+
+// ────────────── sodium-amber backlight halo
+const haloGeom = new THREE.PlaneGeometry(8, 10);
+const haloMat = new THREE.ShaderMaterial({
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  uniforms: {},
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main() {
+      vec2 c = vUv - 0.5;
+      float d = length(c * vec2(1.0, 0.8));
+      float glow = exp(-d * d * 8.0) * 0.05;
+      gl_FragColor = vec4(0.83, 0.65, 0.45, glow);
+    }
+  `
+});
+const halo = new THREE.Mesh(haloGeom, haloMat);
+halo.position.set(0, 0.5, -2);
+scene.add(halo);
+
+// ────────────── shadow ellipse beneath tuft
+const shadowGeom = new THREE.PlaneGeometry(3, 1.2);
+const shadowMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main() {
+      vec2 c = vUv - 0.5;
+      float d = length(c * vec2(1.0, 2.0));
+      float shadow = smoothstep(0.5, 0.0, d) * 0.15;
+      gl_FragColor = vec4(0.0, 0.0, 0.0, shadow);
+    }
+  `
+});
+const shadow = new THREE.Mesh(shadowGeom, shadowMat);
+shadow.position.set(0, -3.8, 0);
+shadow.rotation.x = -0.3;
+scene.add(shadow);
+
+// ────────────── interaction
+let timeScale = 1.0;
+let targetTimeScale = 1.0;
+let orbitAngle = 0;
+let orbitTarget = 0;
+let orbitY = 0;
+let orbitYTarget = 0;
+let isDragging = false;
+let lastMx = 0, lastMy = 0;
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  isDragging = true;
+  lastMx = e.clientX;
+  lastMy = e.clientY;
+});
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  const dx = e.clientX - lastMx;
+  const dy = e.clientY - lastMy;
+  orbitTarget += dx * 0.005;
+  orbitYTarget += dy * 0.003;
+  orbitYTarget = Math.max(-0.5, Math.min(0.5, orbitYTarget));
+  lastMx = e.clientX;
+  lastMy = e.clientY;
+});
+renderer.domElement.addEventListener('pointerup', () => { isDragging = false; });
+renderer.domElement.addEventListener('click', () => {
+  targetTimeScale = targetTimeScale < 0.5 ? 1.0 : 0.3;
+});
+
+// ────────────── animation loop
+let elapsed = 0;
+let lastTime = performance.now();
+
+function animate() {
+  const now = performance.now();
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+
+  timeScale += (targetTimeScale - timeScale) * 0.03;
+  elapsed += dt * timeScale;
+
+  // Rebuild strand geometry with breath
+  if (Math.floor(elapsed * 10) % 2 === 0) { // update every ~0.2s for perf
+    rebuildStrandPositions(elapsed);
+  }
+
+  // Update broken strands
+  updateBrokenStrands(elapsed);
+
+  // Camera: gentle orbit
+  orbitAngle += (orbitTarget - orbitAngle) * 0.05;
+  orbitY += (orbitYTarget - orbitY) * 0.05;
+  const autoOrbit = elapsed * 0.02; // very slow auto rotation
+  const camAngle = autoOrbit + orbitAngle;
+  const camDist = 18;
+  camera.position.set(
+    Math.sin(camAngle) * camDist,
+    orbitY * 4,
+    Math.cos(camAngle) * camDist
+  );
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+
+function rebuildStrandPositions(time) {
+  let idx = 0;
+  let aidx = 0;
+
+  for (let i = 0; i < strandData.length; i++) {
+    const strand = strandData[i];
+    const breathPhase = time * 0.5236 + strand.phase;
+
+    const perturbedControls = strand.controls.map((p, j) => {
+      const t = j / (POINTS_PER_STRAND - 1);
+      const dx = Math.sin(breathPhase + j * 0.3) * strand.amp * t * 2;
+      const dy = Math.cos(breathPhase * 0.7 + j * 0.5) * strand.amp * t;
+      const dz = Math.sin(breathPhase * 1.1 + j * 0.7) * strand.amp * t * 0.5;
+      return new THREE.Vector3(p.x + dx, p.y + dy, p.z + dz);
+    });
+
+    const curve = new THREE.CatmullRomCurve3(perturbedControls, false, 'catmullrom', 0.5);
+    const pts = curve.getPoints(SUBDIVISIONS);
+
+    for (let j = 0; j < pts.length - 1; j++) {
+      const t = j / (pts.length - 1);
+      posAttr.array[idx++] = pts[j].x;
+      posAttr.array[idx++] = pts[j].y;
+      posAttr.array[idx++] = pts[j].z;
+      posAttr.array[idx++] = pts[j+1].x;
+      posAttr.array[idx++] = pts[j+1].y;
+      posAttr.array[idx++] = pts[j+1].z;
+      const a = 0.7 - t * 0.4;
+      alphaAttr.array[aidx++] = a;
+      alphaAttr.array[aidx++] = a;
+    }
+  }
+  posAttr.needsUpdate = true;
+  alphaAttr.needsUpdate = true;
+}
+
+function updateBrokenStrands(time) {
+  let idx = 0;
+  let aidx = 0;
+
+  for (let b = 0; b < brokenStrands.length; b++) {
+    const bs = brokenStrands[b];
+    const t = Math.max(0, time - bs.startTime);
+    // drift upward-left
+    const driftX = bs.velX * t;
+    const driftY = bs.velY * t;
+    // fade as it drifts
+    const fade = Math.max(0, 1.0 - t * 0.005);
+    // rotation
+    const rot = Math.sin(time * 0.3 + bs.phase) * 0.1;
+
+    const perturbedControls = bs.controls.map((p, j) => {
+      const frac = j / (POINTS_PER_STRAND - 1);
+      return new THREE.Vector3(
+        p.x + driftX + Math.sin(rot) * frac * 0.3,
+        p.y + driftY + Math.cos(time * 0.2 + bs.phase) * 0.02 * frac,
+        p.z
+      );
+    });
+
+    const curve = new THREE.CatmullRomCurve3(perturbedControls, false, 'catmullrom', 0.5);
+    const pts = curve.getPoints(SUBDIVISIONS);
+
+    for (let j = 0; j < pts.length - 1; j++) {
+      const frac = j / (pts.length - 1);
+      brokenPositions[idx++] = pts[j].x;
+      brokenPositions[idx++] = pts[j].y;
+      brokenPositions[idx++] = pts[j].z;
+      brokenPositions[idx++] = pts[j+1].x;
+      brokenPositions[idx++] = pts[j+1].y;
+      brokenPositions[idx++] = pts[j+1].z;
+      brokenAlphas[aidx++] = fade * (0.6 - frac * 0.3);
+      brokenAlphas[aidx++] = fade * (0.6 - frac * 0.3);
+    }
+
+    // wrap broken strands when they drift too far
+    if (t > 120) {
+      bs.startTime = time + rng() * 30;
+    }
+  }
+  brokenGeom.attributes.position.needsUpdate = true;
+  brokenGeom.attributes.alpha.needsUpdate = true;
+}
+
+animate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
