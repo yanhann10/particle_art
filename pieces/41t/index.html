@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>41t · hybrid web scan / breathing filaments</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">41t · hybrid web scan / breathing filaments</div>
+<div class="hint">Tomás Saraceno — 3D spider-web archive / suspended architecture</div>
+<div class="src">descended from sav · sparse luminous graph in cosmic black</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Saraceno's laser-scanned spider-web archives are SPARSE + IRREGULAR — anchor
+// points form knot clusters connected by thin radial strands and a few long
+// guy-lines. This is biological architecture digitized. We generate a 3D graph:
+// ~300 anchor nodes with weighted connectivity (2-4 neighbors for each), then
+// render edges as additive lines with faint pearlescent sheen. The web breathes —
+// anchors drift via soft spring + Perlin wind field. Camera dollies through slowly
+// so viewer is inside the web, not outside viewing a sculpture.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000000, 0.008);
+const camera = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── generate sparse 3D graph
+const N_ANCHORS = 300;
+const anchors = [];
+const edges = [];
+
+// cluster around origin with some outliers — spider web has central dense zone + radial strands
+for (let i = 0; i < N_ANCHORS; i++){
+  const cluster = Math.random() < 0.65;
+  const r = cluster ? (Math.random() * 4.0 + 1.0) : (Math.random() * 12.0 + 5.0);
+  const th = Math.random() * Math.PI * 2;
+  const ph = (Math.random() - 0.5) * Math.PI * 0.8;
+  const x = r * Math.cos(th) * Math.cos(ph);
+  const y = r * Math.sin(ph);
+  const z = r * Math.sin(th) * Math.cos(ph);
+  anchors.push({
+    pos: new THREE.Vector3(x, y, z),
+    restPos: new THREE.Vector3(x, y, z),
+    vel: new THREE.Vector3(0, 0, 0),
+    conn: []
+  });
+}
+
+// build connectivity: each anchor connects to 2-4 nearest with falloff prob
+function dist(a, b){ return a.pos.distanceTo(b.pos); }
+for (let i = 0; i < N_ANCHORS; i++){
+  const dists = anchors.map((a, idx) => ({ idx, d: idx === i ? Infinity : dist(anchors[i], a) }));
+  dists.sort((a, b) => a.d - b.d);
+  const nConn = 2 + Math.floor(Math.random() * 3);
+  for (let k = 0; k < Math.min(nConn, dists.length); k++){
+    const j = dists[k].idx;
+    if (j === i) continue;
+    // avoid duplicate edges
+    const exists = edges.some(e => (e.a === i && e.b === j) || (e.a === j && e.b === i));
+    if (!exists) edges.push({ a: i, b: j });
+  }
+}
+
+// add 20 long-range guy-lines (anchors at distance >8 connected for structural stability)
+for (let g = 0; g < 20; g++){
+  const i = Math.floor(Math.random() * N_ANCHORS);
+  const farAnchors = anchors.map((a, idx) => ({ idx, d: dist(anchors[i], a) }))
+    .filter(x => x.d > 8.0 && x.idx !== i);
+  if (farAnchors.length > 0){
+    farAnchors.sort((a, b) => b.d - a.d);
+    const j = farAnchors[0].idx;
+    const exists = edges.some(e => (e.a === i && e.b === j) || (e.a === j && e.b === i));
+    if (!exists) edges.push({ a: i, b: j });
+  }
+}
+
+// ────────────── render edges as thin LineSegments with additive bloom
+const edgeGeom = new THREE.BufferGeometry();
+const edgeVerts = [];
+edges.forEach(e => {
+  const a = anchors[e.a].pos, b = anchors[e.b].pos;
+  edgeVerts.push(a.x, a.y, a.z, b.x, b.y, b.z);
+});
+edgeGeom.setAttribute('position', new THREE.Float32BufferAttribute(edgeVerts, 3));
+
+const edgeMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+  uniforms: {
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    varying float vDepth;
+    void main(){
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vDepth = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying float vDepth;
+    void main(){
+      float fade = clamp(1.0 - (vDepth - 16.0) / 40.0, 0.0, 1.0);
+      // pearlescent shimmer — soft silver with faint blue and pink highlights
+      vec3 base = vec3(0.75, 0.78, 0.80);
+      vec3 high = vec3(0.82, 0.88, 0.92) + vec3(0.05, 0.02, 0.08) * sin(uTime * 0.4);
+      vec3 col = mix(base, high, smoothstep(0.5, 1.0, sin(uTime * 0.25 + vDepth * 0.3)));
+      float alpha = 0.12 * fade;
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+const edgeMesh = new THREE.LineSegments(edgeGeom, edgeMat);
+scene.add(edgeMesh);
+
+// ────────────── render anchor nodes as tiny sprites
+const nodeGeom = new THREE.BufferGeometry();
+const nodeVerts = anchors.map(a => [a.pos.x, a.pos.y, a.pos.z]).flat();
+nodeGeom.setAttribute('position', new THREE.Float32BufferAttribute(nodeVerts, 3));
+const seedArr = new Float32Array(N_ANCHORS).map(() => Math.random());
+nodeGeom.setAttribute('seed', new THREE.Float32BufferAttribute(seedArr, 1));
+
+const nodeMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vFade;
+    void main(){
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+      vFade = clamp(1.0 - (dist - 16.0) / 40.0, 0.0, 1.0);
+      float pulse = 1.0 + 0.15 * sin(uTime * 0.6 + seed * 6.28);
+      gl_PointSize = 2.4 * uPixel * pulse * (12.0 / dist);
+      // pearlescent node glow — same palette as threads
+      vec3 silver = vec3(0.80, 0.82, 0.85);
+      vec3 shimmer = vec3(0.88, 0.90, 0.95) + vec3(0.05, 0.00, 0.10) * sin(uTime * 0.3 + seed);
+      vCol = mix(silver, shimmer, smoothstep(0.3, 1.0, sin(uTime * 0.4 + seed * 3.14)));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vFade;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vFade;
+      gl_FragColor = vec4(vCol * a * 0.6, a);
+    }
+  `
+});
+const nodePoints = new THREE.Points(nodeGeom, nodeMat);
+scene.add(nodePoints);
+
+// ────────────── physics: soft spring + Perlin wind field
+// The web breathes — each anchor drifts from its rest position via spring,
+// plus small wind drift. This is how real webs flex in air.
+function perlinWind(p, t){
+  const f = 0.08;
+  const nx = Math.sin(p.x * f + t * 0.2) * Math.cos(p.z * f);
+  const ny = Math.cos(p.y * f + t * 0.15) * Math.sin(p.x * f);
+  const nz = Math.sin(p.z * f + t * 0.18) * Math.cos(p.y * f);
+  return new THREE.Vector3(nx, ny, nz).multiplyScalar(0.006);
+}
+const SPRING_K = 0.025;
+const DAMPING = 0.88;
+
+function stepWeb(dt, t){
+  anchors.forEach(a => {
+    // spring back to rest
+    const spring = a.restPos.clone().sub(a.pos).multiplyScalar(SPRING_K);
+    // wind drift
+    const wind = perlinWind(a.pos, t);
+    // accumulate
+    a.vel.add(spring).add(wind);
+    a.vel.multiplyScalar(DAMPING);
+    a.pos.add(a.vel.clone().multiplyScalar(dt));
+  });
+  // update geometry
+  anchors.forEach((a, i) => {
+    nodeGeom.attributes.position.setXYZ(i, a.pos.x, a.pos.y, a.pos.z);
+  });
+  nodeGeom.attributes.position.needsUpdate = true;
+  edges.forEach((e, idx) => {
+    const a = anchors[e.a].pos, b = anchors[e.b].pos;
+    edgeGeom.attributes.position.setXYZ(idx * 2, a.x, a.y, a.z);
+    edgeGeom.attributes.position.setXYZ(idx * 2 + 1, b.x, b.y, b.z);
+  });
+  edgeGeom.attributes.position.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm: let web settle into breathing rhythm
+for (let s = 0; s < 120; s++) stepWeb(0.05, s * 0.05);
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  const t = now / 1000;
+  edgeMat.uniforms.uTime.value = t;
+  nodeMat.uniforms.uTime.value = t;
+  stepWeb(dt, t);
+
+  // camera dolly — slow spiral through the web, not outside viewing it
+  // Saraceno's scans are meant to be ENTERED, not observed from distance
+  const ang = t * 0.045;
+  const radius = 12.0 + 4.0 * Math.sin(t * 0.08);
+  camera.position.x = Math.sin(ang) * radius;
+  camera.position.z = Math.cos(ang) * radius;
+  camera.position.y = 2.0 * Math.sin(t * 0.06);
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
