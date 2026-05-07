@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cosmic web · voronoi filament infall</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000408; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">l6l</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Cosmic Web — IllustrisTNG/MillenniumTNG style: 3D Voronoi tessellation,
+// 50k particles along edges (filaments), gravitational infall toward cluster nodes.
+// Color: golden-orange filaments where dense, magenta at vertices, dark in voids.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000408, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 1, 1000);
+camera.position.set(0, 0, 180);
+camera.lookAt(0, 0, 0);
+
+// Generate N Voronoi seed points (cluster nodes) in a cube [-70, 70]
+const N_CELLS = 200;
+const CUBE_SIZE = 140;
+const seeds = [];
+for (let i = 0; i < N_CELLS; i++){
+  seeds.push(new THREE.Vector3(
+    (Math.random() - 0.5) * CUBE_SIZE,
+    (Math.random() - 0.5) * CUBE_SIZE,
+    (Math.random() - 0.5) * CUBE_SIZE
+  ));
+}
+
+// Build Voronoi edges by connecting each seed to its 4-8 nearest neighbors
+// (real Voronoi dual is Delaunay, we approximate with k-nearest)
+const edges = [];
+const K = 6;
+for (let i = 0; i < seeds.length; i++){
+  const distances = seeds.map((s, j) => ({ idx: j, dist: s.distanceTo(seeds[i]) }));
+  distances.sort((a, b) => a.dist - b.dist);
+  for (let k = 1; k <= Math.min(K, distances.length - 1); k++){
+    const j = distances[k].idx;
+    if (i < j) edges.push({ a: i, b: j });
+  }
+}
+
+// Place particles along edges with Gaussian falloff perpendicular to edge
+const N_PARTICLES = 50000;
+const positions = new Float32Array(N_PARTICLES * 3);
+const edgeIndices = new Float32Array(N_PARTICLES);   // which edge
+const edgeT = new Float32Array(N_PARTICLES);          // position along edge [0,1]
+const edgePerp = new Float32Array(N_PARTICLES);       // perpendicular distance from edge
+const targets = new Float32Array(N_PARTICLES * 3);    // target node (for infall)
+
+for (let i = 0; i < N_PARTICLES; i++){
+  const eIdx = Math.floor(Math.random() * edges.length);
+  const edge = edges[eIdx];
+  const A = seeds[edge.a];
+  const B = seeds[edge.b];
+  
+  // position along edge with bias toward ends (clusters)
+  const u = Math.random();
+  const t = u < 0.5 ? Math.pow(u * 2, 0.7) * 0.5 : 1.0 - Math.pow((1.0 - u) * 2, 0.7) * 0.5;
+  
+  // Gaussian perpendicular spread (filament thickness)
+  const perp = (Math.random() + Math.random() + Math.random() - 1.5) * 1.8;
+  
+  const tangent = new THREE.Vector3().subVectors(B, A).normalize();
+  const arbitrary = Math.abs(tangent.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+  const n1 = new THREE.Vector3().crossVectors(tangent, arbitrary).normalize();
+  const n2 = new THREE.Vector3().crossVectors(tangent, n1).normalize();
+  
+  const theta = Math.random() * Math.PI * 2;
+  const offset = n1.clone().multiplyScalar(Math.cos(theta) * perp)
+                    .add(n2.clone().multiplyScalar(Math.sin(theta) * perp));
+  
+  const pos = A.clone().lerp(B, t).add(offset);
+  positions[i * 3]     = pos.x;
+  positions[i * 3 + 1] = pos.y;
+  positions[i * 3 + 2] = pos.z;
+  
+  edgeIndices[i] = eIdx;
+  edgeT[i] = t;
+  edgePerp[i] = Math.abs(perp);
+  
+  // target: nearest node (A or B, whichever is closer in parameter space)
+  const target = t < 0.5 ? A : B;
+  targets[i * 3]     = target.x;
+  targets[i * 3 + 1] = target.y;
+  targets[i * 3 + 2] = target.z;
+}
+
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geometry.setAttribute('edgeIdx',  new THREE.BufferAttribute(edgeIndices, 1));
+geometry.setAttribute('edgeT',    new THREE.BufferAttribute(edgeT, 1));
+geometry.setAttribute('edgePerp', new THREE.BufferAttribute(edgePerp, 1));
+geometry.setAttribute('target',   new THREE.BufferAttribute(targets, 3));
+
+const material = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float edgeIdx;
+    attribute float edgeT;
+    attribute float edgePerp;
+    attribute vec3 target;
+    varying vec3 vColor;
+    varying float vAlpha;
+    
+    void main(){
+      // infall: drift toward target node
+      vec3 toTarget = target - position;
+      float distToNode = length(toTarget);
+      vec3 drift = normalize(toTarget) * min(distToNode * 0.08, 5.0) * uTime * 0.3;
+      vec3 pos = position + drift;
+      
+      // color: hot magenta at nodes, golden-orange mid-filament, dark at perp distance
+      float nodeProx = 1.0 - smoothstep(0.0, 15.0, distToNode);
+      float perpFade = exp(-edgePerp * edgePerp * 0.4);
+      
+      vec3 hotColor = vec3(0.95, 0.35, 0.68);  // magenta cluster
+      vec3 warmColor = vec3(0.98, 0.72, 0.35); // golden filament
+      vec3 coolColor = vec3(0.25, 0.42, 0.65); // blue sparse
+      
+      vec3 col = mix(coolColor, warmColor, perpFade);
+      col = mix(col, hotColor, nodeProx * 0.85);
+      vColor = col;
+      
+      // alpha: bright at nodes and dense filaments, fade in voids
+      vAlpha = perpFade * (0.4 + nodeProx * 0.6);
+      
+      vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
+      gl_PointSize = (1.5 + nodeProx * 3.0) * uPixel * (100.0 / -mvPos.z);
+      gl_Position = projectionMatrix * mvPos;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vAlpha;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float core = exp(-r * 12.0);
+      gl_FragColor = vec4(vColor * core * vAlpha, core * vAlpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geometry, material);
+scene.add(points);
+
+// Add a few bright cluster marker spheres at randomly selected nodes
+const clusterGeometry = new THREE.SphereGeometry(1.2, 8, 8);
+const clusterMaterial = new THREE.MeshBasicMaterial({
+  color: 0xff4488,
+  transparent: true,
+  opacity: 0.7,
+  blending: THREE.AdditiveBlending
+});
+
+for (let i = 0; i < 18; i++){
+  const idx = Math.floor(Math.random() * seeds.length);
+  const cluster = new THREE.Mesh(clusterGeometry, clusterMaterial);
+  cluster.position.copy(seeds[idx]);
+  scene.add(cluster);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Camera: slow orbital drift at cosmological scale
+let t0 = performance.now();
+function loop(){
+  const t = (performance.now() - t0) / 1000;
+  material.uniforms.uTime.value = t;
+  
+  // vast slow rotation (galactic timescale)
+  const angle = t * 0.08;
+  camera.position.x = Math.sin(angle) * 180;
+  camera.position.z = Math.cos(angle) * 180;
+  camera.position.y = Math.sin(angle * 0.6) * 50;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
