@@ -290,6 +290,32 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "index.html").write_text(html)
 
+    # ── render-content gate ──────────────────────────────────────────
+    # Movements live outside pieces/<id>/index.html so we use the
+    # path-based companion API. If the headless render produces
+    # essentially nothing (shader compile fail, missing model load,
+    # design that waits for an input that never arrives in headless),
+    # wipe the movement and abort the tick — it must not ship to Vercel.
+    try:
+        import shutil as _shutil
+        from validate_render import validate_html_path
+        ok, reason = validate_html_path(
+            out_dir / "index.html",
+            label=f"{target_id}_m{n}",
+            warmup_ms=2500,
+        )
+        if not ok:
+            rej = REPO / "scripts" / f"reject_theatrical_{target_id}_m{n}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
+            rej.write_text(html)
+            print(f"render gate: REJECTED {target_id}.m{n} ({reason}) — saved to {rej.name}")
+            _shutil.rmtree(out_dir, ignore_errors=True)
+            return 7
+        print(f"render gate: PASS {target_id}.m{n} ({reason})")
+    except ImportError as e:
+        print(f"render gate: SKIPPED ({e}) — pip install playwright pillow numpy && playwright install chromium")
+    except Exception as e:
+        print(f"render gate: SKIPPED on exception ({e})")
+
     movs["movements"].append({
         "n": n,
         "word": word,

@@ -37,6 +37,8 @@ if [ "$RC" -eq 0 ]; then
   log "tick OK"
 elif [ "$RC" -eq 2 ]; then
   log "tick skipped: budget cap"
+elif [ "$RC" -eq 7 ]; then
+  log "tick rejected by render gate (no commit, no push)"
 else
   log "tick FAILED rc=$RC"
 fi

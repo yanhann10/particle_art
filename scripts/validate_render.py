@@ -144,6 +144,65 @@ def validate(piece_ids: list[str], record_clip: bool = False) -> int:
     return 0
 
 
+def validate_html_path(html_path: Path, label: str, warmup_ms: int = 2500,
+                       thumb_path: Path | None = None) -> tuple[bool, str]:
+    """Render an arbitrary HTML file headless and check it paints content.
+
+    Used by theatrical_tick.py whose movements live at
+    pieces/<target>/movements/m<N>/index.html — outside the
+    pieces/<id>/index.html convention validate() expects.
+
+    Returns (ok, reason). ok=True on pass; reason carries the % or error.
+    Writes the screenshot to thumb_path if given (else discarded after check).
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        from PIL import Image
+        import numpy as np
+    except ImportError as e:
+        return (True, f"skipped (missing dep: {e})")
+
+    if not html_path.exists():
+        return (False, f"no html at {html_path}")
+
+    import tempfile
+    use_temp = thumb_path is None
+    with tempfile.TemporaryDirectory() as td:
+        out = thumb_path if thumb_path else (Path(td) / f"{label}.png")
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(args=[
+                    "--use-gl=swiftshader", "--enable-webgl", "--no-sandbox",
+                ])
+                ctx = browser.new_context(
+                    viewport={"width": W, "height": H},
+                    device_scale_factor=2,
+                )
+                page = ctx.new_page()
+                errors: list[str] = []
+                page.on("pageerror", lambda e: errors.append(str(e)))
+                try:
+                    page.goto(f"file://{html_path}", wait_until="load", timeout=60000)
+                    page.wait_for_timeout(warmup_ms)
+                    page.screenshot(path=str(out), type="png", timeout=60000)
+                    img = Image.open(out).convert("RGB")
+                    arr = np.array(img)
+                    bg = np.median(arr.reshape(-1, 3), axis=0)
+                    dist = np.abs(arr.astype(np.int32) - bg.astype(np.int32)).sum(axis=2)
+                    non_bg = (dist > 12).sum() / dist.size
+                    ok = non_bg >= MIN_NONBACKGROUND_FRACTION
+                    msg = f"non-background={non_bg*100:.2f}%"
+                    if errors:
+                        msg += f" pageerror={errors[0][:120]}"
+                    return (bool(ok), msg)
+                finally:
+                    page.close()
+                    ctx.close()
+                    browser.close()
+        except Exception as e:
+            return (False, f"render exception: {e}")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     record_clip = False
