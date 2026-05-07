@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fh7 · Cellular Forms — nutrient-driven morphogenesis</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background:
+      radial-gradient(ellipse at 32% 38%, #faf2dd 0%, #ecdcb6 38%, #c5a571 78%, #6e4926 100%),
+      #6e4926;
+    background-blend-mode: normal;
+    color: #2a1a08; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.18  0 0 0 0 0.10  0 0 0 0 0.04  0 0 0 0.32 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/></svg>");
+    mix-blend-mode: multiply; opacity: 0.50;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background: radial-gradient(ellipse 90% 80% at 18% 20%, rgba(255,238,195,0.32), rgba(255,238,195,0) 55%);
+    mix-blend-mode: screen;
+  }
+  canvas { display:block; position: relative; z-index: 0; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; z-index:5; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">fh7</div>
+<div class="hint">watch the coral grow — cells split when fed, surface folds accumulate</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Andy Lomas — Cellular Forms direction applied to ERE scaffold.
+// BIOMORPHIC MOTION: cells accumulate nutrient over time, split when threshold met,
+// relax via spring forces to neighbors — the surface GROWS and FOLDS organically,
+// not algorithmic line-redraws. Think living tissue, not pattern playback.
+// Render as instanced spheres with AO-approximation shading (matte bone-white on dark).
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0806);
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 8);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── CELL STRUCTURE
+// Each cell: position, velocity, nutrient, age, neighbor-list (up to 6)
+const MAX_CELLS = 24000;
+const INITIAL_CELLS = 120;
+const SPLIT_THRESHOLD = 1.0;
+const NUTRIENT_RATE = 0.12;
+const SPRING_K = 0.18;
+const DAMPING = 0.85;
+const REST_DIST = 0.14;
+
+class Cell {
+  constructor(x, y, z) {
+    this.pos = new THREE.Vector3(x, y, z);
+    this.vel = new THREE.Vector3(0, 0, 0);
+    this.nutrient = 0;
+    this.age = 0;
+    this.neighbors = [];
+  }
+}
+
+const cells = [];
+const cellPool = [];
+
+// Initialize seed structure — small icosahedron-like cluster
+function initCells() {
+  const phi = (1 + Math.sqrt(5)) / 2;
+  const a = 0.5;
+  const b = a / phi;
+  const verts = [
+    [-a, b, 0], [a, b, 0], [-a, -b, 0], [a, -b, 0],
+    [0, -a, b], [0, a, b], [0, -a, -b], [0, a, -b],
+    [b, 0, -a], [b, 0, a], [-b, 0, -a], [-b, 0, a]
+  ];
+  verts.forEach(v => {
+    const c = new Cell(v[0], v[1], v[2]);
+    cells.push(c);
+  });
+  // Connect nearest neighbors (simple distance threshold)
+  for (let i = 0; i < cells.length; i++) {
+    for (let j = i + 1; j < cells.length; j++) {
+      if (cells[i].pos.distanceTo(cells[j].pos) < 1.2) {
+        cells[i].neighbors.push(j);
+        cells[j].neighbors.push(i);
+      }
+    }
+  }
+}
+initCells();
+
+// ────────────── INSTANCED MESH for cells (sphere per cell)
+const baseGeom = new THREE.SphereGeometry(0.08, 8, 6);
+const instMesh = new THREE.InstancedMesh(baseGeom, null, MAX_CELLS);
+instMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uCellCount: { value: cells.length }
+  },
+  vertexShader: `
+    varying vec3 vNormal;
+    varying vec3 vPos;
+    varying float vDepth;
+    void main() {
+      vNormal = normalize(normalMatrix * normal);
+      vec4 mv = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+      vPos = mv.xyz;
+      vDepth = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec3 vNormal;
+    varying vec3 vPos;
+    varying float vDepth;
+    void main() {
+      // Cheap AO: darker in concavities (approximated via depth variance in screen-space derivative)
+      float ddx = length(dFdx(vPos));
+      float ddy = length(dFdy(vPos));
+      float ao = 1.0 - clamp((ddx + ddy) * 1.8, 0.0, 0.65);
+      // Diffuse shading from upper-left (window light direction)
+      vec3 lightDir = normalize(vec3(-1.0, 1.2, 0.5));
+      float diff = max(0.0, dot(vNormal, lightDir));
+      // Subsurface hint — rim light opposite to light
+      float rim = pow(1.0 - abs(dot(vNormal, vec3(0,0,1))), 2.2) * 0.25;
+      // Matte bone-white with warm undertone
+      vec3 baseCol = vec3(0.96, 0.92, 0.88);
+      vec3 subCol = vec3(0.98, 0.85, 0.78);
+      vec3 col = mix(baseCol, subCol, rim);
+      col *= (0.3 + 0.7 * diff) * ao;
+      // Depth fade to parchment background
+      float fade = clamp((vDepth - 6.0) / 4.0, 0.0, 0.4);
+      col = mix(col, vec3(0.85, 0.78, 0.62), fade);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+instMesh.material = mat;
+scene.add(instMesh);
+
+// ────────────── DUST MOTES (keep atmosphere from parent)
+const N_DUST = 180;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos  = new Float32Array(N_DUST * 3);
+const dustSeed = new Float32Array(N_DUST);
+for (let i = 0; i < N_DUST; i++){
+  dustPos[i*3]     = (Math.random() - 0.5) * 12;
+  dustPos[i*3 + 1] = (Math.random() - 0.5) * 8;
+  dustPos[i*3 + 2] = (Math.random() - 0.5) * 6;
+  dustSeed[i]      = Math.random();
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('seed',     new THREE.BufferAttribute(dustSeed, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPixel: { value: renderer.getPixelRatio() } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vGlow;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.08 + seed * 6.28;
+      p.x += sin(t * 1.3 + seed * 30.0) * 0.35;
+      p.y -= mod(uTime * 0.06 + seed * 7.0, 4.0) - 2.0;
+      p.z += cos(t * 1.1 + seed * 22.0) * 0.28;
+      float sx = -p.x / 6.0;
+      float sy =  p.y / 4.0;
+      vGlow = clamp(0.30 + 0.50 * smoothstep(-0.2, 0.6, sx + sy), 0.0, 1.0);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = (1.0 + 1.2 * vGlow) * uPixel * (3.5 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vGlow;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 20.0);
+      vec3 col = vec3(1.00, 0.94, 0.78) * vGlow;
+      gl_FragColor = vec4(col, a * 0.65 * vGlow);
+    }
+  `
+});
+const dust = new THREE.Points(dustGeom, dustMat);
+scene.add(dust);
+
+// ────────────── GROWTH SIMULATION
+function updateCells(dt) {
+  if (cells.length >= MAX_CELLS) return;
+  
+  // Accumulate nutrient
+  for (let i = 0; i < cells.length; i++) {
+    const c = cells[i];
+    c.nutrient += NUTRIENT_RATE * dt;
+    c.age += dt;
+  }
+  
+  // Split cells that exceed threshold
+  const newCells = [];
+  for (let i = 0; i < cells.length; i++) {
+    const c = cells[i];
+    if (c.nutrient >= SPLIT_THRESHOLD && cells.length + newCells.length < MAX_CELLS) {
+      c.nutrient = 0;
+      // Spawn new cell in a random neighbor direction
+      const offset = new THREE.Vector3(
+        (Math.random() - 0.5) * 0.2,
+        (Math.random() - 0.5) * 0.2,
+        (Math.random() - 0.5) * 0.2
+      ).normalize().multiplyScalar(REST_DIST * 0.85);
+      const nc = new Cell(
+        c.pos.x + offset.x,
+        c.pos.y + offset.y,
+        c.pos.z + offset.z
+      );
+      // Parent becomes neighbor of new cell
+      nc.neighbors.push(i);
+      c.neighbors.push(cells.length + newCells.length);
+      // Inherit some neighbors from parent (simple propagation)
+      if (c.neighbors.length > 2) {
+        const inheritIdx = c.neighbors[Math.floor(Math.random() * c.neighbors.length)];
+        if (inheritIdx < cells.length && !nc.neighbors.includes(inheritIdx)) {
+          nc.neighbors.push(inheritIdx);
+          cells[inheritIdx].neighbors.push(cells.length + newCells.length);
+        }
+      }
+      newCells.push(nc);
+    }
+  }
+  cells.push(...newCells);
+  
+  // Spring relaxation between neighbors
+  const forces = cells.map(() => new THREE.Vector3(0, 0, 0));
+  for (let i = 0; i < cells.length; i++) {
+    const c = cells[i];
+    for (let j = 0; j < c.neighbors.length; j++) {
+      const ni = c.neighbors[j];
+      if (ni >= cells.length) continue;
+      const n = cells[ni];
+      const delta = new THREE.Vector3().subVectors(n.pos, c.pos);
+      const dist = delta.length();
+      if (dist < 0.001) continue;
+      const force = (dist - REST_DIST) * SPRING_K;
+      delta.normalize().multiplyScalar(force);
+      forces[i].add(delta);
+    }
+  }
+  
+  // Apply forces, update velocities and positions
+  for (let i = 0; i < cells.length; i++) {
+    const c = cells[i];
+    c.vel.add(forces[i].multiplyScalar(dt));
+    c.vel.multiplyScalar(DAMPING);
+    c.pos.add(new THREE.Vector3().copy(c.vel).multiplyScalar(dt));
+  }
+  
+  // Update instance matrix
+  const m = new THREE.Matrix4();
+  for (let i = 0; i < cells.length; i++) {
+    const c = cells[i];
+    m.setPosition(c.pos);
+    instMesh.setMatrixAt(i, m);
+  }
+  instMesh.instanceMatrix.needsUpdate = true;
+  instMesh.count = cells.length;
+  mat.uniforms.uCellCount.value = cells.length;
+}
+
+// ────────────── CAMERA tracking growth centroid
+function updateCamera() {
+  if (cells.length === 0) return;
+  const centroid = new THREE.Vector3(0, 0, 0);
+  for (let i = 0; i < cells.length; i++) {
+    centroid.add(cells[i].pos);
+  }
+  centroid.divideScalar(cells.length);
+  camera.lookAt(centroid);
+  // Pull back as structure grows
+  const size = Math.sqrt(cells.length / INITIAL_CELLS);
+  camera.position.z = 8 + size * 1.2;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let lastT = start;
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  const dt = Math.min((now - lastT) / 1000, 0.05);
+  lastT = now;
+  
+  mat.uniforms.uTime.value = t;
+  dustMat.uniforms.uTime.value = t;
+  
+  updateCells(dt);
+  updateCamera();
+  
+  // Slow orbit
+  const orbitAngle = t * 0.08;
+  const r = camera.position.length();
+  camera.position.x = Math.sin(orbitAngle) * r * 0.35;
+  camera.position.y = Math.sin(t * 0.05 + 1.0) * 0.6;
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
