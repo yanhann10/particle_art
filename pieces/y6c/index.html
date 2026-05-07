@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>y6c · Flow field (Hobbs-inspired)</title>
+<!-- MOTION: flow, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">y6c · flow field (Hobbs-inspired)</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Tyler Hobbs principle: structured flow field, non-overlapping streams, intentional negative space
+// Palette: warm earth tones (raw umber #5c4a3a, terracotta #c85a47, ochre #d9a066, oxide red #923c2f)
+// + one cool accent (slate blue #5b6f7d). Composition: 7 color regions with hand-tuned negative gaps.
+
+const N = 75000;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+// Flow field: 5x5 grid of control points with hand-tuned vector directions
+// Each particle follows the interpolated vector field, stream-tracing without crossing
+const GRID_SIZE = 5;
+const fieldVectors = [];
+for (let i = 0; i < GRID_SIZE; i++){
+  for (let j = 0; j < GRID_SIZE; j++){
+    const u = i / (GRID_SIZE - 1);
+    const v = j / (GRID_SIZE - 1);
+    // hand-tuned: central vortex with outward spirals at corners
+    const cx = 0.5, cy = 0.5;
+    const dx = u - cx, dy = v - cy;
+    const angle = Math.atan2(dy, dx) + 0.8 * Math.sin(u * 3.14) * Math.cos(v * 3.14);
+    const mag = 0.5 + 0.3 * Math.sin(u * 6.28) * Math.cos(v * 6.28);
+    fieldVectors.push(new THREE.Vector2(Math.cos(angle) * mag, Math.sin(angle) * mag));
+  }
+}
+
+// 7 color regions with intentional gaps (negative space)
+const regions = [
+  { x: -8, y: 6, w: 5, h: 4, color: new THREE.Color(0x5c4a3a), dx: 0.7, dy: 0.2 },   // raw umber top-left
+  { x: -2, y: 8, w: 6, h: 3, color: new THREE.Color(0xd9a066), dx: 0.4, dy: -0.5 },  // ochre top-center
+  { x: 5, y: 6, w: 4, h: 5, color: new THREE.Color(0x923c2f), dx: -0.6, dy: 0.3 },   // oxide red top-right
+  { x: -9, y: -2, w: 6, h: 4, color: new THREE.Color(0xc85a47), dx: 0.8, dy: 0.0 },  // terracotta mid-left
+  { x: 3, y: -1, w: 5, h: 3, color: new THREE.Color(0x5b6f7d), dx: -0.5, dy: -0.4 }, // slate blue mid-right (cool accent)
+  { x: -7, y: -8, w: 5, h: 4, color: new THREE.Color(0x5c4a3a), dx: 0.5, dy: 0.6 },  // raw umber bottom-left
+  { x: 1, y: -9, w: 6, h: 5, color: new THREE.Color(0xd9a066), dx: -0.3, dy: 0.7 },  // ochre bottom-right
+];
+
+// Partition particles into streams per region
+const streams = regions.map((r, idx) => {
+  const count = Math.floor(N / regions.length);
+  const positions = new Float32Array(count * 3);
+  const velocities = new Float32Array(count * 2);
+  const seeds = new Float32Array(count);
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++){
+    // spawn inside region box
+    positions[i*3]     = r.x + Math.random() * r.w;
+    positions[i*3 + 1] = r.y + Math.random() * r.h;
+    positions[i*3 + 2] = 0;
+    velocities[i*2]     = r.dx;
+    velocities[i*2 + 1] = r.dy;
+    seeds[i] = Math.random();
+    colors[i*3]     = r.color.r;
+    colors[i*3 + 1] = r.color.g;
+    colors[i*3 + 2] = r.color.b;
+  }
+  return { positions, velocities, seeds, colors, color: r.color };
+});
+
+// Build one geometry per stream
+const streamMeshes = streams.map((s, idx) => {
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(s.positions, 3));
+  geom.setAttribute('seed', new THREE.BufferAttribute(s.seeds, 1));
+  geom.setAttribute('color', new THREE.BufferAttribute(s.colors, 3));
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uPixel: { value: renderer.getPixelRatio() },
+    },
+    transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+    vertexShader: `
+      uniform float uTime;
+      uniform float uPixel;
+      attribute float seed;
+      attribute vec3 color;
+      varying vec3 vCol;
+      varying float vAlpha;
+      void main(){
+        vec3 p = position;
+        vCol = color;
+        // subtle pulse per particle
+        float phase = seed * 6.28 + uTime * 0.3;
+        float pulse = 0.7 + 0.3 * sin(phase);
+        vAlpha = 0.35 + 0.15 * pulse;
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        float dist = -mv.z;
+        gl_PointSize = uPixel * (60.0 / dist) * (0.9 + 0.3 * pulse);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vCol;
+      varying float vAlpha;
+      void main(){
+        vec2 d = gl_PointCoord - 0.5;
+        float r = dot(d, d);
+        if (r > 0.25) discard;
+        // oil-paint brush-stroke edge falloff
+        float edge = smoothstep(0.25, 0.15, r);
+        float alpha = vAlpha * edge;
+        gl_FragColor = vec4(vCol * alpha, alpha);
+      }
+    `
+  });
+  const pts = new THREE.Points(geom, mat);
+  scene.add(pts);
+  return { geom, mat, stream: s };
+});
+
+// Flow field interpolation (bilinear)
+function getFlowAt(x, y){
+  const u = THREE.MathUtils.clamp((x + 12) / 24, 0, 1);
+  const v = THREE.MathUtils.clamp((y + 12) / 24, 0, 1);
+  const fi = u * (GRID_SIZE - 1);
+  const fj = v * (GRID_SIZE - 1);
+  const i0 = Math.floor(fi), i1 = Math.min(i0 + 1, GRID_SIZE - 1);
+  const j0 = Math.floor(fj), j1 = Math.min(j0 + 1, GRID_SIZE - 1);
+  const tx = fi - i0, ty = fj - j0;
+  const v00 = fieldVectors[i0 * GRID_SIZE + j0];
+  const v10 = fieldVectors[i1 * GRID_SIZE + j0];
+  const v01 = fieldVectors[i0 * GRID_SIZE + j1];
+  const v11 = fieldVectors[i1 * GRID_SIZE + j1];
+  const a = v00.clone().lerp(v10, tx);
+  const b = v01.clone().lerp(v11, tx);
+  return a.lerp(b, ty);
+}
+
+// Collision grid for non-overlapping enforcement (8×8 coarse grid)
+const GRID_DIV = 8;
+const occupancy = Array.from({ length: GRID_DIV * GRID_DIV }, () => new Set());
+function gridCell(x, y){
+  const gx = Math.floor(THREE.MathUtils.clamp((x + 12) / 24, 0, 0.999) * GRID_DIV);
+  const gy = Math.floor(THREE.MathUtils.clamp((y + 12) / 24, 0, 0.999) * GRID_DIV);
+  return gx * GRID_DIV + gy;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  const dt = 0.016;
+
+  // update particle positions via flow field + collision avoidance
+  streamMeshes.forEach((mesh, sidx) => {
+    const pos = mesh.stream.positions;
+    const vel = mesh.stream.velocities;
+    for (let i = 0; i < pos.length / 3; i++){
+      const x = pos[i*3], y = pos[i*3+1];
+      const flow = getFlowAt(x, y);
+      const vx = vel[i*2], vy = vel[i*2+1];
+      // blend initial region velocity with field
+      const nx = vx * 0.6 + flow.x * 0.4;
+      const ny = vy * 0.6 + flow.y * 0.4;
+      let nextX = x + nx * dt;
+      let nextY = y + ny * dt;
+
+      // collision check: if target cell occupied by different stream, bounce tangentially
+      const cell = gridCell(nextX, nextY);
+      if (occupancy[cell] && occupancy[cell].size > 0 && !occupancy[cell].has(sidx)){
+        // tangent reflection
+        const tang = new THREE.Vector2(-ny, nx).normalize();
+        nextX = x + tang.x * 0.5 * dt;
+        nextY = y + tang.y * 0.5 * dt;
+      }
+
+      // wrap around canvas edges
+      if (nextX < -12) nextX += 24;
+      if (nextX > 12) nextX -= 24;
+      if (nextY < -12) nextY += 24;
+      if (nextY > 12) nextY -= 24;
+
+      pos[i*3] = nextX;
+      pos[i*3+1] = nextY;
+      vel[i*2] = nx;
+      vel[i*2+1] = ny;
+    }
+    mesh.geom.attributes.position.needsUpdate = true;
+  });
+
+  // rebuild occupancy grid each frame
+  occupancy.forEach(s => s.clear());
+  streamMeshes.forEach((mesh, sidx) => {
+    const pos = mesh.stream.positions;
+    for (let i = 0; i < pos.length / 3; i++){
+      const c = gridCell(pos[i*3], pos[i*3+1]);
+      occupancy[c].add(sidx);
+    }
+  });
+
+  streamMeshes.forEach(m => { m.mat.uniforms.uTime.value = t; });
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
