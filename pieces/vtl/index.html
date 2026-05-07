@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vtl · differential growth · woven tower</title>
+<!-- MOTION: accumulate, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080b; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">vtl</div>
+<div class="hint">drag to orbit · scroll to zoom · click to pause/resume</div>
+<div class="stat" id="stat">vertices=0</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Mutation of 5gm: same differential-growth tower simulation,
+// but rendered as LINE SEGMENTS instead of point sprites.
+// Each polyline edge becomes a visible thread; nearby non-adjacent
+// vertices get cross-connected, weaving a dense linear fabric.
+// Palette identical: algae → coral red → bone, driven by height.
+// Technique reference: Nervous System (Jessica Rosenkrantz & Jesse Louis-Rosenberg)
+// differential growth meshes rendered as woven filament networks.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x06080b, 0.034);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080b, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+// ─────────────────────────── curve state (full 3D) — identical to 5gm
+const MAX_VERTS = 4000;
+const ATTRACT   = 0.06;
+const REPEL_R   = 0.42;
+const REPEL_STR = 0.12;
+const NOISE_S   = 0.003;
+const PRESSURE  = 0.0028;
+const RISE      = 0.0045;
+const MAX_D     = 0.32;
+let paused = false;
+
+const verts = [];
+for (let i = 0; i < 24; i++){
+  const th = i / 24 * Math.PI * 2;
+  const r = 1.4 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function gkey(x, y, z){
+  return Math.floor(x/CELL)+','+Math.floor(y/CELL)+','+Math.floor(z/CELL);
+}
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i]; const k = gkey(v.x, v.y, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function spatialNeighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++)
+    for (let dy=-1; dy<=1; dy++)
+      for (let dz=-1; dz<=1; dz++){
+        const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+        if (arr) for (const idx of arr) out.push(idx);
+      }
+  return out;
+}
+
+function step(){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    const cands = spatialNeighbors(v);
+    for (const j of cands){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x-u.x, ey = v.y-u.y, ez = v.z-u.z;
+      const d2 = ex*ex+ey*ey+ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1-d/REPEL_R)/d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x+b.x-2*v.x)*ATTRACT;
+    dy[i] += (a.y+b.y-2*v.y)*ATTRACT;
+    dz[i] += (a.z+b.z-2*v.z)*ATTRACT;
+  }
+  let ccx=0,ccy=0,ccz=0;
+  for (let i=0;i<n;i++){ccx+=verts[i].x;ccy+=verts[i].y;ccz+=verts[i].z;}
+  ccx/=n;ccy/=n;ccz/=n;
+  for (let i = 0; i < n; i++){
+    const ox=verts[i].x-ccx, oy=verts[i].y-ccy, oz=verts[i].z-ccz;
+    const d = Math.hypot(ox,oy,oz)+1e-6;
+    dx[i]+=(ox/d)*PRESSURE;
+    dy[i]+=(oy/d)*PRESSURE*0.4;
+    dz[i]+=(oz/d)*PRESSURE;
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[i].age;
+    const upward = RISE*(0.3+1.2*Math.min(a*1.5,1.0));
+    verts[i].x += dx[i]+(Math.random()-0.5)*NOISE_S;
+    verts[i].y += dy[i]+(Math.random()-0.5)*NOISE_S*0.5+upward;
+    verts[i].z += dz[i]+(Math.random()-0.5)*NOISE_S;
+    verts[i].age += 0.0012;
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex=b.x-a.x,ey=b.y-a.y,ez=b.z-a.z;
+    if (ex*ex+ey*ey+ez*ez > MAX_D*MAX_D && verts.length+grown.length < MAX_VERTS){
+      grown.push({
+        x:(a.x+b.x)*0.5,
+        y:(a.y+b.y)*0.5-0.05,
+        z:(a.z+b.z)*0.5,
+        age: Math.max(a.age,b.age)*0.5
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// pre-warm
+for (let s = 0; s < 800; s++) step();
+
+addEventListener('click', () => { paused = !paused; });
+
+// ─────────────────────────── LINE SEGMENT rendering
+// Two layers:
+//   1. Polyline edges (consecutive verts) — the backbone threads
+//   2. Cross-connections (spatially near, topologically distant) — the weft
+// Combined into one LineSegments geometry.
+
+const MAX_SEGS = 30000;        // total line segments budget
+const CROSS_R  = 0.55;         // cross-connection search radius
+const CROSS_TOPO_MIN = 4;      // minimum topological distance for cross-link
+const MAX_CROSS = 12000;       // budget for cross-connections
+
+const segPos = new Float32Array(MAX_SEGS * 6);  // 2 verts × 3 floats per segment
+const segCol = new Float32Array(MAX_SEGS * 8);  // 2 verts × 4 floats (rgba) per segment
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(segPos, 3));
+lineGeom.setAttribute('color',    new THREE.BufferAttribute(segCol, 4));
+
+const lineMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute vec4 color;
+    varying vec4 vColor;
+    void main(){
+      vColor = color;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec4 vColor;
+    void main(){
+      gl_FragColor = vColor;
+    }
+  `
+});
+
+const lines = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lines);
+
+// palette function: height (0..1) → rgb
+function palette(h){
+  const algae = [0.42, 0.86, 0.55];
+  const coral = [0.95, 0.40, 0.38];
+  const bone  = [0.94, 0.92, 0.84];
+  let r,g,b;
+  if (h < 0.55){
+    const t = h / 0.55;
+    const s = t*t*(3-2*t); // smoothstep
+    r = algae[0]+(coral[0]-algae[0])*s;
+    g = algae[1]+(coral[1]-algae[1])*s;
+    b = algae[2]+(coral[2]-algae[2])*s;
+  } else {
+    const t = (h-0.55)/0.45;
+    const s = t*t*(3-2*t);
+    r = coral[0]+(bone[0]-coral[0])*s;
+    g = coral[1]+(bone[1]-coral[1])*s;
+    b = coral[2]+(bone[2]-coral[2])*s;
+  }
+  return [r,g,b];
+}
+
+function buildLines(){
+  const n = verts.length;
+  if (n < 2) return 0;
+
+  let yMax = 0;
+  for (let i = 0; i < n; i++) if (verts[i].y > yMax) yMax = verts[i].y;
+  yMax = Math.max(yMax, 1.0);
+
+  let seg = 0;
+
+  // Layer 1: polyline backbone — every consecutive pair
+  for (let i = 0; i < n && seg < MAX_SEGS; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    const o = seg * 6;
+    segPos[o]   = a.x; segPos[o+1] = a.y; segPos[o+2] = a.z;
+    segPos[o+3] = b.x; segPos[o+4] = b.y; segPos[o+5] = b.z;
+
+    const ha = Math.min(a.y / yMax, 1.0);
+    const hb = Math.min(b.y / yMax, 1.0);
+    const ca = palette(ha), cb = palette(hb);
+    const oc = seg * 8;
+    // backbone lines slightly brighter: alpha 0.14
+    segCol[oc]   = ca[0]*0.14; segCol[oc+1] = ca[1]*0.14; segCol[oc+2] = ca[2]*0.14; segCol[oc+3] = 0.14;
+    segCol[oc+4] = cb[0]*0.14; segCol[oc+5] = cb[1]*0.14; segCol[oc+6] = cb[2]*0.14; segCol[oc+7] = 0.14;
+    seg++;
+  }
+
+  // Layer 2: cross-connections (weft threads)
+  // Use spatial hash (already rebuilt in step()) to find nearby but topologically distant pairs
+  rebuildGrid();
+  let cross = 0;
+  const crossR2 = CROSS_R * CROSS_R;
+  // Sample a subset of vertices to keep budget reasonable
+  const stride = Math.max(1, Math.floor(n / 1200));
+  for (let i = 0; i < n && cross < MAX_CROSS && seg < MAX_SEGS; i += stride){
+    const v = verts[i];
+    const cands = spatialNeighbors(v);
+    for (const j of cands){
+      if (cross >= MAX_CROSS || seg >= MAX_SEGS) break;
+      // topological distance: minimum wrap-around distance on the closed polyline
+      const topoD = Math.min(Math.abs(i-j), n-Math.abs(i-j));
+      if (topoD < CROSS_TOPO_MIN) continue;
+      const u = verts[j];
+      const ex=v.x-u.x, ey=v.y-u.y, ez=v.z-u.z;
+      const d2 = ex*ex+ey*ey+ez*ez;
+      if (d2 > crossR2 || d2 < 1e-6) continue;
+
+      const dist = Math.sqrt(d2);
+      // alpha falls off with distance — closer cross-links are more visible
+      const alphaBase = 0.09 * (1.0 - dist/CROSS_R);
+
+      const o = seg * 6;
+      segPos[o]   = v.x; segPos[o+1] = v.y; segPos[o+2] = v.z;
+      segPos[o+3] = u.x; segPos[o+4] = u.y; segPos[o+5] = u.z;
+
+      const hv = Math.min(v.y/yMax, 1.0);
+      const hu = Math.min(u.y/yMax, 1.0);
+      const cv = palette(hv), cu = palette(hu);
+      const oc = seg * 8;
+      segCol[oc]   = cv[0]*alphaBase; segCol[oc+1] = cv[1]*alphaBase; segCol[oc+2] = cv[2]*alphaBase; segCol[oc+3] = alphaBase;
+      segCol[oc+4] = cu[0]*alphaBase; segCol[oc+5] = cu[1]*alphaBase; segCol[oc+6] = cu[2]*alphaBase; segCol[oc+7] = alphaBase;
+      seg++;
+      cross++;
+    }
+  }
+
+  return seg;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+function loop(){
+  for (let s = 0; s < 3; s++) step();
+
+  const segCount = buildLines();
+  lineGeom.setDrawRange(0, segCount * 2); // 2 verts per segment
+  lineGeom.attributes.position.needsUpdate = true;
+  lineGeom.attributes.color.needsUpdate = true;
+
+  // camera tracks centroid
+  const n = verts.length;
+  let yMean = 0, yMax = 0;
+  if (n > 0){
+    for (let i = 0; i < n; i++){
+      yMean += verts[i].y;
+      if (verts[i].y > yMax) yMax = verts[i].y;
+    }
+    yMean /= n;
+  }
+  const targetY = Math.max(yMean, 2.0);
+  controls.target.y += (targetY - controls.target.y) * 0.04;
+  const desiredCamY = targetY + 4;
+  camera.position.y += (desiredCamY - camera.position.y) * 0.04;
+
+  statEl.textContent = `vertices=${n} · segments=${segCount} · height=${yMax.toFixed(1)}${paused?' · paused':''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
