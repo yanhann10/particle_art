@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mrs · Three tissues</title>
+<!-- MOTION: pulse, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background:
+      radial-gradient(ellipse at 32% 38%, #faf2dd 0%, #ecdcb6 38%, #c5a571 78%, #6e4926 100%),
+      #6e4926;
+    background-blend-mode: normal;
+    color: #2a1a08; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.18  0 0 0 0 0.10  0 0 0 0 0.04  0 0 0 0.32 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/></svg>");
+    mix-blend-mode: multiply; opacity: 0.50;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background: radial-gradient(ellipse 90% 80% at 18% 20%, rgba(255,238,195,0.32), rgba(255,238,195,0) 55%);
+    mix-blend-mode: screen;
+  }
+  canvas { display:block; position: relative; z-index: 0; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; z-index:5; }
+  .state { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; color:#2a1a08; font-family:ui-monospace,"SF Mono",Menlo,monospace; transition: opacity 0.4s; }
+</style>
+</head>
+<body>
+<div class="id">mrs</div>
+<div class="hint">click to cycle tissue · drag to tilt</div>
+<div class="state" id="stateLabel">i · vascular</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 12);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+const posA = new Float32Array(N * 3);
+const posB = new Float32Array(N * 3);
+const posCur = new Float32Array(N * 3);
+const seedsArr = new Float32Array(N);
+const stateLabel = document.getElementById('stateLabel');
+
+const STATES = [
+  { name: 'i · vascular', mode: 0 },
+  { name: 'ii · venation', mode: 1 },
+  { name: 'iii · peristalsis', mode: 2 }
+];
+let currentState = 0;
+let nextState = -1;
+let crossfade = 1.0;
+let crossfadeDir = 0;
+
+function rngFrom(seed) {
+  let s = seed >>> 0;
+  return () => { s |= 0; s = s + 0x6d2b79f5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// STATE 0: Vascular — Riley wave-interference on cupped surface with radial pulse channels
+function buildVascular(out, seeds, baseSeed) {
+  const rng = rngFrom(baseSeed);
+  const w1 = { ang: rng()*Math.PI*2, k: 1.6+rng()*1.2, ph: rng()*Math.PI*2 };
+  const w2 = { ang: rng()*Math.PI*2, k: 2.1+rng()*1.4, ph: rng()*Math.PI*2 };
+  const w3 = { ang: rng()*Math.PI*2, k: 0.8+rng()*0.6, ph: rng()*Math.PI*2 };
+  const radK = 1.3 + rng()*0.6;
+  // 5 vascular channels radiating from center
+  const channels = [];
+  for (let c = 0; c < 5; c++) channels.push(rng()*Math.PI*2);
+
+  let written = 0, attempts = 0;
+  while (written < N && attempts < N*16) {
+    attempts++;
+    const r = Math.sqrt(rng()) * 4;
+    const th = rng() * Math.PI * 2;
+    const x = r * Math.cos(th), z = r * Math.sin(th);
+    const v1 = Math.sin(x*Math.cos(w1.ang)*w1.k + z*Math.sin(w1.ang)*w1.k + w1.ph);
+    const v2 = Math.sin(x*Math.cos(w2.ang)*w2.k + z*Math.sin(w2.ang)*w2.k + w2.ph);
+    const v3 = Math.sin(x*Math.cos(w3.ang)*w3.k + z*Math.sin(w3.ang)*w3.k + w3.ph);
+    const vR = Math.sin(r * radK);
+    const f = (v1+v2+v3+vR)*0.25;
+    // channel proximity boost
+    let chBoost = 0;
+    for (let c = 0; c < channels.length; c++) {
+      const da = Math.abs(((th - channels[c]) % (Math.PI*2) + Math.PI*3) % (Math.PI*2) - Math.PI);
+      chBoost = Math.max(chBoost, Math.exp(-da*da*8) * 0.4);
+    }
+    const fall = Math.exp(-r*r*0.10);
+    const accept = (f > -chBoost) && (rng() < fall * (0.4 + 0.6*Math.max(f,0) + chBoost));
+    if (!accept) continue;
+    const petals = 6;
+    const scallop = Math.cos(th*petals)*0.18*(r/4);
+    const y = -0.15*r*r + scallop;
+    out[written*3] = x; out[written*3+1] = y; out[written*3+2] = z;
+    seeds[written] = rng();
+    written++;
+  }
+  for (let i = written; i < N; i++) { out[i*3]=0; out[i*3+1]=-5; out[i*3+2]=0; seeds[i]=0; }
+}
+
+// STATE 1: Venation — leaf vein network, particles along branching paths
+function buildVenation(out, seeds, baseSeed) {
+  const rng = rngFrom(baseSeed);
+  // build a simple branching vein tree
+  const veins = [];
+  // midrib
+  const midLen = 3.5;
+  veins.push({ x0:0, y0:-midLen, x1:0, y1:midLen, w:0.35 });
+  // primary laterals
+  const nLat = 7;
+  for (let i = 0; i < nLat; i++) {
+    const t = (i+1)/(nLat+1);
+    const yBase = -midLen + t*midLen*2;
+    const side = (i%2===0)?1:-1;
+    const ang = (0.35+rng()*0.25)*side;
+    const len = (1.8+rng()*1.2)*(1-Math.abs(t-0.5)*0.8);
+    const ex = Math.sin(ang)*len, ey = Math.cos(ang)*len*0.3;
+    veins.push({ x0:0, y0:yBase, x1:ex, y1:yBase+ey, w:0.18 });
+    // secondary branches
+    const nSec = 2+Math.floor(rng()*3);
+    for (let j = 0; j < nSec; j++) {
+      const s = (j+1)/(nSec+1);
+      const bx = ex*s, by = yBase+ey*s;
+      const a2 = ang + (0.3+rng()*0.3)*side;
+      const l2 = len*0.4*(1-s*0.5);
+      veins.push({ x0:bx, y0:by, x1:bx+Math.sin(a2)*l2, y1:by+Math.cos(a2)*l2*0.3, w:0.09 });
+    }
+  }
+  // scatter particles along veins with gaussian spread proportional to width
+  let written = 0;
+  while (written < N) {
+    const v = veins[Math.floor(rng()*veins.length)];
+    const t = rng();
+    const px = v.x0 + (v.x1-v.x0)*t;
+    const py = v.y0 + (v.y1-v.y0)*t;
+    // gaussian spread
+    const u1 = rng(), u2 = rng();
+    const g = Math.sqrt(-2*Math.log(u1+1e-9))*Math.cos(6.2832*u2);
+    const spread = v.w * g;
+    const dx = v.y1-v.y0, dy = -(v.x1-v.x0);
+    const nl = Math.sqrt(dx*dx+dy*dy)+1e-6;
+    const fx = px + (dx/nl)*spread;
+    const fy = py + (dy/nl)*spread;
+    // leaf outline clip: ellipse
+    if ((fx*fx)/(3.2*3.2) + (fy*fy)/(midLen*midLen) > 1) continue;
+    // slight cup
+    const rd = Math.sqrt(fx*fx+fy*fy);
+    const fz = -0.06*rd*rd;
+    out[written*3]=fx; out[written*3+1]=fy; out[written*3+2]=fz;
+    seeds[written]=rng();
+    written++;
+  }
+}
+
+// STATE 2: Peristalsis — tubular vessel with traveling contraction waves
+function buildPeristalsis(out, seeds, baseSeed) {
+  const rng = rngFrom(baseSeed);
+  const tubeLen = 7.0;
+  const baseR = 1.2;
+  // place particles on tube surface with some wall thickness
+  for (let i = 0; i < N; i++) {
+    const t = rng(); // along tube [0,1]
+    const y = (t - 0.5) * tubeLen;
+    const th = rng() * Math.PI * 2;
+    // radius varies along tube — 3 constriction zones
+    const constrict = 1.0 - 0.3*Math.sin(t*Math.PI*3 + rng()*0.2);
+    const rWall = baseR * constrict * (0.85 + rng()*0.3); // wall thickness
+    const x = Math.cos(th) * rWall;
+    const z = Math.sin(th) * rWall;
+    // slight helical twist
+    const twist = t * 0.8;
+    const xr = x*Math.cos(twist) - z*Math.sin(twist);
+    const zr = x*Math.sin(twist) + z*Math.cos(twist);
+    out[i*3] = xr; out[i*3+1] = y; out[i*3+2] = zr;
+    seeds[i] = rng();
+  }
+}
+
+const builders = [buildVascular, buildVenation, buildPeristalsis];
+const baseSeed = Math.floor(Math.random()*1e9);
+
+// Initial build
+builders[0](posA, seedsArr, baseSeed);
+for (let i = 0; i < N*3; i++) posCur[i] = posA[i];
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(posCur, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seedsArr, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uPointer: { value: new THREE.Vector2(0,0) },
+  uMode: { value: 0.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec2 uPointer;
+    uniform float uMode;
+    attribute float seed;
+    varying float vDepth;
+    varying float vSeed;
+    varying float vMode;
+    void main(){
+      vec3 p = position;
+      // pointer tilt
+      float tiltX = uPointer.y * 0.18;
+      float tiltZ = -uPointer.x * 0.18;
+      float ca=cos(tiltX), sa=sin(tiltX), cb=cos(tiltZ), sb=sin(tiltZ);
+      vec3 q = vec3(p.x, p.y*ca - p.z*sa, p.y*sa + p.z*ca);
+      q = vec3(q.x*cb - q.y*sb, q.x*sb + q.y*cb, q.z);
+
+      float t = uTime * 0.22 + seed * 6.28;
+
+      // Mode 0 (vascular): radial pulsing — particles breathe outward in waves from center
+      float r0 = length(p.xz);
+      float vascPulse = sin(r0 * 2.5 - uTime * 0.8 + seed * 1.2) * 0.06;
+      vec3 qVasc = q;
+      qVasc.y += vascPulse;
+      qVasc.xz *= 1.0 + vascPulse * 0.3;
+
+      // Mode 1 (venation): slow tidal expansion along Y axis — the leaf breathes
+      vec3 qVein = q;
+      float leafBreath = sin(uTime * 0.3) * 0.08;
+      qVein.y *= 1.0 + leafBreath;
+      qVein.x *= 1.0 + leafBreath * 0.5;
+      // gentle sway
+      qVein.x += sin(uTime * 0.15 + q.y * 0.4) * 0.08;
+
+      // Mode 2 (peristalsis): traveling contraction wave along tube
+      vec3 qPeri = q;
+      float tubeT = (p.y / 3.5 + 0.5); // normalized tube position
+      float wave = sin(tubeT * 6.2832 * 2.0 - uTime * 1.2);
+      float squeeze = 1.0 - 0.15 * max(wave, 0.0);
+      qPeri.xz *= squeeze;
+      qPeri.y += sin(uTime * 0.18 + seed * 3.0) * 0.02;
+
+      // blend based on uMode
+      vec3 finalP;
+      if (uMode < 0.5) {
+        finalP = qVasc;
+      } else if (uMode < 1.5) {
+        finalP = qVein;
+      } else {
+        finalP = qPeri;
+      }
+
+      vec4 mv = modelViewMatrix * vec4(finalP, 1.0);
+      vDepth = -mv.z;
+      vSeed = seed;
+      vMode = uMode;
+      gl_PointSize = (1.4 + 0.6*sin(t*0.7)) * uPixel * (5.0 / vDepth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDepth;
+    varying float vSeed;
+    varying float vMode;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 19.0);
+      // palette shifts per state:
+      // 0 vascular: sumi ink (warm brown-black)
+      vec3 inkA0 = vec3(0.10, 0.06, 0.04);
+      vec3 inkB0 = vec3(0.30, 0.18, 0.08);
+      // 1 venation: chlorophyll green-to-amber
+      vec3 inkA1 = vec3(0.06, 0.14, 0.05);
+      vec3 inkB1 = vec3(0.28, 0.22, 0.06);
+      // 2 peristalsis: deep carmine-to-rose
+      vec3 inkA2 = vec3(0.22, 0.04, 0.06);
+      vec3 inkB2 = vec3(0.36, 0.14, 0.12);
+
+      vec3 inkA, inkB;
+      if (vMode < 0.5) { inkA = inkA0; inkB = inkB0; }
+      else if (vMode < 1.5) { inkA = inkA1; inkB = inkB1; }
+      else { inkA = inkA2; inkB = inkB2; }
+
+      vec3 col = mix(inkA, inkB, smoothstep(0.0, 1.0, vSeed));
+      float haze = clamp((vDepth - 8.0) / 6.0, 0.0, 0.55);
+      col = mix(col, vec3(0.85, 0.78, 0.62), haze);
+      gl_FragColor = vec4(col, a * 0.78 * (1.0 - haze * 0.6));
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ── DUST MOTES
+const N_DUST = 250;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos = new Float32Array(N_DUST*3);
+const dustSeed = new Float32Array(N_DUST);
+for (let i = 0; i < N_DUST; i++){
+  dustPos[i*3]=(Math.random()-0.5)*14;
+  dustPos[i*3+1]=(Math.random()-0.5)*8;
+  dustPos[i*3+2]=(Math.random()-0.5)*8;
+  dustSeed[i]=Math.random();
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('seed', new THREE.BufferAttribute(dustSeed, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: uniforms.uTime, uPixel: uniforms.uPixel },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime; uniform float uPixel;
+    attribute float seed; varying float vGlow;
+    void main(){
+      vec3 p = position;
+      float t = uTime*0.10 + seed*6.28;
+      p.x += sin(t*1.3+seed*30.0)*0.4;
+      p.y -= mod(uTime*0.08+seed*7.0,4.0)-2.0;
+      p.z += cos(t*1.1+seed*22.0)*0.3;
+      float sx = -p.x/7.0, sy = p.y/4.0;
+      vGlow = clamp(0.30+0.55*smoothstep(-0.2,0.6,sx+sy),0.0,1.0);
+      vec4 mv = modelViewMatrix*vec4(p,1.0);
+      gl_PointSize = (1.0+1.4*vGlow)*uPixel*(4.0/-mv.z);
+      gl_Position = projectionMatrix*mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vGlow;
+    void main(){
+      vec2 d = gl_PointCoord-0.5; float r=dot(d,d);
+      if(r>0.25) discard;
+      float a=exp(-r*24.0);
+      vec3 col=vec3(1.00,0.94,0.78)*vGlow;
+      gl_FragColor=vec4(col,a*0.70*vGlow);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+// ── CROSSFADE + STATE CYCLING
+const FADE_DUR = 1.2; // seconds
+let fadeStart = 0;
+let fading = false;
+
+function startTransition() {
+  const prev = currentState;
+  nextState = (currentState + 1) % 3;
+  // build target positions into posB
+  const tempSeeds = new Float32Array(N);
+  builders[nextState](posB, tempSeeds, baseSeed + nextState * 7919);
+  // snapshot current into posA
+  for (let i = 0; i < N*3; i++) posA[i] = posCur[i];
+  // update seeds for target
+  for (let i = 0; i < N; i++) seedsArr[i] = tempSeeds[i];
+  geom.attributes.seed.needsUpdate = true;
+  fading = true;
+  fadeStart = performance.now()/1000;
+  stateLabel.style.opacity = '0.25';
+}
+
+function updateCrossfade(t) {
+  if (!fading) return;
+  const elapsed = t - fadeStart;
+  const alpha = Math.min(elapsed / FADE_DUR, 1.0);
+  // smooth ease
+  const s = alpha * alpha * (3 - 2 * alpha);
+  for (let i = 0; i < N*3; i++) {
+    posCur[i] = posA[i] + (posB[i] - posA[i]) * s;
+  }
+  geom.attributes.position.needsUpdate = true;
+  // lerp uMode
+  uniforms.uMode.value = STATES[currentState].mode + (STATES[nextState].mode - STATES[currentState].mode) * s;
+  if (alpha >= 1.0) {
+    fading = false;
+    currentState = nextState;
+    uniforms.uMode.value = STATES[currentState].mode;
+    stateLabel.textContent = STATES[currentState].name;
+    stateLabel.style.opacity = '0.55';
+  }
+}
+
+addEventListener('pointermove', (e) => {
+  uniforms.uPointer.value.set(
+    (e.clientX/innerWidth)*2-1, (e.clientY/innerHeight)*2-1
+  );
+});
+addEventListener('click', () => { if (!fading) startTransition(); });
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now()-start)/1000;
+  uniforms.uTime.value = t;
+  updateCrossfade(t);
+  // camera drift — tracks form centroid area, slight breathing
+  camera.position.x = Math.sin(t*0.05)*0.4;
+  camera.position.y = 0.2 + Math.sin(t*0.04+1.0)*0.25;
+  camera.position.z = 12;
+  camera.lookAt(0, 0, 0);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
