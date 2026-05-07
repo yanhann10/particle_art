@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hym · border drift</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1814; overflow:hidden;
+               color:#e5d6e0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">hym</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 42, 95);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1814, 1);
+document.body.appendChild(renderer.domElement);
+
+// volumetric cloud field — 18k particles advected by curl noise
+const N = 18000;
+const positions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const birthTime = new Float32Array(N);
+
+// spawn particles in a wide horizontal band (cloud layer)
+for (let i = 0; i < N; i++) {
+  positions[i*3]   = (Math.random() - 0.5) * 140;
+  positions[i*3+1] = (Math.random() - 0.5) * 18 + 12;
+  positions[i*3+2] = (Math.random() - 0.5) * 80;
+  seeds[i] = Math.random();
+  birthTime[i] = Math.random() * 12;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('birthTime', new THREE.BufferAttribute(birthTime, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBorderX: { value: 0 } // x-coord of the invisible border line
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uBorderX;
+    attribute float seed;
+    attribute float birthTime;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    // curl-noise functions for advection
+    vec3 hash3(vec3 p) {
+      p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+      p += dot(p, p.yxz + 33.33);
+      return fract((p.xxy + p.yxx) * p.zyx);
+    }
+    float noise3(vec3 p) {
+      vec3 i = floor(p);
+      vec3 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      return mix(
+        mix(mix(hash3(i).x, hash3(i + vec3(1,0,0)).x, f.x),
+            mix(hash3(i + vec3(0,1,0)).x, hash3(i + vec3(1,1,0)).x, f.x), f.y),
+        mix(mix(hash3(i + vec3(0,0,1)).x, hash3(i + vec3(1,0,1)).x, f.x),
+            mix(hash3(i + vec3(0,1,1)).x, hash3(i + vec3(1,1,1)).x, f.x), f.y),
+        f.z
+      );
+    }
+    vec3 curlNoise(vec3 p) {
+      float e = 0.12;
+      float n1 = noise3(p + vec3(0, e, 0));
+      float n2 = noise3(p - vec3(0, e, 0));
+      float n3 = noise3(p + vec3(e, 0, 0));
+      float n4 = noise3(p - vec3(e, 0, 0));
+      float n5 = noise3(p + vec3(0, 0, e));
+      float n6 = noise3(p - vec3(0, 0, e));
+      float x = (n1 - n2) - (n5 - n6);
+      float y = (n5 - n6) - (n3 - n4);
+      float z = (n3 - n4) - (n1 - n2);
+      return normalize(vec3(x, y, z));
+    }
+
+    void main() {
+      float t = uTime * 0.5 + birthTime;
+      vec3 p = position;
+
+      // eastward wind base drift
+      p.x += t * 2.8;
+
+      // curl-noise advection
+      vec3 sampleP = p * 0.045 + vec3(uTime * 0.08, seed * 3.14, 0);
+      vec3 curl = curlNoise(sampleP);
+      p += curl * 3.2 * sin(t * 0.4 + seed * 6.28);
+
+      // vertical undulation
+      p.y += sin(t * 0.3 + seed * 6.28 + p.x * 0.02) * 1.8;
+
+      // wrap x to keep particles in frame
+      if (p.x > 70.0) p.x -= 140.0;
+
+      // palette: bone-white if west of border, oxidized-red if east of border
+      vec3 bone = vec3(0.92, 0.89, 0.84);
+      vec3 dust = vec3(0.78, 0.74, 0.68);
+      vec3 red = vec3(0.82, 0.28, 0.22);
+
+      float distToBorder = abs(p.x - uBorderX);
+      float crossedBorder = step(uBorderX, p.x);
+
+      // base color: dust-white west, oxidized-red east
+      vec3 baseCol = mix(mix(bone, dust, seed), red, crossedBorder);
+
+      // fade near border line to show transition zone
+      float borderProximity = smoothstep(4.0, 0.0, distToBorder);
+      vCol = mix(baseCol, vec3(0.65, 0.45, 0.42), borderProximity * 0.6);
+
+      // depth fade
+      float depthFade = smoothstep(-40.0, 20.0, p.z);
+      vAlpha = depthFade * (0.35 + 0.25 * (1.0 - seed));
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (2.2 + seed * 1.8) * uPixel * (80.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float soft = exp(-r * 6.0);
+      float a = soft * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// invisible border line geometry (for visual reference — faint vertical plane)
+const borderGeom = new THREE.PlaneGeometry(0.15, 60);
+const borderMat = new THREE.MeshBasicMaterial({
+  color: 0x4a3a38,
+  transparent: true,
+  opacity: 0.18,
+  side: THREE.DoubleSide
+});
+const borderPlane = new THREE.Mesh(borderGeom, borderMat);
+borderPlane.rotation.y = Math.PI / 2;
+scene.add(borderPlane);
+
+// ambient hemisphere light (soft sky-ground gradient)
+const hemiLight = new THREE.HemisphereLight(0x9a8a7a, 0x3a2a1a, 0.6);
+scene.add(hemiLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // border line drifts slowly eastward (simulating geopolitical shift)
+  uniforms.uBorderX.value = Math.sin(t * 0.08) * 18;
+  borderPlane.position.x = uniforms.uBorderX.value;
+
+  // gentle camera sway
+  camera.position.x = Math.sin(t * 0.05) * 8;
+  camera.position.y = 42 + Math.sin(t * 0.07) * 3;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
