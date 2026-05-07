@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tsp · mycorrhizal leaf-mat</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0805; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">tsp</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── mycorrhizal leaf-mat — fungal network growing through fallen leaves ── */
+/* channel: slime mold plasmodium — amoeboid flow, anastomosis where threads meet */
+/* non-human composition: off-center, asymmetric, no frontal address */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(-7, 11, 9);
+camera.lookAt(2, 0, -1);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0805, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── leaf geometry — curved strip with mid-vein ── */
+function makeLeaf(w, h, curlAmt){
+  const segs = 20;
+  const pos = [];
+  const seeds = [];
+  for (let i=0; i<=segs; i++){
+    const u = i/segs;
+    const x = (u - 0.5) * w;
+    const y = 0;
+    const z = u * h;
+    const curl = curlAmt * Math.sin(u * Math.PI) * (1 - Math.abs(x) / (w*0.5));
+    pos.push(x, y + curl, z);
+    seeds.push(Math.random());
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geom.setAttribute('seed', new THREE.Float32BufferAttribute(seeds, 1));
+  return geom;
+}
+
+/* ── leaf cluster: 7 leaves in overlapping arrangement, rotated, curled variously ── */
+const leafConfigs = [
+  { x:  0.0, z:  0.0, rot: 0.0,   w: 3.2, h: 5.0, curl:  0.85, twist: 0.15 },
+  { x: -1.8, z:  1.2, rot: 0.55,  w: 2.6, h: 4.2, curl:  1.1,  twist: 0.28 },
+  { x:  2.3, z: -0.8, rot: -0.68, w: 3.0, h: 4.8, curl:  0.70, twist: -0.22 },
+  { x:  0.9, z:  2.5, rot: 1.1,   w: 2.4, h: 3.8, curl:  1.35, twist: 0.40 },
+  { x: -2.5, z: -1.5, rot: -1.2,  w: 2.8, h: 4.4, curl:  0.95, twist: -0.18 },
+  { x:  1.5, z: -2.8, rot: 0.3,   w: 2.2, h: 3.6, curl:  1.50, twist: 0.35 },
+  { x: -0.7, z: -2.0, rot: -0.4,  w: 2.5, h: 4.0, curl:  1.20, twist: -0.30 },
+];
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+};
+
+const leafMat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.4 + seed * 6.28;
+
+      /* settling motion — leaves gently compress, shift laterally as fungal mat grows beneath */
+      float settle = sin(t * 0.15) * 0.05;
+      p.y += settle * (1.0 - seed);
+
+      /* lateral drift — slow amoeboid creep, non-directional */
+      float driftX = sin(t * 0.22 + seed * 3.0) * 0.08;
+      float driftZ = cos(t * 0.18 + seed * 5.0) * 0.06;
+      p.x += driftX;
+      p.z += driftZ;
+
+      /* micro-tremor from hyphae threading underneath */
+      float tremor = 0.012 * sin(uTime * 6.0 + seed * 40.0);
+      p.y += tremor;
+
+      /* palette: decomposing autumn leaf — sienna, rust, ochre, fading to soil-brown */
+      float decay = seed * 0.4 + 0.3;
+      vec3 sienna = vec3(0.52, 0.34, 0.22);
+      vec3 rust   = vec3(0.58, 0.28, 0.18);
+      vec3 ochre  = vec3(0.72, 0.52, 0.28);
+      vec3 soil   = vec3(0.28, 0.22, 0.18);
+      vec3 col = mix(sienna, ochre, seed);
+      col = mix(col, rust, sin(t * 0.5) * 0.3 + 0.3);
+      col = mix(col, soil, decay);
+
+      vCol = col;
+      vAlpha = 0.6 - decay * 0.3;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 2.5 * uPixel * (50.0/dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const leafPoints = [];
+for (const cfg of leafConfigs){
+  const g = makeLeaf(cfg.w, cfg.h, cfg.curl);
+  const pts = new THREE.Points(g, leafMat);
+  pts.position.set(cfg.x, 0, cfg.z);
+  pts.rotation.y = cfg.rot;
+  pts.rotation.z = cfg.twist;
+  scene.add(pts);
+  leafPoints.push(pts);
+}
+
+/* ── fungal threads — slime mold plasmodium tubes anastomosing across the mat ── */
+/* threads start at random leaf-surface points, grow toward attractant nodes (food/moisture gradients) */
+/* when threads meet, they fuse (anastomosis) */
+
+const threadN = 12000;
+const threadPos = new Float32Array(threadN * 3);
+const threadSeeds = new Float32Array(threadN);
+const threadPhase = new Float32Array(threadN);
+
+/* attractant nodes — irregular scatter, asymmetric */
+const attractors = [
+  new THREE.Vector3( 1.2,  0, -0.8),
+  new THREE.Vector3(-1.5,  0,  1.5),
+  new THREE.Vector3( 2.5,  0,  0.5),
+  new THREE.Vector3(-0.5,  0, -2.0),
+  new THREE.Vector3( 0.8,  0,  2.2),
+  new THREE.Vector3(-2.2,  0, -1.2),
+];
+
+let idx = 0;
+for (const cfg of leafConfigs){
+  const density = Math.floor(threadN / leafConfigs.length);
+  for (let i=0; i<density && idx<threadN; i++){
+    const u = Math.random();
+    const x = (u - 0.5) * cfg.w;
+    const z = u * cfg.h;
+    const curl = cfg.curl * Math.sin(u * Math.PI) * (1 - Math.abs(x)/(cfg.w*0.5));
+    const lp = new THREE.Vector3(x, curl, z);
+    lp.applyAxisAngle(new THREE.Vector3(0,1,0), cfg.rot);
+    lp.applyAxisAngle(new THREE.Vector3(0,0,1), cfg.twist);
+    lp.x += cfg.x;
+    lp.z += cfg.z;
+
+    /* thread starts at leaf surface, grows toward nearest attractor */
+    const nearest = attractors.reduce((a,b) => lp.distanceTo(a)<lp.distanceTo(b)?a:b);
+    const dir = new THREE.Vector3().subVectors(nearest, lp).normalize();
+    const len = Math.random() * 0.8 + 0.3;
+    lp.addScaledVector(dir, len);
+    lp.y += Math.random() * 0.08 - 0.04; /* vertical drift — hyphae weave through layers */
+
+    threadPos[idx*3]   = lp.x;
+    threadPos[idx*3+1] = lp.y;
+    threadPos[idx*3+2] = lp.z;
+    threadSeeds[idx] = Math.random();
+    threadPhase[idx] = Math.random() * 6.28;
+    idx++;
+  }
+}
+
+const threadGeom = new THREE.BufferGeometry();
+threadGeom.setAttribute('position', new THREE.BufferAttribute(threadPos, 3));
+threadGeom.setAttribute('seed', new THREE.BufferAttribute(threadSeeds, 1));
+threadGeom.setAttribute('phase', new THREE.BufferAttribute(threadPhase, 1));
+
+const threadMat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float phase;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.5 + phase;
+
+      /* amoeboid pulsation — threads thicken/thin as plasmodium flows through them */
+      float pulse = sin(t * 0.8) * 0.5 + 0.5;
+
+      /* anastomosis drift — threads wander toward each other, fusing where they meet */
+      float wander = sin(t * 0.3 + seed * 10.0) * 0.04;
+      p.x += wander;
+      p.z += cos(t * 0.25 + seed * 8.0) * 0.035;
+
+      /* vertical creep — hyphae push up through leaf-litter cracks */
+      float creep = sin(t * 0.4) * 0.02;
+      p.y += creep * seed;
+
+      /* palette: fungal mycelium — cream, pale yellow, faint green luminescence */
+      vec3 cream = vec3(0.92, 0.88, 0.78);
+      vec3 yellow = vec3(0.95, 0.90, 0.65);
+      vec3 green = vec3(0.78, 0.88, 0.72);
+      vec3 col = mix(cream, yellow, seed);
+      col = mix(col, green, pulse * 0.15);
+
+      vCol = col;
+      vAlpha = (0.3 + pulse * 0.2) * (0.5 + seed * 0.5);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + pulse * 0.6) * uPixel * (45.0/dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 10.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const threadPoints = new THREE.Points(threadGeom, threadMat);
+scene.add(threadPoints);
+
+/* ── attractor glow nodes — faint pheromone markers ── */
+const attractorGeom = new THREE.BufferGeometry();
+const attractorPos = new Float32Array(attractors.length * 3);
+const attractorSeeds = new Float32Array(attractors.length);
+attractors.forEach((v, i) => {
+  attractorPos[i*3]   = v.x;
+  attractorPos[i*3+1] = v.y + 0.1;
+  attractorPos[i*3+2] = v.z;
+  attractorSeeds[i] = Math.random();
+});
+attractorGeom.setAttribute('position', new THREE.BufferAttribute(attractorPos, 3));
+attractorGeom.setAttribute('seed', new THREE.BufferAttribute(attractorSeeds, 1));
+
+const attractorMat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.6 + seed * 6.28;
+
+      /* pheromone pulse — attractants breathe, signaling food/moisture */
+      float pulse = sin(t * 0.7) * 0.5 + 0.5;
+
+      /* faint vertical bob */
+      p.y += sin(t * 0.5) * 0.05;
+
+      vec3 amber = vec3(0.88, 0.72, 0.45);
+      vec3 pale = vec3(0.95, 0.90, 0.75);
+      vCol = mix(amber, pale, pulse);
+      vAlpha = 0.25 + pulse * 0.15;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (4.0 + pulse * 2.0) * uPixel * (60.0/dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 6.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const attractorPoints = new THREE.Points(attractorGeom, attractorMat);
+scene.add(attractorPoints);
+
+/* ── subtle volumetric fog — forest-floor humidity ── */
+scene.fog = new THREE.FogExp2(0x0a0805, 0.045);
+
+/* ── camera: slow non-human drift, no orbit, asymmetric framing ── */
+const camBase = camera.position.clone();
+const lookBase = new THREE.Vector3(2, 0, -1);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  /* camera drift — amoeboid, non-periodic, asymmetric */
+  const driftX = Math.sin(elapsed * 0.08) * 1.2;
+  const driftY = Math.cos(elapsed * 0.12) * 0.6;
+  const driftZ = Math.sin(elapsed * 0.09) * 0.8;
+  camera.position.set(camBase.x + driftX, camBase.y + driftY, camBase.z + driftZ);
+
+  const lookX = Math.sin(elapsed * 0.06) * 0.5;
+  const lookZ = Math.cos(elapsed * 0.07) * 0.4;
+  camera.lookAt(lookBase.x + lookX, lookBase.y, lookBase.z + lookZ);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
