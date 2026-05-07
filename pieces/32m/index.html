@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: flocking, intensity: gentle -->
+<title>32m · the flock that loses one and finds it again</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#a8b8d0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  /* desaturated dawn gradient — muted atmosphere, not loud sky */
+  body {
+    background:
+      linear-gradient(to bottom,
+        #131320 0%,
+        #1c1826 22%,
+        #2a2028 45%,
+        #3a2d2a 68%,
+        #4a3a2e 88%,
+        #584535 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em;
+          font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.6; font-size:10px; letter-spacing:0.06em;
+          color:#9a7a5a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+</style>
+</head>
+<body>
+<div class="id">32m</div>
+<div class="arc" id="arc">together · 100%</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// sav mutation: point sprites → translucent billboarded planes.
+// Each boid is now a small PlaneGeometry instance, opacity 0.04–0.12,
+// so dense regions accumulate into luminous washes and sparse areas
+// read as gauze. All boid simulation logic preserved from parent.
+// Background desaturated + starfield specks per user feedback.
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 26);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ─── starfield: subtle specks so the sky feels inhabited ───
+const starCount = 280;
+const starPos = new Float32Array(starCount * 3);
+const starAlpha = new Float32Array(starCount);
+for (let i = 0; i < starCount; i++) {
+  // scatter in a large sphere behind the flock
+  const r = 30 + Math.random() * 60;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI * 0.7 - 0.1; // bias upward
+  starPos[i * 3]     = Math.cos(th) * Math.cos(ph) * r;
+  starPos[i * 3 + 1] = Math.sin(ph) * r + 8;
+  starPos[i * 3 + 2] = Math.sin(th) * Math.cos(ph) * r;
+  starAlpha[i] = 0.15 + Math.random() * 0.35;
+}
+const starGeom = new THREE.BufferGeometry();
+starGeom.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+starGeom.setAttribute('aAlpha', new THREE.BufferAttribute(starAlpha, 1));
+const starMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, fog: false,
+  uniforms: { uTime: { value: 0 }, uPx: { value: renderer.getPixelRatio() } },
+  vertexShader: `
+    uniform float uPx;
+    uniform float uTime;
+    attribute float aAlpha;
+    varying float vA;
+    void main() {
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float twinkle = 0.7 + 0.3 * sin(uTime * 0.4 + position.x * 3.7);
+      vA = aAlpha * twinkle * clamp(1.0 - (-mv.z - 30.0) / 60.0, 0.0, 1.0);
+      gl_PointSize = (1.2 + aAlpha * 1.0) * uPx;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      if (dot(d, d) > 0.25) discard;
+      gl_FragColor = vec4(0.85, 0.82, 0.75, vA * 0.5);
+    }
+  `
+});
+scene.add(new THREE.Points(starGeom, starMat));
+
+// ─── paper-grain overlay (screen-space noise texture) ───
+const grainSize = 256;
+const grainData = new Uint8Array(grainSize * grainSize);
+for (let i = 0; i < grainData.length; i++) grainData[i] = Math.random() * 255;
+const grainTex = new THREE.DataTexture(grainData, grainSize, grainSize, THREE.RedFormat);
+grainTex.wrapS = grainTex.wrapT = THREE.RepeatWrapping;
+grainTex.needsUpdate = true;
+
+// ─── boids simulation (unchanged from parent sav) ───
+const N = 481;
+const STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+
+for (let i = 0; i < N; i++) {
+  const r = Math.random() * 1.6 + 0.4;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI - Math.PI * 0.5;
+  pos[i * 3]     = Math.cos(th) * Math.cos(ph) * r;
+  pos[i * 3 + 1] = Math.sin(ph) * r;
+  pos[i * 3 + 2] = Math.sin(th) * Math.cos(ph) * r;
+  vel[i * 3]     = 0.3 + (Math.random() - 0.5) * 0.4;
+  vel[i * 3 + 1] = (Math.random() - 0.5) * 0.3;
+  vel[i * 3 + 2] = (Math.random() - 0.5) * 0.4;
+}
+pos[0] = -1.2; pos[1] = 0.6; pos[2] = 0.0;
+
+const PERCEPTION_R = 4.0, SEPARATION_R = 0.9;
+const W_COH = 0.018, W_ALI = 0.060, W_SEP = 0.080;
+const MAX_SPEED = 1.4, MAX_FORCE = 0.030;
+
+let cohesion = 1.0;
+let arcStage = 'together';
+const arcEl = document.getElementById('arc');
+
+function step(dt) {
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 1; i < N; i++) { cx += pos[i*3]; cy += pos[i*3+1]; cz += pos[i*3+2]; }
+  cx /= (N-1); cy /= (N-1); cz /= (N-1);
+
+  const sx = pos[0]-cx, sy = pos[1]-cy, sz = pos[2]-cz;
+  const stragDist = Math.sqrt(sx*sx+sy*sy+sz*sz);
+  const targetCohesion = Math.max(0, Math.min(1, 1-stragDist/8));
+  cohesion += (targetCohesion-cohesion) * dt * 0.45;
+
+  if (cohesion > 0.85) arcStage = 'together';
+  else if (cohesion > 0.5 && stragDist > 4.5) arcStage = 'loss';
+  else if (cohesion < 0.5) arcStage = 'seeking';
+  else if (arcStage === 'seeking' && cohesion > 0.65) arcStage = 'return';
+  arcEl.textContent = `${arcStage} · ${Math.round(cohesion*100)}%`;
+
+  const acc = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    let cohX=0,cohY=0,cohZ=0,cohN=0, aliX=0,aliY=0,aliZ=0,aliN=0, sepX=0,sepY=0,sepZ=0;
+    const px=pos[i*3], py=pos[i*3+1], pz=pos[i*3+2];
+    const isS = i===STRAGGLER;
+    const pR = isS ? PERCEPTION_R*0.55 : PERCEPTION_R;
+    for (let j=0; j<N; j++) {
+      if(i===j) continue;
+      const dx=pos[j*3]-px, dy=pos[j*3+1]-py, dz=pos[j*3+2]-pz;
+      const d2=dx*dx+dy*dy+dz*dz;
+      if(d2>pR*pR||d2<1e-6) continue;
+      cohX+=pos[j*3]; cohY+=pos[j*3+1]; cohZ+=pos[j*3+2]; cohN++;
+      aliX+=vel[j*3]; aliY+=vel[j*3+1]; aliZ+=vel[j*3+2]; aliN++;
+      if(d2<SEPARATION_R*SEPARATION_R){
+        const inv=1/Math.sqrt(d2);
+        sepX-=dx*inv; sepY-=dy*inv; sepZ-=dz*inv;
+      }
+    }
+    if(isS){
+      const drift=Math.sin(performance.now()*0.0003)*0.4;
+      acc[i*3]+=drift; acc[i*3+1]+=-0.25+Math.cos(performance.now()*0.0002)*0.2; acc[i*3+2]+=drift*0.6;
+    }
+    if(!isS && (arcStage==='seeking'||arcStage==='return')){
+      const tx=pos[0]-px, ty=pos[1]-py, tz=pos[2]-pz;
+      const td=Math.sqrt(tx*tx+ty*ty+tz*tz)+1e-3;
+      const seek=arcStage==='seeking'?0.020:0.012;
+      acc[i*3]+=(tx/td)*seek; acc[i*3+1]+=(ty/td)*seek; acc[i*3+2]+=(tz/td)*seek;
+    }
+    if(cohN>0){acc[i*3]+=(cohX/cohN-px)*W_COH; acc[i*3+1]+=(cohY/cohN-py)*W_COH; acc[i*3+2]+=(cohZ/cohN-pz)*W_COH;}
+    if(aliN>0){acc[i*3]+=(aliX/aliN-vel[i*3])*W_ALI; acc[i*3+1]+=(aliY/aliN-vel[i*3+1])*W_ALI; acc[i*3+2]+=(aliZ/aliN-vel[i*3+2])*W_ALI;}
+    acc[i*3]+=sepX*W_SEP; acc[i*3+1]+=sepY*W_SEP; acc[i*3+2]+=sepZ*W_SEP;
+    const d2c=px*px+py*py+pz*pz;
+    if(d2c>90){const inv=0.012/Math.sqrt(d2c); acc[i*3]+=-px*inv; acc[i*3+1]+=-py*inv; acc[i*3+2]+=-pz*inv;}
+  }
+
+  const speedMul = (arcStage==='loss'||arcStage==='seeking')?0.55 : arcStage==='return'?0.85 : 1.0;
+  for (let i=0; i<N; i++){
+    let ax=acc[i*3],ay=acc[i*3+1],az=acc[i*3+2];
+    const af=Math.sqrt(ax*ax+ay*ay+az*az);
+    if(af>MAX_FORCE){ax*=MAX_FORCE/af;ay*=MAX_FORCE/af;az*=MAX_FORCE/af;}
+    vel[i*3]+=ax; vel[i*3+1]+=ay; vel[i*3+2]+=az;
+    let vx=vel[i*3],vy=vel[i*3+1],vz=vel[i*3+2];
+    const sp=Math.sqrt(vx*vx+vy*vy+vz*vz);
+    if(sp>MAX_SPEED){vx*=MAX_SPEED/sp;vy*=MAX_SPEED/sp;vz*=MAX_SPEED/sp;vel[i*3]=vx;vel[i*3+1]=vy;vel[i*3+2]=vz;}
+    pos[i*3]+=vel[i*3]*dt*speedMul; pos[i*3+1]+=vel[i*3+1]*dt*speedMul; pos[i*3+2]+=vel[i*3+2]*dt*speedMul;
+  }
+}
+
+// ─── instanced plane rendering ───
+// Each boid → a small billboarded translucent plane.
+// Low individual opacity (0.04–0.12) so overlaps accumulate luminosity.
+
+const planeGeo = new THREE.PlaneGeometry(1, 1);
+const instancedGeo = new THREE.InstancedBufferGeometry();
+instancedGeo.index = planeGeo.index;
+instancedGeo.attributes.position = planeGeo.attributes.position;
+instancedGeo.attributes.uv = planeGeo.attributes.uv;
+instancedGeo.instanceCount = N;
+
+const offsetAttr = new THREE.InstancedBufferAttribute(new Float32Array(N * 3), 3);
+offsetAttr.setUsage(THREE.DynamicDrawUsage);
+instancedGeo.setAttribute('offset', offsetAttr);
+
+const iColorAttr = new THREE.InstancedBufferAttribute(new Float32Array(N * 3), 3);
+iColorAttr.setUsage(THREE.DynamicDrawUsage);
+instancedGeo.setAttribute('iColor', iColorAttr);
+
+const seedArr = new Float32Array(N);
+const stragArr = new Float32Array(N);
+const sizeArr = new Float32Array(N);
+const rotArr = new Float32Array(N); // per-instance random rotation around view axis
+for (let i = 0; i < N; i++) {
+  seedArr[i] = Math.random();
+  stragArr[i] = i === STRAGGLER ? 1.0 : 0.0;
+  sizeArr[i] = 0.28 + Math.random() * 0.22; // hand-tuned size variation
+  rotArr[i] = Math.random() * Math.PI * 2;
+}
+instancedGeo.setAttribute('seed', new THREE.InstancedBufferAttribute(seedArr, 1));
+instancedGeo.setAttribute('strag', new THREE.InstancedBufferAttribute(stragArr, 1));
+instancedGeo.setAttribute('iSize', new THREE.InstancedBufferAttribute(sizeArr, 1));
+instancedGeo.setAttribute('iRot', new THREE.InstancedBufferAttribute(rotArr, 1));
+
+const uTime = { value: 0 };
+const uCohesion = { value: 1.0 };
+const uCamUp = { value: new THREE.Vector3(0, 1, 0) };
+const uCamRight = { value: new THREE.Vector3(1, 0, 0) };
+
+const flockMat = new THREE.ShaderMaterial({
+  uniforms: { uTime, uCohesion, uCamUp, uCamRight, uGrain: { value: grainTex } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide, fog: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uCohesion;
+    uniform vec3 uCamUp;
+    uniform vec3 uCamRight;
+
+    attribute vec3 offset;
+    attribute vec3 iColor;
+    attribute float seed;
+    attribute float strag;
+    attribute float iSize;
+    attribute float iRot;
+
+    varying vec3 vCol;
+    varying float vOpacity;
+    varying vec2 vUv;
+
+    void main() {
+      vUv = uv;
+
+      // billboard: orient plane to face camera using cam right/up vectors
+      vec2 corner = position.xy; // -0.5..0.5
+      // per-instance spin around view axis for handmade variation
+      float a = iRot + uTime * 0.15 * (0.5 + seed * 0.5);
+      float ca = cos(a), sa = sin(a);
+      vec2 rc = vec2(corner.x * ca - corner.y * sa, corner.x * sa + corner.y * ca);
+
+      // breathing size modulation
+      float t = uTime * 0.6 + seed * 6.28;
+      float breathe = 1.0 + 0.15 * sin(t);
+      float sz = iSize * breathe * (1.0 + strag * 1.8);
+
+      vec3 worldPos = offset
+        + uCamRight * rc.x * sz
+        + uCamUp    * rc.y * sz;
+
+      vec4 mv = modelViewMatrix * vec4(worldPos, 1.0);
+      float dist = -mv.z;
+
+      // depth-based fade
+      float fade = clamp(1.0 - (dist - 20.0) / 32.0, 0.0, 1.0);
+
+      // opacity: low base so overlaps compose. Straggler slightly more opaque.
+      float baseOp = 0.045 + seed * 0.065; // 0.045–0.11
+      vOpacity = (baseOp + strag * 0.06) * fade;
+
+      // color: cohesion-driven palette (from parent sav)
+      vec3 warm  = vec3(0.96, 0.65, 0.32);
+      vec3 hot   = vec3(1.00, 0.92, 0.78);
+      vec3 cool  = vec3(0.42, 0.55, 0.78);
+      vec3 lost  = vec3(0.55, 0.32, 0.62);
+      vec3 cohCol = mix(cool, warm, smoothstep(0.0, 1.0, uCohesion));
+      vec3 highCol = mix(lost, hot, smoothstep(0.0, 1.0, uCohesion));
+      vCol = mix(cohCol, highCol, strag * 0.7 + smoothstep(0.6, 1.0, sin(t * 0.4)) * 0.18);
+      vCol *= (1.0 + strag * 0.35);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uGrain;
+    uniform float uTime;
+    varying vec3 vCol;
+    varying float vOpacity;
+    varying vec2 vUv;
+
+    void main() {
+      // soft circular falloff within the plane quad
+      vec2 d = vUv - 0.5;
+      float r2 = dot(d, d);
+      // soft disk with feathered edge
+      float alpha = smoothstep(0.25, 0.08, r2);
+
+      // paper grain: subtle noise to break computational sterility
+      float grain = texture2D(uGrain, vUv * 3.0 + vec2(uTime * 0.01)).r;
+      alpha *= 0.85 + grain * 0.15;
+
+      float a = alpha * vOpacity;
+      if (a < 0.002) discard;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const flockMesh = new THREE.Mesh(instancedGeo, flockMat);
+flockMesh.frustumCulled = false;
+scene.add(flockMesh);
+
+// ─── atmospheric ground horizon line (subtle) ───
+const horizGeo = new THREE.PlaneGeometry(120, 0.08);
+const horizMat = new THREE.MeshBasicMaterial({
+  color: 0x5a4a3a, transparent: true, opacity: 0.08,
+  depthWrite: false, side: THREE.DoubleSide
+});
+const horizMesh = new THREE.Mesh(horizGeo, horizMat);
+horizMesh.position.y = -8;
+horizMesh.rotation.x = 0;
+scene.add(horizMesh);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm so thumbnail catches meaningful state
+for (let s = 0; s < 250; s++) step(0.05);
+
+// helper to compute palette on CPU for instanced color attribute
+function computeColor(seed, strag, coh, time) {
+  const t = time * 0.6 + seed * 6.28;
+  const s1 = Math.max(0, Math.min(1, coh));
+  const warm  = [0.96, 0.65, 0.32];
+  const hot   = [1.00, 0.92, 0.78];
+  const cool  = [0.42, 0.55, 0.78];
+  const lost  = [0.55, 0.32, 0.62];
+  const sm = s1 * s1 * (3 - 2 * s1); // smoothstep
+  const cohCol = cool.map((c, i) => c + (warm[i] - c) * sm);
+  const highCol = lost.map((c, i) => c + (hot[i] - c) * sm);
+  const accent = Math.sin(t * 0.4);
+  const accentSm = accent > 0.6 ? (accent - 0.6) / 0.4 : 0;
+  const mix2 = strag * 0.7 + accentSm * accentSm * (3 - 2 * accentSm) * 0.18;
+  const col = cohCol.map((c, i) => c + (highCol[i] - c) * mix2);
+  const mul = 1.0 + strag * 0.35;
+  return col.map(c => c * mul);
+}
+
+let lastT = performance.now();
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  const time = now / 1000;
+  uTime.value = time;
+  uCohesion.value = cohesion;
+  starMat.uniforms.uTime.value = time;
+
+  step(dt);
+
+  // update camera vectors for billboarding
+  camera.getWorldDirection(new THREE.Vector3()); // ensure matrix is fresh
+  const camMat = camera.matrixWorld;
+  uCamRight.value.set(camMat.elements[0], camMat.elements[1], camMat.elements[2]).normalize();
+  uCamUp.value.set(camMat.elements[4], camMat.elements[5], camMat.elements[6]).normalize();
+
+  // update instance offsets and colors
+  const offsets = offsetAttr.array;
+  const colors = iColorAttr.array;
+  for (let i = 0; i < N; i++) {
+    offsets[i * 3]     = pos[i * 3];
+    offsets[i * 3 + 1] = pos[i * 3 + 1];
+    offsets[i * 3 + 2] = pos[i * 3 + 2];
+    const c = computeColor(seedArr[i], stragArr[i], cohesion, time);
+    colors[i * 3]     = c[0];
+    colors[i * 3 + 1] = c[1];
+    colors[i * 3 + 2] = c[2];
+  }
+  offsetAttr.needsUpdate = true;
+  iColorAttr.needsUpdate = true;
+
+  // slow auto-orbit
+  const ang = now * 0.00010;
+  camera.position.x = Math.sin(ang) * 26;
+  camera.position.z = Math.cos(ang) * 26;
+  camera.lookAt(0, 0, 0);
+
+  // orient horizon to face camera
+  horizMesh.lookAt(camera.position);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
