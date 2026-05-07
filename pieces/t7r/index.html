@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>t7r · Fidenza leaf-ribbon delta</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">t7r</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 18, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.3;
+
+/* ── noise (inline 3D simplex for flow field) ── */
+function noise3(x, y, z){
+  const F3 = 1/3, G3 = 1/6;
+  const s = (x+y+z)*F3;
+  const i = Math.floor(x+s), j = Math.floor(y+s), k = Math.floor(z+s);
+  const t = (i+j+k)*G3;
+  const X0=i-t, Y0=j-t, Z0=k-t;
+  const x0=x-X0, y0=y-Y0, z0=z-Z0;
+  let i1,j1,k1,i2,j2,k2;
+  if(x0>=y0){if(y0>=z0){i1=1;j1=0;k1=0;i2=1;j2=1;k2=0;}
+    else if(x0>=z0){i1=1;j1=0;k1=0;i2=1;j2=0;k2=1;}
+    else{i1=0;j1=0;k1=1;i2=1;j2=0;k2=1;}}
+  else{if(y0<z0){i1=0;j1=0;k1=1;i2=0;j2=1;k2=1;}
+    else if(x0<z0){i1=0;j1=1;k1=0;i2=0;j2=1;k2=1;}
+    else{i1=0;j1=1;k1=0;i2=1;j2=1;k2=0;}}
+  const x1=x0-i1+G3, y1=y0-j1+G3, z1=z0-k1+G3;
+  const x2=x0-i2+2*G3, y2=y0-j2+2*G3, z2=z0-k2+2*G3;
+  const x3=x0-1+3*G3, y3=y0-1+3*G3, z3=z0-1+3*G3;
+  const grad3 = [[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],
+                 [1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],
+                 [0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];
+  const perm = [];
+  for(let n=0;n<512;n++) perm[n]=Math.floor(Math.random()*256);
+  const dot = (g,x,y,z)=>g[0]*x+g[1]*y+g[2]*z;
+  const gi0 = perm[(i+(perm[(j+(perm[k&255]))&255]))&255]%12;
+  const gi1 = perm[(i+i1+(perm[(j+j1+(perm[(k+k1)&255]))&255]))&255]%12;
+  const gi2 = perm[(i+i2+(perm[(j+j2+(perm[(k+k2)&255]))&255]))&255]%12;
+  const gi3 = perm[(i+1+(perm[(j+1+(perm[(k+1)&255]))&255]))&255]%12;
+  const t0=0.6-x0*x0-y0*y0-z0*z0, n0 = t0<0?0:Math.pow(t0,4)*dot(grad3[gi0],x0,y0,z0);
+  const t1=0.6-x1*x1-y1*y1-z1*z1, n1 = t1<0?0:Math.pow(t1,4)*dot(grad3[gi1],x1,y1,z1);
+  const t2=0.6-x2*x2-y2*y2-z2*z2, n2 = t2<0?0:Math.pow(t2,4)*dot(grad3[gi2],x2,y2,z2);
+  const t3=0.6-x3*x3-y3*y3-z3*z3, n3 = t3<0?0:Math.pow(t3,4)*dot(grad3[gi3],x3,y3,z3);
+  return 32*(n0+n1+n2+n3);
+}
+
+/* ── flow field ── */
+function flowAt(x, y, t){
+  const scale = 0.12;
+  const curl = noise3(x*scale, y*scale, t*0.15);
+  const ang = curl * Math.PI * 2;
+  return { x: Math.cos(ang), y: Math.sin(ang) };
+}
+
+/* ── streamline integration with collision ── */
+class Ribbon {
+  constructor(path, thickness, color){
+    this.path = path;
+    this.thickness = thickness;
+    this.color = color;
+  }
+  bounds(){
+    const bb = new THREE.Box2();
+    for(const p of this.path){
+      bb.expandByPoint(new THREE.Vector2(p.x, p.y));
+    }
+    bb.min.x -= this.thickness; bb.min.y -= this.thickness;
+    bb.max.x += this.thickness; bb.max.y += this.thickness;
+    return bb;
+  }
+  distToPoint(px, py){
+    let min = Infinity;
+    for(let i=0; i<this.path.length-1; i++){
+      const a = this.path[i], b = this.path[i+1];
+      const dx=b.x-a.x, dy=b.y-a.y;
+      const len = Math.sqrt(dx*dx+dy*dy);
+      if(len<1e-6) continue;
+      const t = Math.max(0,Math.min(1,((px-a.x)*dx+(py-a.y)*dy)/(len*len)));
+      const cx=a.x+t*dx, cy=a.y+t*dy;
+      const d = Math.sqrt((px-cx)*(px-cx)+(py-cy)*(py-cy));
+      if(d<min) min=d;
+    }
+    return min;
+  }
+}
+
+const ribbons = [];
+const W = 30, H = 30;
+const STREAMLINE_COUNT = 50;
+const STEP_SIZE = 0.18;
+const MAX_STEPS = 220;
+const MIN_DIST = 0.7;
+const seed = Math.floor(Math.random()*1e9);
+let rng_state = seed;
+function rng(){
+  rng_state ^= rng_state << 13; rng_state ^= rng_state >> 17; rng_state ^= rng_state << 5;
+  return (rng_state>>>0)/4294967296;
+}
+
+function integrateStreamline(sx, sy, t){
+  const path = [{x:sx, y:sy}];
+  let x=sx, y=sy;
+  for(let step=0; step<MAX_STEPS; step++){
+    const f = flowAt(x, y, t);
+    x += f.x * STEP_SIZE;
+    y += f.y * STEP_SIZE;
+    if(x<-W/2||x>W/2||y<-H/2||y>H/2) break;
+    let tooClose = false;
+    for(const r of ribbons){
+      if(r.distToPoint(x,y) < r.thickness + MIN_DIST){
+        tooClose = true; break;
+      }
+    }
+    if(tooClose) break;
+    path.push({x, y});
+  }
+  return path;
+}
+
+/* ── palette: Fidenza Luxe (muted earth tones, hand-picked) ── */
+const LUXE = [
+  new THREE.Color(0xc4a57b), // warm sand
+  new THREE.Color(0x8b6f47), // ochre
+  new THREE.Color(0x5c4a3a), // burnt sienna
+  new THREE.Color(0x9b8b7e), // taupe
+  new THREE.Color(0xa67c52), // terracotta
+];
+
+for(let i=0; i<STREAMLINE_COUNT; i++){
+  const sx = (rng()-0.5)*W;
+  const sy = (rng()-0.5)*H;
+  const path = integrateStreamline(sx, sy, 0);
+  if(path.length < 10) continue;
+  const baseThick = 0.3 + rng()*0.6;
+  const col = LUXE[Math.floor(rng()*LUXE.length)].clone();
+  ribbons.push(new Ribbon(path, baseThick, col));
+}
+
+/* ── leaf-ribbon geometry: each ribbon is a folded leaf-strip ── */
+const group = new THREE.Group();
+scene.add(group);
+
+for(const rib of ribbons){
+  const path = rib.path;
+  if(path.length<2) continue;
+
+  const curve = new THREE.CatmullRomCurve3(
+    path.map(p => new THREE.Vector3(p.x, 0, p.y))
+  );
+
+  const segments = Math.max(32, Math.floor(path.length*2));
+  const positions = [];
+  const colors = [];
+  const indices = [];
+  const widthProfile = t => {
+    const pressureStart = Math.pow(Math.sin(t*Math.PI), 0.7);
+    const pressureMid = 1.0 + 0.3*Math.sin(t*Math.PI*3);
+    return rib.thickness * pressureStart * pressureMid;
+  };
+
+  const colBase = rib.color;
+  const colLight = colBase.clone().multiplyScalar(1.2);
+  const colDark = colBase.clone().multiplyScalar(0.7);
+
+  for(let i=0; i<=segments; i++){
+    const t = i/segments;
+    const pt = curve.getPointAt(t);
+    const tang = curve.getTangentAt(t).normalize();
+    const binorm = new THREE.Vector3(-tang.z, 0, tang.x).normalize();
+    const w = widthProfile(t);
+
+    const foldPhase = t * Math.PI * 4 + rib.thickness * 10;
+    const foldAmt = 0.2 * Math.sin(foldPhase);
+    const yOffset = foldAmt * w;
+
+    const leftEdge = pt.clone().addScaledVector(binorm, w).add(new THREE.Vector3(0, yOffset, 0));
+    const rightEdge = pt.clone().addScaledVector(binorm, -w).add(new THREE.Vector3(0, -yOffset*0.6, 0));
+
+    const veinColor = t < 0.5 ? colLight : colDark;
+    positions.push(leftEdge.x, leftEdge.y, leftEdge.z);
+    colors.push(veinColor.r, veinColor.g, veinColor.b);
+    positions.push(rightEdge.x, rightEdge.y, rightEdge.z);
+    colors.push(colBase.r, colBase.g, colBase.b);
+
+    if(i<segments){
+      const base = i*2;
+      indices.push(base, base+1, base+2);
+      indices.push(base+1, base+3, base+2);
+    }
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+
+  const mat = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    side: THREE.DoubleSide,
+    flatShading: true,
+    roughness: 0.85,
+    metalness: 0.05,
+  });
+
+  const mesh = new THREE.Mesh(geom, mat);
+  group.add(mesh);
+}
+
+/* ── mid-vein accent lines (calligraphic) ── */
+for(const rib of ribbons){
+  const path = rib.path;
+  if(path.length<2) continue;
+  const veinPts = [];
+  for(const p of path){
+    veinPts.push(new THREE.Vector3(p.x, 0.02, p.y));
+  }
+  const veinGeom = new THREE.BufferGeometry().setFromPoints(veinPts);
+  const veinMat = new THREE.LineBasicMaterial({
+    color: rib.color.clone().multiplyScalar(0.5),
+    linewidth: 1,
+    transparent: true,
+    opacity: 0.6,
+  });
+  const veinLine = new THREE.Line(veinGeom, veinMat);
+  group.add(veinLine);
+}
+
+/* ── lighting (Hobbs-style: flat matte, minimal specular) ── */
+const ambLight = new THREE.AmbientLight(0xffffff, 0.7);
+scene.add(ambLight);
+const keyLight = new THREE.DirectionalLight(0xffeedd, 0.5);
+keyLight.position.set(5, 10, 7);
+scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0xccbbaa, 0.3);
+fillLight.position.set(-5, 5, -3);
+scene.add(fillLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+  
+  group.rotation.y = elapsed * 0.05;
+  const breathe = 0.08 * Math.sin(elapsed * 0.4);
+  group.rotation.x = breathe;
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
