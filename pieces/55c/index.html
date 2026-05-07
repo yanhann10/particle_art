@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>55c · slow leaves</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#080412; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  .breath { position:fixed; right:14px; bottom:12px; opacity:0; font-size:10px; letter-spacing:0.08em; color:#7a6a5a; font-family:ui-monospace,"SF Mono",Menlo,monospace; transition: opacity 8s ease-in; }
+  .breath.show { opacity:0.4; }
+</style>
+</head>
+<body>
+<div class="id">55c</div>
+<div class="breath" id="breath"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 2, 32);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x080412, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── particles ── */
+const N = 18000;
+const pos0     = new Float32Array(N * 3); // start positions
+const posTarget= new Float32Array(N * 3); // nautilus target
+const posCur   = new Float32Array(N * 3);
+const leafRot  = new Float32Array(N);     // per-leaf rotation
+const leafSize = new Float32Array(N);
+const driftSeed= new Float32Array(N * 3);
+const shellAttr= new Float32Array(N);
+
+// golden-angle nautilus spiral target
+const PHI = (1 + Math.sqrt(5)) / 2;
+const GOLDEN_ANGLE = 2 * Math.PI / (PHI * PHI);
+
+for (let i = 0; i < N; i++) {
+  // start: loose spherical scatter across 5 shells
+  const s = Math.floor(Math.random() * 5);
+  shellAttr[i] = s;
+  const r0 = 5 + s * 2.6 + (Math.random() - 0.5) * 1.8;
+  const theta0 = Math.random() * Math.PI * 2;
+  const phi0 = Math.acos(2 * Math.random() - 1);
+  pos0[i*3]   = r0 * Math.sin(phi0) * Math.cos(theta0);
+  pos0[i*3+1] = r0 * Math.sin(phi0) * Math.sin(theta0) * 0.6; // flatten slightly
+  pos0[i*3+2] = r0 * Math.cos(phi0);
+
+  // target: 3D nautilus spiral
+  const t = i / N;
+  const spiralAngle = i * GOLDEN_ANGLE;
+  const spiralR = 2.0 + 14.0 * Math.pow(t, 0.55);
+  const ySpread = (Math.random() - 0.5) * 2.5 * (1.0 - t * 0.5);
+  const zWobble = Math.sin(spiralAngle * 0.3) * 1.5 * t;
+  posTarget[i*3]   = Math.cos(spiralAngle) * spiralR;
+  posTarget[i*3+1] = ySpread + zWobble;
+  posTarget[i*3+2] = Math.sin(spiralAngle) * spiralR * 0.7;
+
+  posCur[i*3]   = pos0[i*3];
+  posCur[i*3+1] = pos0[i*3+1];
+  posCur[i*3+2] = pos0[i*3+2];
+
+  leafRot[i]  = Math.random() * Math.PI * 2;
+  leafSize[i] = 0.7 + Math.random() * 0.6;
+  driftSeed[i*3]   = (Math.random() - 0.5) * 2;
+  driftSeed[i*3+1] = (Math.random() - 0.5) * 2;
+  driftSeed[i*3+2] = (Math.random() - 0.5) * 2;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position',  new THREE.BufferAttribute(posCur, 3));
+geom.setAttribute('aLeafRot',  new THREE.BufferAttribute(leafRot, 1));
+geom.setAttribute('aLeafSize', new THREE.BufferAttribute(leafSize, 1));
+geom.setAttribute('aShell',    new THREE.BufferAttribute(shellAttr, 1));
+
+const uniforms = {
+  uTime:    { value: 0 },
+  uMorph:   { value: 0 },
+  uFog:     { value: 1.0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+  uColorShift: { value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uMorph;
+    uniform float uFog;
+    uniform float uPixel;
+    uniform float uColorShift;
+    attribute float aLeafRot;
+    attribute float aLeafSize;
+    attribute float aShell;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vRot;
+
+    void main(){
+      vec3 p = position;
+
+      // micro-drift: barely perceptible sway
+      float drift = uTime * 0.015;
+      p.x += sin(drift * 1.1 + aLeafRot * 3.0) * 0.08;
+      p.y += sin(drift * 0.7 + aLeafRot * 5.0) * 0.06;
+      p.z += cos(drift * 0.9 + aLeafRot * 4.0) * 0.07;
+
+      // color: starts warm amber, shifts to gradient warm→teal over time
+      vec3 amber    = vec3(0.92, 0.65, 0.18);
+      vec3 sienna   = vec3(0.62, 0.34, 0.14);
+      vec3 dustRose = vec3(0.72, 0.44, 0.46);
+      vec3 teal     = vec3(0.18, 0.52, 0.58);
+
+      float radial = length(p.xz) / 16.0;
+      float shellNorm = aShell / 4.0;
+
+      // early: everything amber-sienna. late: inner=teal, outer=amber
+      vec3 earlyCol = mix(amber, sienna, shellNorm * 0.6 + 0.2);
+      vec3 lateInner = mix(teal, dustRose, radial * 0.5);
+      vec3 lateOuter = mix(dustRose, amber, clamp(radial - 0.3, 0.0, 1.0));
+      vec3 lateCol = mix(lateInner, lateOuter, clamp(radial, 0.0, 1.0));
+
+      vCol = mix(earlyCol, lateCol, uColorShift);
+      // subtle brightness variation
+      vCol *= 0.7 + 0.3 * sin(aLeafRot * 7.0 + uTime * 0.02);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // fog: thick early, clears slowly
+      float fogFactor = exp(-dist * 0.012 * uFog);
+      vAlpha = fogFactor * (0.35 + 0.15 * sin(aLeafRot * 11.0));
+
+      // fade distant particles more
+      vAlpha *= smoothstep(120.0, 30.0, dist);
+
+      float sz = aLeafSize * (2.0 + uMorph * 1.0) * uPixel * (55.0 / max(dist, 1.0));
+      gl_PointSize = sz;
+      gl_Position = projectionMatrix * mv;
+      vRot = aLeafRot + uTime * 0.008;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vRot;
+
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      // rotate
+      float c = cos(vRot), s = sin(vRot);
+      vec2 ruv = vec2(c*uv.x - s*uv.y, s*uv.x + c*uv.y);
+
+      // leaf shape: ellipse with pointed tip
+      float lx = ruv.x * 2.2;
+      float ly = ruv.y * 1.4;
+      // asymmetric: narrower at top
+      float taper = 1.0 + ruv.y * 0.8;
+      float shape = lx * lx * taper * taper + ly * ly;
+      if (shape > 0.45) discard;
+
+      // vein line down center
+      float vein = exp(-abs(ruv.x) * 40.0) * 0.15;
+
+      float falloff = exp(-shape * 6.0);
+      float a = (falloff + vein) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── background gradient plane ── */
+const bgGeom = new THREE.PlaneGeometry(200, 200);
+const bgMat = new THREE.ShaderMaterial({
+  uniforms: { uShift: { value: 0 } },
+  depthWrite: false,
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+  `,
+  fragmentShader: `
+    uniform float uShift;
+    varying vec2 vUv;
+    void main(){
+      vec3 top    = mix(vec3(0.04,0.02,0.08), vec3(0.03,0.04,0.07), uShift);
+      vec3 bottom = mix(vec3(0.06,0.03,0.02), vec3(0.02,0.02,0.05), uShift);
+      vec3 col = mix(bottom, top, vUv.y);
+      // subtle paper grain
+      float grain = fract(sin(dot(vUv*400.0, vec2(12.9898,78.233)))*43758.5453);
+      col += (grain - 0.5) * 0.012;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const bgPlane = new THREE.Mesh(bgGeom, bgMat);
+bgPlane.position.z = -60;
+scene.add(bgPlane);
+
+/* ── dust motes (environmental texture) ── */
+const DUST = 800;
+const dustPos = new Float32Array(DUST * 3);
+for (let i = 0; i < DUST; i++){
+  dustPos[i*3]   = (Math.random()-0.5)*60;
+  dustPos[i*3+1] = (Math.random()-0.5)*40;
+  dustPos[i*3+2] = (Math.random()-0.5)*50;
+}
+const dustGeom = new THREE.BufferGeometry();
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos,3));
+const dustMat = new THREE.PointsMaterial({
+  color: 0x8a7a6a, size: 0.08, transparent: true, opacity: 0.12,
+  blending: THREE.AdditiveBlending, depthWrite: false
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── breath counter ── */
+const breathEl = document.getElementById('breath');
+let breathCount = 0;
+const BREATH_CYCLE = 4.2; // seconds per breath
+let nextBreathAt = BREATH_CYCLE;
+// show breath counter after 20s
+setTimeout(() => breathEl.classList.add('show'), 20000);
+
+/* ── animation ── */
+const start = performance.now();
+
+// easing: extremely slow start, gradual acceleration
+function slowReveal(t, duration) {
+  const x = Math.min(t / duration, 1.0);
+  // cubic ease-in: nearly invisible change early
+  return x * x * x;
+}
+
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  // morph: 0→1 over 150 seconds with cubic ease-in
+  const morphT = slowReveal(elapsed, 150);
+  uniforms.uMorph.value = morphT;
+
+  // color shift: delayed start at 30s, full at 180s
+  const colorT = slowReveal(Math.max(0, elapsed - 30), 150);
+  uniforms.uColorShift.value = colorT;
+
+  // fog: starts at 1.0, drops to 0.25 over 120s
+  uniforms.uFog.value = 1.0 - 0.75 * slowReveal(elapsed, 120);
+
+  // bg shift
+  bgMat.uniforms.uShift.value = slowReveal(elapsed, 180);
+
+  // update particle positions: lerp from start to nautilus
+  const posAttr = geom.getAttribute('position');
+  const arr = posAttr.array;
+  for (let i = 0; i < N; i++){
+    const i3 = i * 3;
+    arr[i3]   = pos0[i3]   + (posTarget[i3]   - pos0[i3])   * morphT;
+    arr[i3+1] = pos0[i3+1] + (posTarget[i3+1] - pos0[i3+1]) * morphT;
+    arr[i3+2] = pos0[i3+2] + (posTarget[i3+2] - pos0[i3+2]) * morphT;
+  }
+  posAttr.needsUpdate = true;
+
+  // camera: imperceptible slow dolly and slight orbit
+  const camAngle = elapsed * 0.003;
+  const camDist = 32 - morphT * 4;
+  camera.position.x = Math.sin(camAngle) * camDist * 0.15;
+  camera.position.z = camDist * Math.cos(camAngle * 0.5);
+  camera.position.y = 2 + Math.sin(elapsed * 0.008) * 1.5;
+  camera.lookAt(0, 0, 0);
+
+  // breath counter
+  if (elapsed >= nextBreathAt) {
+    breathCount++;
+    breathEl.textContent = breathCount + (breathCount === 1 ? ' breath' : ' breaths');
+    nextBreathAt += BREATH_CYCLE;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
