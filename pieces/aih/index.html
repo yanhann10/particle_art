@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aih · lucy point-cloud · atmospheric beam</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a080c; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  #cam { position:fixed; right:14px; bottom:14px; width:240px; height:160px;
+         border:1px solid #2a2025; border-radius:4px; transform:scaleX(-1); opacity:0.85; }
+  #cam.hidden { display:none; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size: 11px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #1a141d; color:#e5dcd2; border:1px solid #4a3a44;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; z-index:5; }
+  button.start:hover { background:#26202a; }
+  .loading { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+             font-size: 13px; opacity: 0.6; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy · stanford 3d scanning repo …</div>
+<button class="start" id="startBtn" style="display:none">grant camera · sculpt with hands</button>
+<video id="cam" class="hidden" autoplay playsinline muted></video>
+<div class="id">aih</div>
+<div class="hint" id="hint"></div>
+<div class="src">model: stanford 3d scanning repo · public-research</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const fogColor = new THREE.Color(0x0a080c);
+const fogDensity = 0.032;
+scene.fog = new THREE.FogExp2(fogColor, fogDensity);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 30);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a080c, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── volumetric light beam ── */
+const beamOrigin = new THREE.Vector3(9, 18, -3);
+const beamDir = new THREE.Vector3(-0.15, -1.0, 0.08).normalize();
+const beamLen = 38.0;
+const beamRadius = 2.8;
+
+const beamGeo = new THREE.ConeGeometry(beamRadius, beamLen, 32, 1, true);
+const beamMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uFogColor: { value: fogColor },
+    uFogDensity: { value: fogDensity }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    varying vec3 vPos;
+    varying vec2 vUv;
+    varying float vViewDist;
+    void main(){
+      vUv = uv;
+      vPos = position;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vViewDist = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform vec3 uFogColor;
+    uniform float uFogDensity;
+    varying vec3 vPos;
+    varying vec2 vUv;
+    varying float vViewDist;
+    void main(){
+      // radial falloff from cone center axis
+      float h = vUv.y; // 0 at tip (top), 1 at base
+      float radial = length(vPos.xz) / (2.8 * h + 0.001);
+      float edge = 1.0 - smoothstep(0.0, 1.0, radial);
+      edge *= edge;
+      // vertical falloff: brightest near source (tip), fading toward base
+      float vertical = smoothstep(1.0, 0.05, h);
+      vertical = pow(vertical, 0.6);
+      // subtle shimmer
+      float shimmer = 0.92 + 0.08 * sin(h * 18.0 + uTime * 0.7);
+      // warm tint
+      vec3 beamCol = vec3(0.95, 0.85, 0.65);
+      float alpha = edge * vertical * shimmer * 0.065;
+      // manual fog
+      float fogFactor = exp(-uFogDensity * uFogDensity * vViewDist * vViewDist);
+      vec3 col = mix(uFogColor, beamCol, fogFactor);
+      alpha *= fogFactor;
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+
+const beamMesh = new THREE.Mesh(beamGeo, beamMat);
+// orient cone: default cone points along +Y with tip at top
+// we want tip at beamOrigin, extending along beamDir
+const beamEnd = beamOrigin.clone().add(beamDir.clone().multiplyScalar(beamLen));
+const beamCenter = beamOrigin.clone().add(beamEnd).multiplyScalar(0.5);
+beamMesh.position.copy(beamCenter);
+// align Y-axis of cone to beamDir (cone default axis is Y)
+const up = new THREE.Vector3(0, 1, 0);
+const q = new THREE.Quaternion().setFromUnitVectors(up, beamDir.clone().negate());
+beamMesh.quaternion.copy(q);
+scene.add(beamMesh);
+
+/* ── dust motes in the beam ── */
+const dustN = 400;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustN * 3);
+const dustSeeds = new Float32Array(dustN);
+for (let i = 0; i < dustN; i++) {
+  const along = Math.random();
+  const r = Math.random() * 0.7 * beamRadius * along;
+  const th = Math.random() * Math.PI * 2;
+  const pt = beamOrigin.clone().add(beamDir.clone().multiplyScalar(along * beamLen));
+  // perpendicular offset
+  const perp1 = new THREE.Vector3().crossVectors(beamDir, new THREE.Vector3(1,0,0)).normalize();
+  const perp2 = new THREE.Vector3().crossVectors(beamDir, perp1).normalize();
+  pt.add(perp1.clone().multiplyScalar(Math.cos(th) * r));
+  pt.add(perp2.clone().multiplyScalar(Math.sin(th) * r));
+  dustPos[i*3]   = pt.x;
+  dustPos[i*3+1] = pt.y;
+  dustPos[i*3+2] = pt.z;
+  dustSeeds[i] = Math.random();
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeo.setAttribute('seed', new THREE.BufferAttribute(dustSeeds, 1));
+
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPixel: { value: renderer.getPixelRatio() } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      p.x += sin(uTime * 0.3 + seed * 40.0) * 0.3;
+      p.y += cos(uTime * 0.2 + seed * 30.0) * 0.2 - uTime * 0.02;
+      p.z += sin(uTime * 0.15 + seed * 20.0) * 0.2;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + seed) * uPixel * (30.0 / dist);
+      gl_Position = projectionMatrix * mv;
+      vAlpha = 0.15 + 0.15 * sin(uTime * 0.5 + seed * 6.28);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vAlpha;
+      gl_FragColor = vec4(vec3(0.95, 0.88, 0.7) * a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeo, dustMat));
+
+/* ── main particle system ── */
+const N = 60000;
+const positions    = new Float32Array(N * 3);
+const restPositions = new Float32Array(N * 3);
+const seeds        = new Float32Array(N);
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uPinch: { value: 1.0 },
+  uHand:  { value: new THREE.Vector3(0,0,0) },
+  uActive:{ value: 0.0 },
+  uReady: { value: 0.0 },
+  uBeamOrigin: { value: beamOrigin },
+  uBeamDir: { value: beamDir },
+  uBeamRadius: { value: beamRadius },
+  uFogColor: { value: fogColor },
+  uFogDensity: { value: fogDensity }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPinch;
+    uniform vec3  uHand;
+    uniform float uActive;
+    uniform float uReady;
+    uniform vec3  uBeamOrigin;
+    uniform vec3  uBeamDir;
+    uniform float uBeamRadius;
+    attribute vec3  rest;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vEnergy;
+    varying float vViewDist;
+
+    float distToRay(vec3 p, vec3 ro, vec3 rd){
+      vec3 v = p - ro;
+      float t = dot(v, rd);
+      vec3 closest = ro + rd * t;
+      return length(p - closest);
+    }
+
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.5 + seed * 6.28;
+
+      vec3 dir = normalize(p);
+      p += dir * sin(t) * 0.06 * (1.0 + 0.5*sin(seed*9.0));
+
+      vec3 fromCenter = p;
+      float disperse = mix(0.0, 1.5, uPinch * 0.5) * uActive;
+      p += fromCenter * disperse;
+
+      vec3 toHand = uHand - p;
+      p += toHand * uActive * 0.04;
+
+      vec3 entry = vec3(sin(seed*40.0), cos(seed*30.0), sin(seed*22.0)) * 18.0;
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      vEnergy = 0.4 + 0.6*sin(t*0.7);
+
+      // beam intersection brightening
+      // transform p to world space (account for object rotation)
+      vec4 worldPos4 = modelMatrix * vec4(p, 1.0);
+      vec3 wp = worldPos4.xyz;
+      float beamDist = distToRay(wp, uBeamOrigin, uBeamDir);
+      float beamInfluence = smoothstep(uBeamRadius, 0.0, beamDist);
+      // check particle is within beam length
+      float alongBeam = dot(wp - uBeamOrigin, uBeamDir);
+      float inBeam = step(0.0, alongBeam) * step(alongBeam, 38.0);
+      beamInfluence *= inBeam;
+
+      // bone-warm palette with beam boost
+      vec3 a = vec3(0.95, 0.92, 0.86);
+      vec3 b = vec3(0.98, 0.78, 0.55);
+      vec3 c = vec3(0.78, 0.32, 0.22);
+      vec3 beamWarm = vec3(1.0, 0.92, 0.72);
+      vCol = mix(a, b, vEnergy);
+      vCol = mix(vCol, c, smoothstep(0.78, 1.0, vEnergy) * 0.6);
+      // brighten in beam
+      vCol = mix(vCol, beamWarm, beamInfluence * 0.55);
+      vEnergy = vEnergy + beamInfluence * 0.5;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vViewDist = -mv.z;
+      float dist = -mv.z;
+      float sizeBoost = 1.0 + beamInfluence * 0.8;
+      gl_PointSize = (1.0 + 1.6*vEnergy) * uPixel * (45.0/dist) * (0.4 + 0.6*uReady) * sizeBoost;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uFogColor;
+    uniform float uFogDensity;
+    varying vec3 vCol;
+    varying float vEnergy;
+    varying float vViewDist;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 17.0) * (0.45 + 0.55*vEnergy);
+      vec3 col = vCol * a;
+      // manual fog
+      float fogFactor = exp(-uFogDensity * uFogDensity * vViewDist * vViewDist);
+      col = mix(uFogColor, col, fogFactor);
+      a *= mix(0.3, 1.0, fogFactor);
+      gl_FragColor = vec4(col, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const loadingEl = document.getElementById('loading');
+const startBtn  = document.getElementById('startBtn');
+const hintEl    = document.getElementById('hint');
+const camEl     = document.getElementById('cam');
+
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+const loader = new PLYLoader();
+loader.load(PLY_URL,
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scale = 15 / maxAxis;
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp = new THREE.Vector3();
+    for (let i = 0; i < N; i++){
+      sampler.sample(tmp);
+      restPositions[i*3]   = tmp.x;
+      restPositions[i*3+1] = tmp.y;
+      restPositions[i*3+2] = tmp.z;
+      seeds[i] = Math.random();
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+
+    loadingEl.style.display = 'none';
+    startBtn.style.display = 'inline-block';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      loadingEl.textContent = `loading lucy · ${pct}% · stanford 3d scanning repo`;
+    }
+  },
+  (err) => {
+    loadingEl.textContent = 'load failed — check network';
+    console.error(err);
+  });
+
+let revealStart = 0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let handsActive = false;
+async function loadMP(){
+  const load = (src) => new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = src; s.crossOrigin = 'anonymous';
+    s.onload = res; s.onerror = rej; document.head.appendChild(s);
+  });
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js');
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js');
+}
+async function startHands(){
+  startBtn.style.display = 'none';
+  hintEl.textContent = 'requesting camera…';
+  try { await loadMP(); }
+  catch { hintEl.textContent = 'mediapipe load failed — passive mode'; return; }
+  const hands = new window.Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}` });
+  hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+  hands.onResults((res) => {
+    if (!res.multiHandLandmarks || res.multiHandLandmarks.length === 0){
+      uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 0.0, 0.05);
+      return;
+    }
+    uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 1.0, 0.1);
+    const lm = res.multiHandLandmarks[0];
+    const dx = lm[4].x - lm[8].x, dy = lm[4].y - lm[8].y, dz = lm[4].z - lm[8].z;
+    const pinch = Math.min(2.0, Math.sqrt(dx*dx+dy*dy+dz*dz) * 6.0);
+    uniforms.uPinch.value = THREE.MathUtils.lerp(uniforms.uPinch.value, pinch, 0.15);
+    const palm = lm[9];
+    const wx = (0.5 - palm.x) * 22;
+    const wy = (0.5 - palm.y) * 14;
+    uniforms.uHand.value.set(wx, wy, 0.0);
+    hintEl.textContent = `hand · pinch=${pinch.toFixed(2)}`;
+  });
+  camEl.classList.remove('hidden');
+  const cam = new window.Camera(camEl, {
+    onFrame: async () => { await hands.send({ image: camEl }); },
+    width: 320, height: 240
+  });
+  cam.start();
+  handsActive = true;
+}
+startBtn.addEventListener('click', startHands);
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  beamMat.uniforms.uTime.value = t;
+  dustMat.uniforms.uTime.value = t;
+
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 2500);
+  }
+  points.rotation.y = t * 0.05;
+
+  if (!handsActive && uniforms.uReady.value > 0.95) {
+    uniforms.uPinch.value = 1.0 + 0.25 * Math.sin(t * 0.4);
+    uniforms.uActive.value = 0.35;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
