@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vs1 · genealogical face morph</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.50; font-size: 10px; letter-spacing: 0.04em; }
+  .label { position:fixed; right:14px; bottom:12px; opacity:0.60; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">vs1</div>
+<div class="hint">drag to orbit · click to pause · faces morph across generations</div>
+<div class="label" id="genLabel">ancestor</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ────────────── scene
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x1a1612, 0.035);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 12);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+controls.enablePan = false;
+controls.minDistance = 6;
+controls.maxDistance = 20;
+
+// volumetric fog plane — paper-grain depth
+const fogPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(50, 50),
+  new THREE.MeshBasicMaterial({
+    color: 0x1a1612,
+    transparent: true,
+    opacity: 0.15,
+    depthWrite: false
+  })
+);
+fogPlane.position.z = -8;
+scene.add(fogPlane);
+
+// side-light gradient — warm amber from upper-left
+const ambientLight = new THREE.AmbientLight(0x3a2f28, 0.4);
+scene.add(ambientLight);
+const sideLight = new THREE.DirectionalLight(0xd4a574, 1.2);
+sideLight.position.set(-6, 8, 4);
+scene.add(sideLight);
+const rimLight = new THREE.DirectionalLight(0x4a3a32, 0.6);
+rimLight.position.set(4, -2, -6);
+scene.add(rimLight);
+
+// ────────────── facial geometry: three latent anchors
+// great-grandparent → grandparent → self
+// each face is a point cloud sampled from a stylized facial structure
+// (no UV-mapped mesh, just particle positions that suggest features)
+
+function sampleFace(seed, N){
+  // returns N positions forming a frontal face point-cloud
+  // features: forehead, eye sockets, nose ridge, cheekbones, jaw, chin
+  const rng = (() => { let s = seed; return () => { s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296; }; })();
+  
+  const out = new Float32Array(N * 3);
+  const pos = new THREE.Vector3();
+  let i = 0;
+
+  // parametric variation per generation
+  const faceW = 1.8 + (rng() - 0.5) * 0.4;      // face width
+  const faceH = 2.6 + (rng() - 0.5) * 0.5;      // face height
+  const jawW = faceW * (0.85 + (rng() - 0.5) * 0.15);
+  const foreheadH = faceH * (0.35 + (rng() - 0.5) * 0.08);
+  const noseL = 0.6 + (rng() - 0.5) * 0.15;
+  const eyeGap = 0.5 + (rng() - 0.5) * 0.1;
+  const cheekH = faceH * 0.15;
+
+  // budget distribution
+  const nForehead = Math.floor(N * 0.18);
+  const nEyes = Math.floor(N * 0.22);
+  const nNose = Math.floor(N * 0.14);
+  const nCheeks = Math.floor(N * 0.16);
+  const nJaw = Math.floor(N * 0.20);
+  const nChin = N - nForehead - nEyes - nNose - nCheeks - nJaw;
+
+  // forehead arc
+  for (let k = 0; k < nForehead && i < N; k++){
+    const u = rng();
+    const x = (u - 0.5) * faceW;
+    const y = foreheadH * (0.6 + rng() * 0.4);
+    const z = -0.3 + rng() * 0.2;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  // eyes (two clusters)
+  for (let k = 0; k < nEyes && i < N; k++){
+    const side = rng() < 0.5 ? -1 : 1;
+    const cx = side * eyeGap;
+    const cy = foreheadH * 0.6;
+    const r = 0.25;
+    const th = rng() * Math.PI * 2;
+    const rad = rng() * r;
+    const x = cx + Math.cos(th) * rad;
+    const y = cy + Math.sin(th) * rad * 0.7;
+    const z = -0.2 + rng() * 0.15;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  // nose ridge
+  for (let k = 0; k < nNose && i < N; k++){
+    const t = rng();
+    const y = foreheadH * 0.55 - t * noseL;
+    const x = (rng() - 0.5) * 0.15;
+    const z = -0.15 + t * 0.3;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  // cheekbones
+  for (let k = 0; k < nCheeks && i < N; k++){
+    const side = rng() < 0.5 ? -1 : 1;
+    const cx = side * faceW * 0.5;
+    const cy = cheekH;
+    const x = cx + (rng() - 0.5) * 0.3;
+    const y = cy + (rng() - 0.5) * 0.4;
+    const z = -0.1 + rng() * 0.2;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  // jawline
+  for (let k = 0; k < nJaw && i < N; k++){
+    const u = rng();
+    const side = u < 0.5 ? -1 : 1;
+    const along = rng();
+    const x = side * (jawW * 0.5 - along * 0.2);
+    const y = cheekH - along * (cheekH + 0.8);
+    const z = -0.2 + rng() * 0.15;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  // chin
+  for (let k = 0; k < nChin && i < N; k++){
+    const x = (rng() - 0.5) * 0.5;
+    const y = -faceH * 0.42 + rng() * 0.3;
+    const z = -0.25 + rng() * 0.15;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  while (i < N){
+    out[i*3] = 0; out[i*3+1] = 0; out[i*3+2] = 0; i++;
+  }
+  return out;
+}
+
+const N = 45000;
+const faceA = sampleFace(0xAABBCC, N);   // great-grandparent
+const faceB = sampleFace(0xDDEEFF, N);   // grandparent
+const faceC = sampleFace(0x112233, N);   // self
+
+const seeds = new Float32Array(N);
+for (let i = 0; i < N; i++) seeds[i] = Math.random();
+
+// ────────────── shader
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uPhase:  { value: 0 }    // 0..3 cycles through A→B→C
+};
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(faceA.slice(), 3));
+geom.setAttribute('faceA',  new THREE.BufferAttribute(faceA, 3));
+geom.setAttribute('faceB',  new THREE.BufferAttribute(faceB, 3));
+geom.setAttribute('faceC',  new THREE.BufferAttribute(faceC, 3));
+geom.setAttribute('seed',   new THREE.BufferAttribute(seeds, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPhase;
+    attribute vec3 faceA;
+    attribute vec3 faceB;
+    attribute vec3 faceC;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      // cycle through three faces: 0→1 (A→B), 1→2 (B→C), 2→3 (C→A)
+      float cycle = mod(uPhase, 3.0);
+      vec3 p;
+      float mixAmt;
+      
+      if (cycle < 1.0){
+        // A → B
+        mixAmt = cycle;
+        p = mix(faceA, faceB, smoothstep(0.0, 1.0, mixAmt));
+      } else if (cycle < 2.0){
+        // B → C
+        mixAmt = cycle - 1.0;
+        p = mix(faceB, faceC, smoothstep(0.0, 1.0, mixAmt));
+      } else {
+        // C → A
+        mixAmt = cycle - 2.0;
+        p = mix(faceC, faceA, smoothstep(0.0, 1.0, mixAmt));
+      }
+
+      // per-particle latent lag — memory catching up
+      float lag = seed * 0.4;
+      float effectiveMix = clamp(mixAmt - lag, 0.0, 1.0);
+      float jitter = (1.0 - effectiveMix) * effectiveMix * 0.08;   // peak jitter at mid-morph
+      p.x += sin(uTime * 2.0 + seed * 6.28) * jitter;
+      p.y += cos(uTime * 1.8 + seed * 3.14) * jitter;
+      p.z += sin(uTime * 1.5 + seed * 9.42) * jitter * 0.5;
+
+      // palette: sepia → rose → ink
+      vec3 sepia = vec3(0.72, 0.58, 0.42);
+      vec3 rose  = vec3(0.82, 0.52, 0.48);
+      vec3 ink   = vec3(0.18, 0.14, 0.12);
+      
+      float t = fract(uPhase / 3.0);
+      vec3 col1 = mix(sepia, rose, t);
+      vec3 col2 = mix(rose, ink, t);
+      vCol = mix(col1, col2, seed);
+
+      // alpha peaks at in-between frames (0.3 < effectiveMix < 0.7)
+      float inBetween = 1.0 - abs(effectiveMix - 0.5) * 2.0;
+      vAlpha = 0.4 + 0.6 * inBetween;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + 0.6 * inBetween) * uPixel * (40.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── interaction
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const genLabel = document.getElementById('genLabel');
+const start = performance.now();
+let accumulatedTime = 0;
+
+function loop(){
+  const dt = 1/60;
+  if (!paused) accumulatedTime += dt;
+  
+  const t = accumulatedTime;
+  uniforms.uTime.value = t;
+
+  // morph cycle: 8 seconds per generation
+  const phase = (t / 8.0);
+  uniforms.uPhase.value = phase;
+
+  const cycle = Math.floor(phase) % 3;
+  const frac = phase % 1.0;
+  let label = '';
+  if (cycle === 0){
+    label = frac < 0.5 ? 'great-grandparent' : 'becoming grandparent';
+  } else if (cycle === 1){
+    label = frac < 0.5 ? 'grandparent' : 'becoming self';
+  } else {
+    label = frac < 0.5 ? 'self' : 'becoming ancestor';
+  }
+  genLabel.textContent = label;
+
+  // gentle camera drift
+  const ang = t * 0.08;
+  camera.position.x = Math.sin(ang) * 12;
+  camera.position.z = Math.cos(ang) * 12;
+  camera.lookAt(0, 0, 0);
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
