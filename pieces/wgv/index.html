@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wgv · leaf-stela</title>
+<!-- MOTION: settle, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#130f0a; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">wgv</div>
+<div class="hint">drag to orbit · scroll to zoom</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── LEAF-STELA: a vertical monolith of folded-leaf glyphs ── */
+/* inspired by Mayan stelae — vertical grid of glyphs, each a distinct folded-leaf form */
+/* the stela is a compositional frame; each glyph-cell contains an organic leaf-twirl */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x130f0a, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+/* ── Stela grid: 3 columns × 7 rows — each cell a glyph ── */
+const COLS = 3;
+const ROWS = 7;
+const CELL_W = 3.2;
+const CELL_H = 2.8;
+const STELA_W = COLS * CELL_W;
+const STELA_H = ROWS * CELL_H;
+
+/* each glyph is a FOLDED-LEAF structure, distinct per cell */
+/* leaf types: palm-frond, fern-uncurl, autumn-twist, monstera-split, banana-fold */
+
+const LEAF_TYPES = [
+  { name: 'palm', segments: 16, curvature: 0.8, twist: 0.6, width: 0.9 },
+  { name: 'fern', segments: 22, curvature: 1.4, twist: 1.2, width: 0.7 },
+  { name: 'autumn', segments: 18, curvature: 1.1, twist: 2.2, width: 0.85 },
+  { name: 'monstera', segments: 14, curvature: 0.6, twist: 0.4, width: 1.1 },
+  { name: 'banana', segments: 20, curvature: 1.0, twist: 0.8, width: 1.3 },
+];
+
+function buildLeafGlyph(type, seed, scale){
+  const S = type.segments;
+  const positions = [];
+  const rng = mulberry32(seed);
+  
+  /* mid-vein curve — calligraphic spine */
+  const vein = [];
+  for (let i = 0; i <= S; i++){
+    const t = i / S;
+    const baseX = 0;
+    const baseY = t * 2.4 * scale;
+    /* side-curl in XZ — the leaf twists as it grows */
+    const angle = t * type.curvature * Math.PI + Math.sin(t * 3.14159 * 2) * 0.3;
+    const curlX = Math.sin(angle) * 0.5 * scale;
+    const curlZ = Math.cos(angle) * 0.2 * scale - 0.2 * scale;
+    vein.push(new THREE.Vector3(baseX + curlX, baseY - 1.2 * scale, curlZ));
+  }
+  
+  /* leaf blade — particles scattered around vein with width taper */
+  const N = 1200;
+  for (let i = 0; i < N; i++){
+    const t = Math.pow(rng(), 0.85);
+    const idx = Math.floor(t * S);
+    const frac = (t * S) - idx;
+    const p0 = vein[idx];
+    const p1 = vein[Math.min(idx + 1, S)];
+    const mid = new THREE.Vector3().lerpVectors(p0, p1, frac);
+    
+    /* width taper — narrow at tip, wide at base */
+    const widthProfile = Math.sin(t * Math.PI) * (0.3 + 0.7 * (1 - t * 0.4));
+    const w = type.width * scale * widthProfile;
+    
+    /* lateral offset — particles on both sides of vein */
+    const side = (rng() - 0.5) * 2;
+    const lat = side * w * rng();
+    
+    /* twist accumulates along length */
+    const twistAngle = t * type.twist * Math.PI;
+    const ct = Math.cos(twistAngle);
+    const st = Math.sin(twistAngle);
+    
+    const offsetX = lat * ct;
+    const offsetZ = lat * st;
+    
+    /* edge flutter — perlin-like ripple */
+    const flutter = Math.sin(t * 18 + side * 6) * 0.06 * scale;
+    
+    const px = mid.x + offsetX + flutter * side;
+    const py = mid.y;
+    const pz = mid.z + offsetZ;
+    
+    positions.push(px, py, pz);
+  }
+  
+  /* vein particles — denser along spine */
+  for (let i = 0; i <= S; i++){
+    const p = vein[i];
+    for (let k = 0; k < 8; k++){
+      const jitter = (rng() - 0.5) * 0.03 * scale;
+      positions.push(p.x + jitter, p.y + jitter, p.z + jitter);
+    }
+  }
+  
+  return new Float32Array(positions);
+}
+
+function mulberry32(seed){
+  return function(){
+    let t = seed += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ── Build the stela — grid of glyphs ── */
+const glyphMeshes = [];
+const totalParticles = COLS * ROWS * 1304; // per-glyph count
+
+const allPositions = new Float32Array(totalParticles * 3);
+const allSeeds = new Float32Array(totalParticles);
+const allCells = new Float32Array(totalParticles); // cell index for color variation
+
+let writeIdx = 0;
+
+for (let row = 0; row < ROWS; row++){
+  for (let col = 0; col < COLS; col++){
+    const cellIdx = row * COLS + col;
+    const typeIdx = cellIdx % LEAF_TYPES.length;
+    const type = LEAF_TYPES[typeIdx];
+    
+    /* cell center in stela space */
+    const cx = (col - (COLS - 1) / 2) * CELL_W;
+    const cy = (row - (ROWS - 1) / 2) * CELL_H;
+    
+    /* scale variation — larger glyphs toward center */
+    const centerDist = Math.abs(cy) / (STELA_H * 0.5);
+    const scaleBase = 0.75 + 0.35 * (1 - centerDist);
+    const scaleVar = 0.85 + 0.3 * Math.sin(cellIdx * 1.7);
+    const scale = scaleBase * scaleVar;
+    
+    /* rotation variation — each glyph slightly different angle */
+    const rotY = (Math.sin(cellIdx * 2.1) * 0.4 + Math.cos(cellIdx * 1.3) * 0.3);
+    
+    const seed = 1000 + cellIdx * 137;
+    const leafPos = buildLeafGlyph(type, seed, scale);
+    
+    /* transform into cell position */
+    for (let i = 0; i < leafPos.length / 3; i++){
+      const lx = leafPos[i * 3];
+      const ly = leafPos[i * 3 + 1];
+      const lz = leafPos[i * 3 + 2];
+      
+      /* rotate around Y */
+      const rx = lx * Math.cos(rotY) - lz * Math.sin(rotY);
+      const rz = lx * Math.sin(rotY) + lz * Math.cos(rotY);
+      
+      allPositions[writeIdx * 3]     = rx + cx;
+      allPositions[writeIdx * 3 + 1] = ly + cy;
+      allPositions[writeIdx * 3 + 2] = rz;
+      
+      allSeeds[writeIdx] = (seed + i) / 10000;
+      allCells[writeIdx] = cellIdx;
+      
+      writeIdx++;
+    }
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(allPositions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(allSeeds, 1));
+geom.setAttribute('cellIdx', new THREE.BufferAttribute(allCells, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReveal: { value: 0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, 
+  depthWrite: false, 
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReveal;
+    attribute float seed;
+    attribute float cellIdx;
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    void main(){
+      vec3 p = position;
+      
+      /* stela settle — pieces drift down into place */
+      float entryDelay = cellIdx * 0.08;
+      float entryProgress = clamp((uReveal - entryDelay) / 1.2, 0.0, 1.0);
+      entryProgress = entryProgress * entryProgress * (3.0 - 2.0 * entryProgress);
+      
+      vec3 entryOffset = vec3(
+        (seed * 2.0 - 1.0) * 4.0,
+        8.0 + seed * 6.0,
+        (seed * 2.0 - 1.0) * 3.0
+      );
+      p = mix(entryOffset, p, entryProgress);
+      
+      /* gentle sway — stone weathering, not alive */
+      float swayPhase = uTime * 0.3 + seed * 6.28;
+      float sway = 0.015 * sin(swayPhase + p.y * 0.4);
+      p.x += sway;
+      p.z += sway * 0.6;
+      
+      /* ── Palette: ochre limestone, Copán patina ── */
+      /* warm stone — weathered yellow-brown limestone */
+      vec3 stone = vec3(0.82, 0.68, 0.48);
+      /* moss patina — green-gray lichen on north faces */
+      vec3 moss = vec3(0.48, 0.54, 0.42);
+      /* shadow recess — carved depth */
+      vec3 shadow = vec3(0.28, 0.22, 0.18);
+      
+      /* cell-based color zones */
+      float cellPhase = cellIdx * 0.7;
+      float mossAmount = smoothstep(0.3, 0.7, sin(cellPhase));
+      vec3 cellCol = mix(stone, moss, mossAmount * 0.4);
+      
+      /* depth shading — recessed glyphs darker */
+      float depthK = smoothstep(-0.8, 0.2, p.z);
+      cellCol = mix(shadow, cellCol, depthK);
+      
+      /* particle variation — texture grain */
+      float grain = 0.5 + 0.5 * sin(seed * 40.0);
+      cellCol *= 0.9 + 0.2 * grain;
+      
+      vCol = cellCol;
+      
+      /* alpha: carved depth has higher contrast */
+      float depthAlpha = 0.5 + 0.5 * depthK;
+      vAlpha = depthAlpha * (0.6 + 0.4 * entryProgress);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * (38.0 / dist) * (0.8 + 0.4 * grain) * entryProgress;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = (1.0 - r * 4.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ambient fog — jungle haze */
+scene.fog = new THREE.Fog(0x130f0a, 18, 50);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+  
+  /* reveal over 4 seconds */
+  uniforms.uReveal.value = Math.min(4.0, elapsed);
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
