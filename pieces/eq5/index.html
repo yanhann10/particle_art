@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>eq5 · cursive binary</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08080c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">eq5</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* Sasha Stiles — Cursive Binary / WORDS BEYOND WORDS
+   100k glyph-particles trace a Lorenz attractor butterfly.
+   Each particle IS a letter — periodically collapsing into binary
+   0/1 streams and re-coalescing. Language as moving form.
+   Palette: warm cream ink on void, binary in cool pale blue.
+   Film grain overlay for photochemical materiality. */
+
+const W = 320, H = 320, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080c, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ---- glyph texture atlas (10×7 grid, canvas-rendered) ---- */
+const AC = 10, AR = 7, CELL = 64;
+const atlasC = document.createElement('canvas');
+atlasC.width = AC * CELL; atlasC.height = AR * CELL;
+const cx = atlasC.getContext('2d');
+cx.fillStyle = '#000';
+cx.fillRect(0, 0, atlasC.width, atlasC.height);
+cx.textAlign = 'center'; cx.textBaseline = 'middle';
+
+// 0-25: A-Z (calligraphic), 26-27: 0 and 1 (mono), 28-51: a-z, 52-69: binary fill
+const poem = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+const glyphs = [];
+for (let i = 0; i < 52; i++) glyphs.push(poem[i]);
+while (glyphs.length < AC * AR) glyphs.push(Math.random() > 0.5 ? '0' : '1');
+
+for (let i = 0; i < AC * AR; i++) {
+  const gc = i % AC, gr = Math.floor(i / AC);
+  const px = gc * CELL + CELL / 2, py = gr * CELL + CELL / 2;
+  const isBin = (i >= 52) || i === 26 || i === 27;
+  cx.font = isBin ? 'bold 38px ui-monospace, monospace' : 'italic 34px Georgia, "Times New Roman", serif';
+  cx.fillStyle = '#fff';
+  cx.fillText(glyphs[i] || '0', px, py);
+}
+// manually draw 0 and 1 at indices 26, 27
+cx.font = 'bold 40px ui-monospace, monospace';
+cx.fillStyle = '#000'; cx.fillRect(6*CELL, 2*CELL, CELL, CELL); cx.fillRect(7*CELL, 2*CELL, CELL, CELL);
+cx.fillStyle = '#fff';
+cx.fillText('0', 6*CELL + CELL/2, 2*CELL + CELL/2);
+cx.fillText('1', 7*CELL + CELL/2, 2*CELL + CELL/2);
+
+const atlasTex = new THREE.CanvasTexture(atlasC);
+atlasTex.minFilter = THREE.LinearFilter;
+atlasTex.magFilter = THREE.LinearFilter;
+
+/* ---- GPGPU ping-pong ---- */
+const rtP = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping, depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtP);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtP);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  init[i*4]   = (Math.random()*2-1) * 8.0;
+  init[i*4+1] = (Math.random()*2-1) * 8.0;
+  init[i*4+2] = (Math.random()*2-1) * 8.0 + 25.0;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const camO = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitS = new THREE.Scene();
+blitS.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitS, camO);
+renderer.setRenderTarget(null);
+
+/* ---- Lorenz integrator ---- */
+const simU = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.005 }, uSigma: { value: 10.0 },
+  uRho: { value: 28.0 }, uBeta: { value: 8.0/3.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simU,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uSigma, uRho, uBeta;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz; float age = s.w;
+      vec3 dp = vec3(uSigma*(p.y-p.x), p.x*(uRho-p.z)-p.y, p.x*p.y-uBeta*p.z);
+      p += dp * uDt;
+      age = mod(age + uDt * 0.05, 1.0);
+      gl_FragColor = vec4(p, age);
+    }`
+});
+const simS = new THREE.Scene();
+simS.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+/* ---- glyph particle renderer ---- */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 80);
+
+const pGeom = new THREE.BufferGeometry();
+const uvI = new Float32Array(N * 2);
+const gIdx = new Float32Array(N);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = y * W + x;
+  uvI[i*2] = (x+0.5)/W; uvI[i*2+1] = (y+0.5)/H;
+  gIdx[i] = Math.floor(Math.random() * 52); // letter index
+}
+pGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pGeom.setAttribute('uvIdx', new THREE.BufferAttribute(uvI, 2));
+pGeom.setAttribute('aGlyph', new THREE.BufferAttribute(gIdx, 1));
+
+const pMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state: { value: rtB.texture },
+    atlas: { value: atlasTex },
+    uPx: { value: renderer.getPixelRatio() },
+    uTime: { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPx, uTime;
+    attribute vec2 uvIdx;
+    attribute float aGlyph;
+    varying float vBinMix;
+    varying float vGlyphF;
+    varying float vSpeed;
+    varying float vAge;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz; float age = s.w;
+      float speed = length(vec3(10.0*(p.y-p.x), p.x*28.0-p.y-p.x*p.z, p.x*p.y-2.6667*p.z)) * 0.005;
+      vSpeed = clamp(speed, 0.0, 1.0);
+      vAge = age;
+      // binary collapse: wave per particle, phase offset by glyph seed
+      float wave = sin(age * 6.2832 * 2.0 + aGlyph * 0.41 + uTime * 0.4);
+      vBinMix = smoothstep(0.35, 0.65, wave);
+      // letter glyph cycles slowly; binary picks 0 or 1
+      float lIdx = mod(aGlyph + floor(uTime * 0.08), 52.0);
+      float bIdx = 52.0 + step(0.5, fract(aGlyph * 0.618 + uTime * 0.07));
+      vGlyphF = mix(lIdx, bIdx, vBinMix);
+      p.z -= 25.0;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 1.0);
+      gl_PointSize = (2.8 + 1.8 * vSpeed) * uPx * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    uniform sampler2D atlas;
+    uniform float uTime;
+    varying float vBinMix, vGlyphF, vSpeed, vAge;
+    void main(){
+      float idx = floor(vGlyphF + 0.5);
+      float gc = mod(idx, 10.0);
+      float gr = floor(idx / 10.0);
+      vec2 cell = gl_PointCoord * 0.82 + 0.09;
+      vec2 uv = (vec2(gc, gr) + cell) / vec2(10.0, 7.0);
+      float alpha = texture2D(atlas, uv).r;
+      if (alpha < 0.07) discard;
+      // cream for letters, pale blue for binary
+      vec3 letterC = vec3(0.94, 0.89, 0.78);
+      vec3 binaryC = vec3(0.68, 0.78, 0.94);
+      vec3 c = mix(letterC, binaryC, vBinMix);
+      c += vec3(0.06, 0.01, -0.03) * vSpeed;
+      // edge softness
+      float ef = 1.0 - smoothstep(0.32, 0.5, length(gl_PointCoord - 0.5));
+      float fa = alpha * ef * (0.3 + vSpeed * 0.55);
+      gl_FragColor = vec4(c * fa, fa);
+    }`
+});
+const pts = new THREE.Points(pGeom, pMat);
+scene.add(pts);
+
+/* ---- film grain overlay (screen-space) ---- */
+const grainS = new THREE.Scene();
+const grainC = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const grainMat = new THREE.ShaderMaterial({
+  transparent: true, depthTest: false, depthWrite: false,
+  uniforms: { uTime: { value: 0 }, uRes: { value: new THREE.Vector2(innerWidth, innerHeight) } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform float uTime;
+    uniform vec2 uRes;
+    varying vec2 vUv;
+    float h(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+    void main(){
+      vec2 uv = gl_FragCoord.xy / uRes;
+      float g = h(uv * uRes + uTime * 137.0) * 0.055 - 0.025;
+      gl_FragColor = vec4(vec3(0.92, 0.88, 0.80) * g, 0.12);
+    }`
+});
+grainS.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), grainMat));
+
+/* ---- subtle depth fog plane ---- */
+const fogMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      float d = length(vUv - 0.5);
+      float f = exp(-d * 3.5) * 0.025;
+      gl_FragColor = vec4(0.12, 0.10, 0.15, f);
+    }`
+});
+const fogP = new THREE.Mesh(new THREE.PlaneGeometry(180, 180), fogMat);
+fogP.position.z = -15;
+scene.add(fogP);
+
+/* ---- resize ---- */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  grainMat.uniforms.uRes.value.set(innerWidth, innerHeight);
+});
+
+/* ---- pointer nudge ---- */
+const tgt = { sigma: 10.0, rho: 28.0 };
+addEventListener('pointermove', (e) => {
+  tgt.rho   = 28.0 + ((e.clientY / innerHeight) - 0.5) * 6.0;
+  tgt.sigma = 10.0 + ((e.clientX / innerWidth)  - 0.5) * 2.5;
+});
+
+/* ---- main loop ---- */
+function loop() {
+  const t = performance.now() / 1000;
+  simU.uSigma.value += (tgt.sigma - simU.uSigma.value) * 0.05;
+  simU.uRho.value   += (tgt.rho   - simU.uRho.value)   * 0.05;
+
+  for (let i = 0; i < 4; i++) {
+    simU.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simS, camO);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pMat.uniforms.state.value = rtA.texture;
+  pMat.uniforms.uTime.value = t;
+  grainMat.uniforms.uTime.value = t;
+
+  // gentle drift orbit — not pure rotation, slight vertical wander
+  const ang = t * 0.055;
+  const r = 76;
+  camera.position.set(Math.sin(ang) * r, Math.sin(ang * 0.31) * 14, Math.cos(ang) * r);
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  renderer.autoClear = false;
+  renderer.render(grainS, grainC);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
