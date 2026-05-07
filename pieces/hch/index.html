@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>hch · aizawa soak-stain</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">hch</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  Helen Frankenthaler — soak-stain translation.
+  40 000 translucent planes read Aizawa attractor positions from GPGPU,
+  billboard toward camera with per-instance rotation jitter.
+  Additive blending at α ≈ 0.06 so overlap IS the composition:
+  thin washes of burnt sienna and sage-teal seep into the dark canvas,
+  building luminosity only where the attractor's density concentrates.
+  Palette: #c4705a (terra rosa) ↔ #3a6b5a (deep sage), near-monochrome.
+  Background carries subtle canvas grain + warm-to-cool vertical gradient.
+*/
+
+const W = 200, H = 200;
+const N = W * H; // 40 000
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── GPGPU render targets ── */
+const rtParams = {
+  type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false
+};
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+/* ── seed particles ── */
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  init[i * 4]     = (Math.random() * 2 - 1) * 0.5;
+  init[i * 4 + 1] = (Math.random() * 2 - 1) * 0.5;
+  init[i * 4 + 2] = (Math.random() * 2 - 1) * 0.5;
+  init[i * 4 + 3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const fullQuad = new THREE.PlaneGeometry(2, 2);
+
+/* blit init state */
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv;
+    void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(fullQuad, blitMat));
+renderer.setRenderTarget(rtA);
+renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+/* ── Aizawa simulation shader ── */
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.011 },
+  uA: { value: 0.95 }, uB: { value: 0.70 },
+  uC: { value: 0.60 }, uD: { value: 3.50 },
+  uE: { value: 0.25 }, uF: { value: 0.10 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vec3 dp = vec3(
+        (p.z - uB)*p.x - uD*p.y,
+        uD*p.x + (p.z - uB)*p.y,
+        uC + uA*p.z - (p.z*p.z*p.z)/3.0
+          - (p.x*p.x + p.y*p.y)*(1.0 + uE*p.z)
+          + uF*p.z*p.x*p.x*p.x
+      );
+      p += dp * uDt;
+      age = mod(age + uDt * 0.05, 1.0);
+      gl_FragColor = vec4(p, age);
+    }`
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(fullQuad, simMat));
+
+/* ── background: canvas grain + warm/cool gradient ── */
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false, depthTest: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      vec3 top = vec3(0.058, 0.046, 0.036);
+      vec3 bot = vec3(0.032, 0.036, 0.044);
+      vec3 col = mix(bot, top, vUv.y);
+      float grain = fract(sin(dot(vUv*900.0, vec2(12.9898,78.233)))*43758.5453);
+      col += (grain - 0.5) * 0.015;
+      gl_FragColor = vec4(col, 1.0);
+    }`
+});
+const bgScene = new THREE.Scene();
+bgScene.add(new THREE.Mesh(fullQuad, bgMat));
+
+/* ── instanced planes ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.05, 60);
+camera.position.set(0, 0, 5);
+
+const planeGeo = new THREE.PlaneGeometry(1, 1);
+const instGeo  = new THREE.InstancedBufferGeometry();
+instGeo.index = planeGeo.index;
+instGeo.attributes.position = planeGeo.attributes.position;
+instGeo.attributes.uv = planeGeo.attributes.uv;
+
+const uvIdxArr = new Float32Array(N * 2);
+const seedArr  = new Float32Array(N * 3);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = y * W + x;
+  uvIdxArr[i * 2]     = (x + 0.5) / W;
+  uvIdxArr[i * 2 + 1] = (y + 0.5) / H;
+  seedArr[i * 3]      = Math.random() * 6.2832;   // rotation
+  seedArr[i * 3 + 1]  = 0.35 + Math.random() * 1.4; // scale
+  seedArr[i * 3 + 2]  = Math.random();              // color seed
+}
+instGeo.setAttribute('aUvIdx', new THREE.InstancedBufferAttribute(uvIdxArr, 2));
+instGeo.setAttribute('aSeed',  new THREE.InstancedBufferAttribute(seedArr, 3));
+instGeo.instanceCount = N;
+
+const planeMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:   { value: rtA.texture },
+    uTime:   { value: 0 },
+    uCamPos: { value: new THREE.Vector3() }
+  },
+  transparent: true,
+  depthWrite: false,
+  depthTest: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uTime;
+    uniform vec3 uCamPos;
+    attribute vec2 aUvIdx;
+    attribute vec3 aSeed;
+
+    varying vec2  vUv;
+    varying float vK;       // palette key
+    varying float vDepth;
+
+    void main(){
+      vec4 s   = texture2D(state, aUvIdx);
+      vec3 wP  = s.xyz;
+      float age = s.w;
+
+      /* billboard basis */
+      vec3 look  = normalize(uCamPos - wP);
+      vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), look));
+      vec3 up    = cross(look, right);
+
+      /* per-instance rotation in the billboard plane */
+      float ang = aSeed.x + uTime * 0.07;
+      float ca  = cos(ang), sa = sin(ang);
+      vec3 lR   = right * ca + up * sa;
+      vec3 lU   = -right * sa + up * ca;
+
+      float sc = aSeed.y * 0.13;
+
+      vec3 vPos = wP + lR * position.x * sc + lU * position.y * sc;
+
+      vec4 mv   = modelViewMatrix * vec4(vPos, 1.0);
+      vDepth    = -mv.z;
+      vUv       = uv;
+      vK        = mod(aSeed.z + age * 0.25, 1.0);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying vec2  vUv;
+    varying float vK;
+    varying float vDepth;
+
+    void main(){
+      /* soft radial falloff — soak-stain wash edge */
+      vec2  c  = vUv - 0.5;
+      float r  = length(c);
+      float f  = 1.0 - smoothstep(0.12, 0.50, r);
+      float edge = f * f;  // squared for softer boundary
+
+      /*
+        Frankenthaler palette (Mountains and Sea, 1952)
+        terra rosa  #c4705a → (0.77, 0.44, 0.35)
+        deep sage   #3a6b5a → (0.23, 0.42, 0.35)
+      */
+      vec3 warm = vec3(0.77, 0.44, 0.35);
+      vec3 cool = vec3(0.23, 0.48, 0.40);
+      vec3 col  = mix(warm, cool, smoothstep(0.28, 0.72, vK));
+
+      float alpha = edge * 0.062;
+      alpha *= smoothstep(14.0, 2.5, vDepth);
+
+      gl_FragColor = vec4(col * alpha * 1.9, alpha);
+    }`
+});
+const mesh = new THREE.Mesh(instGeo, planeMat);
+scene.add(mesh);
+
+/* ── pointer perturbation ── */
+const target = { a: 0.95, c: 0.60 };
+addEventListener('pointermove', (e) => {
+  target.a = 0.95 + ((e.clientX / innerWidth)  - 0.5) * 0.06;
+  target.c = 0.60 + ((e.clientY / innerHeight) - 0.5) * 0.08;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── render loop ── */
+const t0 = performance.now();
+
+function loop() {
+  const now     = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  simUniforms.uA.value += (target.a - simUniforms.uA.value) * 0.03;
+  simUniforms.uC.value += (target.c - simUniforms.uC.value) * 0.03;
+
+  /* GPGPU integration steps */
+  for (let i = 0; i < 3; i++) {
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  /* gentle camera drift — not rotation, a slow figure-8 sway */
+  const ang = elapsed * 0.11;
+  camera.position.x = Math.sin(ang) * 4.2;
+  camera.position.z = Math.cos(ang) * 4.2;
+  camera.position.y = Math.sin(ang * 0.55) * 0.7;
+  camera.lookAt(0, 0, 0.9);
+
+  planeMat.uniforms.state.value = rtA.texture;
+  planeMat.uniforms.uTime.value = elapsed;
+  planeMat.uniforms.uCamPos.value.copy(camera.position);
+
+  /* render: bg → planes */
+  renderer.autoClear = false;
+  renderer.clear();
+  renderer.render(bgScene, camOrtho);
+  renderer.render(scene, camera);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
