@@ -36,6 +36,14 @@ LINEAGE = REPO / "lineage.json"
 # the user perceived as empty.
 MIN_NONBACKGROUND_FRACTION = 0.01
 
+# CONTRAST GATE — user 2026-05-07: many pieces pass the non-bg threshold yet
+# the eye reads them as "empty / faint / cant see / blurry / low-contrast"
+# (jwu, kjn, 7wq, si0, usm flagged). Reject when grayscale stddev is too
+# small (image is mostly one shade) or dynamic range (p95 - p5 of luminance)
+# is too narrow (no real foreground/background separation).
+MIN_GRAYSCALE_STDDEV   = 12.0   # 0..255 scale
+MIN_LUMA_DYNAMIC_RANGE = 35.0   # p95 - p5 of luminance, 0..255 scale
+
 W, H = 800, 500
 
 
@@ -116,12 +124,27 @@ def validate(piece_ids: list[str], record_clip: bool = False) -> int:
                 # any pixel that's >12 channel-units away from bg in L1 distance
                 dist = np.abs(arr.astype(np.int32) - bg.astype(np.int32)).sum(axis=2)
                 non_bg = (dist > 12).sum() / dist.size
-                ok = non_bg >= MIN_NONBACKGROUND_FRACTION
+
+                # contrast gate — reject low-stddev / narrow-range renders
+                gray = arr.astype(np.float32) @ np.array([0.299, 0.587, 0.114])
+                gstd = float(gray.std())
+                p5, p95 = np.percentile(gray, [5, 95])
+                drange = float(p95 - p5)
+
+                fail_reason = None
+                if non_bg < MIN_NONBACKGROUND_FRACTION:
+                    fail_reason = f"empty render ({non_bg*100:.2f}% non-bg)"
+                elif gstd < MIN_GRAYSCALE_STDDEV:
+                    fail_reason = f"low-contrast (stddev={gstd:.1f}<{MIN_GRAYSCALE_STDDEV:.0f})"
+                elif drange < MIN_LUMA_DYNAMIC_RANGE:
+                    fail_reason = f"narrow dynamic range (p95-p5={drange:.1f}<{MIN_LUMA_DYNAMIC_RANGE:.0f})"
+
+                ok = fail_reason is None
                 marker = "✓" if ok else "✗"
-                print(f"  {marker} {pid}: non-background={non_bg*100:.2f}% (threshold {MIN_NONBACKGROUND_FRACTION*100:.1f}%)" +
+                print(f"  {marker} {pid}: non-bg={non_bg*100:.2f}% stddev={gstd:.1f} range={drange:.1f}" +
                       (f"  errors: {errors[:2]}" if errors else ""))
                 if not ok:
-                    failed.append((pid, f"empty render ({non_bg*100:.2f}%)" + (f"; pageerror: {errors[0]}" if errors else "")))
+                    failed.append((pid, fail_reason + (f"; pageerror: {errors[0]}" if errors else "")))
             except Exception as e:
                 print(f"  ✗ {pid}: render exception — {e}")
                 failed.append((pid, str(e)))

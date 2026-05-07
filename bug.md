@@ -63,7 +63,31 @@ a new piece's HTML, and concrete enough that a generator can avoid it.
 **Pattern:** unintended render geometry: typically a degenerate L-system terminal, an unconsumed control-point in a CatmullRomCurve3, or a forgotten debug-marker (two endpoint spheres + a line) accidentally left in the scene.
 **Fix:** when descending from 5i1, EXPLICITLY remove or hide any 2-endpoint-sphere-with-connecting-line geometry. Verify by inspecting the rendered thumbnail for unexpected dumbbell shapes. The aesthetic gate should flag this if it persists.
 
-## 9. tiny subject in vast empty canvas
+## 9. low-contrast / faint render — "cant see"
+**Examples:** jwu, kjn, 7wq, si0 (all culled 2026-05-07).
+**Pattern:** the piece passes the non-bg pixel-fraction gate, but the EYE reads it as nearly empty — the foreground form is too faint against the background, contrast is too low to perceive, or the entire image sits in one narrow luminance band.
+**Why it fails:** user 2026-05-07 — "too faint cant see / cant see / blurry, contrast very low / blurry."
+**Hard gate (now enforced in scripts/validate_render.py):**
+- grayscale stddev < 12.0 (out of 255) → REJECT
+- p95 - p5 luminance < 35.0 → REJECT
+**Fix in generation:** every piece must have at least ONE high-contrast element — either bright foreground on dark bg or vice-versa, with a luminance delta of ≥ 50 channel-units between the form and the background. If the piece's design is "everything in mid-grey", abandon and pick another direction.
+
+## 10. movement-not-meaningful (no readable motion law)
+**Examples:** dcs (culled 2026-05-07).
+**Pattern:** particles move but the motion is incoherent — no readable law, no narrative arc, no rhythmic structure. The eye cannot name what's happening (compare to the 10-word motion vocabulary in scripts/motion_graph.json).
+**Why it fails:** user 2026-05-07 — "movement not meaningful." Motion that doesn't resolve to one of the 10 vocabulary words (drift / pulse / cascade / spiral / murmur / ascend / shatter / trace / breathe / propagate) is failure.
+**Fix:** ALL pieces must declare their motion via `<!-- MOTION: <word>, intensity: ... -->` in the HTML head, and the eye should be able to verify the declaration in 5 seconds of watching.
+
+## 11. empty composition
+**Examples:** usm (culled 2026-05-07).
+**Pattern:** the piece passes the non-bg gate by virtue of a tiny element, but most of the canvas is dead space and the form doesn't earn that void. Distinct from #9 (which is everywhere-faint); this is "subject too small / sparse to support the empty negative space around it."
+**Fix:** subject must occupy ≥ 25% of frame at default camera, OR the negative space must be doing intentional compositional work (Eliasson's atmosphere, Shiota's web stretching to edges, Riley wave-interference filling the field).
+
+## 12. RECURRING BAD-STYLE MEMORY (user 2026-05-07 batch cull)
+**Examples (all culled, no shared pattern but recorded for memory):** wjb, cp2, 8aa, zo2, mac, 7cb, b3s, cyf.
+**Pattern:** user labeled "very bad" without elaboration — meaning the style read as immediately wrong on sight. Reasons inferred from neighbors: rotation-only motion, generic chaotic dispersion, off-center compositions, garish palettes, derivative of culled styles. The aesthetic gate should treat any piece whose IMMEDIATE READ resembles these culled examples as suspect — when in doubt about a borderline render, REJECT.
+
+## 13. tiny subject in vast empty canvas
 **Examples:** f36 / k2v (single flamingo too small in frame, culled).
 **Pattern:** the recognizable form occupies <10% of the viewport at default camera; the rest of the frame is empty.
 **Fix:** the form must occupy AT LEAST 30-60% of the frame at the default camera angle. Re-fit the camera if needed.
