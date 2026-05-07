@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6u8 · systematic grid rules (Sol LeWitt)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#fafaf8; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+</style>
+</head>
+<body>
+<div class="id">6u8</div>
+<div class="hint">click to regenerate · orbit drag</div>
+<div class="src">LeWitt · combinatorial grid instructions · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 35);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xfafaf8, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+let geom, points;
+
+const uniforms = {
+  uTime:       { value: 0 },
+  uPixel:      { value: renderer.getPixelRatio() },
+  uRuleA:      { value: 0 },
+  uRuleB:      { value: 0 },
+  uRuleC:      { value: 0 },
+  uRuleD:      { value: 0 },
+  uReveal:     { value: 0 },
+  uGridSize:   { value: 12 },
+  uDepthScale: { value: 1.0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uRuleA;
+    uniform float uRuleB;
+    uniform float uRuleC;
+    uniform float uRuleD;
+    uniform float uReveal;
+    uniform float uGridSize;
+    uniform float uDepthScale;
+
+    attribute vec2 cellCoord;
+    attribute vec2 localPos;
+    attribute float seed;
+
+    varying float vRule;
+    varying float vDepth;
+    varying float vReveal;
+
+    // LeWitt instruction set:
+    // Rule A: vertical lines
+    // Rule B: horizontal lines
+    // Rule C: diagonal lines (upper-left to lower-right)
+    // Rule D: diagonal lines (upper-right to lower-left)
+
+    float hash(vec2 p){
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+
+    void main(){
+      vec2 cell = cellCoord;
+      vec2 local = localPos;
+
+      // Each cell gets assigned one rule based on its grid position
+      float h = hash(cell);
+      float ruleSelect;
+      if (h < 0.25)      ruleSelect = uRuleA;
+      else if (h < 0.5)  ruleSelect = uRuleB;
+      else if (h < 0.75) ruleSelect = uRuleC;
+      else               ruleSelect = uRuleD;
+
+      vRule = ruleSelect;
+
+      // Grid positioning: flat wall plane
+      float cellSize = 2.4;
+      vec2 cellCenter = cell * cellSize;
+      vec2 worldPos2D = cellCenter + local * cellSize * 0.48;
+
+      // Apply rule geometry
+      float z = 0.0;
+      float density = 0.0;
+
+      if (ruleSelect < 0.5){
+        // Rule A: vertical lines
+        float stripe = abs(fract(local.x * 6.0) - 0.5);
+        density = smoothstep(0.45, 0.35, stripe);
+        z = density * uDepthScale * 0.3;
+      } else if (ruleSelect < 1.5){
+        // Rule B: horizontal lines
+        float stripe = abs(fract(local.y * 6.0) - 0.5);
+        density = smoothstep(0.45, 0.35, stripe);
+        z = density * uDepthScale * 0.3;
+      } else if (ruleSelect < 2.5){
+        // Rule C: diagonal (NW-SE)
+        float diag = local.x + local.y;
+        float stripe = abs(fract(diag * 4.0) - 0.5);
+        density = smoothstep(0.45, 0.35, stripe);
+        z = density * uDepthScale * 0.5;
+      } else {
+        // Rule D: diagonal (NE-SW)
+        float diag = local.x - local.y;
+        float stripe = abs(fract(diag * 4.0) - 0.5);
+        density = smoothstep(0.45, 0.35, stripe);
+        z = density * uDepthScale * 0.5;
+      }
+
+      // Combinatorial reveal: rules fade in sequentially
+      float cellReveal = hash(cell + vec2(17.3, 29.4));
+      vReveal = smoothstep(cellReveal - 0.1, cellReveal + 0.1, uReveal);
+
+      vec3 p = vec3(worldPos2D, z * vReveal);
+
+      // Parallax depth from z
+      vDepth = z * vReveal;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * max(1.2, 2.8 - dist * 0.05) * (0.5 + 0.5 * density);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vRule;
+    varying float vDepth;
+    varying float vReveal;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // LeWitt palette: graphite on white wall
+      vec3 graphite = vec3(0.15, 0.15, 0.16);
+      vec3 wall = vec3(0.98, 0.98, 0.97);
+
+      // Subtle rule-based tint (minimalist)
+      vec3 tintA = vec3(0.14, 0.14, 0.16);  // vertical: cooler
+      vec3 tintB = vec3(0.16, 0.15, 0.14);  // horizontal: warmer
+      vec3 tintC = vec3(0.13, 0.15, 0.15);  // diag1: cyan hint
+      vec3 tintD = vec3(0.16, 0.14, 0.13);  // diag2: ochre hint
+
+      vec3 lineColor;
+      if (vRule < 0.5)      lineColor = tintA;
+      else if (vRule < 1.5) lineColor = tintB;
+      else if (vRule < 2.5) lineColor = tintC;
+      else                  lineColor = tintD;
+
+      // Depth modulation: darker where raised
+      lineColor = mix(lineColor, lineColor * 0.8, vDepth * 0.4);
+
+      vec3 col = lineColor;
+      float alpha = (1.0 - smoothstep(0.18, 0.25, r)) * vReveal;
+
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+function buildSystematic(gridSize, seed){
+  const positions = new Float32Array(N * 3);
+  const cellCoords = new Float32Array(N * 2);
+  const localPositions = new Float32Array(N * 2);
+  const seeds = new Float32Array(N);
+
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const totalCells = gridSize * gridSize;
+  const pointsPerCell = Math.floor(N / totalCells);
+  let idx = 0;
+
+  for (let cy = 0; cy < gridSize; cy++){
+    for (let cx = 0; cx < gridSize; cx++){
+      const cellX = cx - gridSize * 0.5;
+      const cellY = cy - gridSize * 0.5;
+
+      for (let p = 0; p < pointsPerCell && idx < N; p++){
+        const lx = rng() * 2.0 - 1.0;
+        const ly = rng() * 2.0 - 1.0;
+
+        positions[idx * 3] = 0;
+        positions[idx * 3 + 1] = 0;
+        positions[idx * 3 + 2] = 0;
+
+        cellCoords[idx * 2] = cellX;
+        cellCoords[idx * 2 + 1] = cellY;
+        localPositions[idx * 2] = lx;
+        localPositions[idx * 2 + 1] = ly;
+        seeds[idx] = rng();
+        idx++;
+      }
+    }
+  }
+
+  while (idx < N){
+    const cx = Math.floor(rng() * gridSize) - gridSize * 0.5;
+    const cy = Math.floor(rng() * gridSize) - gridSize * 0.5;
+    const lx = rng() * 2.0 - 1.0;
+    const ly = rng() * 2.0 - 1.0;
+
+    positions[idx * 3] = 0;
+    positions[idx * 3 + 1] = 0;
+    positions[idx * 3 + 2] = 0;
+
+    cellCoords[idx * 2] = cx;
+    cellCoords[idx * 2 + 1] = cy;
+    localPositions[idx * 2] = lx;
+    localPositions[idx * 2 + 1] = ly;
+    seeds[idx] = rng();
+    idx++;
+  }
+
+  return { positions, cellCoords, localPositions, seeds };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random() * 1e9);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const gridSize = 10 + Math.floor(rng() * 5);
+  uniforms.uGridSize.value = gridSize;
+
+  // Assign rule types (0=A, 1=B, 2=C, 3=D)
+  uniforms.uRuleA.value = 0.0;
+  uniforms.uRuleB.value = 1.0;
+  uniforms.uRuleC.value = 2.0;
+  uniforms.uRuleD.value = 3.0;
+
+  uniforms.uDepthScale.value = 0.5 + rng() * 1.5;
+  uniforms.uReveal.value = 0.0;
+
+  const { positions, cellCoords, localPositions, seeds } = buildSystematic(gridSize, seed);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('cellCoord', new THREE.BufferAttribute(cellCoords, 2));
+    geom.setAttribute('localPos', new THREE.BufferAttribute(localPositions, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.cellCoord.array.set(cellCoords);
+    geom.attributes.cellCoord.needsUpdate = true;
+    geom.attributes.localPos.array.set(localPositions);
+    geom.attributes.localPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);
+    geom.attributes.seed.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+  regenTime = performance.now();
+}
+
+let regenTime = 0;
+regenerate();
+
+addEventListener('click', (e) => {
+  if (e.target.tagName === 'CANVAS') regenerate();
+});
+
+/* --- Orbit drag --- */
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 1.57;
+const canvas = renderer.domElement;
+
+canvas.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.006;
+  orbitPhi = Math.max(0.2, Math.min(3.0, orbitPhi - (e.clientY - prevY) * 0.006));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Combinatorial reveal over 8 seconds
+  const elapsed = (now - regenTime) / 1000;
+  const revealTarget = Math.min(1.0, elapsed / 8.0);
+  uniforms.uReveal.value += (revealTarget - uniforms.uReveal.value) * 0.02;
+
+  // Slow auto-orbit around wall drawing
+  const autoTheta = t * 0.05;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 35;
+
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
