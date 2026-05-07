@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vtg · chladni plate resonance</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.38; font-size: 10px; letter-spacing: 0.04em; }
+  .label { position:fixed; right:14px; bottom:12px; opacity:0.60; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">vtg · chladni plate</div>
+<div class="hint">click to step resonance · modes cycle every 16s</div>
+<div class="src">Ernst Chladni (1787) · cymatics · 50k sand particles</div>
+<div class="label" id="modeLabel">mode (1,1)</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ────────────── scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0c);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 18, 0);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── plate geometry (dark metal square)
+const plateSize = 10;
+const plateMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(plateSize, plateSize, 1, 1),
+  new THREE.MeshBasicMaterial({ 
+    color: 0x1a1a1c, 
+    side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.95
+  })
+);
+plateMesh.rotation.x = -Math.PI / 2;
+scene.add(plateMesh);
+
+// plate edge frame (thin white border)
+const edgePoints = [
+  new THREE.Vector3(-plateSize/2, 0, -plateSize/2),
+  new THREE.Vector3( plateSize/2, 0, -plateSize/2),
+  new THREE.Vector3( plateSize/2, 0,  plateSize/2),
+  new THREE.Vector3(-plateSize/2, 0,  plateSize/2),
+  new THREE.Vector3(-plateSize/2, 0, -plateSize/2),
+];
+const edgeGeom = new THREE.BufferGeometry().setFromPoints(edgePoints);
+const edgeLine = new THREE.Line(edgeGeom, new THREE.LineBasicMaterial({ color: 0x606066, opacity: 0.4, transparent: true }));
+scene.add(edgeLine);
+
+// ────────────── chladni eigenmode for square plate
+// u(x,y,m,n) = cos(m*pi*x/L)*cos(n*pi*y/L) - cos(n*pi*x/L)*cos(m*pi*y/L)
+// normalized x,y ∈ [-0.5, 0.5]
+function chladniU(x, y, m, n){
+  const pi = Math.PI;
+  const term1 = Math.cos(m * pi * x) * Math.cos(n * pi * y);
+  const term2 = Math.cos(n * pi * x) * Math.cos(m * pi * y);
+  return term1 - term2;
+}
+
+// gradient ∇u — particles move toward nodal lines (u=0)
+function chladniGrad(x, y, m, n, eps = 0.002){
+  const u0 = chladniU(x, y, m, n);
+  const ux = chladniU(x + eps, y, m, n);
+  const uy = chladniU(x, y + eps, m, n);
+  return {
+    dx: (ux - u0) / eps,
+    dy: (uy - u0) / eps
+  };
+}
+
+// ────────────── particle system
+const N = 50000;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 2); // 2D motion on plate
+const seeds = new Float32Array(N);
+
+// initialize particles randomly on plate surface
+for (let i = 0; i < N; i++){
+  positions[i * 3 + 0] = (Math.random() - 0.5) * plateSize;
+  positions[i * 3 + 1] = 0.02; // slightly above plate
+  positions[i * 3 + 2] = (Math.random() - 0.5) * plateSize;
+  velocities[i * 2 + 0] = 0;
+  velocities[i * 2 + 1] = 0;
+  seeds[i] = Math.random();
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() },
+    uIntensity: { value: 0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uIntensity;
+    attribute float seed;
+    varying float vBright;
+    void main(){
+      vec3 p = position;
+      // slight vertical jitter when intensity is high (vibration)
+      p.y += 0.015 * uIntensity * sin(uTime * 60.0 + seed * 6.28);
+      
+      vBright = 0.7 + 0.3 * uIntensity;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = length(mv.xyz);
+      gl_PointSize = 1.8 * uPixel * (20.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vBright;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vBright * 0.85;
+      vec3 col = vec3(0.92, 0.90, 0.85);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── mode sequence (m,n) pairs — Ernst Chladni's classic patterns
+const modes = [
+  { m: 1, n: 1 }, // diagonal cross
+  { m: 2, n: 1 }, // three vertical stripes
+  { m: 2, n: 2 }, // concentric squares
+  { m: 3, n: 1 }, // four vertical stripes
+  { m: 3, n: 2 }, // rosette
+  { m: 3, n: 3 }, // nine-fold symmetry
+  { m: 4, n: 1 }, // five vertical
+  { m: 4, n: 2 }, // complex grid
+  { m: 4, n: 3 }, // fractal-symmetric
+  { m: 4, n: 4 }, // nested squares
+  { m: 5, n: 2 }, // intricate pattern
+  { m: 5, n: 3 }  // six-pointed star structure
+];
+
+let currentModeIdx = 0;
+let targetModeIdx = 0;
+let transitionProgress = 0; // 0 = old mode settled, 1 = transitioning
+
+const modeLabel = document.getElementById('modeLabel');
+
+addEventListener('click', () => {
+  targetModeIdx = (targetModeIdx + 1) % modes.length;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ────────────── physics step
+const DAMPING = 0.88;
+const FORCE_SCALE = 0.008;
+const BROWNIAN = 0.012;
+
+function updateParticles(dt, mode){
+  const { m, n } = mode;
+  const half = plateSize / 2;
+  
+  for (let i = 0; i < N; i++){
+    const x = positions[i * 3 + 0];
+    const z = positions[i * 3 + 2];
+    
+    // normalized coords [-0.5, 0.5]
+    const nx = x / plateSize;
+    const nz = z / plateSize;
+    
+    // compute gradient (force toward nodal lines)
+    const grad = chladniGrad(nx, nz, m, n);
+    
+    // particles move DOWN the gradient (toward u=0)
+    const fx = -grad.dx * FORCE_SCALE;
+    const fz = -grad.dy * FORCE_SCALE;
+    
+    // add Brownian noise so particles don't freeze perfectly
+    const brownX = (Math.random() - 0.5) * BROWNIAN;
+    const brownZ = (Math.random() - 0.5) * BROWNIAN;
+    
+    velocities[i * 2 + 0] = velocities[i * 2 + 0] * DAMPING + fx + brownX;
+    velocities[i * 2 + 1] = velocities[i * 2 + 1] * DAMPING + fz + brownZ;
+    
+    positions[i * 3 + 0] += velocities[i * 2 + 0] * dt * 60;
+    positions[i * 3 + 2] += velocities[i * 2 + 1] * dt * 60;
+    
+    // clamp to plate bounds
+    if (positions[i * 3 + 0] < -half) { positions[i * 3 + 0] = -half; velocities[i * 2 + 0] *= -0.3; }
+    if (positions[i * 3 + 0] >  half) { positions[i * 3 + 0] =  half; velocities[i * 2 + 0] *= -0.3; }
+    if (positions[i * 3 + 2] < -half) { positions[i * 3 + 2] = -half; velocities[i * 2 + 1] *= -0.3; }
+    if (positions[i * 3 + 2] >  half) { positions[i * 3 + 2] =  half; velocities[i * 2 + 1] *= -0.3; }
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+}
+
+// ────────────── main loop
+const start = performance.now();
+let lastT = 0;
+
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  const dt = t - lastT;
+  lastT = t;
+  
+  mat.uniforms.uTime.value = t;
+  
+  // auto-cycle modes every 16s
+  const autoIdx = Math.floor(t / 16) % modes.length;
+  if (autoIdx !== targetModeIdx && transitionProgress === 0){
+    targetModeIdx = autoIdx;
+  }
+  
+  // mode transition state machine
+  if (currentModeIdx !== targetModeIdx){
+    transitionProgress += dt * 0.25; // transition takes ~4s
+    if (transitionProgress >= 1.0){
+      currentModeIdx = targetModeIdx;
+      transitionProgress = 0;
+      // scatter particles slightly on mode change
+      for (let i = 0; i < N; i++){
+        velocities[i * 2 + 0] += (Math.random() - 0.5) * 0.15;
+        velocities[i * 2 + 1] += (Math.random() - 0.5) * 0.15;
+      }
+    }
+  } else {
+    transitionProgress = Math.max(0, transitionProgress - dt * 0.5);
+  }
+  
+  const intensity = transitionProgress; // 0 = settled, 1 = chaotic transition
+  mat.uniforms.uIntensity.value = intensity;
+  
+  const mode = modes[currentModeIdx];
+  updateParticles(dt, mode);
+  
+  modeLabel.textContent = `mode (${mode.m},${mode.n})`;
+  
+  // slow camera orbit
+  const ang = t * 0.08;
+  const r = 20;
+  camera.position.x = Math.sin(ang) * r * 0.3;
+  camera.position.y = 18 + Math.cos(ang * 0.4) * 2;
+  camera.position.z = Math.cos(ang) * r * 0.3;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
