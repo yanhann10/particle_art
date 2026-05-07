@@ -474,6 +474,30 @@ def main():
     except Exception as e:
         print(f"render gate: SKIPPED on exception ({e})")
 
+    # aesthetic gate — reads bug.md (user's catalogue of anti-patterns) +
+    # the new piece's HTML, asks Claude whether the piece exhibits any
+    # documented failure mode (jcl dots-on-intestine, h97 sieve, 610 blurry,
+    # LeePerrySmith head, ac2 noise nebula, tiny-subject-vast-canvas, etc.).
+    # Failing pieces are REJECTED but their reusable IDEAS are extracted to
+    # scripts/idea_extracts.jsonl so genius bits survive the cull.
+    try:
+        import shutil
+        from aesthetic_gate import check as aesthetic_check
+        ok, hits, ideas = aesthetic_check(html, new_id, parent, directive)
+        if not ok:
+            rej = REPO / "scripts" / f"aesthetic_reject_{new_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
+            rej.write_text(html)
+            print(f"aesthetic gate: REJECTED {new_id} (saved to {rej.name})")
+            shutil.rmtree(out_dir, ignore_errors=True)
+            thumb = REPO / "thumbs" / f"{new_id}.png"
+            if thumb.exists():
+                thumb.unlink()
+            return 8
+    except ImportError as e:
+        print(f"aesthetic gate: SKIPPED ({e})")
+    except Exception as e:
+        print(f"aesthetic gate: SKIPPED on exception ({e})")
+
     pieces_now = lineage["pieces"]
     parent_chain = _lineage_chain(parent["id"], pieces_now)            # parent → … → root
     parent_directives = _directives_in_lineage(parent["id"], pieces_now)
