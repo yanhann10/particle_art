@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5rv · hash-seeded choreography</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0605; overflow:hidden;
+               color:#d6cab2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .hash { position:fixed; right:14px; top:14px; opacity:0.45; font-size: 9px; letter-spacing: 0.02em; font-family: monospace; }
+  .label { position:fixed; right:14px; bottom:12px; opacity:0.65; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">5rv · hash-seeded choreography</div>
+<div class="hint">click to reseed · drag to orbit</div>
+<div class="hash" id="hashLabel">seed: 0x00000000</div>
+<div class="label">operator · 42k particles · provably unique</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ────────────── hash → deterministic RNG (simulates on-chain seed derivation)
+function sha256_mock(seed){
+  let h = seed ^ 0xdeadbeef;
+  for (let i = 0; i < 8; i++){
+    h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+    h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+  }
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+class HashRNG {
+  constructor(seed){
+    this.s = sha256_mock(seed);
+  }
+  next(){
+    this.s = Math.imul(this.s ^ (this.s >>> 15), 1 | this.s);
+    let t = Math.imul(this.s ^ (this.s >>> 7), 61 | this.s) ^ this.s;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  range(a, b){ return a + this.next() * (b - a); }
+}
+
+let HASH_SEED = Math.floor(Math.random() * 0xFFFFFFFF);
+let rng = new HashRNG(HASH_SEED);
+
+// ────────────── scene
+const scene = new THREE.Scene();
+const fogColor = 0x0a0605;
+scene.fog = new THREE.FogExp2(fogColor, 0.015);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 2, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(fogColor, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 3, 0);
+
+// stage cyc gradient
+const cycGrad = new THREE.Mesh(
+  new THREE.PlaneGeometry(80, 40),
+  new THREE.ShaderMaterial({
+    side: THREE.DoubleSide,
+    transparent: true,
+    depthWrite: false,
+    uniforms: { uFogColor: { value: new THREE.Color(fogColor) } },
+    vertexShader: `
+      varying vec2 vUv;
+      void main(){
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uFogColor;
+      varying vec2 vUv;
+      void main(){
+        float t = vUv.y;
+        vec3 warm = vec3(0.92, 0.48, 0.22);
+        vec3 mid = vec3(0.38, 0.18, 0.12);
+        vec3 dark = uFogColor;
+        vec3 col = mix(dark, mid, smoothstep(0.0, 0.4, t));
+        col = mix(col, warm, smoothstep(0.6, 1.0, t));
+        float a = 0.35 * smoothstep(0.0, 0.3, t);
+        gl_FragColor = vec4(col, a);
+      }
+    `
+  })
+);
+cycGrad.position.set(0, 20, -15);
+scene.add(cycGrad);
+
+// key light
+const keyLight = new THREE.DirectionalLight(0xffcc88, 1.2);
+keyLight.position.set(4, 12, 8);
+scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0x4488cc, 0.4);
+fillLight.position.set(-6, 3, -4);
+scene.add(fillLight);
+scene.add(new THREE.AmbientLight(0x101010, 0.5));
+
+// ────────────── FIGURE SKELETON: 15 joints per dancer
+// 0: pelvis, 1: spine, 2: neck, 3: head
+// 4: left-shoulder, 5: left-elbow, 6: left-wrist
+// 7: right-shoulder, 8: right-elbow, 9: right-wrist
+// 10: left-hip, 11: left-knee, 12: left-ankle
+// 13: right-hip, 14: right-knee, 15: right-ankle
+const JOINTS = 16;
+const BONES = [
+  [0,1],[1,2],[2,3],                   // spine
+  [2,4],[4,5],[5,6],                   // left arm
+  [2,7],[7,8],[8,9],                   // right arm
+  [0,10],[10,11],[11,12],              // left leg
+  [0,13],[13,14],[14,15]               // right leg
+];
+
+// ────────────── hash-seeded choreography params
+function buildDancers(rng, count){
+  const dancers = [];
+  for (let d = 0; d < count; d++){
+    const x = rng.range(-8, 8);
+    const z = rng.range(-3, 3);
+    const dancer = {
+      pos: new THREE.Vector3(x, 0, z),
+      joints: [],
+      // each dancer has unique phase offsets, amplitudes, frequencies
+      phases: new Array(JOINTS).fill(0).map(() => rng.range(0, Math.PI * 2)),
+      ampX:   new Array(JOINTS).fill(0).map(() => rng.range(0.02, 0.25)),
+      ampY:   new Array(JOINTS).fill(0).map(() => rng.range(0.05, 0.35)),
+      ampZ:   new Array(JOINTS).fill(0).map(() => rng.range(0.02, 0.18)),
+      freqX:  new Array(JOINTS).fill(0).map(() => rng.range(0.4, 1.8)),
+      freqY:  new Array(JOINTS).fill(0).map(() => rng.range(0.6, 2.2)),
+      freqZ:  new Array(JOINTS).fill(0).map(() => rng.range(0.5, 1.6)),
+      hue:    rng.range(10, 45),  // warm stage lighting palette
+      scale:  rng.range(0.85, 1.15)
+    };
+    // base skeleton (T-pose)
+    const base = [
+      [0, 0, 0],        // 0: pelvis
+      [0, 0.6, 0],      // 1: spine
+      [0, 1.2, 0],      // 2: neck
+      [0, 1.5, 0],      // 3: head
+      [-0.3, 1.1, 0],   // 4: left-shoulder
+      [-0.6, 0.8, 0],   // 5: left-elbow
+      [-0.9, 0.5, 0],   // 6: left-wrist
+      [0.3, 1.1, 0],    // 7: right-shoulder
+      [0.6, 0.8, 0],    // 8: right-elbow
+      [0.9, 0.5, 0],    // 9: right-wrist
+      [-0.2, -0.6, 0],  // 10: left-hip
+      [-0.2, -1.2, 0],  // 11: left-knee
+      [-0.2, -1.8, 0],  // 12: left-ankle
+      [0.2, -0.6, 0],   // 13: right-hip
+      [0.2, -1.2, 0],   // 14: right-knee
+      [0.2, -1.8, 0]    // 15: right-ankle
+    ];
+    for (let j = 0; j < JOINTS; j++){
+      dancer.joints.push(new THREE.Vector3(
+        base[j][0] * dancer.scale,
+        base[j][1] * dancer.scale,
+        base[j][2] * dancer.scale
+      ));
+    }
+    dancers.push(dancer);
+  }
+  return dancers;
+}
+
+const DANCER_COUNT = 7;
+let dancers = buildDancers(rng, DANCER_COUNT);
+
+// ────────────── particle geometry
+const N = 42000;
+const pos = new Float32Array(N * 3);
+const cols = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+
+function rebuildParticles(){
+  let i = 0;
+  const particlesPerDancer = Math.floor(N / DANCER_COUNT);
+  const particlesPerJoint = Math.floor(particlesPerDancer / JOINTS);
+  const particlesPerBone = Math.floor(particlesPerDancer / BONES.length);
+
+  for (let d = 0; d < dancers.length; d++){
+    const dancer = dancers[d];
+    const hue = dancer.hue;
+    const sat = 0.75;
+    const lig = 0.55;
+    const col = new THREE.Color().setHSL(hue / 360, sat, lig);
+
+    // joint spheres — each joint gets a small particle cluster
+    for (let j = 0; j < JOINTS; j++){
+      for (let k = 0; k < particlesPerJoint && i < N; k++){
+        const r = 0.04 + Math.random() * 0.06;
+        const th = Math.random() * Math.PI * 2;
+        const ph = Math.acos(2 * Math.random() - 1);
+        const x = r * Math.sin(ph) * Math.cos(th);
+        const y = r * Math.sin(ph) * Math.sin(th);
+        const z = r * Math.cos(ph);
+        pos[i*3]   = x;
+        pos[i*3+1] = y;
+        pos[i*3+2] = z;
+        cols[i*3]   = col.r;
+        cols[i*3+1] = col.g;
+        cols[i*3+2] = col.b;
+        seeds[i] = j + d * 16;
+        i++;
+      }
+    }
+
+    // bone connectors — particles distributed along each bone segment
+    for (let b = 0; b < BONES.length; b++){
+      for (let k = 0; k < particlesPerBone && i < N; k++){
+        const t = Math.random();
+        const jitter = 0.02;
+        pos[i*3]   = (Math.random() - 0.5) * jitter;
+        pos[i*3+1] = (Math.random() - 0.5) * jitter;
+        pos[i*3+2] = (Math.random() - 0.5) * jitter;
+        cols[i*3]   = col.r;
+        cols[i*3+1] = col.g;
+        cols[i*3+2] = col.b;
+        seeds[i] = BONES[b][0] + BONES[b][1] * 0.1 + d * 16;
+        i++;
+      }
+    }
+  }
+  while (i < N){
+    pos[i*3] = 0; pos[i*3+1] = 0; pos[i*3+2] = 0;
+    cols[i*3] = 1; cols[i*3+1] = 1; cols[i*3+2] = 1;
+    seeds[i] = i;
+    i++;
+  }
+}
+rebuildParticles();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexColors: true,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute vec3 color;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vBright;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.7 + seed * 0.3;
+      float pulse = 0.5 + 0.5 * sin(t * 2.0);
+      vBright = 0.6 + 0.4 * pulse;
+      vCol = color * vBright;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * (35.0 / dist) * (0.7 + 0.3 * pulse);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vBright;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * 0.6 * vBright;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── update loop — animate dancer joints
+function updateDancers(t){
+  let i = 0;
+  const particlesPerDancer = Math.floor(N / DANCER_COUNT);
+  const particlesPerJoint = Math.floor(particlesPerDancer / JOINTS);
+  const particlesPerBone = Math.floor(particlesPerDancer / BONES.length);
+
+  for (let d = 0; d < dancers.length; d++){
+    const dancer = dancers[d];
+    // update joint positions based on hash-seeded motion laws
+    for (let j = 0; j < JOINTS; j++){
+      const base = dancer.joints[j];
+      const phase = dancer.phases[j];
+      const dx = dancer.ampX[j] * Math.sin(t * dancer.freqX[j] + phase);
+      const dy = dancer.ampY[j] * Math.sin(t * dancer.freqY[j] + phase * 1.3);
+      const dz = dancer.ampZ[j] * Math.sin(t * dancer.freqZ[j] + phase * 0.7);
+      dancer.joints[j].set(
+        base.x + dx,
+        base.y + dy,
+        base.z + dz
+      );
+    }
+
+    // update joint particle positions
+    for (let j = 0; j < JOINTS; j++){
+      for (let k = 0; k < particlesPerJoint && i < N; k++){
+        const jPos = dancer.joints[j].clone().add(dancer.pos);
+        pos[i*3]   += (jPos.x - pos[i*3]) * 0.12;
+        pos[i*3+1] += (jPos.y - pos[i*3+1]) * 0.12;
+        pos[i*3+2] += (jPos.z - pos[i*3+2]) * 0.12;
+        i++;
+      }
+    }
+
+    // update bone connector positions
+    for (let b = 0; b < BONES.length; b++){
+      const [ja, jb] = BONES[b];
+      const pA = dancer.joints[ja].clone().add(dancer.pos);
+      const pB = dancer.joints[jb].clone().add(dancer.pos);
+      for (let k = 0; k < particlesPerBone && i < N; k++){
+        const t = k / particlesPerBone;
+        const target = pA.clone().lerp(pB, t);
+        pos[i*3]   += (target.x - pos[i*3]) * 0.15;
+        pos[i*3+1] += (target.y - pos[i*3+1]) * 0.15;
+        pos[i*3+2] += (target.z - pos[i*3+2]) * 0.15;
+        i++;
+      }
+    }
+  }
+  geom.attributes.position.needsUpdate = true;
+}
+
+// ────────────── interaction
+addEventListener('click', () => {
+  HASH_SEED = Math.floor(Math.random() * 0xFFFFFFFF);
+  rng = new HashRNG(HASH_SEED);
+  dancers = buildDancers(rng, DANCER_COUNT);
+  rebuildParticles();
+  geom.attributes.color.needsUpdate = true;
+  document.getElementById('hashLabel').textContent = `seed: 0x${HASH_SEED.toString(16).toUpperCase().padStart(8, '0')}`;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+document.getElementById('hashLabel').textContent = `seed: 0x${HASH_SEED.toString(16).toUpperCase().padStart(8, '0')}`;
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  updateDancers(t);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
