@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>y7g · halcyon settling spiral</title>
+<!-- MOTION: spiral-settle, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#080e14; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">y7g</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x080e14, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 8, 14);
+camera.lookAt(0, 0, 0);
+
+// golden ratio for spiral
+const PHI = (1 + Math.sqrt(5)) / 2;
+const GOLDEN_ANGLE = 2 * Math.PI * (1 - 1/PHI);
+
+// leaf geometry — curled sheet with midrib
+function createLeafGeometry(length, width) {
+  const segs = 18;
+  const verts = [];
+  const indices = [];
+
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs;
+    const x = t * length;
+    const curl = Math.pow(t, 1.8) * 0.3;
+    const taper = 1 - Math.pow(t, 2.2);
+
+    for (let side = -1; side <= 1; side += 2) {
+      const y = side * width * taper * 0.5;
+      const z = curl * (1 - Math.abs(side * 0.3));
+      verts.push(x, y, z);
+    }
+  }
+
+  for (let i = 0; i < segs; i++) {
+    const base = i * 2;
+    indices.push(base, base+1, base+2);
+    indices.push(base+1, base+3, base+2);
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
+}
+
+const baseGeom = createLeafGeometry(1.0, 0.45);
+
+// halcyon palette: cerulean, sage, pale gold, soft teal, mist
+const palette = [
+  new THREE.Color(0x4a8ba8), // cerulean
+  new THREE.Color(0x7a9a6a), // sage
+  new THREE.Color(0xd4c88a), // pale gold
+  new THREE.Color(0x5a8a80), // soft teal
+  new THREE.Color(0xb8c8c0), // mist
+  new THREE.Color(0x3a6878), // deep cerulean
+];
+
+function pickColor(index, total) {
+  const t = index / total;
+  if (t < 0.25) return palette[0];
+  if (t < 0.45) return palette[3];
+  if (t < 0.6) return palette[1];
+  if (t < 0.8) return palette[2];
+  if (t < 0.92) return palette[4];
+  return palette[5];
+}
+
+// water plane — visible ground with wave vertex shader
+const waterGeo = new THREE.PlaneGeometry(30, 30, 80, 80);
+const waterMat = new THREE.ShaderMaterial({
+  transparent: true,
+  side: THREE.DoubleSide,
+  uniforms: {
+    uTime: { value: 0 },
+    uColor: { value: new THREE.Color(0x1a3a4a) },
+    uHighlight: { value: new THREE.Color(0x3a7a8a) },
+    uBgColor: { value: new THREE.Color(0x080e14) },
+  },
+  vertexShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    varying float vWave;
+    void main() {
+      vUv = uv;
+      vec3 pos = position;
+      float wave = sin(pos.x * 0.8 + uTime * 0.4) * cos(pos.y * 0.6 + uTime * 0.3) * 0.15;
+      wave += sin(pos.x * 1.5 - uTime * 0.25) * 0.08;
+      wave += cos(pos.y * 1.2 + uTime * 0.35) * 0.06;
+      pos.z += wave;
+      vWave = wave;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    uniform vec3 uHighlight;
+    uniform vec3 uBgColor;
+    varying vec2 vUv;
+    varying float vWave;
+    void main() {
+      float edge = 1.0 - smoothstep(0.25, 0.5, length(vUv - 0.5));
+      float highlight = smoothstep(-0.05, 0.18, vWave);
+      vec3 col = mix(uColor, uHighlight, highlight * 0.5);
+      // manual fog blend
+      float dist = length(gl_FragCoord.xyz);
+      float fogFactor = 1.0 - exp(-0.0003 * dist * dist);
+      col = mix(col, uBgColor, fogFactor * 0.3);
+      gl_FragColor = vec4(col, 0.45 * edge);
+    }
+  `,
+});
+const waterPlane = new THREE.Mesh(waterGeo, waterMat);
+waterPlane.rotation.x = -Math.PI * 0.5;
+waterPlane.position.y = -2.2;
+scene.add(waterPlane);
+
+// create spiral of leaves
+const leafCount = 144;
+const leaves = [];
+const SETTLE_DURATION = 18.0; // seconds for full settle cycle
+const WATER_Y = -2.0;
+
+for (let i = 0; i < leafCount; i++) {
+  const angle = i * GOLDEN_ANGLE;
+  const radius = Math.sqrt(i + 1) * 0.42;
+  const scale = 0.18 + Math.pow(i / leafCount, 0.65) * 1.2;
+
+  const color = pickColor(i, leafCount);
+  const mat = new THREE.MeshPhongMaterial({
+    color: color,
+    side: THREE.DoubleSide,
+    flatShading: false,
+    shininess: 12,
+    emissive: color,
+    emissiveIntensity: 0.06,
+    transparent: true,
+    opacity: 1.0,
+  });
+
+  const mesh = new THREE.Mesh(baseGeom, mat);
+
+  const startY = 1.5 + (i / leafCount) * 3.0; // leaves start high
+  mesh.position.x = Math.cos(angle) * radius;
+  mesh.position.z = Math.sin(angle) * radius;
+  mesh.position.y = startY;
+
+  mesh.rotation.y = angle + Math.PI * 0.5;
+
+  const tiltVariation = (Math.sin(i * 0.7) * 0.3 + Math.cos(i * 1.3) * 0.2);
+  mesh.rotation.x = tiltVariation * 0.4;
+  mesh.rotation.z = tiltVariation * 0.25;
+
+  mesh.scale.set(scale, scale, scale);
+
+  // stagger settle: outer leaves settle first, inner last
+  const settleDelay = (1 - i / leafCount) * 8.0;
+  // edge leaves get transparent
+  const edgeFade = i > leafCount * 0.75 ? 1.0 - ((i - leafCount * 0.75) / (leafCount * 0.25)) : 0;
+
+  mesh.userData = {
+    baseAngle: angle,
+    baseRadius: radius,
+    startY: startY,
+    index: i,
+    phaseOffset: Math.random() * Math.PI * 2,
+    breathRate: 0.5 + Math.random() * 0.3,
+    settleDelay: settleDelay,
+    targetOpacity: 1.0 - edgeFade * 0.55,
+    baseScale: scale,
+    settled: false,
+  };
+
+  scene.add(mesh);
+  leaves.push(mesh);
+}
+
+// lighting — cooler for halcyon
+const ambient = new THREE.AmbientLight(0x1a2838, 0.4);
+scene.add(ambient);
+
+const key = new THREE.DirectionalLight(0xc8dae8, 0.7);
+key.position.set(3, 6, 5);
+scene.add(key);
+
+const fill = new THREE.DirectionalLight(0x6090a0, 0.3);
+fill.position.set(-3, 2, 4);
+scene.add(fill);
+
+const rim = new THREE.PointLight(0xd4c88a, 0.3, 20);
+rim.position.set(0, -1, -4);
+scene.add(rim);
+
+// soft overhead glow for water reflection feel
+const topLight = new THREE.PointLight(0x4a8ba8, 0.25, 25);
+topLight.position.set(0, 8, 0);
+scene.add(topLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let t0 = performance.now();
+
+// centroid tracker for camera
+const centroid = new THREE.Vector3();
+
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  // update water
+  waterMat.uniforms.uTime.value = elapsed;
+
+  const spiralRot = elapsed * 0.04; // slower rotation — halcyon calm
+
+  centroid.set(0, 0, 0);
+
+  leaves.forEach((leaf) => {
+    const d = leaf.userData;
+    const breathPhase = elapsed * d.breathRate + d.phaseOffset;
+
+    // settle animation: leaf descends to water over time
+    const settleTime = Math.max(0, elapsed - d.settleDelay);
+    const settleFrac = Math.min(1, settleTime / SETTLE_DURATION);
+    // ease-out cubic
+    const eased = 1 - Math.pow(1 - settleFrac, 3);
+
+    const currentY = THREE.MathUtils.lerp(d.startY, WATER_Y, eased);
+
+    // once near water, flatten rotation to lie on surface
+    const flattenFrac = Math.max(0, eased - 0.5) * 2; // starts flattening halfway
+
+    const newAngle = d.baseAngle + spiralRot;
+    // as leaf settles, radius spreads slightly — drifting on water
+    const driftRadius = d.baseRadius + eased * 0.3;
+    leaf.position.x = Math.cos(newAngle) * driftRadius;
+    leaf.position.z = Math.sin(newAngle) * driftRadius;
+    leaf.position.y = currentY;
+
+    // gentle bob on water when settled
+    if (eased > 0.8) {
+      const bobAmt = (eased - 0.8) * 5; // 0 to 1
+      leaf.position.y += Math.sin(elapsed * 0.6 + d.phaseOffset) * 0.04 * bobAmt;
+    }
+
+    leaf.rotation.y = newAngle + Math.PI * 0.5;
+
+    // flatten toward horizontal as settling
+    const tiltVariation = (Math.sin(d.index * 0.7) * 0.3 + Math.cos(d.index * 1.3) * 0.2);
+    leaf.rotation.x = tiltVariation * 0.4 * (1 - flattenFrac) + flattenFrac * (-Math.PI * 0.5);
+    leaf.rotation.z = tiltVariation * 0.25 * (1 - flattenFrac);
+
+    // breath scale — gentler
+    const breathAmp = 0.02 * Math.sin(breathPhase) * (1 - eased * 0.5);
+    leaf.scale.setScalar(d.baseScale + breathAmp);
+
+    // edge fade transparency
+    const targetOp = d.targetOpacity;
+    leaf.material.opacity = THREE.MathUtils.lerp(1.0, targetOp, Math.min(1, elapsed / 12));
+
+    centroid.add(leaf.position);
+  });
+
+  centroid.divideScalar(leafCount);
+
+  // camera: slow orbit tracking centroid
+  const camAngle = elapsed * 0.06;
+  const camRadius = 14;
+  const camTarget = centroid.clone();
+
+  camera.position.x = camTarget.x + Math.sin(camAngle) * camRadius;
+  camera.position.z = camTarget.z + Math.cos(camAngle) * camRadius;
+  // camera descends as leaves settle, staying above
+  const camSettleFrac = Math.min(1, elapsed / (SETTLE_DURATION + 8));
+  camera.position.y = THREE.MathUtils.lerp(8, 3.5, camSettleFrac) + Math.sin(camAngle * 0.3) * 0.8;
+  camera.lookAt(camTarget.x, camTarget.y, camTarget.z);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
