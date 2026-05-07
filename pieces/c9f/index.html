@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: morph, intensity: gentle -->
+<title>c9f · attractor triptych</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; cursor:pointer; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .state { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc;
+           transition: opacity 0.3s; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">c9f</div>
+<div class="state" id="stateLabel">i · aizawa vortex</div>
+<div class="hint">click to cycle attractors</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  Three strange attractors — three topologically distinct forms:
+    I.   Aizawa     — vortex with protruding spike from a flattened disk
+    II.  Thomas     — cyclically symmetric pretzel knot (Thomas 1999)
+    III. Halvorsen  — three-winged symmetric shell
+  Click cycles I → II → III → I with a 2.5s velocity-field crossfade.
+  Particles flow continuously; the basin reshapes beneath them.
+*/
+
+const W = 320, H = 320, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080a, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtP = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+              minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+              wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+              depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtP);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtP);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 0.5;
+  init[i*4+1] = (Math.random()*2-1) * 0.5;
+  init[i*4+2] = (Math.random()*2-1) * 0.5;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev:   { value: rtA.texture },
+  uDt:    { value: 0.012 },
+  uBlend: { value: 0.0 },
+  uFrom:  { value: 0 },
+  uTo:    { value: 0 }
+};
+
+const simFrag = `
+  uniform sampler2D prev;
+  uniform float uDt, uBlend;
+  uniform int uFrom, uTo;
+  varying vec2 vUv;
+
+  // I. Aizawa: a=0.95 b=0.7 c=0.6 d=3.5 e=0.25 f=0.1
+  vec3 aizawa(vec3 p){
+    float a=0.95, b=0.7, c=0.6, d=3.5, e=0.25, f=0.1;
+    return vec3(
+      (p.z - b)*p.x - d*p.y,
+      d*p.x + (p.z - b)*p.y,
+      c + a*p.z - p.z*p.z*p.z/3.0
+        - (p.x*p.x + p.y*p.y)*(1.0 + e*p.z)
+        + f*p.z*p.x*p.x*p.x
+    );
+  }
+
+  // II. Thomas symmetric: b=0.208
+  // lives in ~[-4,4], scale to match aizawa ~[-2,2]
+  vec3 thomas(vec3 p){
+    vec3 q = p * 2.0; // expand to Thomas scale
+    float b = 0.208;
+    vec3 dp = vec3(
+      sin(q.y) - b*q.x,
+      sin(q.z) - b*q.y,
+      sin(q.x) - b*q.z
+    );
+    return dp * 0.5; // scale derivatives back
+  }
+
+  // III. Halvorsen: a=1.89, lives in ~[-8,8], scale down
+  vec3 halvorsen(vec3 p){
+    vec3 q = p * 3.5;
+    float a = 1.89;
+    vec3 dp = vec3(
+      -a*q.x - 4.0*q.y - 4.0*q.z - q.y*q.y,
+      -a*q.y - 4.0*q.z - 4.0*q.x - q.z*q.z,
+      -a*q.z - 4.0*q.x - 4.0*q.y - q.x*q.x
+    );
+    return dp * (1.0/3.5) * 0.08; // scale + slow down
+  }
+
+  vec3 field(int id, vec3 p){
+    if(id == 0) return aizawa(p);
+    if(id == 1) return thomas(p);
+    return halvorsen(p);
+  }
+
+  void main(){
+    vec4 s = texture2D(prev, vUv);
+    vec3 p = s.xyz;
+    float age = s.w;
+
+    vec3 dpFrom = field(uFrom, p);
+    vec3 dpTo   = field(uTo, p);
+    vec3 dp = mix(dpFrom, dpTo, uBlend);
+
+    p += dp * uDt;
+
+    // soft clamp to prevent divergence during transition
+    p = clamp(p, vec3(-4.0), vec3(4.0));
+
+    age = mod(age + uDt * 0.06, 1.0);
+    gl_FragColor = vec4(p, age);
+  }
+`;
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: simFrag
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// Render points
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.05, 50);
+camera.position.set(0, 0, 4);
+
+const pGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:    { value: rtB.texture },
+    uPixel:   { value: renderer.getPixelRatio() },
+    uPalette: { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vSpeed;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float speed = length(p) * 0.5;
+      vSpeed = clamp(speed, 0.0, 1.0);
+      vAge = s.w;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.0 + 1.4 * vSpeed) * uPixel * (8.0 / max(dist, 0.5));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vSpeed;
+    uniform float uPalette;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0);
+      float k = mod(vAge + vSpeed * 0.4, 1.0);
+
+      // Palette I: emerald → violet → silver (Aizawa)
+      vec3 c0a = vec3(0.20, 0.62, 0.45);
+      vec3 c0b = vec3(0.55, 0.30, 0.78);
+      vec3 c0c = vec3(0.92, 0.95, 0.98);
+
+      // Palette II: warm amber → rose → pale gold (Thomas)
+      vec3 c1a = vec3(0.78, 0.45, 0.12);
+      vec3 c1b = vec3(0.72, 0.22, 0.38);
+      vec3 c1c = vec3(0.95, 0.88, 0.72);
+
+      // Palette III: ice blue → slate → white (Halvorsen)
+      vec3 c2a = vec3(0.18, 0.42, 0.68);
+      vec3 c2b = vec3(0.38, 0.40, 0.50);
+      vec3 c2c = vec3(0.90, 0.92, 0.96);
+
+      // blend palettes
+      vec3 ca = mix(c0a, c1a, clamp(uPalette, 0.0, 1.0));
+      ca = mix(ca, mix(c1a, c2a, clamp(uPalette - 1.0, 0.0, 1.0)), step(1.0, uPalette));
+
+      vec3 cb = mix(c0b, c1b, clamp(uPalette, 0.0, 1.0));
+      cb = mix(cb, mix(c1b, c2b, clamp(uPalette - 1.0, 0.0, 1.0)), step(1.0, uPalette));
+
+      vec3 cc = mix(c0c, c1c, clamp(uPalette, 0.0, 1.0));
+      cc = mix(cc, mix(c1c, c2c, clamp(uPalette - 1.0, 0.0, 1.0)), step(1.0, uPalette));
+
+      vec3 col = mix(ca, cb, smoothstep(0.0, 0.5, k));
+      col = mix(col, cc, smoothstep(0.5, 1.0, k));
+      gl_FragColor = vec4(col * a * (0.40 + vSpeed * 0.85), a * 0.9);
+    }
+  `
+});
+const pts = new THREE.Points(pGeom, pointsMat);
+scene.add(pts);
+
+// Fog plane — subtle depth
+const fogGeo = new THREE.PlaneGeometry(20, 20);
+const fogMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uTime;
+    void main(){
+      float d = length(vUv - 0.5);
+      float a = smoothstep(0.5, 0.0, d) * 0.025;
+      gl_FragColor = vec4(vec3(0.12, 0.14, 0.18), a);
+    }
+  `
+});
+const fogPlane = new THREE.Mesh(fogGeo, fogMat);
+fogPlane.position.z = -1.5;
+scene.add(fogPlane);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// State machine
+const STATES = [
+  { name: 'i · aizawa vortex',    id: 0, camR: 4.0, camY: 1.0, lookY: 1.0 },
+  { name: 'ii · thomas knot',     id: 1, camR: 5.0, camY: 1.5, lookY: 0.0 },
+  { name: 'iii · halvorsen triad', id: 2, camR: 4.5, camY: 0.8, lookY: 0.2 }
+];
+let currentState = 0;
+let transitioning = false;
+let transStart = 0;
+const TRANS_DUR = 2500; // ms
+
+const stateLabel = document.getElementById('stateLabel');
+
+function advanceState(){
+  if (transitioning) return;
+  const from = currentState;
+  currentState = (currentState + 1) % 3;
+  simUniforms.uFrom.value = STATES[from].id;
+  simUniforms.uTo.value   = STATES[currentState].id;
+  simUniforms.uBlend.value = 0.0;
+  transitioning = true;
+  transStart = performance.now();
+  stateLabel.style.opacity = '0.25';
+}
+
+addEventListener('click', advanceState);
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space') { e.preventDefault(); advanceState(); }
+});
+
+let t0 = performance.now();
+let targetCamR = STATES[0].camR;
+let targetCamY = STATES[0].camY;
+let targetLookY = STATES[0].lookY;
+let targetPalette = 0.0;
+let curCamR = targetCamR, curCamY = targetCamY, curLookY = targetLookY;
+let curPalette = 0.0;
+
+function loop(){
+  const now = performance.now();
+
+  // transition blend
+  if (transitioning){
+    const t = Math.min((now - transStart) / TRANS_DUR, 1.0);
+    const ease = t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2,2)/2; // ease in-out quad
+    simUniforms.uBlend.value = ease;
+    if (t >= 1.0){
+      transitioning = false;
+      simUniforms.uFrom.value = STATES[currentState].id;
+      simUniforms.uTo.value   = STATES[currentState].id;
+      simUniforms.uBlend.value = 0.0;
+      stateLabel.textContent = STATES[currentState].name;
+      stateLabel.style.opacity = '0.55';
+    }
+  }
+
+  // camera targets
+  targetCamR   = STATES[currentState].camR;
+  targetCamY   = STATES[currentState].camY;
+  targetLookY  = STATES[currentState].lookY;
+  targetPalette = currentState;
+
+  curCamR   += (targetCamR   - curCamR)   * 0.02;
+  curCamY   += (targetCamY   - curCamY)   * 0.02;
+  curLookY  += (targetLookY  - curLookY)  * 0.02;
+  curPalette += (targetPalette - curPalette) * 0.025;
+
+  pointsMat.uniforms.uPalette.value = curPalette;
+
+  // simulation steps
+  for (let i = 0; i < 4; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+
+  // orbit camera
+  const ang = (now - t0) * 0.00012;
+  camera.position.x = Math.sin(ang) * curCamR;
+  camera.position.z = Math.cos(ang) * curCamR;
+  camera.position.y = Math.sin(ang * 0.6) * curCamY;
+  camera.lookAt(0, curLookY, 0);
+
+  fogPlane.lookAt(camera.position);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
