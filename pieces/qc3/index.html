@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qc3 · withdrawn object · OOO Lucy</title>
+<!-- MOTION: orbit, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#060508; overflow:hidden;
+               color:#c8c0b8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">qc3</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.5, 200);
+camera.position.set(0, 0, 32);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x060508, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 65000;
+const restPositions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const shyZoneAttr = new Float32Array(N); // which shy zone (0-3) each particle is nearest
+
+// 4 shy zones — regions where the object withdraws from the viewer
+const shyZones = [
+  new THREE.Vector3(-4.5, 3.0, 2.0),
+  new THREE.Vector3(3.0, -2.5, -3.0),
+  new THREE.Vector3(-1.5, -5.0, 4.0),
+  new THREE.Vector3(2.5, 5.5, -2.0)
+];
+const shyRadii = [3.8, 3.2, 4.0, 3.5];
+
+const uniforms = {
+  uTime:    { value: 0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+  uReady:   { value: 0.0 },
+  uCamPos:  { value: new THREE.Vector3() },
+  uShyZone0: { value: shyZones[0] },
+  uShyZone1: { value: shyZones[1] },
+  uShyZone2: { value: shyZones[2] },
+  uShyZone3: { value: shyZones[3] },
+  uShyRad:   { value: new THREE.Vector4(shyRadii[0], shyRadii[1], shyRadii[2], shyRadii[3]) },
+  uFogNear:  { value: 18.0 },
+  uFogFar:   { value: 55.0 },
+  uNearClip: { value: 2.5 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform vec3  uCamPos;
+    uniform vec3  uShyZone0;
+    uniform vec3  uShyZone1;
+    uniform vec3  uShyZone2;
+    uniform vec3  uShyZone3;
+    uniform vec4  uShyRad;
+    uniform float uFogNear;
+    uniform float uFogFar;
+    uniform float uNearClip;
+
+    attribute vec3  rest;
+    attribute float seed;
+
+    varying vec3  vCol;
+    varying float vAlpha;
+
+    // Shy-zone withdrawal: particles near a shy zone fade when camera
+    // also faces that zone. The object retreats from being seen.
+    float shyFactor(vec3 worldP, vec3 zone, float radius) {
+      float dParticle = length(worldP - zone);
+      float inZone = 1.0 - smoothstep(0.0, radius, dParticle);
+      // how much camera is looking toward this zone
+      vec3 camToZone = normalize(zone - uCamPos);
+      vec3 camDir = normalize(-uCamPos); // cam looks at origin
+      float facing = max(0.0, dot(camDir, camToZone));
+      facing = smoothstep(0.3, 0.85, facing);
+      return inZone * facing;
+    }
+
+    void main(){
+      vec3 p = rest;
+      float t = uTime;
+      float s = seed;
+
+      // subtle breathing — particles drift along approximate normal
+      vec3 dir = normalize(p + vec3(0.001));
+      float breath = sin(t * 0.35 + s * 6.28) * 0.07;
+      breath += sin(t * 0.17 + s * 3.14) * 0.04;
+      p += dir * breath;
+
+      // spectral drift — particles occasionally slide along the surface
+      float drift = sin(t * 0.12 + s * 19.3) * 0.15;
+      vec3 tangent = normalize(cross(dir, vec3(0.0, 1.0, 0.1)));
+      p += tangent * drift * (0.5 + 0.5 * sin(s * 44.0));
+
+      // assembly reveal: coalesce from scattered fog
+      vec3 entry = dir * 40.0 + vec3(
+        sin(s * 77.0) * 12.0,
+        cos(s * 53.0) * 12.0,
+        sin(s * 33.0) * 12.0
+      );
+      float reveal = smoothstep(0.0, 1.0, uReady);
+      p = mix(entry, p, reveal);
+
+      // world position after model rotation
+      vec4 worldP4 = modelMatrix * vec4(p, 1.0);
+      vec3 worldP = worldP4.xyz;
+
+      // compute shy withdrawal
+      float shy = 0.0;
+      shy = max(shy, shyFactor(worldP, uShyZone0, uShyRad.x));
+      shy = max(shy, shyFactor(worldP, uShyZone1, uShyRad.y));
+      shy = max(shy, shyFactor(worldP, uShyZone2, uShyRad.z));
+      shy = max(shy, shyFactor(worldP, uShyZone3, uShyRad.w));
+
+      // pulse shy zones with time so withdrawal breathes
+      shy *= 0.7 + 0.3 * sin(t * 0.5 + s * 2.0);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // near-clip fade — particles dissolve as camera gets close
+      float nearFade = smoothstep(uNearClip, uNearClip + 3.5, dist);
+
+      // depth fog — form recedes into darkness at distance
+      float fogT = smoothstep(uFogNear, uFogFar, dist);
+      // variable fog density — some bands are thicker
+      float fogBand = 0.15 * sin(dist * 0.4 + t * 0.08);
+      fogT = clamp(fogT + fogBand, 0.0, 1.0);
+
+      float alpha = (1.0 - fogT) * nearFade * (1.0 - shy * 0.92) * reveal;
+
+      // palette: cold stone, oxidized bronze, deep shadow
+      // Harman's withdrawn object — colors of things half-seen
+      vec3 stone    = vec3(0.62, 0.58, 0.55);  // limestone
+      vec3 bronze   = vec3(0.42, 0.52, 0.45);  // verdigris
+      vec3 ember    = vec3(0.65, 0.35, 0.25);  // terracotta glimpse
+      vec3 shadow   = vec3(0.18, 0.16, 0.20);  // deep recession
+
+      float colorT = sin(s * 12.0 + t * 0.1) * 0.5 + 0.5;
+      float depthCol = smoothstep(8.0, 35.0, dist);
+      vec3 col = mix(stone, bronze, colorT);
+      col = mix(col, ember, smoothstep(0.7, 1.0, sin(s * 44.0 + t * 0.2)) * 0.4);
+      col = mix(col, shadow, depthCol * 0.7);
+
+      // shy zones tint cooler — the withdrawing parts lose warmth
+      col = mix(col, shadow * 1.3, shy * 0.6);
+
+      vCol = col;
+      vAlpha = alpha * (0.3 + 0.7 * (1.0 - depthCol));
+
+      float ptSize = (1.2 + 0.8 * (1.0 - depthCol)) * uPixel * (40.0 / max(dist, 1.0));
+      ptSize *= 0.3 + 0.7 * reveal;
+      gl_PointSize = max(ptSize, 0.5);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float falloff = exp(-r * 14.0);
+      float a = vAlpha * falloff;
+      if (a < 0.003) discard;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// fog planes — semi-transparent sheets at varying depths for occlusion layers
+const fogPlaneMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  side: THREE.DoubleSide,
+  uniforms: {
+    uTime: uniforms.uTime,
+    uDensity: { value: 0.12 },
+    uColor: { value: new THREE.Color(0x060508) }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uDensity;
+    uniform vec3  uColor;
+    varying vec2 vUv;
+    void main() {
+      float edge = smoothstep(0.0, 0.3, vUv.x) * smoothstep(1.0, 0.7, vUv.x)
+                 * smoothstep(0.0, 0.3, vUv.y) * smoothstep(1.0, 0.7, vUv.y);
+      float drift = sin(vUv.x * 3.0 + uTime * 0.06) * sin(vUv.y * 2.5 + uTime * 0.04) * 0.3;
+      float alpha = uDensity * edge * (0.7 + drift);
+      gl_FragColor = vec4(uColor, alpha);
+    }
+  `
+});
+
+// place 3 fog curtains at different angles/depths
+for (let i = 0; i < 3; i++) {
+  const fp = new THREE.Mesh(
+    new THREE.PlaneGeometry(50, 40),
+    fogPlaneMat.clone()
+  );
+  fp.material.uniforms.uTime = uniforms.uTime;
+  fp.material.uniforms.uDensity.value = 0.08 + i * 0.04;
+  const angle = (i / 3) * Math.PI * 2 + 0.4;
+  fp.position.set(Math.sin(angle) * 6, 0, Math.cos(angle) * 6);
+  fp.lookAt(0, 0, 0);
+  scene.add(fp);
+}
+
+// dust motes — tiny ambient particles for atmosphere
+const dustN = 2000;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustN * 3);
+const dustSeeds = new Float32Array(dustN);
+for (let i = 0; i < dustN; i++) {
+  dustPos[i*3]   = (Math.random() - 0.5) * 60;
+  dustPos[i*3+1] = (Math.random() - 0.5) * 40;
+  dustPos[i*3+2] = (Math.random() - 0.5) * 60;
+  dustSeeds[i] = Math.random();
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeo.setAttribute('seed', new THREE.BufferAttribute(dustSeeds, 1));
+
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: uniforms.uTime, uPixel: uniforms.uPixel },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vA;
+    void main() {
+      vec3 p = position;
+      p.y += sin(uTime * 0.05 + seed * 20.0) * 2.0;
+      p.x += cos(uTime * 0.03 + seed * 15.0) * 1.5;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      vA = 0.08 * smoothstep(50.0, 10.0, dist) * (0.5 + 0.5 * sin(uTime * 0.3 + seed * 6.28));
+      gl_PointSize = uPixel * (12.0 / max(dist, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = vA * exp(-r * 10.0);
+      gl_FragColor = vec4(vec3(0.45, 0.42, 0.40) * a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeo, dustMat));
+
+// fallback: if PLY fails, generate an icosahedron point cloud
+function buildFallback() {
+  const ico = new THREE.IcosahedronGeometry(7, 5);
+  const mesh = new THREE.Mesh(ico, new THREE.MeshBasicMaterial());
+  const sampler = new MeshSurfaceSampler(mesh).build();
+  const tmp = new THREE.Vector3();
+  for (let i = 0; i < N; i++) {
+    sampler.sample(tmp);
+    restPositions[i*3]   = tmp.x;
+    restPositions[i*3+1] = tmp.y;
+    restPositions[i*3+2] = tmp.z;
+    seeds[i] = Math.random();
+  }
+  attachGeometry();
+}
+
+function attachGeometry() {
+  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+  geom.setAttribute('rest', new THREE.BufferAttribute(restPositions, 3));
+  geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+  revealStart = performance.now();
+}
+
+let revealStart = 0;
+
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+const loader = new PLYLoader();
+loader.load(PLY_URL,
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scale = 16 / maxAxis;
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp = new THREE.Vector3();
+    for (let i = 0; i < N; i++) {
+      sampler.sample(tmp);
+      restPositions[i*3]   = tmp.x;
+      restPositions[i*3+1] = tmp.y;
+      restPositions[i*3+2] = tmp.z;
+      seeds[i] = Math.random();
+    }
+    attachGeometry();
+  },
+  undefined,
+  () => { buildFallback(); }
+);
+
+// also start fallback on timeout
+setTimeout(() => { if (revealStart === 0) buildFallback(); }, 8000);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 3500);
+  }
+
+  // camera orbit: elliptical, varying altitude, never completing a full reveal
+  // the path is irrational so it never exactly repeats
+  const orbitSpeed = 0.04;
+  const theta = t * orbitSpeed;
+  const phi = Math.sin(t * 0.013) * 0.35 + 0.15; // subtle vertical wander
+
+  // distance oscillates — sometimes closer (more near-clip occlusion), sometimes far (more fog)
+  const dist = 26 + 8 * Math.sin(t * 0.023) + 3 * Math.sin(t * 0.071);
+
+  const cx = Math.sin(theta) * dist * Math.cos(phi);
+  const cy = Math.sin(phi) * dist * 0.4 + 2.0 * Math.sin(t * 0.019);
+  const cz = Math.cos(theta) * dist * Math.cos(phi);
+
+  camera.position.set(cx, cy, cz);
+  // look slightly off-center — never directly at the core
+  const lookOffset = new THREE.Vector3(
+    Math.sin(t * 0.031) * 2.5,
+    Math.cos(t * 0.027) * 1.5,
+    Math.sin(t * 0.019) * 2.0
+  );
+  camera.lookAt(lookOffset);
+  uniforms.uCamPos.value.copy(camera.position);
+
+  // rotate shy zones slowly so withdrawal regions drift
+  for (let i = 0; i < 4; i++) {
+    const base = shyZones[i];
+    const a = t * 0.02 * (i + 1) * 0.3;
+    const rotated = new THREE.Vector3(
+      base.x * Math.cos(a) - base.z * Math.sin(a),
+      base.y + Math.sin(t * 0.04 + i) * 0.8,
+      base.x * Math.sin(a) + base.z * Math.cos(a)
+    );
+    uniforms[`uShyZone${i}`].value.copy(rotated);
+  }
+
+  // modulate fog boundaries with time — occlusion breathes
+  uniforms.uFogNear.value = 16 + 4 * Math.sin(t * 0.05);
+  uniforms.uFogFar.value = 48 + 8 * Math.sin(t * 0.03);
+  uniforms.uNearClip.value = 2.0 + 1.5 * Math.sin(t * 0.07);
+
+  // slow model rotation — independent of camera orbit
+  points.rotation.y = t * 0.015;
+  points.rotation.x = Math.sin(t * 0.008) * 0.1;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
