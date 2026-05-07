@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wsz · Process surface — drawing as contact</title>
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#f8f8f6; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">wsz</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf8f8f6);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 11);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+// ── Drawing surface geometry: torus as canvas
+const TORUS_MAJOR = 4.0;
+const TORUS_MINOR = 1.8;
+const surfaceGeo = new THREE.TorusGeometry(TORUS_MAJOR, TORUS_MINOR, 64, 128);
+const surfaceMat = new THREE.MeshBasicMaterial({
+  color: 0xf8f8f6,
+  transparent: true,
+  opacity: 0.02,
+  side: THREE.DoubleSide
+});
+const surface = new THREE.Mesh(surfaceGeo, surfaceMat);
+scene.add(surface);
+
+// ── Element class — agent that traces circular path on torus surface
+class Element {
+  constructor(id){
+    this.id = id;
+    // Toroidal coordinates
+    this.theta = Math.random() * Math.PI * 2; // major circle angle
+    this.phi = Math.random() * Math.PI * 2;   // minor circle angle
+    this.speed = 0.0008 + Math.random() * 0.0012;
+    this.direction = Math.random() > 0.5 ? 1 : -1;
+    // Oscillation in minor angle
+    this.phiSpeed = 0.0003 + Math.random() * 0.0005;
+    this.phiAmp = 0.3 + Math.random() * 0.8;
+    this.phiOffset = Math.random() * Math.PI * 2;
+    this.updatePosition();
+  }
+  
+  updatePosition(){
+    const majorX = Math.cos(this.theta) * TORUS_MAJOR;
+    const majorZ = Math.sin(this.theta) * TORUS_MAJOR;
+    const minorR = TORUS_MINOR;
+    this.position = new THREE.Vector3(
+      majorX + Math.cos(this.phi) * minorR * Math.cos(this.theta),
+      Math.sin(this.phi) * minorR,
+      majorZ + Math.cos(this.phi) * minorR * Math.sin(this.theta)
+    );
+  }
+  
+  step(time){
+    this.theta += this.speed * this.direction;
+    this.phi = Math.sin(time * this.phiSpeed + this.phiOffset) * this.phiAmp;
+    this.updatePosition();
+  }
+}
+
+// ── Create elements
+const NUM_ELEMENTS = 380;
+const elements = [];
+for (let i = 0; i < NUM_ELEMENTS; i++){
+  elements.push(new Element(i));
+}
+
+// ── Connection quad geometry
+// When two elements are within threshold, draw a filled quad
+// We'll use InstancedMesh with dynamic visibility
+const MAX_CONNECTIONS = NUM_ELEMENTS * 8;
+const quadGeo = new THREE.PlaneGeometry(1, 1);
+const quadMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uColor: { value: new THREE.Color(0x0a0a0a) }
+  },
+  vertexShader: `
+    attribute float opacity;
+    attribute vec3 corner0;
+    attribute vec3 corner1;
+    attribute vec3 corner2;
+    attribute vec3 corner3;
+    
+    varying float vOpacity;
+    
+    void main(){
+      vOpacity = opacity;
+      vec3 pos = position;
+      // Map unit square to quad corners
+      vec3 worldPos = mix(
+        mix(corner0, corner1, (position.x + 0.5)),
+        mix(corner3, corner2, (position.x + 0.5)),
+        (position.y + 0.5)
+      );
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    varying float vOpacity;
+    
+    void main(){
+      if (vOpacity < 0.001) discard;
+      gl_FragColor = vec4(uColor, vOpacity);
+    }
+  `,
+  transparent: true,
+  blending: THREE.NormalBlending,
+  depthWrite: false,
+  side: THREE.DoubleSide
+});
+
+const quadsInstance = new THREE.InstancedMesh(quadGeo, quadMat, MAX_CONNECTIONS);
+quadsInstance.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+// Custom attributes for each quad instance
+const opacities = new Float32Array(MAX_CONNECTIONS);
+const corner0s = new Float32Array(MAX_CONNECTIONS * 3);
+const corner1s = new Float32Array(MAX_CONNECTIONS * 3);
+const corner2s = new Float32Array(MAX_CONNECTIONS * 3);
+const corner3s = new Float32Array(MAX_CONNECTIONS * 3);
+
+quadsInstance.geometry.setAttribute('opacity', new THREE.InstancedBufferAttribute(opacities, 1));
+quadsInstance.geometry.setAttribute('corner0', new THREE.InstancedBufferAttribute(corner0s, 3));
+quadsInstance.geometry.setAttribute('corner1', new THREE.InstancedBufferAttribute(corner1s, 3));
+quadsInstance.geometry.setAttribute('corner2', new THREE.InstancedBufferAttribute(corner2s, 3));
+quadsInstance.geometry.setAttribute('corner3', new THREE.InstancedBufferAttribute(corner3s, 3));
+
+scene.add(quadsInstance);
+
+// ── Connection records
+const connections = [];
+const CONTACT_THRESHOLD = 0.35;
+const FADE_IN_SPEED = 0.003;
+const FADE_OUT_SPEED = 0.0008;
+const MAX_OPACITY = 0.15;
+
+function findConnection(idA, idB){
+  return connections.find(c => (c.idA === idA && c.idB === idB) || (c.idA === idB && c.idB === idA));
+}
+
+// ── Lines between element positions (ephemeral indicator)
+const lineGeo = new THREE.BufferGeometry();
+const linePosArray = new Float32Array(MAX_CONNECTIONS * 6);
+lineGeo.setAttribute('position', new THREE.BufferAttribute(linePosArray, 3));
+const lineMat = new THREE.LineBasicMaterial({
+  color: 0x0a0a0a,
+  transparent: true,
+  opacity: 0.04,
+  blending: THREE.AdditiveBlending
+});
+const lines = new THREE.LineSegments(lineGeo, lineMat);
+scene.add(lines);
+
+// ── Element position markers (tiny dots)
+const dotGeo = new THREE.SphereGeometry(0.04, 8, 6);
+const dotMat = new THREE.MeshBasicMaterial({ color: 0xc20018 });
+const dots = new THREE.InstancedMesh(dotGeo, dotMat, NUM_ELEMENTS);
+scene.add(dots);
+
+const dummy = new THREE.Object3D();
+
+// ── Slow fade entire scene
+const fadeQuad = new THREE.Mesh(
+  new THREE.PlaneGeometry(100, 100),
+  new THREE.MeshBasicMaterial({
+    color: 0xf8f8f6,
+    transparent: true,
+    opacity: 0.005,
+    depthWrite: false,
+    depthTest: false
+  })
+);
+fadeQuad.position.z = 10;
+const fadeScene = new THREE.Scene();
+fadeScene.add(fadeQuad);
+const fadeCamera = new THREE.OrthographicCamera(-50, 50, 50, -50, 0.1, 100);
+fadeCamera.position.z = 50;
+
+// ── Animate
+let time = 0;
+let frameCount = 0;
+
+function loop(){
+  time += 1;
+  frameCount++;
+  
+  // Step elements
+  elements.forEach(el => el.step(time));
+  
+  // Update dot positions
+  elements.forEach((el, i) => {
+    dummy.position.copy(el.position);
+    dummy.updateMatrix();
+    dots.setMatrixAt(i, dummy.matrix);
+  });
+  dots.instanceMatrix.needsUpdate = true;
+  
+  // Check distances and manage connections
+  let activeConnections = 0;
+  let lineIdx = 0;
+  
+  for (let i = 0; i < NUM_ELEMENTS; i++){
+    for (let j = i + 1; j < NUM_ELEMENTS; j++){
+      const dist = elements[i].position.distanceTo(elements[j].position);
+      if (dist < CONTACT_THRESHOLD){
+        let conn = findConnection(i, j);
+        if (!conn){
+          // Create new connection
+          conn = {
+            idA: i,
+            idB: j,
+            opacity: 0,
+            posA0: elements[i].position.clone(),
+            posB0: elements[j].position.clone(),
+            posA1: elements[i].position.clone(),
+            posB1: elements[j].position.clone()
+          };
+          connections.push(conn);
+        }
+        conn.opacity = Math.min(conn.opacity + FADE_IN_SPEED, MAX_OPACITY);
+        // Update quad corners — current positions frozen at contact
+        conn.posA1.copy(elements[i].position);
+        conn.posB1.copy(elements[j].position);
+      }
+    }
+  }
+  
+  // Update all connections and build quads
+  for (let i = connections.length - 1; i >= 0; i--){
+    const conn = connections[i];
+    const elA = elements[conn.idA];
+    const elB = elements[conn.idB];
+    const dist = elA.position.distanceTo(elB.position);
+    
+    if (dist > CONTACT_THRESHOLD + 0.1){
+      conn.opacity -= FADE_OUT_SPEED;
+    }
+    
+    if (conn.opacity < 0.001){
+      connections.splice(i, 1);
+      continue;
+    }
+    
+    if (activeConnections < MAX_CONNECTIONS){
+      // Build quad from four corners
+      const idx = activeConnections;
+      opacities[idx] = conn.opacity;
+      
+      corner0s[idx*3]   = conn.posA0.x;
+      corner0s[idx*3+1] = conn.posA0.y;
+      corner0s[idx*3+2] = conn.posA0.z;
+      
+      corner1s[idx*3]   = conn.posB0.x;
+      corner1s[idx*3+1] = conn.posB0.y;
+      corner1s[idx*3+2] = conn.posB0.z;
+      
+      corner2s[idx*3]   = conn.posB1.x;
+      corner2s[idx*3+1] = conn.posB1.y;
+      corner2s[idx*3+2] = conn.posB1.z;
+      
+      corner3s[idx*3]   = conn.posA1.x;
+      corner3s[idx*3+1] = conn.posA1.y;
+      corner3s[idx*3+2] = conn.posA1.z;
+      
+      dummy.position.set(0, 0, 0);
+      dummy.updateMatrix();
+      quadsInstance.setMatrixAt(idx, dummy.matrix);
+      
+      // Draw line between current positions
+      linePosArray[lineIdx*6]   = elA.position.x;
+      linePosArray[lineIdx*6+1] = elA.position.y;
+      linePosArray[lineIdx*6+2] = elA.position.z;
+      linePosArray[lineIdx*6+3] = elB.position.x;
+      linePosArray[lineIdx*6+4] = elB.position.y;
+      linePosArray[lineIdx*6+5] = elB.position.z;
+      lineIdx++;
+      
+      activeConnections++;
+    }
+  }
+  
+  // Zero out unused instances
+  for (let i = activeConnections; i < MAX_CONNECTIONS; i++){
+    opacities[i] = 0;
+  }
+  
+  quadsInstance.geometry.attributes.opacity.needsUpdate = true;
+  quadsInstance.geometry.attributes.corner0.needsUpdate = true;
+  quadsInstance.geometry.attributes.corner1.needsUpdate = true;
+  quadsInstance.geometry.attributes.corner2.needsUpdate = true;
+  quadsInstance.geometry.attributes.corner3.needsUpdate = true;
+  quadsInstance.instanceMatrix.needsUpdate = true;
+  quadsInstance.count = activeConnections;
+  
+  lineGeo.setDrawRange(0, lineIdx * 2);
+  lineGeo.attributes.position.needsUpdate = true;
+  
+  // Slow rotation
+  surface.rotation.y = time * 0.0002;
+  
+  // Camera gentle drift
+  camera.position.x = Math.sin(time * 0.00015) * 1.5;
+  camera.position.y = Math.cos(time * 0.00012) * 1.2;
+  camera.lookAt(0, 0, 0);
+  
+  // Render with accumulation fade
+  if (frameCount % 2 === 0){
+    renderer.render(fadeScene, fadeCamera);
+  }
+  renderer.render(scene, camera);
+  
+  requestAnimationFrame(loop);
+}
+
+// Initial clear
+renderer.clear();
+loop();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
