@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zt6 · ghost orchard · lidar scan with loss</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background:
+      radial-gradient(ellipse at 50% 30%, #12141a 0%, #080a0e 50%, #000000 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">zt6 · ghost orchard · lidar scan with loss</div>
+<div class="hint">quayola · remains — the scanner cannot resolve what it cannot see</div>
+<div class="src">descended from sav · narrative boids → measurement failure</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// MUTATION CONTEXT: sav had narrative boids (together/loss/seeking/return).
+// User feedback: backdrop too loud/blank. This mutation REMOVES the boids
+// entirely and translates the LOSS/SEEKING emotional arc into Quayola's
+// LiDAR-scan aesthetic: a ghost orchard of 5 trees dissolving into scan
+// noise. The trees lose coherence over time (occlusion blocks, gaussian
+// displacement grows), then slowly reconverge — LOSS as measurement failure,
+// RETURN as the scanner resolving the form again. The backdrop is now
+// inhabited: a few hundred ground-plane specks + subtle atmospheric fog.
+// Color: pale gray on near-black (Quayola signature). Camera: slow orbit
+// that reveals missing chunks where the laser couldn't see.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a0e, 0.022);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 180);
+camera.position.set(0, 5, 18);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── L-system tree skeleton generator
+function lsystemTree(axiom, rules, iterations, angle, stepLen){
+  let str = axiom;
+  for (let i = 0; i < iterations; i++){
+    let next = '';
+    for (let c of str){
+      next += rules[c] || c;
+    }
+    str = next;
+  }
+  // turtle interpret: F = forward, + = left, - = right, [ = push, ] = pop
+  const stack = [];
+  let x = 0, y = 0, z = 0, heading = Math.PI * 0.5, pitch = 0;
+  const segs = [];
+  for (let c of str){
+    if (c === 'F'){
+      const nx = x + Math.cos(heading) * Math.cos(pitch) * stepLen;
+      const ny = y + Math.sin(pitch) * stepLen;
+      const nz = z + Math.sin(heading) * Math.cos(pitch) * stepLen;
+      segs.push({ x0:x, y0:y, z0:z, x1:nx, y1:ny, z1:nz });
+      x = nx; y = ny; z = nz;
+    } else if (c === '+'){
+      heading += angle;
+    } else if (c === '-'){
+      heading -= angle;
+    } else if (c === '^'){
+      pitch += angle * 0.6;
+    } else if (c === '&'){
+      pitch -= angle * 0.6;
+    } else if (c === '['){
+      stack.push({x,y,z,heading,pitch});
+    } else if (c === ']'){
+      const s = stack.pop();
+      x=s.x; y=s.y; z=s.z; heading=s.heading; pitch=s.pitch;
+    }
+  }
+  return segs;
+}
+
+// ────────────── generate 5 trees with different L-system seeds
+const treeConfigs = [
+  { axiom:'F', rules:{F:'F[+F]F[-F][F]'}, iter:4, angle:0.44, step:0.8, x:-6, z:-2 },
+  { axiom:'F', rules:{F:'FF-[-F+F+F]+[+F-F-F]'}, iter:4, angle:0.39, step:0.7, x:-2, z:1 },
+  { axiom:'F', rules:{F:'F[+F][-F]F[^F][&F]F'}, iter:4, angle:0.48, step:0.75, x:2, z:-1 },
+  { axiom:'F', rules:{F:'F[-F][+F][^F]F'}, iter:4, angle:0.52, step:0.85, x:6, z:0.5 },
+  { axiom:'F', rules:{F:'FF[+F[-F]][-F[+F]]'}, iter:4, angle:0.41, step:0.72, x:0, z:-4 }
+];
+
+const treeSkelData = [];
+for (let cfg of treeConfigs){
+  const segs = lsystemTree(cfg.axiom, cfg.rules, cfg.iter, cfg.angle, cfg.step);
+  treeSkelData.push({ segs, offset: new THREE.Vector3(cfg.x, 0, cfg.z) });
+}
+
+// ────────────── sample points on skeleton + store original positions
+// each segment → 8 sample points; total ~10k points across 5 trees
+const SAMPLES_PER_SEG = 8;
+const allPoints = [];
+const allOriginals = [];
+const allTreeIdx = [];
+for (let ti = 0; ti < treeSkelData.length; ti++){
+  const tree = treeSkelData[ti];
+  for (let seg of tree.segs){
+    for (let s = 0; s < SAMPLES_PER_SEG; s++){
+      const t = s / SAMPLES_PER_SEG;
+      const px = seg.x0 + (seg.x1 - seg.x0) * t + tree.offset.x;
+      const py = seg.y0 + (seg.y1 - seg.y0) * t + tree.offset.y;
+      const pz = seg.z0 + (seg.z1 - seg.z0) * t + tree.offset.z;
+      allPoints.push(px, py, pz);
+      allOriginals.push(px, py, pz);
+      allTreeIdx.push(ti);
+    }
+  }
+}
+const N = allPoints.length / 3;
+
+// occlusion map: each point has a 'visible' flag that randomly toggles
+// simulating blocks where the laser couldn't see through dense foliage
+const occlusionSeed = new Float32Array(N);
+for (let i = 0; i < N; i++){
+  occlusionSeed[i] = Math.random();
+}
+
+// ────────────── render as Points with LiDAR-falloff shader
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(allPoints), 3));
+geom.setAttribute('original', new THREE.BufferAttribute(new Float32Array(allOriginals), 3));
+geom.setAttribute('occlusionSeed', new THREE.BufferAttribute(occlusionSeed, 1));
+const treeIdxAttr = new Float32Array(N);
+for (let i = 0; i < N; i++) treeIdxAttr[i] = allTreeIdx[i];
+geom.setAttribute('treeIdx', new THREE.BufferAttribute(treeIdxAttr, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uLossFactor: { value: 0 }  // 0=together (resolved), 1=loss (dissolving)
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: true,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uLossFactor;
+    attribute vec3 original;
+    attribute float occlusionSeed;
+    attribute float treeIdx;
+    varying float vAlpha;
+    void main(){
+      // base position = original
+      vec3 p = original;
+
+      // add gaussian displacement that grows with uLossFactor
+      // each tree phase-offsets so they don't all dissolve at once
+      float tPhase = treeIdx * 0.8 + uTime * 0.15;
+      float noiseMag = uLossFactor * 0.8;
+      vec3 noise = vec3(
+        sin(tPhase + occlusionSeed * 31.4) * noiseMag,
+        cos(tPhase * 1.3 + occlusionSeed * 27.1) * noiseMag,
+        sin(tPhase * 0.7 + occlusionSeed * 41.8) * noiseMag
+      );
+      p += noise;
+
+      // occlusion: some points disappear entirely when uLossFactor > threshold
+      // they reappear as it drops — simulating scan gaps
+      float occlusionThresh = 0.3 + occlusionSeed * 0.5;
+      float visible = step(uLossFactor, occlusionThresh);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // LiDAR-falloff size: points farther from camera are fuzzier
+      float baseSize = 1.2 + sin(uTime * 0.4 + occlusionSeed * 6.28) * 0.3;
+      float falloff = 1.0 + dist * 0.08;  // size grows with distance → scan uncertainty
+      gl_PointSize = baseSize * falloff * uPixel * (12.0 / dist);
+
+      vAlpha = visible * clamp(1.0 - (dist - 20.0) / 40.0, 0.0, 1.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      // pale gray, Quayola signature
+      vec3 col = vec3(0.72, 0.76, 0.78);
+      float a = exp(-r * 9.0) * vAlpha * 0.65;
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── ground specks (scan noise at y=0, inhabited backdrop)
+const groundN = 300;
+const groundPos = new Float32Array(groundN * 3);
+for (let i = 0; i < groundN; i++){
+  groundPos[i*3]     = (Math.random() - 0.5) * 40;
+  groundPos[i*3 + 1] = Math.random() * 0.2;
+  groundPos[i*3 + 2] = (Math.random() - 0.5) * 40;
+}
+const groundGeom = new THREE.BufferGeometry();
+groundGeom.setAttribute('position', new THREE.BufferAttribute(groundPos, 3));
+const groundMat = new THREE.PointsMaterial({
+  size: 0.04, color: 0x3a3e42, transparent: true, opacity: 0.18, fog: true
+});
+const groundPoints = new THREE.Points(groundGeom, groundMat);
+scene.add(groundPoints);
+
+// ────────────── emotional arc: cycle TOGETHER→LOSS→SEEKING→RETURN
+// lossFactor ranges 0..1 over ~20sec cycle
+let arcPhase = 0;
+const CYCLE_DURATION = 20;
+function updateArc(dt){
+  arcPhase += dt / CYCLE_DURATION;
+  if (arcPhase > 1) arcPhase -= 1;
+  // 0..0.3 = together (lossFactor=0)
+  // 0.3..0.5 = loss ramp (0→1)
+  // 0.5..0.7 = seeking (lossFactor=1)
+  // 0.7..1.0 = return ramp (1→0)
+  if (arcPhase < 0.3){
+    uniforms.uLossFactor.value = 0;
+  } else if (arcPhase < 0.5){
+    uniforms.uLossFactor.value = (arcPhase - 0.3) / 0.2;
+  } else if (arcPhase < 0.7){
+    uniforms.uLossFactor.value = 1.0;
+  } else {
+    uniforms.uLossFactor.value = 1.0 - (arcPhase - 0.7) / 0.3;
+  }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm
+for (let s = 0; s < 100; s++){
+  updateArc(0.05);
+  uniforms.uTime.value = s * 0.05;
+}
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = now / 1000;
+  updateArc(dt);
+
+  // slow orbit
+  const ang = now * 0.00008;
+  camera.position.x = Math.sin(ang) * 18;
+  camera.position.z = Math.cos(ang) * 18;
+  camera.position.y = 5 + Math.sin(ang * 0.6) * 1.5;
+  camera.lookAt(0, 3, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
