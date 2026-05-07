@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>w20 · tender strings</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; color:#cdd2dc; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">w20</div>
+<div class="hint">drag to orbit · scroll to zoom · click to regrow</div>
+<div class="src">Felix Gonzalez-Torres · light-string drape · L-system armature · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── L-system (inherited skeleton, softened angles) ── */
+const RULES = {
+  'F': [
+    { p: 0.40, s: 'FF[+F-F][-F+F][/F\\F]' },
+    { p: 0.30, s: 'F[+F][-F]F'             },
+    { p: 0.18, s: 'F[/F][\\F]F'            },
+    { p: 0.12, s: 'F[+F-F]F[\\F/F]'        },
+  ],
+};
+const ANGLE = THREE.MathUtils.degToRad(25);
+const STEP_BASE = 1.0;
+
+function expand(axiom, depth, rng){
+  let s = axiom;
+  for (let d = 0; d < depth; d++){
+    let out = '';
+    for (const ch of s){
+      if (ch in RULES){
+        const r = rng(); let acc = 0;
+        for (const opt of RULES[ch]){ acc += opt.p; if (r <= acc){ out += opt.s; break; } }
+      } else out += ch;
+    }
+    s = out;
+  }
+  return s;
+}
+
+function turtle(str, depthFactor){
+  const H = new THREE.Vector3(0,1,0), L = new THREE.Vector3(-1,0,0), U = new THREE.Vector3(0,0,1);
+  const stack = [], segments = [];
+  let pos = new THREE.Vector3(0,-7,0);
+  let h = H.clone(), l = L.clone(), u = U.clone(), gen = 0, maxGen = 0;
+  const rotate = (axis, ang) => {
+    const q = new THREE.Quaternion().setFromAxisAngle(axis, ang);
+    h.applyQuaternion(q); l.applyQuaternion(q); u.applyQuaternion(q);
+  };
+  for (const ch of str){
+    switch(ch){
+      case 'F': {
+        const step = STEP_BASE * Math.pow(depthFactor, gen);
+        const np = pos.clone().addScaledVector(h, step);
+        segments.push({ from: pos.clone(), to: np.clone(), gen });
+        if (gen > maxGen) maxGen = gen;
+        pos = np; break;
+      }
+      case '+': rotate(u, +ANGLE); break;
+      case '-': rotate(u, -ANGLE); break;
+      case '&': rotate(l, +ANGLE); break;
+      case '^': rotate(l, -ANGLE); break;
+      case '/': rotate(h, +ANGLE); break;
+      case '\\': rotate(h, -ANGLE); break;
+      case '[': stack.push({ pos:pos.clone(), h:h.clone(), l:l.clone(), u:u.clone(), gen }); gen++; break;
+      case ']': { const f = stack.pop(); pos=f.pos; h=f.h; l=f.l; u=f.u; gen=f.gen; break; }
+    }
+  }
+  return { segments, maxGen };
+}
+
+/* ── Particle builder: light-string drape with fallen particles ── */
+function buildParticles(segments, totalN, maxGen){
+  const lens = segments.map(s => s.from.distanceTo(s.to));
+  const total = lens.reduce((a,b)=>a+b,0);
+  const positions = new Float32Array(totalN*3);
+  const seeds     = new Float32Array(totalN);
+  const gens      = new Float32Array(totalN);
+  const fallSeeds = new Float32Array(totalN*3); // where fallen particles drift to
+  const isFallen  = new Float32Array(totalN);   // 0 = on tree, 1 = fallen
+  const v = new THREE.Vector3();
+  let written = 0;
+  const tipThreshold = Math.max(1, maxGen - 1);
+
+  // Find lowest y for ground plane
+  let minY = Infinity;
+  for (const s of segments) minY = Math.min(minY, s.from.y, s.to.y);
+  const groundY = minY - 0.3;
+
+  // 15% of particles will be "fallen" — resting on the ground beneath tips
+  const fallenRatio = 0.15;
+  const tipSegments = segments.filter(s => s.gen >= tipThreshold);
+
+  for (let i = 0; i < segments.length; i++){
+    const share = i === segments.length-1
+      ? totalN - written
+      : Math.max(1, Math.floor(totalN * lens[i] / total));
+    const isTip = segments[i].gen >= tipThreshold;
+    for (let k = 0; k < share && written < totalN; k++){
+      const fallen = isTip && Math.random() < fallenRatio;
+      const t = Math.random();
+      v.lerpVectors(segments[i].from, segments[i].to, t);
+      const jitter = 0.03 * Math.pow(0.85, segments[i].gen);
+      v.x += (Math.random()-0.5)*jitter;
+      v.y += (Math.random()-0.5)*jitter;
+      v.z += (Math.random()-0.5)*jitter;
+      positions[written*3]   = v.x;
+      positions[written*3+1] = v.y;
+      positions[written*3+2] = v.z;
+      seeds[written] = Math.random();
+      gens[written]  = segments[i].gen;
+      isFallen[written] = fallen ? 1.0 : 0.0;
+
+      // fallen destination: spread gently on the ground beneath
+      if (fallen) {
+        const tipSeg = tipSegments[Math.floor(Math.random()*tipSegments.length)];
+        const mid = tipSeg.from.clone().lerp(tipSeg.to, 0.5);
+        fallSeeds[written*3]   = mid.x + (Math.random()-0.5)*3.5;
+        fallSeeds[written*3+1] = groundY + Math.random()*0.15;
+        fallSeeds[written*3+2] = mid.z + (Math.random()-0.5)*3.5;
+      } else {
+        fallSeeds[written*3]   = v.x;
+        fallSeeds[written*3+1] = v.y;
+        fallSeeds[written*3+2] = v.z;
+      }
+      written++;
+    }
+  }
+  return { positions, seeds, gens, isFallen, fallSeeds, tipThreshold };
+}
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(6, 3, 20);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0807,1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.target.set(0,2,0);
+
+const N = 80000;
+let geom, points;
+
+const uniforms = {
+  uTime:         { value: 0 },
+  uPixel:        { value: renderer.getPixelRatio() },
+  uReady:        { value: 0 },
+  uTipThreshold: { value: 3.0 },
+  uFallCycle:    { value: 0.0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent:true, depthWrite:false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform float uTipThreshold;
+    uniform float uFallCycle;
+    attribute float seed;
+    attribute float gen;
+    attribute float fallen;
+    attribute vec3 fallDest;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vBulb;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.3 + seed * 6.28;
+
+      // gentle sway — tender, slow breathing
+      float sway = 0.035 * gen * (0.5 + 0.5*sin(t * 0.4));
+      p.x += sway * sin(t * 0.5 + p.y * 0.2);
+      p.z += sway * cos(t * 0.45 + p.y * 0.2);
+
+      // catenary drape: inner branch particles sag slightly
+      float sagAmount = 0.12 * gen * sin(seed * 3.14);
+      p.y -= sagAmount * (1.0 - step(uTipThreshold, gen));
+
+      // fallen particles: slow drift from tree position to ground
+      // 30s cycle: on tree → detach → drift → rest → fade back up
+      float fallT = fallen * uFallCycle;
+      p = mix(p, fallDest, fallT);
+
+      // reveal
+      vec3 entry = vec3(seed*3.0-1.5, 20.0+seed*6.0, seed*3.0-1.5);
+      p = mix(entry, p, smoothstep(0.0,1.0,uReady));
+
+      // Gonzalez-Torres palette: warm amber glow, fading to soft white at tips
+      // Like bare incandescent bulbs on a string
+      float k = clamp(gen * 0.2, 0.0, 1.0);
+      vec3 wire   = vec3(0.25, 0.18, 0.12);  // dark warm wire
+      vec3 amber  = vec3(1.0, 0.78, 0.42);   // warm bulb light
+      vec3 pale   = vec3(1.0, 0.95, 0.88);   // pale tips
+
+      float isTip = step(uTipThreshold, gen);
+      // particles on branches = wire, periodic "bulbs" glow amber
+      float bulbPhase = fract(seed * 7.0 + gen * 0.3);
+      float isBulb = step(0.7, bulbPhase); // ~30% of branch particles are "bulbs"
+      isBulb = max(isBulb, isTip); // all tips glow
+
+      vCol = mix(wire, amber, isBulb * (0.7 + 0.3*sin(t*0.3 + seed*6.28)));
+      vCol = mix(vCol, pale, isTip * 0.3);
+
+      // fallen particles: dimmer, warmer
+      vec3 fallenCol = vec3(0.95, 0.82, 0.55);
+      vCol = mix(vCol, fallenCol, fallT * 0.6);
+
+      // alpha: bulbs brighter, wire dimmer
+      float baseA = mix(0.15, 0.65, isBulb);
+      // bulbs pulse gently, like breathing
+      float pulse = 0.08 * sin(t * 0.6 + seed * 12.56);
+      vAlpha = (baseA + pulse) * (0.3 + 0.7*uReady);
+      // fallen particles fade slightly
+      vAlpha = mix(vAlpha, vAlpha * 0.5, fallT);
+
+      vBulb = isBulb;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // bulbs are larger points; wire is tiny
+      float sz = mix(1.2, 3.5, isBulb);
+      // tips slightly larger
+      sz = mix(sz, 4.5, isTip * 0.5);
+      // fallen particles: small, like scattered candy wrappers catching light
+      sz = mix(sz, 2.0, fallT);
+      gl_PointSize = sz * uPixel * (40.0/dist) * (0.3 + 0.7*uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vBulb;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      // bulbs: soft glow; wire: sharper
+      float sharpness = mix(20.0, 5.0, vBulb);
+      float a = exp(-r * sharpness) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+let revealStart = 0;
+let centroid = new THREE.Vector3(0,2,0);
+
+function regrow(seed){
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  const str = expand('F', 5, rng);
+  const { segments, maxGen } = turtle(str, 0.78);
+
+  const bb = new THREE.Box3();
+  for (const s of segments){ bb.expandByPoint(s.from); bb.expandByPoint(s.to); }
+  const ctr = bb.getCenter(new THREE.Vector3());
+  const mn = bb.min;
+  for (const s of segments){
+    s.from.x -= ctr.x; s.from.z -= ctr.z; s.from.y -= mn.y - (-7);
+    s.to.x   -= ctr.x; s.to.z   -= ctr.z; s.to.y   -= mn.y - (-7);
+  }
+
+  const { positions, seeds, gens, isFallen, fallSeeds, tipThreshold } =
+    buildParticles(segments, N, maxGen);
+  uniforms.uTipThreshold.value = tipThreshold;
+
+  // compute centroid for camera tracking
+  let cx=0, cy=0, cz=0;
+  for (let i=0; i<N; i++){ cx+=positions[i*3]; cy+=positions[i*3+1]; cz+=positions[i*3+2]; }
+  centroid.set(cx/N, cy/N, cz/N);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('gen',      new THREE.BufferAttribute(gens, 1));
+    geom.setAttribute('fallen',   new THREE.BufferAttribute(isFallen, 1));
+    geom.setAttribute('fallDest', new THREE.BufferAttribute(fallSeeds, 3));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions); geom.attributes.position.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);          geom.attributes.seed.needsUpdate = true;
+    geom.attributes.gen.array.set(gens);            geom.attributes.gen.needsUpdate = true;
+    geom.attributes.fallen.array.set(isFallen);     geom.attributes.fallen.needsUpdate = true;
+    geom.attributes.fallDest.array.set(fallSeeds);  geom.attributes.fallDest.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+  revealStart = performance.now();
+}
+
+regrow(Math.floor(Math.random()*1e9));
+addEventListener('click', () => regrow(Math.floor(Math.random()*1e9)));
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  if (revealStart > 0){
+    uniforms.uReady.value = Math.min(1.0, (now - revealStart) / 3000);
+  }
+
+  // fall cycle: 40s loop — particles slowly detach, drift, rest, return
+  // slow and tender like Gonzalez-Torres's sense of time
+  const cyc = (elapsed % 40) / 40;
+  let fallAmt;
+  if (cyc < 0.15)      fallAmt = 0;                                    // on tree
+  else if (cyc < 0.40) fallAmt = smoothstep(0.15, 0.40, cyc);          // detaching
+  else if (cyc < 0.70) fallAmt = 1.0;                                  // resting on ground
+  else                  fallAmt = 1.0 - smoothstep(0.70, 0.95, cyc);   // drifting back
+  uniforms.uFallCycle.value = fallAmt;
+
+  // camera gently tracks centroid
+  controls.target.lerp(centroid, 0.01);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+function smoothstep(a, b, x){
+  const t = Math.max(0, Math.min(1, (x-a)/(b-a)));
+  return t*t*(3-2*t);
+}
+
+loop();
+</script>
+</body>
+</html>
