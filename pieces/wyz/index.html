@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wyz · hash-seeded dancer</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0806; overflow:hidden;
+               color:#d6cab2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+  .hash { position:fixed; right:14px; bottom:12px; opacity:0.45; font-size: 9px; letter-spacing: 0.06em; font-family: monospace; }
+</style>
+</head>
+<body>
+<div class="id">wyz · hash-seeded dancer</div>
+<div class="hint">click to reseed · cryptographic choreography</div>
+<div class="src">operator (2023) · linked joint-skeletons · spring-coupled motion</div>
+<div class="hash" id="hashDisplay"></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 1.8, 8);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0806, 1);
+document.body.appendChild(renderer.domElement);
+
+// stage cyc gradient — warm theatrical gradient
+const gradMat = new THREE.ShaderMaterial({
+  depthWrite: false,
+  side: THREE.BackSide,
+  vertexShader: `
+    varying vec3 vPos;
+    void main(){
+      vPos = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vPos;
+    void main(){
+      float t = (vPos.y + 5.0) / 10.0;
+      vec3 bottom = vec3(0.08, 0.05, 0.03);
+      vec3 top = vec3(0.42, 0.28, 0.16);
+      gl_FragColor = vec4(mix(bottom, top, smoothstep(0.0, 1.0, t)), 1.0);
+    }
+  `
+});
+const gradGeom = new THREE.SphereGeometry(40, 32, 32);
+const gradSphere = new THREE.Mesh(gradGeom, gradMat);
+scene.add(gradSphere);
+
+// sha256-like seeded PRNG from 256-bit hex string
+function seedRNG(hexSeed){
+  const bytes = [];
+  for (let i = 0; i < hexSeed.length; i += 2){
+    bytes.push(parseInt(hexSeed.slice(i, i+2), 16));
+  }
+  let idx = 0;
+  return () => {
+    idx = (idx + 1) % bytes.length;
+    const b1 = bytes[idx];
+    const b2 = bytes[(idx + 17) % bytes.length];
+    const b3 = bytes[(idx + 41) % bytes.length];
+    const b4 = bytes[(idx + 73) % bytes.length];
+    const val = ((b1 << 24) | (b2 << 16) | (b3 << 8) | b4) >>> 0;
+    return val / 0xFFFFFFFF;
+  };
+}
+
+function generateSeed(){
+  let s = '';
+  for (let i = 0; i < 64; i++){
+    s += Math.floor(Math.random() * 16).toString(16);
+  }
+  return s;
+}
+
+// figure skeleton — 15 joints: head, neck, shoulders, elbows, wrists, hips, knees, ankles, spine
+const JOINTS = [
+  { name: 'head',      parent: 1, offset: [0, 0.25, 0] },
+  { name: 'neck',      parent: 2, offset: [0, 0.18, 0] },
+  { name: 'spine_u',   parent: 3, offset: [0, 0.14, 0] },
+  { name: 'spine_m',   parent: 4, offset: [0, 0.12, 0] },
+  { name: 'spine_l',   parent: -1, offset: [0, 0.0, 0] },   // root
+  { name: 'l_shoulder', parent: 2, offset: [-0.16, 0.08, 0] },
+  { name: 'l_elbow',   parent: 5, offset: [-0.18, -0.22, 0] },
+  { name: 'l_wrist',   parent: 6, offset: [-0.16, -0.20, 0] },
+  { name: 'r_shoulder', parent: 2, offset: [0.16, 0.08, 0] },
+  { name: 'r_elbow',   parent: 8, offset: [0.18, -0.22, 0] },
+  { name: 'r_wrist',   parent: 9, offset: [0.16, -0.20, 0] },
+  { name: 'l_hip',     parent: 4, offset: [-0.10, -0.06, 0] },
+  { name: 'l_knee',    parent: 11, offset: [0.0, -0.32, 0] },
+  { name: 'l_ankle',   parent: 12, offset: [0.0, -0.30, 0] },
+  { name: 'r_hip',     parent: 4, offset: [0.10, -0.06, 0] },
+  { name: 'r_knee',    parent: 14, offset: [0.0, -0.32, 0] },
+  { name: 'r_ankle',   parent: 15, offset: [0.0, -0.30, 0] },
+];
+
+class Dancer {
+  constructor(seed){
+    this.seed = seed;
+    const rng = seedRNG(seed);
+    this.joints = [];
+    for (let i = 0; i < JOINTS.length; i++){
+      const j = JOINTS[i];
+      this.joints.push({
+        pos: new THREE.Vector3(...j.offset),
+        vel: new THREE.Vector3(0,0,0),
+        restOffset: new THREE.Vector3(...j.offset),
+        parent: j.parent,
+        // hash-derived motion params
+        freq: 0.5 + rng() * 2.5,
+        amp: [0.1 + rng() * 0.4, 0.1 + rng() * 0.3, 0.1 + rng() * 0.3],
+        phase: rng() * Math.PI * 2,
+      });
+    }
+    // derive figure position from seed
+    this.rootY = 0.5 + rng() * 0.5;
+    this.xDrift = (rng() - 0.5) * 2.0;
+    this.zDrift = (rng() - 0.5) * 1.5;
+    this.rootRot = rng() * Math.PI * 2;
+  }
+
+  update(t){
+    // forward kinematic pass — each joint oscillates in hash-seeded pattern
+    for (let i = 0; i < this.joints.length; i++){
+      const j = this.joints[i];
+      const parentPos = j.parent >= 0 ? this.joints[j.parent].pos : new THREE.Vector3(this.xDrift, this.rootY, this.zDrift);
+      const targ = parentPos.clone().add(j.restOffset);
+      // hash-seeded oscillation
+      const osc = new THREE.Vector3(
+        Math.sin(t * j.freq + j.phase) * j.amp[0],
+        Math.sin(t * j.freq * 0.8 + j.phase + 1.2) * j.amp[1],
+        Math.sin(t * j.freq * 1.1 + j.phase + 2.4) * j.amp[2]
+      );
+      targ.add(osc);
+      // spring coupling
+      const force = targ.clone().sub(j.pos).multiplyScalar(0.06);
+      j.vel.add(force);
+      j.vel.multiplyScalar(0.88);
+      j.pos.add(j.vel);
+    }
+    // global rotation around root
+    const rot = Math.sin(t * 0.3) * 0.2 + this.rootRot;
+    const c = Math.cos(rot), s = Math.sin(rot);
+    for (const j of this.joints){
+      const x = j.pos.x - this.xDrift;
+      const z = j.pos.z - this.zDrift;
+      j.pos.x = this.xDrift + x * c - z * s;
+      j.pos.z = this.zDrift + x * s + z * c;
+    }
+  }
+}
+
+// create 3 dancers from same seed (variations via small index offset in rng stream)
+let currentSeed = generateSeed();
+let dancers = [];
+function respawn(){
+  dancers = [];
+  for (let i = 0; i < 3; i++){
+    const offsetSeed = currentSeed.slice(i, i+64) + currentSeed.slice(0, i);
+    dancers.push(new Dancer(offsetSeed.slice(0, 64)));
+  }
+  document.getElementById('hashDisplay').textContent = `seed: ${currentSeed.slice(0, 16)}…`;
+}
+respawn();
+
+// render joint-skeletons as point-particles + line segments
+const MAX_JOINTS = 3 * JOINTS.length;
+const jointPos = new Float32Array(MAX_JOINTS * 3);
+const jointCol = new Float32Array(MAX_JOINTS * 3);
+const jointGeom = new THREE.BufferGeometry();
+jointGeom.setAttribute('position', new THREE.BufferAttribute(jointPos, 3));
+jointGeom.setAttribute('color', new THREE.BufferAttribute(jointCol, 3));
+const jointMat = new THREE.PointsMaterial({
+  size: 12,
+  sizeAttenuation: true,
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.85,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+const jointPoints = new THREE.Points(jointGeom, jointMat);
+scene.add(jointPoints);
+
+// bones (lines between joints)
+const boneLines = [];
+for (let d = 0; d < 3; d++){
+  const lineGeom = new THREE.BufferGeometry();
+  const positions = new Float32Array((JOINTS.length - 1) * 6);
+  const colors = new Float32Array((JOINTS.length - 1) * 6);
+  lineGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  lineGeom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const lineMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending });
+  const line = new THREE.LineSegments(lineGeom, lineMat);
+  boneLines.push(line);
+  scene.add(line);
+}
+
+// stage-cyc palette — warm gradient (amber to cream)
+function colorForY(y){
+  const t = (y + 1.0) / 2.5;
+  const bottom = new THREE.Color(0.92, 0.45, 0.18);
+  const top = new THREE.Color(0.99, 0.88, 0.72);
+  return bottom.lerp(top, Math.max(0, Math.min(1, t)));
+}
+
+addEventListener('click', () => {
+  currentSeed = generateSeed();
+  respawn();
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  
+  for (const d of dancers) d.update(t);
+
+  // update joint point positions + colors
+  let idx = 0;
+  for (const d of dancers){
+    for (const j of d.joints){
+      jointPos[idx*3]   = j.pos.x;
+      jointPos[idx*3+1] = j.pos.y;
+      jointPos[idx*3+2] = j.pos.z;
+      const c = colorForY(j.pos.y);
+      jointCol[idx*3]   = c.r;
+      jointCol[idx*3+1] = c.g;
+      jointCol[idx*3+2] = c.b;
+      idx++;
+    }
+  }
+  jointGeom.attributes.position.needsUpdate = true;
+  jointGeom.attributes.color.needsUpdate = true;
+
+  // update bone line segments
+  for (let d = 0; d < dancers.length; d++){
+    const dancer = dancers[d];
+    const line = boneLines[d];
+    const pos = line.geometry.attributes.position.array;
+    const col = line.geometry.attributes.color.array;
+    let segIdx = 0;
+    for (let i = 0; i < dancer.joints.length; i++){
+      if (dancer.joints[i].parent < 0) continue;
+      const j = dancer.joints[i];
+      const p = dancer.joints[j.parent];
+      pos[segIdx*6]   = p.pos.x;
+      pos[segIdx*6+1] = p.pos.y;
+      pos[segIdx*6+2] = p.pos.z;
+      pos[segIdx*6+3] = j.pos.x;
+      pos[segIdx*6+4] = j.pos.y;
+      pos[segIdx*6+5] = j.pos.z;
+      const c1 = colorForY(p.pos.y);
+      const c2 = colorForY(j.pos.y);
+      col[segIdx*6]   = c1.r;
+      col[segIdx*6+1] = c1.g;
+      col[segIdx*6+2] = c1.b;
+      col[segIdx*6+3] = c2.r;
+      col[segIdx*6+4] = c2.g;
+      col[segIdx*6+5] = c2.b;
+      segIdx++;
+    }
+    line.geometry.attributes.position.needsUpdate = true;
+    line.geometry.attributes.color.needsUpdate = true;
+  }
+
+  // gentle camera drift
+  camera.position.x = Math.sin(t * 0.08) * 1.2;
+  camera.position.z = 8 + Math.cos(t * 0.12) * 0.5;
+  camera.lookAt(0, 1.2, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
