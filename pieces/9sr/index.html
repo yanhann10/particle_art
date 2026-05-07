@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9sr · parallels · rail drift</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#080604; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">9sr</div>
+<div class="hint">move mouse · scroll to zoom</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x080604, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.enableZoom = true;
+controls.enablePan = false;
+controls.minDistance = 12;
+controls.maxDistance = 40;
+
+/* ── parallel rail system ── */
+const RAIL_COUNT = 72;
+const RAIL_LENGTH = 18;
+const RAIL_SPACING = 0.28;
+const PARTICLES_PER_RAIL = 320;
+const TOTAL_PARTICLES = RAIL_COUNT * PARTICLES_PER_RAIL;
+
+const mouse = new THREE.Vector2(0, 0);
+const mouseWorld = new THREE.Vector3(0, 0, 0);
+let mouseActive = false;
+let mouseDecay = 0;
+
+addEventListener('mousemove', (e) => {
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+  mouseActive = true;
+  mouseDecay = 1.0;
+});
+
+/* ── geometry: instanced line segments along rails ── */
+const positions = new Float32Array(TOTAL_PARTICLES * 3);
+const railIndices = new Float32Array(TOTAL_PARTICLES);
+const tParams = new Float32Array(TOTAL_PARTICLES);
+const seeds = new Float32Array(TOTAL_PARTICLES);
+
+let idx = 0;
+for (let r = 0; r < RAIL_COUNT; r++){
+  const z = (r - RAIL_COUNT/2) * RAIL_SPACING;
+  for (let p = 0; p < PARTICLES_PER_RAIL; p++){
+    const t = p / PARTICLES_PER_RAIL;
+    const x = (t - 0.5) * RAIL_LENGTH;
+    positions[idx*3]   = x;
+    positions[idx*3+1] = 0;
+    positions[idx*3+2] = z;
+    railIndices[idx] = r;
+    tParams[idx] = t;
+    seeds[idx] = Math.random();
+    idx++;
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('railIndex', new THREE.BufferAttribute(railIndices, 1));
+geom.setAttribute('tParam', new THREE.BufferAttribute(tParams, 1));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uMouse: { value: new THREE.Vector3(0, 0, 0) },
+  uMouseDecay: { value: 0 },
+  uRailCount: { value: RAIL_COUNT },
+  uRailSpacing: { value: RAIL_SPACING },
+  uRailLength: { value: RAIL_LENGTH },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec3 uMouse;
+    uniform float uMouseDecay;
+    uniform float uRailCount;
+    uniform float uRailSpacing;
+    uniform float uRailLength;
+    attribute float railIndex;
+    attribute float tParam;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = position;
+      
+      /* rail base position */
+      float z = (railIndex - uRailCount*0.5) * uRailSpacing;
+      float x = (tParam - 0.5) * uRailLength;
+      
+      /* global drift — slow parallel translation */
+      float driftPhase = uTime * 0.08 + railIndex * 0.03;
+      p.x += sin(driftPhase) * 0.4;
+      p.y += cos(driftPhase * 0.7) * 0.25;
+      
+      /* viewer influence — rails warp toward mouse projection */
+      vec3 mouseProj = uMouse;
+      mouseProj.z = 0.0; /* flatten to rail plane */
+      
+      float distToMouse = length(vec2(p.x - mouseProj.x, z - mouseProj.y));
+      float influence = exp(-distToMouse * 0.8) * uMouseDecay;
+      
+      /* warp: rails bend toward mouse in x-y, creating figure silhouette */
+      vec2 toMouse = normalize(vec2(mouseProj.x - p.x, mouseProj.y - z));
+      float warpAmount = influence * 2.4 * (0.3 + 0.7 * sin(tParam * 3.14159));
+      p.x += toMouse.x * warpAmount;
+      float yWarp = toMouse.y * warpAmount;
+      
+      /* rail undulation — breathing motion */
+      float wave = sin(uTime * 0.5 + railIndex * 0.2 + tParam * 6.28) * 0.12;
+      p.y += wave;
+      
+      /* apply y-component of mouse warp */
+      p.y += yWarp;
+      
+      /* z stays on rail plane but with subtle phase offset per rail */
+      p.z = z + sin(uTime * 0.3 + railIndex * 0.15) * 0.08;
+      
+      /* snap-back elasticity — rails return to parallel when mouse moves away */
+      float snapback = 1.0 - uMouseDecay;
+      p.x = mix(p.x, x + sin(driftPhase) * 0.4, snapback * 0.2);
+      p.y = mix(p.y, wave, snapback * 0.15);
+      
+      /* LED amber palette — Marc Da Costa signature */
+      vec3 ledAmber = vec3(1.0, 0.72, 0.35);
+      vec3 darkAmber = vec3(0.85, 0.55, 0.22);
+      vec3 warm = vec3(1.0, 0.82, 0.50);
+      
+      /* color varies by rail and influence */
+      float railPhase = railIndex / uRailCount;
+      vCol = mix(darkAmber, ledAmber, railPhase);
+      vCol = mix(vCol, warm, influence * 0.6);
+      
+      /* shimmer along rail length */
+      float shimmer = 0.3 * sin(tParam * 12.56 + uTime * 2.0) + 0.5;
+      vCol += shimmer * 0.15 * vec3(0.2, 0.15, 0.0);
+      
+      /* alpha: particles fade at rail ends */
+      float endFade = smoothstep(0.0, 0.08, tParam) * smoothstep(1.0, 0.92, tParam);
+      vAlpha = 0.75 * endFade * (0.5 + 0.5 * sin(uTime * 0.8 + seed * 6.28));
+      
+      /* influenced particles brighten */
+      vAlpha += influence * 0.35;
+      vAlpha = min(vAlpha, 1.0);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * (38.0 / dist) * (0.8 + 0.4 * influence);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── ambient light gradient (LED volume atmosphere) ── */
+const ambientLight = new THREE.AmbientLight(0x1a1108, 0.3);
+scene.add(ambientLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const raycaster = new THREE.Raycaster();
+const planeZ = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+  
+  /* mouse decay — influence fades when cursor stops */
+  if (mouseActive){
+    mouseDecay = Math.max(0, mouseDecay - 0.016);
+    if (mouseDecay < 0.02){
+      mouseActive = false;
+      mouseDecay = 0;
+    }
+  }
+  uniforms.uMouseDecay.value = mouseDecay;
+  
+  /* project mouse to world space on z=0 plane */
+  raycaster.setFromCamera(mouse, camera);
+  const intersect = new THREE.Vector3();
+  raycaster.ray.intersectPlane(planeZ, intersect);
+  if (intersect){
+    mouseWorld.lerp(intersect, 0.1);
+    uniforms.uMouse.value.copy(mouseWorld);
+  }
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
