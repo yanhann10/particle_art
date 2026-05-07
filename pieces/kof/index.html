@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kof · calligraphic ink · propagating wavefront</title>
+<!-- MOTION: PROPAGATE, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08080d; overflow:hidden;
+               color:#d8c895; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">kof</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">descended from 2iy · wavefront activation + thickness modulation</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// PROPAGATE — instead of growing everywhere simultaneously, the differential
+// growth propagates as a WAVEFRONT from a seed point. Each vertex has an
+// activation_time; forces only apply when global_time >= activation_time.
+// Newly split vertices inherit activation_time = global_time + local_delay.
+// Result: the ink stroke WRITES ITSELF across the page as a traveling wave,
+// like watching a calligrapher's hand move — the form emerges spatially, not
+// temporally uniform.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x08080d, 0.012);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(10, 7, 15);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080d, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 4, 0);
+
+// ─────────── differential growth with WAVEFRONT PROPAGATION
+const MAX_VERTS = 1600;
+const ATTRACT   = 0.065;
+const REPEL_R   = 0.48;
+const REPEL_STR = 0.14;
+const NOISE     = 0.0025;
+const PRESSURE  = 0.003;
+const RISE      = 0.005;
+const MAX_D     = 0.38;
+const WAVE_SPEED = 0.22;  // propagation speed (units per frame)
+
+const verts = [];
+// seed circle with one activated point
+for (let i = 0; i < 16; i++){
+  const th = i / 16 * Math.PI * 2;
+  const r = 1.2 + (Math.random() - 0.5) * 0.08;
+  verts.push({
+    x: Math.cos(th)*r,
+    y: 0,
+    z: Math.sin(th)*r,
+    age: 0,
+    activation_time: (i === 0) ? 0 : Infinity,  // only first vertex starts active
+    dist_from_seed: (i === 0) ? 0 : Infinity
+  });
+}
+
+const CELL = REPEL_R, grid = new Map();
+function key3(x, y, z){ return Math.floor(x/CELL)+','+Math.floor(y/CELL)+','+Math.floor(z/CELL); }
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i]; const k = key3(v.x, v.y, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++){
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+let global_time = 0;
+
+function step(){
+  if (paused) return;
+  global_time += 1;
+  
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  
+  // propagate activation to neighbors
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    if (v.activation_time > global_time) continue;  // not yet active
+    
+    // activate edge-neighbors if they're not activated
+    const prev = verts[(i-1+n)%n];
+    const next = verts[(i+1)%n];
+    
+    if (prev.activation_time === Infinity){
+      const dist = Math.hypot(v.x - prev.x, v.y - prev.y, v.z - prev.z);
+      prev.activation_time = global_time + dist / WAVE_SPEED;
+      prev.dist_from_seed = v.dist_from_seed + dist;
+    }
+    if (next.activation_time === Infinity){
+      const dist = Math.hypot(v.x - next.x, v.y - next.y, v.z - next.z);
+      next.activation_time = global_time + dist / WAVE_SPEED;
+      next.dist_from_seed = v.dist_from_seed + dist;
+    }
+  }
+  
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+  
+  // only apply forces to activated vertices
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    if (v.activation_time > global_time) continue;
+    
+    for (const j of neighbors(v)){
+      if (j === i) continue;
+      const u = verts[j];
+      if (u.activation_time > global_time) continue;
+      
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d/REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    if (v.activation_time > global_time) continue;
+    
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n];
+    if (a.activation_time <= global_time && b.activation_time <= global_time){
+      dx[i] += (a.x + b.x - 2*v.x) * ATTRACT;
+      dy[i] += (a.y + b.y - 2*v.y) * ATTRACT;
+      dz[i] += (a.z + b.z - 2*v.z) * ATTRACT;
+    }
+  }
+  
+  let cx = 0, cy = 0, cz = 0, activeCount = 0;
+  for (let i = 0; i < n; i++){
+    if (verts[i].activation_time <= global_time){
+      cx += verts[i].x; cy += verts[i].y; cz += verts[i].z;
+      activeCount++;
+    }
+  }
+  if (activeCount > 0){
+    cx /= activeCount; cy /= activeCount; cz /= activeCount;
+    for (let i = 0; i < n; i++){
+      const v = verts[i];
+      if (v.activation_time > global_time) continue;
+      
+      const ox = v.x - cx, oy = v.y - cy, oz = v.z - cz;
+      const d = Math.hypot(ox, oy, oz) + 1e-6;
+      dx[i] += (ox/d) * PRESSURE;
+      dy[i] += (oy/d) * PRESSURE * 0.35;
+      dz[i] += (oz/d) * PRESSURE;
+    }
+  }
+  
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    if (v.activation_time > global_time) continue;
+    
+    const wavefront_factor = Math.max(0, 1.0 - (global_time - v.activation_time) * 0.002);
+    const upward = RISE * (0.4 + 1.0 * Math.min(v.age * 1.8, 1.0)) * (1.0 + wavefront_factor * 0.8);
+    
+    v.x += dx[i] + (Math.random()-0.5)*NOISE;
+    v.y += dy[i] + (Math.random()-0.5)*NOISE * 0.5 + upward;
+    v.z += dz[i] + (Math.random()-0.5)*NOISE;
+    v.age += 0.0016;
+  }
+  
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    
+    if (a.activation_time <= global_time && b.activation_time <= global_time){
+      const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+      const dist = Math.sqrt(ex*ex + ey*ey + ez*ez);
+      
+      if (dist > MAX_D && verts.length + grown.length < MAX_VERTS){
+        const midDist = (a.dist_from_seed + b.dist_from_seed) * 0.5;
+        const newActivationTime = global_time + dist * 0.5 / WAVE_SPEED;
+        
+        grown.push({
+          x:(a.x+b.x)*0.5,
+          y:(a.y+b.y)*0.5 - 0.04,
+          z:(a.z+b.z)*0.5,
+          age: Math.max(a.age, b.age) * 0.5,
+          activation_time: newActivationTime,
+          dist_from_seed: midDist
+        });
+      }
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// pre-warm to get initial wavefront established
+for (let s = 0; s < 400; s++) step();
+
+addEventListener('click', () => { paused = !paused; });
+
+// ─────────── ink-tube renderer with activation-based opacity
+let tubeMesh = null;
+const tubeMat = new THREE.MeshBasicMaterial({
+  color: 0xe8dcc0,
+  transparent: true,
+  opacity: 0.88,
+  vertexColors: true
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(){
+  for (let s = 0; s < 2; s++) step();
+
+  if (verts.length > 8){
+    const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+
+    const N_SAMPLES = Math.min(800, verts.length * 2);
+    const radiiList = new Array(N_SAMPLES);
+    const opacityList = new Array(N_SAMPLES);
+    
+    for (let i = 0; i < N_SAMPLES; i++){
+      const t = i / N_SAMPLES;
+      const idx = Math.floor(t * verts.length);
+      const v = verts[idx];
+      
+      // opacity based on activation wavefront
+      let opacity = 0;
+      if (v.activation_time <= global_time){
+        const time_since_activation = global_time - v.activation_time;
+        opacity = Math.min(1.0, time_since_activation * 0.015);
+      }
+      opacityList[i] = opacity;
+      
+      const dt = 1 / N_SAMPLES;
+      const t1 = curve.getTangent((t - dt + 1) % 1);
+      const t2 = curve.getTangent(t);
+      const t3 = curve.getTangent((t + dt) % 1);
+      const cosAB = t1.dot(t2);
+      const cosBC = t2.dot(t3);
+      const curvature = (2 - cosAB - cosBC) * 0.5;
+      const pressure = Math.min(1.0, curvature * 7);
+      const r = 0.022 + 0.095 * pressure;
+      radiiList[i] = r * (0.3 + 0.7 * opacity);  // thin at wavefront edge
+    }
+
+    const RADIAL = 6;
+    const positions = new Float32Array(N_SAMPLES * RADIAL * 3);
+    const colors = new Float32Array(N_SAMPLES * RADIAL * 3);
+    const indices = [];
+    const up = new THREE.Vector3(0, 1, 0);
+    
+    for (let i = 0; i < N_SAMPLES; i++){
+      const t = i / N_SAMPLES;
+      const p = curve.getPointAt(t);
+      const tangent = curve.getTangentAt(t).normalize();
+      const normal = new THREE.Vector3().crossVectors(tangent, up).normalize();
+      if (normal.lengthSq() < 0.001) normal.set(1, 0, 0);
+      const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+      const r = radiiList[i];
+      const op = opacityList[i];
+      
+      for (let j = 0; j < RADIAL; j++){
+        const ang = (j / RADIAL) * Math.PI * 2;
+        const v = new THREE.Vector3()
+          .copy(normal).multiplyScalar(Math.cos(ang) * r)
+          .add(binormal.clone().multiplyScalar(Math.sin(ang) * r))
+          .add(p);
+        const baseIdx = (i * RADIAL + j) * 3;
+        positions[baseIdx]     = v.x;
+        positions[baseIdx + 1] = v.y;
+        positions[baseIdx + 2] = v.z;
+        colors[baseIdx]     = 0.91 * op;
+        colors[baseIdx + 1] = 0.86 * op;
+        colors[baseIdx + 2] = 0.75 * op;
+      }
+    }
+    
+    for (let i = 0; i < N_SAMPLES; i++){
+      const ni = (i + 1) % N_SAMPLES;
+      for (let j = 0; j < RADIAL; j++){
+        const nj = (j + 1) % RADIAL;
+        const a = i * RADIAL + j, b = i * RADIAL + nj;
+        const c = ni * RADIAL + j, d = ni * RADIAL + nj;
+        indices.push(a, b, c);
+        indices.push(b, d, c);
+      }
+    }
+    
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    g.setIndex(indices);
+    g.computeVertexNormals();
+
+    if (tubeMesh){ scene.remove(tubeMesh); tubeMesh.geometry.dispose(); }
+    tubeMesh = new THREE.Mesh(g, tubeMat);
+    scene.add(tubeMesh);
+  }
+
+  let yMean = 0, activeCount = 0;
+  for (const v of verts){
+    if (v.activation_time <= global_time){
+      yMean += v.y;
+      activeCount++;
+    }
+  }
+  if (activeCount > 0) yMean /= activeCount;
+  
+  const targetY = Math.max(yMean, 2.0);
+  controls.target.y += (targetY - controls.target.y) * 0.03;
+  const desiredCamY = targetY + 4;
+  camera.position.y += (desiredCamY - camera.position.y) * 0.03;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
