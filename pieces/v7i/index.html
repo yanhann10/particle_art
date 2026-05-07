@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v7i · tender wash planes</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">v7i</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Felix Gonzalez-Torres · light wash planes · differential growth</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Tender wash planes — differential growth reimagined as
+   Felix Gonzalez-Torres draped incandescent bulb strands.
+   Each vertex-particle is now a small billboarded plane at
+   very low opacity; overlap is composition — dense regions
+   read as warm saturated pools of light, sparse as gauze. */
+
+const BG = 0x0a0807;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 2, 20);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, -1, 0);
+
+// --- curve parameters, tuned for draping ---
+const MAX_VERTS = 3200;
+const ATTRACT   = 0.05;
+const REPEL_R   = 0.48;
+const REPEL_STR = 0.10;
+const NOISE     = 0.002;
+const PRESSURE  = 0.002;
+const GRAVITY   = 0.008;
+const MAX_D     = 0.36;
+const ANCHOR_N  = 6;
+
+const verts = [];
+const NV0 = 40;
+for (let i = 0; i < NV0; i++) {
+  const t = (i / (NV0 - 1)) * 2 - 1;
+  const x = t * 6;
+  const y = -Math.abs(t) * 1.2 + Math.sin(t * Math.PI * 2) * 0.3;
+  verts.push({ x, z: 0, y, age: 0, pinY: i < ANCHOR_N || i >= NV0 - ANCHOR_N });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i], k = gridKey(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function nearby(v) {
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function step() {
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? verts[i - 1] : null;
+    const next = i < n - 1 ? verts[i + 1] : null;
+    const v = verts[i];
+    if (prev) {
+      dx[i] += (prev.x - v.x) * ATTRACT;
+      dz[i] += (prev.z - v.z) * ATTRACT;
+      dy[i] += (prev.y - v.y) * ATTRACT;
+    }
+    if (next) {
+      dx[i] += (next.x - v.x) * ATTRACT;
+      dz[i] += (next.z - v.z) * ATTRACT;
+      dy[i] += (next.y - v.y) * ATTRACT;
+    }
+  }
+  let ccx = 0, ccz = 0;
+  for (let i = 0; i < n; i++) { ccx += verts[i].x; ccz += verts[i].z; }
+  ccx /= n; ccz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - ccx, oz = verts[i].z - ccz;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dz[i] += (oz / d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++) {
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+    const grav = verts[i].pinY ? GRAVITY * 0.05 : GRAVITY;
+    verts[i].y += dy[i] - grav + (Math.random() - 0.5) * NOISE * 0.5;
+    verts[i].age += 0.0004;
+  }
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    grown.push(a);
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    if (ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({
+        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.02,
+        z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.02,
+        y: (a.y + b.y) * 0.5,
+        age: Math.max(a.age, b.age) * 0.7,
+        pinY: false
+      });
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// --- rendering: 40k billboarded planes as wash-of-light ---
+const N_RENDER = 40000;
+
+// base quad geometry (two triangles, unit square centered at origin)
+const baseGeo = new THREE.InstancedBufferGeometry();
+const quadVerts = new Float32Array([
+  -0.5, -0.5, 0,  0.5, -0.5, 0,  0.5, 0.5, 0,
+  -0.5, -0.5, 0,  0.5, 0.5, 0,  -0.5, 0.5, 0
+]);
+const quadUVs = new Float32Array([
+  0, 0,  1, 0,  1, 1,
+  0, 0,  1, 1,  0, 1
+]);
+baseGeo.setAttribute('position', new THREE.BufferAttribute(quadVerts, 3));
+baseGeo.setAttribute('uv', new THREE.BufferAttribute(quadUVs, 2));
+
+// per-instance attributes
+const iOffsets = new Float32Array(N_RENDER * 3);
+const iSeeds   = new Float32Array(N_RENDER);
+const iAges    = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) iSeeds[i] = Math.random();
+
+const offAttr  = new THREE.InstancedBufferAttribute(iOffsets, 3);
+const seedAttr = new THREE.InstancedBufferAttribute(iSeeds, 1);
+const ageAttr  = new THREE.InstancedBufferAttribute(iAges, 1);
+offAttr.setUsage(THREE.DynamicDrawUsage);
+ageAttr.setUsage(THREE.DynamicDrawUsage);
+
+baseGeo.setAttribute('iOffset', offAttr);
+baseGeo.setAttribute('iSeed',   seedAttr);
+baseGeo.setAttribute('iAge',    ageAttr);
+
+const uniforms = {
+  uTime:       { value: 0 },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.035 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    uniform float uTime;
+    attribute vec3 iOffset;
+    attribute float iSeed;
+    attribute float iAge;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying vec2 vUv;
+    varying float vFogFactor;
+    uniform float uFogDensity;
+
+    void main() {
+      vUv = uv;
+
+      // gentle sway
+      float t = uTime * 0.3 + iSeed * 6.28;
+      vec3 off = iOffset;
+      off.x += sin(t) * 0.008 * (1.0 + iSeed);
+      off.z += cos(t * 0.7) * 0.005;
+
+      // pulse per-plane
+      float pulse = 0.85 + 0.15 * sin(uTime * 1.2 + iSeed * 40.0);
+
+      // palette: warm filament amber → soft white (Gonzalez-Torres incandescent)
+      vec3 amber  = vec3(1.0, 0.72, 0.32);
+      vec3 warm   = vec3(1.0, 0.88, 0.72);
+      vec3 white  = vec3(1.0, 0.96, 0.92);
+      float k = clamp(iAge * 1.2, 0.0, 1.0);
+      vCol = mix(amber, warm, k);
+      vCol = mix(vCol, white, smoothstep(0.7, 1.0, k) * 0.3);
+      vCol *= pulse;
+
+      // opacity 0.04–0.12 so overlap builds the image
+      float baseAlpha = 0.04 + iSeed * 0.08;
+      vAlpha = baseAlpha * (0.7 + 0.3 * pulse);
+
+      // billboard: construct camera-facing quad
+      // plane size varies slightly per instance
+      float sz = 0.12 + iSeed * 0.10;
+
+      vec4 mvCenter = modelViewMatrix * vec4(off, 1.0);
+      // offset in view space (billboard)
+      vec3 localPos = position * sz;
+      mvCenter.xy += localPos.xy;
+
+      gl_Position = projectionMatrix * mvCenter;
+
+      // fog
+      float fogDepth = length(mvCenter.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying vec2 vUv;
+    varying float vFogFactor;
+    uniform vec3 uFogColor;
+
+    void main() {
+      // soft radial falloff within the plane — wash feel, not hard square
+      vec2 d = vUv - 0.5;
+      float r2 = dot(d, d);
+      // smooth elliptical glow
+      float glow = exp(-r2 * 6.0);
+      float a = glow * vAlpha;
+
+      vec3 col = vCol;
+      col = mix(col, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.8);
+
+      if (a < 0.001) discard;
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const mesh = new THREE.Mesh(baseGeo, mat);
+mesh.frustumCulled = false;
+scene.add(mesh);
+
+// faint wire between vertices
+const wireGeom = new THREE.BufferGeometry();
+const wirePositions = new Float32Array(MAX_VERTS * 3);
+wireGeom.setAttribute('position', new THREE.BufferAttribute(wirePositions, 3));
+const wireMat = new THREE.LineBasicMaterial({
+  color: 0x2a2420,
+  transparent: true,
+  opacity: 0.25
+});
+const wireLine = new THREE.Line(wireGeom, wireMat);
+scene.add(wireLine);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow
+for (let s = 0; s < 500; s++) step();
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  for (let s = 0; s < 3; s++) step();
+
+  const n = verts.length;
+
+  // update wire
+  for (let i = 0; i < n; i++) {
+    wirePositions[i * 3]     = verts[i].x;
+    wirePositions[i * 3 + 1] = verts[i].y;
+    wirePositions[i * 3 + 2] = verts[i].z;
+  }
+  wireGeom.setDrawRange(0, n);
+  wireGeom.attributes.position.needsUpdate = true;
+
+  // camera tracks centroid gently
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) {
+    cx += verts[i].x; cy += verts[i].y; cz += verts[i].z;
+  }
+  cx /= n; cy /= n; cz /= n;
+  controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.02);
+
+  // distribute planes along the open curve
+  const lengths = [];
+  let total = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    const L = Math.sqrt(
+      (b.x - a.x) ** 2 + (b.z - a.z) ** 2 + (b.y - a.y) ** 2
+    );
+    lengths.push(L);
+    total += L;
+  }
+  if (total > 0) {
+    let written = 0;
+    for (let i = 0; i < n - 1; i++) {
+      const share = (i === n - 2)
+        ? N_RENDER - written
+        : Math.max(1, Math.floor(N_RENDER * lengths[i] / total));
+      const a = verts[i], b = verts[i + 1];
+      for (let k = 0; k < share && written < N_RENDER; k++) {
+        const u = Math.random();
+        const cu = u < 0.5 ? u * u * 2 : 1 - (1 - u) * (1 - u) * 2;
+        const spread = 0.018;
+        iOffsets[written * 3]     = a.x + (b.x - a.x) * cu + (Math.random() - 0.5) * spread;
+        iOffsets[written * 3 + 1] = a.y + (b.y - a.y) * cu + (Math.random() - 0.5) * spread * 0.5;
+        iOffsets[written * 3 + 2] = a.z + (b.z - a.z) * cu + (Math.random() - 0.5) * spread;
+        iAges[written] = Math.max(a.age, b.age);
+        written++;
+      }
+    }
+    offAttr.needsUpdate = true;
+    ageAttr.needsUpdate = true;
+  }
+
+  statEl.textContent = `vertices=${n}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
