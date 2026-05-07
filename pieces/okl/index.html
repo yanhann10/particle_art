@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>okl · parallels</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#050505; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">okl</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── renderer ── */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050505, 1);
+document.body.appendChild(renderer.domElement);
+
+let aspect = innerWidth / innerHeight;
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-aspect, aspect, 1, -1, 0.1, 10);
+camera.position.z = 2;
+
+/* ── parallel-line grid ── */
+const ROWS = 200;
+const COLS = 500;
+const totalVerts = ROWS * COLS;
+
+const baseXArr = new Float32Array(totalVerts);
+const baseYArr = new Float32Array(totalVerts);
+const positions = new Float32Array(totalVerts * 3);
+
+for (let r = 0; r < ROWS; r++) {
+  const y = (r / (ROWS - 1)) * 2.0 - 1.0;
+  for (let c = 0; c < COLS; c++) {
+    const idx = r * COLS + c;
+    const x = (c / (COLS - 1)) * 2.0 * 1.8 - 1.8; // wide enough for any aspect
+    baseXArr[idx] = x;
+    baseYArr[idx] = y;
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = 0;
+  }
+}
+
+const indices = [];
+for (let r = 0; r < ROWS; r++) {
+  for (let c = 0; c < COLS - 1; c++) {
+    const i = r * COLS + c;
+    indices.push(i, i + 1);
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('baseX', new THREE.BufferAttribute(baseXArr, 1));
+geom.setAttribute('baseY', new THREE.BufferAttribute(baseYArr, 1));
+geom.setIndex(indices);
+
+/* ── line shader ── */
+const uniforms = {
+  uTime:       { value: 0 },
+  uMouse:      { value: new THREE.Vector2(10, 10) },
+  uMix:        { value: 0 },
+  uWarp:       { value: 1.0 },
+  uMouseWarp:  { value: 0.0 }
+};
+
+const vertSrc = `
+  uniform float uTime;
+  uniform vec2 uMouse;
+  uniform float uMix;
+  uniform float uWarp;
+  uniform float uMouseWarp;
+  attribute float baseX;
+  attribute float baseY;
+  varying float vBright;
+  varying float vEdge;
+
+  /* cypress silhouette: tall narrow flame-shape with branch texture */
+  float cypressWidth(float ny) {
+    if (ny < 0.0 || ny > 1.0) return 0.0;
+    /* Italian-cypress profile: rises steeply, bulges at 35-45%, tapers to narrow tip */
+    float base = smoothstep(0.0, 0.08, ny) * 0.06;
+    float trunk = 0.06;
+    float bulge = 0.19 * exp(-4.5 * pow(ny - 0.42, 2.0));
+    float crown = 0.14 * smoothstep(0.08, 0.35, ny) * smoothstep(1.0, 0.7, ny);
+    float w = trunk + bulge + crown;
+    /* branch texture: subtle bumps */
+    w += 0.012 * sin(ny * 31.0 + 1.7) * smoothstep(0.05, 0.2, ny);
+    w += 0.008 * sin(ny * 53.0 - 0.9) * smoothstep(0.1, 0.3, ny);
+    /* taper to tip */
+    w *= smoothstep(1.0, 0.82, ny);
+    w *= smoothstep(0.0, 0.06, ny);
+    return w;
+  }
+
+  /* art-deco tower: setback rectangles + spire */
+  float towerWidth(float ny) {
+    if (ny < 0.0 || ny > 1.0) return 0.0;
+    float w;
+    if      (ny < 0.25) w = 0.30;
+    else if (ny < 0.42) w = 0.24;
+    else if (ny < 0.56) w = 0.18;
+    else if (ny < 0.68) w = 0.13;
+    else if (ny < 0.78) w = 0.09;
+    else if (ny < 0.88) w = 0.05;
+    else                w = 0.05 * smoothstep(1.0, 0.88, ny); /* spire taper */
+    /* vertical ridge corrugation */
+    w += 0.006 * sin(ny * 45.0);
+    /* sunburst crown */
+    if (ny > 0.75 && ny < 0.82) {
+      w += 0.06 * smoothstep(0.75, 0.78, ny) * smoothstep(0.82, 0.79, ny);
+    }
+    w *= smoothstep(0.0, 0.02, ny);
+    return w;
+  }
+
+  void main() {
+    float m = smoothstep(0.0, 1.0, uMix);
+
+    /* figure vertical span: centered in frame */
+    float figBottom = -0.78;
+    float figHeight = 1.62;
+    float ny = (baseY - figBottom) / figHeight;
+
+    /* blended figure half-width at this scan-line */
+    float wA = cypressWidth(ny);
+    float wB = towerWidth(ny);
+    float halfW = mix(wA, wB, m);
+
+    /* figure center shifts subtly with time */
+    float cx = sin(uTime * 0.13) * 0.03;
+
+    /* signed distance from figure edge (negative = inside) */
+    float dx = abs(baseX - cx) - halfW;
+
+    /* mouse proximity: local warp intensifier */
+    float md = length(vec2(baseX, baseY) - uMouse);
+    float mouseBoost = 1.0 + uMouseWarp * 1.8 * exp(-md * 2.5);
+
+    /* warp displacement: bend lines toward figure edges */
+    float warpAmt = uWarp * mouseBoost;
+    float displacement = 0.0;
+
+    if (halfW > 0.001) {
+      if (dx < 0.0) {
+        /* inside figure: push lines outward toward edges to create density there */
+        float depth = -dx / max(halfW, 0.01);
+        float push = halfW * 0.4 * depth * warpAmt;
+        displacement = push * sign(baseX - cx);
+      } else if (dx < 0.25) {
+        /* outside but close: pull lines inward toward edge */
+        float pull = exp(-dx * 14.0) * 0.06 * warpAmt;
+        displacement = -pull * sign(baseX - cx);
+      }
+    }
+
+    /* ambient drift: lines breathe slowly */
+    float drift = sin(baseY * 5.0 + uTime * 0.25) * 0.004;
+    drift += sin(baseY * 13.0 - uTime * 0.55 + baseX * 2.0) * 0.002;
+    /* time-based scan wave — a brightness pulse moving vertically */
+    float scanPhase = fract(uTime * 0.07);
+    float scanY = scanPhase * 2.2 - 1.1;
+    float scanDist = abs(baseY - scanY);
+    float scanPulse = exp(-scanDist * 6.0) * 0.015;
+    drift += scanPulse * sign(sin(baseX * 20.0));
+
+    float finalX = baseX + displacement + drift;
+
+    /* brightness: edge density = bright, flat parallel = dim */
+    float edgeness = 0.0;
+    if (halfW > 0.001) {
+      edgeness = exp(-abs(dx) * 16.0) * warpAmt;
+    }
+    /* inside figure: subtle interior glow */
+    float interiorGlow = 0.0;
+    if (dx < 0.0 && halfW > 0.001) {
+      interiorGlow = 0.15 * (1.0 - (-dx / max(halfW, 0.01))) * warpAmt;
+    }
+
+    float baseBright = 0.08 + 0.03 * sin(baseY * 4.0 + uTime * 0.35);
+    /* scan-line highlight */
+    baseBright += exp(-scanDist * 8.0) * 0.12;
+
+    vBright = baseBright + edgeness * 0.9 + interiorGlow;
+    vEdge = edgeness;
+
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(finalX, baseY, 0.0, 1.0);
+  }
+`;
+
+const fragSrc = `
+  varying float vBright;
+  varying float vEdge;
+  void main() {
+    /* LED amber palette: dim amber → warm white at peak brightness */
+    vec3 amberLo  = vec3(0.70, 0.38, 0.05);
+    vec3 amberMid = vec3(0.95, 0.62, 0.12);
+    vec3 amberHi  = vec3(1.0, 0.88, 0.55);
+
+    float b = clamp(vBright, 0.0, 1.0);
+    vec3 col;
+    if (b < 0.4) {
+      col = mix(amberLo * 0.4, amberMid, b / 0.4);
+    } else {
+      col = mix(amberMid, amberHi, (b - 0.4) / 0.6);
+    }
+
+    /* subtle glow bloom on figure edges */
+    col += vec3(0.15, 0.08, 0.02) * vEdge;
+
+    gl_FragColor = vec4(col * b, b);
+  }
+`;
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: vertSrc,
+  fragmentShader: fragSrc
+});
+
+const lines = new THREE.LineSegments(geom, mat);
+scene.add(lines);
+
+/* ── glow layer: duplicate lines wider + dimmer for soft bloom ── */
+const glowMat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: vertSrc,
+  fragmentShader: `
+    varying float vBright;
+    varying float vEdge;
+    void main() {
+      float b = clamp(vBright * 0.25, 0.0, 0.3);
+      vec3 col = vec3(0.85, 0.50, 0.08) * b;
+      gl_FragColor = vec4(col, b * 0.5);
+    }
+  `
+});
+const glowLines = new THREE.LineSegments(geom, glowMat);
+glowLines.position.z = -0.01;
+scene.add(glowLines);
+
+/* ── ambient dust motes: sparse points for atmosphere ── */
+const DUST = 3000;
+const dustPos = new Float32Array(DUST * 3);
+const dustSeed = new Float32Array(DUST);
+for (let i = 0; i < DUST; i++) {
+  dustPos[i * 3] = (Math.random() * 2 - 1) * 1.8;
+  dustPos[i * 3 + 1] = Math.random() * 2 - 1;
+  dustPos[i * 3 + 2] = 0;
+  dustSeed[i] = Math.random();
+}
+const dustGeom = new THREE.BufferGeometry();
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('seed', new THREE.BufferAttribute(dustSeed, 1));
+
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: uniforms.uTime },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    attribute float seed;
+    varying float vAlpha;
+    void main() {
+      vec3 p = position;
+      p.x += sin(uTime * 0.2 + seed * 40.0) * 0.02;
+      p.y += sin(uTime * 0.15 + seed * 30.0) * 0.015;
+      vAlpha = 0.08 + 0.06 * sin(uTime * 0.5 + seed * 20.0);
+      gl_PointSize = 1.2;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      if (dot(d, d) > 0.25) discard;
+      gl_FragColor = vec4(0.8, 0.55, 0.15, vAlpha * 0.4);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+/* ── interaction ── */
+let mouseNDC = new THREE.Vector2(10, 10);
+let lastMoveT = 0;
+let mouseSmooth = new THREE.Vector2(10, 10);
+
+function onPointer(x, y) {
+  mouseNDC.set(
+    (x / innerWidth) * 2 * aspect - aspect,
+    -((y / innerHeight) * 2 - 1)
+  );
+  lastMoveT = performance.now();
+}
+addEventListener('mousemove', e => onPointer(e.clientX, e.clientY));
+addEventListener('touchmove', e => { e.preventDefault(); onPointer(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+addEventListener('touchend', () => { mouseNDC.set(10, 10); });
+
+addEventListener('resize', () => {
+  aspect = innerWidth / innerHeight;
+  camera.left = -aspect; camera.right = aspect;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── animation ── */
+const start = performance.now();
+let currentMix = 0;
+let currentMouseWarp = 0;
+let warpPhase = 1.0; // start visible
+
+function loop() {
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  /* morph: auto-cycle between cypress and tower ~16s */
+  /* narrative arc: figure gathers (warp up) → holds → dissolves (warp pulses down) → reforms as other shape */
+  const cycleT = t % 32;
+  let targetMix, targetWarp;
+
+  if (cycleT < 6) {
+    /* cypress gathering */
+    targetMix = 0; targetWarp = smoothRamp(cycleT / 6);
+  } else if (cycleT < 12) {
+    /* cypress holding, breathing */
+    targetMix = 0; targetWarp = 0.85 + 0.15 * Math.sin(cycleT * 0.7);
+  } else if (cycleT < 16) {
+    /* dissolving: warp fades, lines go parallel */
+    const dt = (cycleT - 12) / 4;
+    targetMix = dt * 0.5; targetWarp = 1.0 - dt * 0.7;
+  } else if (cycleT < 22) {
+    /* tower gathering */
+    const dt = (cycleT - 16) / 6;
+    targetMix = 0.5 + dt * 0.5; targetWarp = 0.3 + smoothRamp(dt) * 0.7;
+  } else if (cycleT < 28) {
+    /* tower holding */
+    targetMix = 1; targetWarp = 0.85 + 0.15 * Math.sin(cycleT * 0.7);
+  } else {
+    /* dissolving back */
+    const dt = (cycleT - 28) / 4;
+    targetMix = 1.0 - dt; targetWarp = 1.0 - dt * 0.7;
+  }
+
+  currentMix += (targetMix - currentMix) * 0.025;
+  warpPhase += (targetWarp - warpPhase) * 0.03;
+  uniforms.uMix.value = currentMix;
+  uniforms.uWarp.value = warpPhase;
+
+  /* mouse tracking */
+  mouseSmooth.lerp(mouseNDC, 0.06);
+  uniforms.uMouse.value.copy(mouseSmooth);
+  const sinceMove = (now - lastMoveT) / 1000;
+  const targetMouseWarp = sinceMove < 4 ? 1.0 : Math.max(0, 1.0 - (sinceMove - 4) * 0.3);
+  currentMouseWarp += (targetMouseWarp - currentMouseWarp) * 0.04;
+  uniforms.uMouseWarp.value = currentMouseWarp;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+function smoothRamp(t) {
+  return t * t * (3 - 2 * t);
+}
+
+loop();
+</script>
+</body>
+</html>
