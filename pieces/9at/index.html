@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9at · fitzhugh-nagumo phase space</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#04060b; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size:10px; letter-spacing:0.04em; }
+  .regime { position:fixed; right:14px; bottom:12px; opacity:0.45; font-size:10px; letter-spacing:0.04em; transition: opacity 0.3s; }
+</style>
+</head>
+<body>
+<div class="id">9at</div>
+<div class="hint">← pointer X → drives I_ext through Hopf bifurcation</div>
+<div class="regime" id="regime">stable node</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// FitzHugh-Nagumo neuron model in phase space (v, w):
+//   dv/dt = v - v³/3 - w + I_ext
+//   dw/dt = ε(v + a - b*w)
+// Hopf bifurcation at I_ext ≈ 0.33 (for a=0.7, b=0.8, ε=0.08)
+// Pointer X sweeps I_ext from -0.5 to 1.5 — stable → limit cycle → large oscillation
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x04060b, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.FloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// Second texture pair for velocity/aux data
+let rtVelA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtVelB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// Init: spread particles across phase space v∈[-3,3], w∈[-2,3]
+// z stores a per-particle phase offset for depth layering
+const init = new Float32Array(N * 4);
+const initVel = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  const v = (Math.random() * 2 - 1) * 2.5;
+  const w = (Math.random() * 2 - 1) * 1.8;
+  const z = (Math.random() * 2 - 1) * 0.4; // depth scatter
+  init[i*4]   = v;
+  init[i*4+1] = w;
+  init[i*4+2] = z;
+  init[i*4+3] = Math.random(); // age/phase
+  // vel texture: store trail history offset, epsilon variation
+  initVel[i*4]   = 0.0; // prev dv
+  initVel[i*4+1] = 0.0; // prev dw
+  initVel[i*4+2] = 0.06 + Math.random() * 0.04; // per-particle epsilon
+  initVel[i*4+3] = Math.random() * 0.06 - 0.03; // I_ext offset (slight variation)
+}
+
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+const initVelTex = new THREE.DataTexture(initVel, W, H, THREE.RGBAFormat, THREE.FloatType);
+initVelTex.needsUpdate = true;
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+
+// Blit initial state
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+blitMat.uniforms.tex.value = initVelTex;
+renderer.setRenderTarget(rtVelA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// FHN simulation shader
+const simMat = new THREE.ShaderMaterial({
+  uniforms: {
+    prev: { value: null },
+    velTex: { value: null },
+    uDt: { value: 0.035 },
+    uIext: { value: 0.0 },
+    uEps: { value: 0.08 },
+    uA: { value: 0.7 },
+    uB: { value: 0.8 },
+    uTime: { value: 0.0 }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev, velTex;
+    uniform float uDt, uIext, uEps, uA, uB, uTime;
+    varying vec2 vUv;
+
+    // Hash for respawn
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec4 vel = texture2D(velTex, vUv);
+
+      float v = s.x;
+      float w = s.y;
+      float z = s.z;
+      float age = s.w;
+
+      float eps = vel.z;
+      float iOff = vel.w;
+      float I = uIext + iOff;
+
+      // FitzHugh-Nagumo ODE
+      float dv = v - (v*v*v)/3.0 - w + I;
+      float dw = eps * (v + uA - uB * w);
+
+      // Integrate (RK2 midpoint for stability)
+      float vm = v + dv * uDt * 0.5;
+      float wm = w + dw * uDt * 0.5;
+      float dvm = vm - (vm*vm*vm)/3.0 - wm + I;
+      float dwm = eps * (vm + uA - uB * wm);
+
+      v += dvm * uDt;
+      w += dwm * uDt;
+
+      // Z: slow drift based on speed to create depth ribbon
+      float speed = sqrt(dv*dv + dw*dw);
+      z += (speed * 0.003 - 0.001) * uDt * 8.0;
+      z *= 0.999; // decay toward center plane
+
+      age = mod(age + uDt * 0.02, 1.0);
+
+      // Respawn if diverged
+      if(abs(v) > 8.0 || abs(w) > 8.0 || isnan(v) || isnan(w)){
+        float h = hash(vUv + uTime);
+        v = (h * 2.0 - 1.0) * 2.0;
+        w = (hash(vUv * 1.3 + uTime) * 2.0 - 1.0) * 1.5;
+        z = (hash(vUv * 2.1 + uTime) * 2.0 - 1.0) * 0.3;
+        age = 0.0;
+      }
+
+      gl_FragColor = vec4(v, w, z, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// Velocity update shader (stores prev derivatives for coloring)
+const velMat = new THREE.ShaderMaterial({
+  uniforms: {
+    posTex: { value: null },
+    prevVel: { value: null },
+    uIext: { value: 0.0 },
+    uA: { value: 0.7 },
+    uB: { value: 0.8 }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D posTex, prevVel;
+    uniform float uIext, uA, uB;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(posTex, vUv);
+      vec4 pv = texture2D(prevVel, vUv);
+      float v = s.x, w = s.y;
+      float eps = pv.z;
+      float iOff = pv.w;
+      float I = uIext + iOff;
+      float dv = v - (v*v*v)/3.0 - w + I;
+      float dw = eps * (v + uA - uB * w);
+      gl_FragColor = vec4(dv, dw, eps, iOff);
+    }
+  `
+});
+const velScene = new THREE.Scene();
+velScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), velMat));
+
+// Render points
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.05, 60);
+camera.position.set(0, 0, 7);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state: { value: null },
+    velState: { value: null },
+    uPixel: { value: renderer.getPixelRatio() },
+    uIext: { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state, velState;
+    uniform float uPixel, uIext;
+    attribute vec2 uvIdx;
+    varying float vSpeed;
+    varying float vPhase;
+    varying float vV;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec4 vel = texture2D(velState, uvIdx);
+      // Phase space: v→x, w→y, z→z
+      vec3 p = vec3(s.x * 0.5, s.y * 0.6, s.z * 2.0);
+
+      float dv = vel.x;
+      float dw = vel.y;
+      float speed = sqrt(dv*dv + dw*dw);
+      vSpeed = clamp(speed * 0.3, 0.0, 1.0);
+      vPhase = s.w;
+      vV = s.x; // membrane potential for color
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 0.5);
+      gl_PointSize = (0.8 + vSpeed * 2.5) * uPixel * (6.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vSpeed;
+    varying float vPhase;
+    varying float vV;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 12.0);
+
+      // Color: resting=deep blue, firing(high v)=hot white-gold, recovery=teal
+      vec3 rest = vec3(0.12, 0.18, 0.42);     // deep blue - resting
+      vec3 fire = vec3(1.0, 0.85, 0.5);       // hot gold - spike
+      vec3 recover = vec3(0.15, 0.55, 0.52);  // teal - recovery
+
+      // Map membrane potential to color
+      float vNorm = clamp((vV + 2.0) / 4.0, 0.0, 1.0);
+      vec3 col = mix(rest, recover, smoothstep(0.0, 0.4, vNorm));
+      col = mix(col, fire, smoothstep(0.5, 0.85, vNorm));
+
+      // Boost brightness with speed
+      col += vec3(0.15, 0.12, 0.05) * vSpeed;
+
+      float alpha = a * (0.25 + vSpeed * 0.8);
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// Subtle background gradient quad for atmosphere
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false, depthTest: false, transparent: true,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      float d = length(vUv - 0.5);
+      vec3 warm = vec3(0.08, 0.04, 0.02);
+      vec3 cold = vec3(0.01, 0.02, 0.04);
+      vec3 col = mix(warm, cold, smoothstep(0.0, 0.7, d));
+      gl_FragColor = vec4(col, 0.3 * (1.0 - d));
+    }
+  `
+});
+const bgScene = new THREE.Scene();
+bgScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), bgMat));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Pointer control: X → I_ext (bifurcation parameter)
+let targetIext = 0.0;
+let currentIext = 0.0;
+const regimeEl = document.getElementById('regime');
+
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth) - 0.5;
+  // Map to I_ext range: -0.3 to 1.5
+  targetIext = nx * 3.0 + 0.4;
+});
+
+// Start with a value that shows the limit cycle (visually engaging on load)
+targetIext = 0.6;
+currentIext = 0.6;
+
+function getRegime(I){
+  // Approximate bifurcation boundaries for a=0.7, b=0.8, eps=0.08
+  if(I < 0.33) return 'stable node';
+  if(I < 0.38) return 'hopf bifurcation';
+  if(I < 1.2) return 'limit cycle';
+  return 'large oscillation';
+}
+
+let t0 = performance.now();
+let frame = 0;
+function loop(){
+  const now = performance.now();
+  frame++;
+
+  // Smooth parameter transition
+  currentIext += (targetIext - currentIext) * 0.02;
+
+  // Update regime label
+  if(frame % 30 === 0){
+    regimeEl.textContent = getRegime(currentIext) + ' · I=' + currentIext.toFixed(2);
+  }
+
+  // Simulation steps
+  simMat.uniforms.uIext.value = currentIext;
+  simMat.uniforms.uTime.value = now * 0.001;
+
+  for(let i = 0; i < 6; i++){
+    simMat.uniforms.prev.value = rtA.texture;
+    simMat.uniforms.velTex.value = rtVelA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+
+    // Update velocity texture
+    velMat.uniforms.posTex.value = rtB.texture;
+    velMat.uniforms.prevVel.value = rtVelA.texture;
+    velMat.uniforms.uIext.value = currentIext;
+    renderer.setRenderTarget(rtVelB);
+    renderer.render(velScene, camOrtho);
+
+    let tmp = rtA; rtA = rtB; rtB = tmp;
+    tmp = rtVelA; rtVelA = rtVelB; rtVelB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  // Update point uniforms
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.velState.value = rtVelA.texture;
+  pointsMat.uniforms.uIext.value = currentIext;
+
+  // Camera: gentle orbit, slightly tilted
+  const ang = (now - t0) * 0.00008;
+  camera.position.x = Math.sin(ang) * 5.5;
+  camera.position.z = Math.cos(ang) * 5.5;
+  camera.position.y = Math.sin(ang * 0.6) * 1.5 + 0.5;
+  camera.lookAt(0, 0.2, 0);
+
+  // Render background atmosphere
+  renderer.render(bgScene, camOrtho);
+  // Render particles on top (don't clear)
+  renderer.autoClear = false;
+  renderer.render(scene, camera);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
