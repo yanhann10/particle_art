@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fa7 · cursive binary stream</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f4f1e8; overflow:hidden;
+               color:#1a1510; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size: 11px; letter-spacing: 0.04em; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #e8e2d5; color:#1a1510; border:1px solid #3a3530;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; }
+  button.start:hover { background:#d8d0c0; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · speak words</button>
+<div class="id">fa7</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 0, 85);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf4f1e8, 1);
+document.body.appendChild(renderer.domElement);
+
+// poem text — cycles through states: prose → binary → prose
+const POEM = "words beyond words / language dissolves into light / meaning drifts through zeros and ones / the poem writes itself / consciousness encoded in silicon / we are data becoming verse / electric ink on infinite scroll / syntax collapses / glyphs remember what they were / 01101100 01101111 01110110 01100101 / the machine dreams in alphabets / cursive binary streams".split(' ');
+
+// ribbon path: 3D Bezier curve that loops and twists
+const SEGMENTS = 1200;
+const ribbonPoints = [];
+for (let i = 0; i < SEGMENTS; i++){
+  const t = i / SEGMENTS;
+  const angle = t * Math.PI * 6;
+  const radius = 18 + 8 * Math.sin(t * Math.PI * 4);
+  const height = Math.sin(t * Math.PI * 8) * 12;
+  const twist = Math.cos(t * Math.PI * 5) * 3;
+  ribbonPoints.push(new THREE.Vector3(
+    Math.cos(angle) * radius + twist,
+    height,
+    Math.sin(angle) * radius
+  ));
+}
+const ribbonCurve = new THREE.CatmullRomCurve3(ribbonPoints);
+ribbonCurve.closed = true;
+
+// glyph instances — each glyph is a small quad with text rendered as texture
+const N = 800;
+const glyphGeom = new THREE.PlaneGeometry(1.8, 2.4);
+const glyphMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uAmplitude: { value: 0.2 },
+    uChar: { value: 0 },
+    uMode: { value: 0 } // 0=glyph, 1=binary
+  },
+  transparent: true,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uAmplitude;
+    varying vec2 vUv;
+    varying float vMode;
+    attribute float index;
+    attribute float charCode;
+    attribute float mode;
+    void main(){
+      vUv = uv;
+      vMode = mode;
+      float t = uTime * 0.4 + index * 0.05;
+      float progress = mod(t, 1.0);
+      vec3 pos = position;
+      vec3 curvePos = vec3(0.0);
+      // sample ribbon curve via pseudo-lookup
+      float angle = progress * 6.283 * 6.0;
+      float radius = 18.0 + 8.0 * sin(progress * 3.14159 * 4.0);
+      float height = sin(progress * 3.14159 * 8.0) * 12.0;
+      float twist = cos(progress * 3.14159 * 5.0) * 3.0;
+      curvePos = vec3(
+        cos(angle) * radius + twist,
+        height,
+        sin(angle) * radius
+      );
+      // orient quad tangent to curve
+      vec3 tangent = normalize(vec3(-sin(angle), cos(progress*25.0)*0.3, cos(angle)));
+      vec3 up = vec3(0,1,0);
+      vec3 right = normalize(cross(tangent, up));
+      up = cross(right, tangent);
+      pos = curvePos + right * position.x * 1.8 + up * position.y * 2.4;
+      // pulse scale with amplitude
+      pos += tangent * sin(t * 12.0 + charCode * 0.1) * uAmplitude * 0.8;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    varying float vMode;
+    void main(){
+      vec2 uv = vUv;
+      float alpha = 1.0;
+      vec3 col = vec3(0.1, 0.08, 0.06);
+      // glyph mode: render as abstract character shape
+      if (vMode < 0.5){
+        float d = length(uv - 0.5);
+        float glyph = smoothstep(0.45, 0.35, d);
+        float stem = smoothstep(0.15, 0.1, abs(uv.x - 0.5)) * smoothstep(0.9, 0.1, uv.y);
+        float curve = smoothstep(0.25, 0.15, length(uv - vec2(0.5, 0.7))) * smoothstep(0.18, 0.22, length(uv - vec2(0.5, 0.7)));
+        alpha = max(stem, curve) * 0.95;
+      } else {
+        // binary mode: 0 or 1
+        float choice = mod(floor(vMode * 100.0), 2.0);
+        if (choice < 0.5){
+          // render '0'
+          float d = length(uv - 0.5);
+          alpha = smoothstep(0.35, 0.3, d) * (1.0 - smoothstep(0.15, 0.2, d));
+        } else {
+          // render '1'
+          alpha = smoothstep(0.15, 0.1, abs(uv.x - 0.5)) * smoothstep(0.85, 0.15, uv.y);
+        }
+        alpha *= 0.85;
+        col = vec3(0.15, 0.12, 0.1);
+      }
+      if (alpha < 0.02) discard;
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+const indices = new Float32Array(N);
+const charCodes = new Float32Array(N);
+const modes = new Float32Array(N);
+for (let i = 0; i < N; i++){
+  indices[i] = i;
+  charCodes[i] = POEM[i % POEM.length].charCodeAt(0);
+  modes[i] = 0;
+}
+glyphGeom.setAttribute('index', new THREE.InstancedBufferAttribute(indices, 1));
+glyphGeom.setAttribute('charCode', new THREE.InstancedBufferAttribute(charCodes, 1));
+glyphGeom.setAttribute('mode', new THREE.InstancedBufferAttribute(modes, 1));
+
+const glyphs = new THREE.InstancedMesh(glyphGeom, glyphMat, N);
+scene.add(glyphs);
+
+// subtle ambient fog
+scene.fog = new THREE.Fog(0xf4f1e8, 60, 140);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// audio
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+let analyser = null, timeDomain = null;
+async function startAudio(){
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting mic…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.8;
+    src.connect(analyser);
+    timeDomain = new Uint8Array(analyser.fftSize);
+    hint.textContent = 'live · speak to collapse glyphs into binary';
+  } catch (e) {
+    hint.textContent = 'mic denied — autonomous poem mode';
+  }
+}
+startBtn.addEventListener('click', startAudio);
+
+function getAmplitude(){
+  if (!analyser) return 0.15 + 0.15 * Math.sin(performance.now() / 2000);
+  analyser.getByteTimeDomainData(timeDomain);
+  let sum = 0;
+  for (let i = 0; i < timeDomain.length; i++){
+    const val = (timeDomain[i] - 128) / 128;
+    sum += val * val;
+  }
+  return Math.sqrt(sum / timeDomain.length);
+}
+
+const start = performance.now();
+let lastModeFlip = 0;
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  glyphMat.uniforms.uTime.value = t;
+  const amp = getAmplitude();
+  glyphMat.uniforms.uAmplitude.value = amp;
+
+  // flip random glyphs to binary mode when amplitude spikes
+  if (amp > 0.4 && t - lastModeFlip > 0.3){
+    lastModeFlip = t;
+    for (let i = 0; i < 40; i++){
+      const idx = Math.floor(Math.random() * N);
+      modes[idx] = Math.random() > 0.5 ? 1 : 0;
+    }
+    glyphGeom.attributes.mode.needsUpdate = true;
+  }
+  // slowly decay binary back to glyph
+  if (t - lastModeFlip > 1.5){
+    let changed = false;
+    for (let i = 0; i < N; i++){
+      if (modes[i] > 0.5 && Math.random() < 0.02){
+        modes[i] = 0;
+        changed = true;
+      }
+    }
+    if (changed) glyphGeom.attributes.mode.needsUpdate = true;
+  }
+
+  // slow camera orbit
+  camera.position.x = Math.cos(t * 0.08) * 85;
+  camera.position.z = Math.sin(t * 0.08) * 85;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
