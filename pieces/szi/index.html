@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>szi · process 18 (sphere)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#fdfbf8; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#1a1816; }
+</style>
+</head>
+<body>
+<div class="id">szi</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Casey Reas Process 18 lifted to 3D: 400 Elements drift on sphere surface in circular paths.
+// When two come within threshold, a quad is drawn connecting their positions + velocities.
+// Additive blending; quads accumulate to build the tessellated scaffold over time.
+
+const N = 400;
+const RADIUS = 2.8;
+const EPSILON = 0.35; // connection threshold
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xfdfbf8, 1);
+renderer.autoClear = false; // accumulate
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 50);
+camera.position.set(0, 0, 9);
+camera.lookAt(0, 0, 0);
+
+// Elements: each has a position on sphere, angular velocity, and circular-path center
+class Element {
+  constructor() {
+    // random point on sphere
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(Math.random() * 2 - 1);
+    this.pos = new THREE.Vector3(
+      RADIUS * Math.sin(phi) * Math.cos(theta),
+      RADIUS * Math.sin(phi) * Math.sin(theta),
+      RADIUS * Math.cos(phi)
+    );
+    
+    // circular path: define a tangent direction and angular speed
+    const tangent = new THREE.Vector3().randomDirection().cross(this.pos).normalize();
+    this.axis = this.pos.clone().normalize();
+    this.angularSpeed = (Math.random() * 0.4 + 0.15) * (Math.random() < 0.5 ? 1 : -1);
+    this.angle = 0;
+    this.pathRadius = (Math.random() * 0.3 + 0.1) * RADIUS;
+    
+    // store initial tangent for circular motion
+    this.tangent = tangent;
+  }
+  
+  step(dt) {
+    this.angle += this.angularSpeed * dt;
+    // compute position on circular path around axis
+    const rotAxis = this.axis.clone();
+    const offset = this.tangent.clone()
+      .applyAxisAngle(rotAxis, this.angle)
+      .multiplyScalar(this.pathRadius);
+    this.pos.copy(this.axis).multiplyScalar(RADIUS).add(offset);
+    // re-project to sphere surface
+    this.pos.normalize().multiplyScalar(RADIUS);
+  }
+}
+
+const elements = [];
+for (let i = 0; i < N; i++) {
+  elements.push(new Element());
+}
+
+// Connection quads: when two elements are within EPSILON, draw a filled quad
+// connecting their current positions + a projected 'tail' from velocity
+const quadGeom = new THREE.BufferGeometry();
+const maxQuads = N * 2; // pre-allocate generously
+const positions = new Float32Array(maxQuads * 4 * 3);
+const indices = new Uint16Array(maxQuads * 6);
+for (let i = 0; i < maxQuads; i++) {
+  const base = i * 4;
+  indices[i*6  ] = base;
+  indices[i*6+1] = base + 1;
+  indices[i*6+2] = base + 2;
+  indices[i*6+3] = base;
+  indices[i*6+4] = base + 2;
+  indices[i*6+5] = base + 3;
+}
+quadGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+quadGeom.setIndex(new THREE.BufferAttribute(indices, 1));
+quadGeom.setDrawRange(0, 0);
+
+const quadMat = new THREE.ShaderMaterial({
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    varying vec3 vPos;
+    void main() {
+      vPos = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vPos;
+    void main() {
+      // sumi-ink black with slight variance
+      float noise = fract(sin(dot(vPos.xy, vec2(12.9898, 78.233))) * 43758.5453);
+      float alpha = 0.018 + noise * 0.008;
+      vec3 col = vec3(0.10, 0.09, 0.09);
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+const quadMesh = new THREE.Mesh(quadGeom, quadMat);
+scene.add(quadMesh);
+
+// Accumulation: fade canvas very slowly each frame
+let fadeCount = 0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let t0 = performance.now();
+let quadCount = 0;
+
+function loop() {
+  const now = performance.now();
+  const dt = 0.016;
+  
+  // step elements
+  for (let i = 0; i < N; i++) {
+    elements[i].step(dt);
+  }
+  
+  // detect connections and build quads
+  const newPositions = [];
+  for (let i = 0; i < N; i++) {
+    for (let j = i + 1; j < N; j++) {
+      const dist = elements[i].pos.distanceTo(elements[j].pos);
+      if (dist < EPSILON) {
+        // create quad: endpoints are current positions, other two vertices trail back along velocity
+        const p1 = elements[i].pos.clone();
+        const p2 = elements[j].pos.clone();
+        
+        // compute velocity vectors (approximate from angular motion)
+        const v1 = new THREE.Vector3()
+          .crossVectors(elements[i].axis, elements[i].pos)
+          .normalize()
+          .multiplyScalar(-0.08);
+        const v2 = new THREE.Vector3()
+          .crossVectors(elements[j].axis, elements[j].pos)
+          .normalize()
+          .multiplyScalar(-0.08);
+        
+        const p3 = p1.clone().add(v1);
+        const p4 = p2.clone().add(v2);
+        
+        newPositions.push(
+          p1.x, p1.y, p1.z,
+          p2.x, p2.y, p2.z,
+          p4.x, p4.y, p4.z,
+          p3.x, p3.y, p3.z
+        );
+      }
+    }
+  }
+  
+  // append new quads to geometry (ring-buffer style)
+  if (newPositions.length > 0) {
+    const numNew = newPositions.length / 12;
+    for (let i = 0; i < numNew; i++) {
+      if (quadCount >= maxQuads) break;
+      for (let v = 0; v < 4; v++) {
+        const src = i * 12 + v * 3;
+        const dst = quadCount * 12 + v * 3;
+        positions[dst    ] = newPositions[src    ];
+        positions[dst + 1] = newPositions[src + 1];
+        positions[dst + 2] = newPositions[src + 2];
+      }
+      quadCount++;
+    }
+    quadGeom.attributes.position.needsUpdate = true;
+    quadGeom.setDrawRange(0, quadCount * 6);
+  }
+  
+  // slow fade every 30 frames
+  fadeCount++;
+  if (fadeCount % 30 === 0) {
+    renderer.setClearColor(0xfdfbf8, 0.004);
+    renderer.clear();
+    renderer.setClearColor(0xfdfbf8, 0);
+  }
+  
+  // gentle camera drift
+  const elapsed = (now - t0) * 0.001;
+  camera.position.x = Math.sin(elapsed * 0.08) * 0.6;
+  camera.position.y = Math.cos(elapsed * 0.12) * 0.4;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+// initial clear
+renderer.clear();
+loop();
+</script>
+</body>
+</html>
