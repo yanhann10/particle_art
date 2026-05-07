@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>n3g · reaction-diffusion morphogenesis · Gray-Scott</title>
+<!-- MOTION: undulation, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.6; font-size: 11px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">n3g</div>
+<div class="hint" id="hint">Gray-Scott U-V system · feed=0.055 kill=0.062 · coral pattern</div>
+<div class="src">Pearson 1993 · chemical morphogenesis</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0908, 0.012);
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 12, 55);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+
+// Gray-Scott reaction-diffusion grid
+const GRID_W = 128;
+const GRID_H = 128;
+const GRID_D = 64;
+const TOTAL = GRID_W * GRID_H * GRID_D;
+
+// Two chemical concentrations: U and V
+let U = new Float32Array(TOTAL);
+let V = new Float32Array(TOTAL);
+let U_next = new Float32Array(TOTAL);
+let V_next = new Float32Array(TOTAL);
+
+// Initialize: U=1 everywhere, V=0 except small seed region
+for (let i = 0; i < TOTAL; i++){
+  U[i] = 1.0;
+  V[i] = 0.0;
+}
+
+// Seed multiple small spheres of V
+for (let seed = 0; seed < 8; seed++){
+  const cx = 32 + Math.random() * 64;
+  const cy = 32 + Math.random() * 64;
+  const cz = 16 + Math.random() * 32;
+  const r = 3 + Math.random() * 4;
+  for (let x = 0; x < GRID_W; x++){
+    for (let y = 0; y < GRID_H; y++){
+      for (let z = 0; z < GRID_D; z++){
+        const dx = x - cx, dy = y - cy, dz = z - cz;
+        if (dx*dx + dy*dy + dz*dz < r*r){
+          const idx = x + y * GRID_W + z * GRID_W * GRID_H;
+          V[idx] = 1.0;
+          U[idx] = 0.0;
+        }
+      }
+    }
+  }
+}
+
+// Gray-Scott parameters for coral/mitosis pattern
+const Du = 0.16;  // diffusion rate of U
+const Dv = 0.08;  // diffusion rate of V
+const feed = 0.055; // feed rate
+const kill = 0.062; // kill rate
+const dt = 1.0;
+
+function getIndex(x, y, z){
+  x = (x + GRID_W) % GRID_W;
+  y = (y + GRID_H) % GRID_H;
+  z = Math.max(0, Math.min(GRID_D - 1, z)); // clamp Z
+  return x + y * GRID_W + z * GRID_W * GRID_H;
+}
+
+function laplacian3D(arr, x, y, z){
+  const c = arr[getIndex(x, y, z)];
+  let sum = 0;
+  sum += arr[getIndex(x-1, y, z)];
+  sum += arr[getIndex(x+1, y, z)];
+  sum += arr[getIndex(x, y-1, z)];
+  sum += arr[getIndex(x, y+1, z)];
+  sum += arr[getIndex(x, y, z-1)];
+  sum += arr[getIndex(x, y, z+1)];
+  return sum - 6 * c;
+}
+
+function stepReactionDiffusion(){
+  for (let x = 0; x < GRID_W; x++){
+    for (let y = 0; y < GRID_H; y++){
+      for (let z = 0; z < GRID_D; z++){
+        const idx = getIndex(x, y, z);
+        const u = U[idx];
+        const v = V[idx];
+        const lapU = laplacian3D(U, x, y, z);
+        const lapV = laplacian3D(V, x, y, z);
+        const uvv = u * v * v;
+        
+        U_next[idx] = u + dt * (Du * lapU - uvv + feed * (1 - u));
+        V_next[idx] = v + dt * (Dv * lapV + uvv - (feed + kill) * v);
+      }
+    }
+  }
+  [U, U_next] = [U_next, U];
+  [V, V_next] = [V_next, V];
+}
+
+// Particle system: sample grid and place particles where V concentration is high
+const N = 28000;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const vConc = new Float32Array(N); // store V concentration per particle
+
+for (let i = 0; i < N; i++){
+  positions[i*3] = (Math.random() - 0.5) * 60;
+  positions[i*3+1] = (Math.random() - 0.5) * 60;
+  positions[i*3+2] = (Math.random() - 0.5) * 30;
+  velocities[i*3] = 0;
+  velocities[i*3+1] = 0;
+  velocities[i*3+2] = 0;
+  seeds[i] = Math.random();
+  vConc[i] = 0;
+}
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float vConc;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      
+      // Pulsing based on V concentration and seed
+      float phase = seed * 6.28 + uTime * 0.4;
+      float pulse = 0.4 + 0.6 * sin(phase);
+      float activity = vConc * 2.0; // V drives brightness
+      
+      // Palette: deep charcoal → coral pink → cream white
+      // Inspired by Ernst Haeckel's radiolaria illustrations
+      vec3 c0 = vec3(0.12, 0.10, 0.11); // charcoal
+      vec3 c1 = vec3(0.85, 0.42, 0.38); // coral
+      vec3 c2 = vec3(0.95, 0.89, 0.82); // cream
+      
+      float t1 = smoothstep(0.2, 0.5, activity);
+      float t2 = smoothstep(0.6, 0.9, activity);
+      vCol = mix(c0, c1, t1);
+      vCol = mix(vCol, c2, t2);
+      
+      vAlpha = 0.3 + activity * 0.7 + pulse * 0.2;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float size = (1.2 + activity * 2.5 + pulse * 1.0) * uPixel * (80.0/dist);
+      gl_PointSize = size;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float core = exp(-r * 20.0);
+      float halo = exp(-r * 6.0);
+      float a = mix(halo, core, 0.7) * vAlpha;
+      gl_FragColor = vec4(vCol * a * 1.2, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('vConc', new THREE.BufferAttribute(vConc, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Ambient light for atmosphere
+const ambient = new THREE.AmbientLight(0x1a1416, 0.3);
+scene.add(ambient);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Map particles to grid and apply forces based on gradients
+function updateParticles(dt){
+  const scale = 0.5; // world units per grid cell
+  
+  for (let i = 0; i < N; i++){
+    const px = positions[i*3];
+    const py = positions[i*3+1];
+    const pz = positions[i*3+2];
+    
+    // Map to grid coords
+    const gx = Math.floor((px / scale) + GRID_W * 0.5);
+    const gy = Math.floor((py / scale) + GRID_H * 0.5);
+    const gz = Math.floor((pz / scale) + GRID_D * 0.5);
+    
+    if (gx >= 0 && gx < GRID_W && gy >= 0 && gy < GRID_H && gz >= 0 && gz < GRID_D){
+      const idx = getIndex(gx, gy, gz);
+      const v = V[idx];
+      vConc[i] = THREE.MathUtils.lerp(vConc[i], v, 0.15);
+      
+      // Compute gradient of V field (chemical taxis)
+      const vXp = V[getIndex(gx+1, gy, gz)];
+      const vXn = V[getIndex(gx-1, gy, gz)];
+      const vYp = V[getIndex(gx, gy+1, gz)];
+      const vYn = V[getIndex(gx, gy-1, gz)];
+      const vZp = V[getIndex(gx, gy, gz+1)];
+      const vZn = V[getIndex(gx, gy, gz-1)];
+      
+      const gradX = (vXp - vXn) * 0.5;
+      const gradY = (vYp - vYn) * 0.5;
+      const gradZ = (vZp - vZn) * 0.5;
+      
+      // Particles attracted to high V concentration
+      const attractionStrength = 0.15;
+      velocities[i*3]   += gradX * attractionStrength * dt;
+      velocities[i*3+1] += gradY * attractionStrength * dt;
+      velocities[i*3+2] += gradZ * attractionStrength * dt;
+      
+      // Damping
+      velocities[i*3]   *= 0.92;
+      velocities[i*3+1] *= 0.92;
+      velocities[i*3+2] *= 0.92;
+      
+      // Brownian motion for liveliness
+      const brownian = 0.08;
+      velocities[i*3]   += (Math.random() - 0.5) * brownian;
+      velocities[i*3+1] += (Math.random() - 0.5) * brownian;
+      velocities[i*3+2] += (Math.random() - 0.5) * brownian;
+    }
+    
+    // Update position
+    positions[i*3]   += velocities[i*3] * dt;
+    positions[i*3+1] += velocities[i*3+1] * dt;
+    positions[i*3+2] += velocities[i*3+2] * dt;
+    
+    // Gentle boundary containment
+    const boundX = 32, boundY = 32, boundZ = 16;
+    if (Math.abs(positions[i*3]) > boundX){
+      velocities[i*3] *= -0.5;
+      positions[i*3] = Math.sign(positions[i*3]) * boundX;
+    }
+    if (Math.abs(positions[i*3+1]) > boundY){
+      velocities[i*3+1] *= -0.5;
+      positions[i*3+1] = Math.sign(positions[i*3+1]) * boundY;
+    }
+    if (Math.abs(positions[i*3+2]) > boundZ){
+      velocities[i*3+2] *= -0.5;
+      positions[i*3+2] = Math.sign(positions[i*3+2]) * boundZ;
+    }
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.vConc.needsUpdate = true;
+}
+
+// Track centroid
+const centroid = new THREE.Vector3();
+function updateCentroid(){
+  centroid.set(0,0,0);
+  let count = 0;
+  for (let i = 0; i < N; i++){
+    if (vConc[i] > 0.3){ // only count active particles
+      centroid.x += positions[i*3];
+      centroid.y += positions[i*3+1];
+      centroid.z += positions[i*3+2];
+      count++;
+    }
+  }
+  if (count > 0) centroid.multiplyScalar(1 / count);
+}
+
+function updateCamera(t){
+  updateCentroid();
+  const orbitRadius = 55;
+  const angle = t * 0.00006;
+  const wobble = Math.sin(t * 0.0003) * 8;
+  camera.position.x = centroid.x + Math.cos(angle) * orbitRadius;
+  camera.position.z = centroid.z + Math.sin(angle) * orbitRadius;
+  camera.position.y = centroid.y + 12 + wobble;
+  camera.lookAt(centroid);
+}
+
+let lastTime = performance.now();
+const start = performance.now();
+let frameCount = 0;
+const hintEl = document.getElementById('hint');
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  const t = now - start;
+  
+  frameCount++;
+  
+  // Step reaction-diffusion every 2 frames
+  if (frameCount % 2 === 0){
+    stepReactionDiffusion();
+  }
+  
+  // Update statistics every 60 frames
+  if (frameCount % 60 === 0){
+    let totalV = 0;
+    for (let i = 0; i < TOTAL; i++) totalV += V[i];
+    const avgV = (totalV / TOTAL).toFixed(4);
+    hintEl.textContent = `reaction progress · avg V: ${avgV} · Gray-Scott U-V · coral morphogenesis`;
+  }
+  
+  uniforms.uTime.value = t * 0.001;
+  updateParticles(dt * 60);
+  updateCamera(t);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
