@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aws · parallels · figure-field line-warp</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0a; overflow:hidden;
+               color:#d6cab2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">aws · parallels · figure-field</div>
+<div class="hint">move cursor to warp rails into figure · idle: pattern returns</div>
+<div class="src">marc da costa · matthew niederhauser · lumen 2024</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ────────────── PARALLELS MUTATION: mouse-warped parallel-rail field
+// geometry: 80 horizontal rails (each sampled as 240 segments), particles constrained to rails
+// interaction: mouse presence bends rails into viewer-figure (human silhouette at cursor depth)
+// palette: LED amber (#FFB347) on black
+// motion: gentle drift left-to-right, rails snap back to parallel when idle
+// ref: Da Costa/Niederhauser Lumen Prize 2024 — perception slipping between figure/pattern
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a0a, 0.012);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0a, 1);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── rail topology
+const RAILS = 80;       // horizontal lines across frame
+const SEGS_PER_RAIL = 240;
+const RAIL_HEIGHT = 24;
+const RAIL_WIDTH = 40;
+const PARTICLES_PER_SEG = 2;
+const N = RAILS * SEGS_PER_RAIL * PARTICLES_PER_SEG;
+
+// base rail grid (neutral parallel state)
+const basePos = new Float32Array(N * 3);
+const railIndex = new Float32Array(N);
+const segIndex = new Float32Array(N);
+const seeds = new Float32Array(N);
+
+let idx = 0;
+for (let r = 0; r < RAILS; r++){
+  const y = -RAIL_HEIGHT/2 + (r / (RAILS - 1)) * RAIL_HEIGHT;
+  for (let s = 0; s < SEGS_PER_RAIL; s++){
+    const x = -RAIL_WIDTH/2 + (s / (SEGS_PER_RAIL - 1)) * RAIL_WIDTH;
+    for (let p = 0; p < PARTICLES_PER_SEG; p++){
+      basePos[idx*3]   = x + (Math.random() - 0.5) * 0.08;
+      basePos[idx*3+1] = y + (Math.random() - 0.5) * 0.08;
+      basePos[idx*3+2] = (Math.random() - 0.5) * 0.6;
+      railIndex[idx] = r / (RAILS - 1);
+      segIndex[idx] = s / (SEGS_PER_RAIL - 1);
+      seeds[idx] = Math.random();
+      idx++;
+    }
+  }
+}
+
+// ────────────── figure template: human silhouette (head/torso/arms/legs)
+// when mouse active, rails warp to match this shape at cursor depth
+function sampleFigure(N){
+  const out = new Float32Array(N * 3);
+  const v = new THREE.Vector3();
+  // head: ellipsoid
+  const headY = 10, headR = 1.4, headH = 2.2;
+  const neckY = headY - headH/2 - 0.4;
+  // torso: tapered rectangle
+  const torsoTop = neckY - 0.3, torsoBot = 4.0;
+  const shoulderW = 3.0, hipW = 2.0;
+  // arms: two rectangles extending from shoulders
+  const armY = torsoTop - 1.2, armLen = 4.5, armW = 0.6;
+  // legs: two rectangles from hips down
+  const legTop = torsoBot, legBot = -8, legW = 0.7, legSep = 0.9;
+
+  // budget: 25% head, 35% torso, 20% arms, 20% legs
+  const NH = Math.floor(N * 0.25);
+  const NT = Math.floor(N * 0.35);
+  const NA = Math.floor(N * 0.20);
+  const NL = N - NH - NT - NA;
+
+  let i = 0;
+  // head
+  for (let k = 0; k < NH; k++){
+    const phi = Math.acos(2 * Math.random() - 1);
+    const theta = Math.random() * Math.PI * 2;
+    v.x = headR * Math.sin(phi) * Math.cos(theta);
+    v.y = headY + headH/2 * Math.cos(phi);
+    v.z = headR * 0.7 * Math.sin(phi) * Math.sin(theta);
+    out[i*3]=v.x; out[i*3+1]=v.y; out[i*3+2]=v.z; i++;
+  }
+  // torso
+  for (let k = 0; k < NT; k++){
+    const t = Math.random();
+    const yy = torsoTop + t * (torsoBot - torsoTop);
+    const w = shoulderW + t * (hipW - shoulderW);
+    const xx = (Math.random() - 0.5) * w;
+    const zz = (Math.random() - 0.5) * 0.8;
+    out[i*3]=xx; out[i*3+1]=yy; out[i*3+2]=zz; i++;
+  }
+  // arms (left/right)
+  for (let k = 0; k < NA; k++){
+    const side = Math.random() < 0.5 ? -1 : 1;
+    const t = Math.random();
+    const xx = side * (shoulderW/2 + t * armLen);
+    const yy = armY + (Math.random() - 0.5) * armW;
+    const zz = (Math.random() - 0.5) * 0.6;
+    out[i*3]=xx; out[i*3+1]=yy; out[i*3+2]=zz; i++;
+  }
+  // legs
+  for (let k = 0; k < NL; k++){
+    const side = Math.random() < 0.5 ? -1 : 1;
+    const t = Math.random();
+    const yy = legTop + t * (legBot - legTop);
+    const xx = side * legSep + (Math.random() - 0.5) * legW;
+    const zz = (Math.random() - 0.5) * 0.6;
+    out[i*3]=xx; out[i*3+1]=yy; out[i*3+2]=zz; i++;
+  }
+  return out;
+}
+const figureTemplate = sampleFigure(N);
+
+// scale figure to fit within frame height
+function fitVertical(arr, h){
+  let minY = Infinity, maxY = -Infinity;
+  for (let i = 0; i < arr.length/3; i++){
+    minY = Math.min(minY, arr[i*3+1]);
+    maxY = Math.max(maxY, arr[i*3+1]);
+  }
+  const span = maxY - minY;
+  const s = h / span;
+  const cy = (minY + maxY) / 2;
+  for (let i = 0; i < arr.length/3; i++){
+    arr[i*3]   *= s;
+    arr[i*3+1] = (arr[i*3+1] - cy) * s;
+    arr[i*3+2] *= s;
+  }
+}
+fitVertical(figureTemplate, RAIL_HEIGHT * 0.75);
+
+// ────────────── shader
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uMouse:  { value: new THREE.Vector2(-999, -999) },
+  uFigure: { value: 0 }    // 0 = parallel rails, 1 = warped to figure
+};
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(basePos.slice(), 3));
+geom.setAttribute('basePos', new THREE.BufferAttribute(basePos, 3));
+geom.setAttribute('figPos',  new THREE.BufferAttribute(figureTemplate, 3));
+geom.setAttribute('railIdx', new THREE.BufferAttribute(railIndex, 1));
+geom.setAttribute('segIdx',  new THREE.BufferAttribute(segIndex, 1));
+geom.setAttribute('seed',    new THREE.BufferAttribute(seeds, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec2 uMouse;
+    uniform float uFigure;
+    attribute vec3 basePos;
+    attribute vec3 figPos;
+    attribute float railIdx;
+    attribute float segIdx;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vEnergy;
+    void main(){
+      // smooth blend between parallel (basePos) and figure-warped (figPos)
+      float f = smoothstep(0.0, 1.0, uFigure);
+      vec3 p = mix(basePos, figPos, f);
+
+      // drift: gentle left-to-right wave on parallel rails
+      float drift = (1.0 - f) * 0.6 * sin(uTime * 0.3 + railIdx * 6.28 + seed * 3.14);
+      p.x += drift;
+
+      // figure warp: particles near mouse position get pulled toward figPos more strongly
+      // (creates local depth-of-field where viewer's gaze shapes the field)
+      vec2 screen = uMouse;
+      float distToMouse = length(vec2(p.x, p.y) - screen);
+      float influence = exp(-distToMouse * 0.08);
+      float localFig = mix(f, min(1.0, f + influence * 0.4), f);
+      p = mix(basePos, figPos, localFig);
+      p.x += drift * (1.0 - localFig);
+
+      // energy: particles pulse based on rail + time
+      float t = uTime * 0.7 + seed * 6.28;
+      vEnergy = 0.4 + 0.6 * (0.5 + 0.5 * sin(t + railIdx * 12.0));
+
+      // LED amber: single hue, intensity varies with energy + figure-state
+      // parallel rails: dimmer, more uniform
+      // figure-warped: brighter at figure edges
+      float edgeness = smoothstep(0.3, 0.7, abs(segIdx - 0.5) * 2.0);
+      float brightness = mix(0.6, 1.0, f * edgeness);
+      vCol = vec3(1.0, 0.70, 0.28) * brightness;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (0.7 + 0.5 * vEnergy) * uPixel * (60.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vEnergy;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 20.0) * (0.35 + 0.65 * vEnergy);
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── interaction: mouse position controls warp focus
+let mouseNDC = new THREE.Vector2(-999, -999);
+let lastMove = 0;
+
+addEventListener('mousemove', e => {
+  mouseNDC.x = (e.clientX / innerWidth) * 2 - 1;
+  mouseNDC.y = -(e.clientY / innerHeight) * 2 + 1;
+  lastMove = performance.now();
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // figure blend: active when mouse moved recently, fades after 3s idle
+  const idle = (now - lastMove) / 1000;
+  const figTarget = idle < 3.0 ? 1.0 : 0.0;
+  uniforms.uFigure.value += (figTarget - uniforms.uFigure.value) * 0.03;
+
+  // convert mouse NDC to world-space XY (at z=0 plane)
+  const aspect = innerWidth / innerHeight;
+  const fov = camera.fov * Math.PI / 180;
+  const h = 2 * Math.tan(fov / 2) * camera.position.z;
+  const w = h * aspect;
+  uniforms.uMouse.value.set(mouseNDC.x * w/2, mouseNDC.y * h/2);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
