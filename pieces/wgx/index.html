@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>wgx · disrupted lorenz weave</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0b08; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">wgx</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  Anni Albers' disrupted-weave principle applied to the Lorenz attractor:
+  The attractor IS the textile — 100k threads tracing the canonical double-scroll.
+  Four deliberate disruptions break the regularity:
+    1. Cylindrical void through the right wing — a core sample removed
+    2. Shear plane at x≈3 displaces one half, tearing the two lobes apart
+    3. Spherical density knot in the left wing — threads bunch and brighten
+    4. Angular wedge absence — a 35° slice excised like cut warp threads
+  Palette: copper/sienna, deep wine, pale sage, warm parchment — autumn warp on dark loom.
+  Leaf-shaped point sprites (leaf-as-basic-unit): each particle is a tiny spinning leaf
+  caught in the strange attractor's wind.
+*/
+
+const W = 320, H = 320, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0b08, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = {
+  type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false
+};
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// seed particles near attractor basin
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 8.0;
+  init[i*4+1] = (Math.random()*2-1) * 8.0;
+  init[i*4+2] = (Math.random()*2-1) * 8.0 + 25.0;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv;
+    void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// simulation — Lorenz integration with shear disruption baked in
+const simUniforms = {
+  prev:    { value: rtA.texture },
+  uDt:     { value: 0.005 },
+  uSigma:  { value: 10.0 },
+  uRho:    { value: 28.0 },
+  uBeta:   { value: 8.0/3.0 },
+  uTime:   { value: 0.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uSigma, uRho, uBeta, uTime;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      vec3 dp = vec3(
+        uSigma * (p.y - p.x),
+        p.x * (uRho - p.z) - p.y,
+        p.x * p.y - uBeta * p.z
+      );
+      p += dp * uDt;
+
+      // DISRUPTION 2: shear plane at x≈3 — displaces the right lobe upward
+      // like a tectonic fault through the weave
+      float shearStrength = 0.012;
+      float shearEdge = 3.0 + sin(uTime * 0.15) * 1.5;
+      float shearMask = smoothstep(shearEdge - 1.0, shearEdge + 1.0, p.x);
+      p.z += shearMask * shearStrength * (p.x - shearEdge) * 2.0;
+      p.y += shearMask * shearStrength * 1.5;
+
+      // DISRUPTION 3: density knot — mild attraction toward a point in left wing
+      vec3 knotCenter = vec3(-8.0, -4.0, 20.0);
+      vec3 toKnot = knotCenter - p;
+      float knotDist = length(toKnot);
+      float knotPull = 0.03 * smoothstep(8.0, 2.0, knotDist);
+      p += normalize(toKnot + 0.001) * knotPull;
+
+      age = mod(age + uDt * 0.05, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// render pass — points with disruption voids and leaf sprites
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 500);
+// off-center framing — attractor shifted to upper-right compositional third
+camera.position.set(-15, 12, 85);
+camera.lookAt(5, 3, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel, uTime;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vSpeed;
+    varying float vDisrupt;
+    varying float vLeafAngle;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      float speed = length(vec3(
+        10.0 * (p.y - p.x),
+        p.x * 28.0 - p.y - p.x*p.z,
+        p.x * p.y - (8.0/3.0) * p.z
+      )) * 0.005;
+      vSpeed = clamp(speed, 0.0, 1.0);
+      vAge = age;
+
+      // center the attractor
+      vec3 centered = p;
+      centered.z -= 25.0;
+
+      // DISRUPTION 1: cylindrical void — right wing, axis along Y
+      // like a core sample pulled from woven fabric
+      vec2 cylXZ = centered.xz - vec2(10.0, 2.0 + sin(uTime*0.1)*1.5);
+      float cylDist = length(cylXZ);
+      float cylVoid = smoothstep(3.0, 4.5, cylDist);
+
+      // DISRUPTION 4: angular wedge absence — 35° slice excised
+      // like cut warp threads in a weaving
+      float angle = atan(centered.z, centered.x);
+      float wedgeCenter = 2.6 + sin(uTime * 0.07) * 0.3; // ~150°
+      float wedgeHalf = 0.305; // ~17.5° each side
+      float wedgeDist = abs(angle - wedgeCenter);
+      float wedgeVoid = smoothstep(0.0, wedgeHalf, wedgeDist);
+
+      vDisrupt = cylVoid * wedgeVoid;
+
+      // leaf rotation angle — each particle's leaf spins at its own rate
+      vLeafAngle = age * 6.2832 + float(gl_VertexID) * 0.37;
+
+      vec4 mv = modelViewMatrix * vec4(centered, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.6 + 1.8 * vSpeed) * uPixel * (55.0 / max(dist, 1.0));
+      gl_PointSize *= mix(0.5, 1.0, vDisrupt); // shrink near void edges
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge, vSpeed, vDisrupt, vLeafAngle;
+    void main(){
+      if(vDisrupt < 0.05) discard;
+
+      // leaf-shaped point sprite
+      vec2 uv = gl_PointCoord - 0.5;
+
+      // rotate the leaf
+      float c = cos(vLeafAngle), s = sin(vLeafAngle);
+      vec2 ruv = vec2(c*uv.x - s*uv.y, s*uv.x + c*uv.y);
+
+      // leaf shape: elongated with pointed tip
+      // ellipse stretched along x, pinched at the ends
+      float leafX = ruv.x * 1.8;
+      float leafY = ruv.y * 3.2;
+      float ellipse = leafX*leafX + leafY*leafY;
+      if(ellipse > 0.25) discard;
+
+      // central vein — subtle darker line
+      float vein = exp(-abs(ruv.y) * 40.0) * 0.15;
+
+      float alpha = exp(-ellipse * 12.0);
+      alpha *= vDisrupt; // fade at void boundaries
+
+      // Palette: copper, wine, sage, parchment — autumn leaves on dark loom
+      // Anni Albers palette: handwoven, earthy, deliberate
+      vec3 copper    = vec3(0.82, 0.52, 0.24);
+      vec3 wine      = vec3(0.56, 0.14, 0.20);
+      vec3 sage      = vec3(0.55, 0.70, 0.45);
+      vec3 parchment = vec3(0.92, 0.85, 0.68);
+
+      float k = mod(vAge + vSpeed * 0.3, 1.0);
+      vec3 col;
+      if(k < 0.3){
+        col = mix(copper, wine, k / 0.3);
+      } else if(k < 0.6){
+        col = mix(wine, sage, (k - 0.3) / 0.3);
+      } else {
+        col = mix(sage, parchment, (k - 0.6) / 0.4);
+      }
+
+      // darken in density knot region (particles there are bunched)
+      col -= vein;
+
+      // brightness modulated by speed + disruption proximity
+      float brightness = (0.4 + vSpeed * 0.8) * mix(0.7, 1.0, vDisrupt);
+      col *= brightness;
+
+      gl_FragColor = vec4(col * alpha, alpha * 0.85);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// atmospheric dust motes — sparse, large, very dim
+const dustCount = 200;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+const dustAlpha = new Float32Array(dustCount);
+for(let i = 0; i < dustCount; i++){
+  dustPos[i*3]   = (Math.random()-0.5) * 100;
+  dustPos[i*3+1] = (Math.random()-0.5) * 80;
+  dustPos[i*3+2] = (Math.random()-0.5) * 100;
+  dustAlpha[i] = Math.random();
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('alpha', new THREE.BufferAttribute(dustAlpha, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float alpha;
+    varying float vA;
+    uniform float uTime;
+    void main(){
+      vA = alpha;
+      vec3 p = position;
+      p.y += sin(uTime * 0.3 + alpha * 6.28) * 0.8;
+      p.x += cos(uTime * 0.2 + alpha * 3.14) * 0.5;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 2.5 * (80.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      float r = length(gl_PointCoord - 0.5);
+      if(r > 0.5) discard;
+      float a = exp(-r*r*20.0) * 0.04 * vA;
+      gl_FragColor = vec4(0.85, 0.78, 0.65, a);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+// film grain overlay — full-screen quad
+const grainScene = new THREE.Scene();
+const grainMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthWrite: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    float hash(vec2 p){
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    void main(){
+      float grain = hash(vUv * 800.0 + uTime * 7.0);
+      grain = (grain - 0.5) * 0.06;
+      gl_FragColor = vec4(vec3(grain + 0.02), 0.15);
+    }
+  `
+});
+grainScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), grainMat));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pointer nudges parameters — keep the canonical shape recognizable
+const target = { sigma: 10.0, rho: 28.0 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth) - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.rho   = 28.0 + ny * 5.0;
+  target.sigma = 10.0 + nx * 2.0;
+});
+
+const startTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - startTime) / 1000;
+
+  simUniforms.uSigma.value += (target.sigma - simUniforms.uSigma.value) * 0.04;
+  simUniforms.uRho.value   += (target.rho   - simUniforms.uRho.value)   * 0.04;
+  simUniforms.uTime.value = elapsed;
+
+  // 4 substeps
+  for(let i = 0; i < 4; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = elapsed;
+  dustMat.uniforms.uTime.value = elapsed;
+  grainMat.uniforms.uTime.value = elapsed;
+
+  // slow drift orbit — off-center, compositionally deliberate
+  // camera traces a gentle figure-8 lissajous, biased to upper-right
+  const t1 = elapsed * 0.06;
+  const camR = 82;
+  camera.position.x = Math.sin(t1) * camR * 0.7 + 8;
+  camera.position.z = Math.cos(t1 * 0.7) * camR * 0.85;
+  camera.position.y = Math.sin(t1 * 0.5) * 15 + 10;
+  // look slightly off-center — the attractor isn't centered in frame
+  camera.lookAt(4, 2, 0);
+
+  renderer.render(scene, camera);
+
+  // grain overlay composited on top
+  renderer.autoClear = false;
+  renderer.render(grainScene, camOrtho);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
