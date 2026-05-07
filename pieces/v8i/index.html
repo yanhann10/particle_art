@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v8i · hypercube lattice · Mohr P-197</title>
+<!-- MOTION: rotation, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">v8i</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Manfred Mohr P-197 homage: 8-dimensional hypercube projected into 3D space via
+// orthonormalized random matrix. Edges selected by combinatorial rule (connecting
+// vertices differing in exactly 2 bits). Rotation via Givens matrices in a
+// randomly chosen 2-plane of R^8. Mohr's palette: primaries on black, hard-edge.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────────────────────────────────────────────────────────────────────
+// 8-DIMENSIONAL HYPERCUBE
+// ────────────────────────────────────────────────────────────────────────────
+const DIM = 8;
+const N_VERTS = Math.pow(2, DIM); // 256 vertices
+
+// Generate all 2^8 vertices in {-1,+1}^8
+const verts8D = [];
+for (let i = 0; i < N_VERTS; i++){
+  const v = [];
+  for (let d = 0; d < DIM; d++){
+    v.push((i & (1 << d)) ? 1 : -1);
+  }
+  verts8D.push(v);
+}
+
+// Edge rule: connect vertices differing in EXACTLY 2 coordinates (Hamming distance = 2)
+// This is Mohr's P-197 combinatorial constraint — selective edge-set from the full cube graph
+const edges = [];
+for (let i = 0; i < N_VERTS; i++){
+  for (let j = i+1; j < N_VERTS; j++){
+    let diff = 0;
+    for (let d = 0; d < DIM; d++){
+      if (verts8D[i][d] !== verts8D[j][d]) diff++;
+    }
+    if (diff === 2) edges.push([i, j]);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// ORTHONORMALIZED PROJECTION MATRIX R^8 → R^3
+// ────────────────────────────────────────────────────────────────────────────
+function gramSchmidt(basis){
+  const ortho = [];
+  for (let i = 0; i < basis.length; i++){
+    let v = basis[i].slice();
+    for (let j = 0; j < ortho.length; j++){
+      const dot = v.reduce((s, val, k) => s + val * ortho[j][k], 0);
+      for (let k = 0; k < v.length; k++) v[k] -= dot * ortho[j][k];
+    }
+    const norm = Math.sqrt(v.reduce((s, val) => s + val*val, 0));
+    if (norm > 1e-9) ortho.push(v.map(x => x/norm));
+  }
+  return ortho;
+}
+
+const seed = Math.random() * 12345;
+function seededRandom(i){
+  const x = Math.sin(seed + i) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+const rawBasis = [];
+for (let i = 0; i < 3; i++){
+  const row = [];
+  for (let d = 0; d < DIM; d++) row.push(seededRandom(i*DIM + d) - 0.5);
+  rawBasis.push(row);
+}
+const projBasis = gramSchmidt(rawBasis);
+
+function project8to3(v8){
+  const out = [0, 0, 0];
+  for (let i = 0; i < 3; i++){
+    for (let d = 0; d < DIM; d++){
+      out[i] += projBasis[i][d] * v8[d];
+    }
+  }
+  return out;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// GIVENS ROTATION IN R^8 (randomly chosen 2-plane)
+// ────────────────────────────────────────────────────────────────────────────
+const planeA = Math.floor(seededRandom(999) * DIM);
+let planeB = Math.floor(seededRandom(1000) * DIM);
+while (planeB === planeA) planeB = (planeB + 1) % DIM;
+
+function rotate8D(v8, angle){
+  const out = v8.slice();
+  const ca = Math.cos(angle), sa = Math.sin(angle);
+  const a = v8[planeA], b = v8[planeB];
+  out[planeA] = ca*a - sa*b;
+  out[planeB] = sa*a + ca*b;
+  return out;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// MOHR PALETTE: discrete primaries
+// ────────────────────────────────────────────────────────────────────────────
+const palette = [
+  new THREE.Color(0xff0000), // red
+  new THREE.Color(0x0000ff), // blue
+  new THREE.Color(0xffff00), // yellow
+  new THREE.Color(0xffffff), // white
+];
+
+// Assign each edge a color from palette based on seeded index
+const edgeColors = edges.map((e, i) => {
+  const idx = Math.floor(seededRandom(5000 + i) * palette.length);
+  return palette[idx];
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// RENDER EDGES AS INSTANCED CYLINDERS (hard-edge, no glow)
+// ────────────────────────────────────────────────────────────────────────────
+const cylinderGeo = new THREE.CylinderGeometry(0.02, 0.02, 1, 6, 1, false);
+cylinderGeo.translate(0, 0.5, 0);
+cylinderGeo.rotateX(Math.PI / 2);
+
+const dummyMat = new THREE.Matrix4();
+const dummyObj = new THREE.Object3D();
+
+const materials = palette.map(c => new THREE.MeshBasicMaterial({ color: c, depthTest: true, depthWrite: true }));
+const meshes = materials.map(mat => {
+  const m = new THREE.InstancedMesh(cylinderGeo, mat, edges.length);
+  m.count = 0;
+  scene.add(m);
+  return m;
+});
+
+function updateGeometry(angle){
+  const rotatedVerts = verts8D.map(v8 => rotate8D(v8, angle));
+  const verts3D = rotatedVerts.map(v8 => project8to3(v8));
+
+  // scale projected coords to fit ~±3 range
+  let maxDist = 0;
+  for (const v of verts3D){
+    const d = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+    if (d > maxDist) maxDist = d;
+  }
+  const scale = maxDist > 0.1 ? 3.0 / maxDist : 1.0;
+  for (const v of verts3D){
+    v[0] *= scale; v[1] *= scale; v[2] *= scale;
+  }
+
+  // reset instance counts
+  for (const m of meshes) m.count = 0;
+
+  for (let i = 0; i < edges.length; i++){
+    const [ia, ib] = edges[i];
+    const a = verts3D[ia], b = verts3D[ib];
+    const ax = a[0], ay = a[1], az = a[2];
+    const bx = b[0], by = b[1], bz = b[2];
+    const dx = bx - ax, dy = by - ay, dz = bz - az;
+    const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (len < 1e-6) continue;
+
+    const cx = (ax + bx) * 0.5, cy = (ay + by) * 0.5, cz = (az + bz) * 0.5;
+    dummyObj.position.set(cx, cy, cz);
+    dummyObj.lookAt(bx, by, bz);
+    dummyObj.scale.set(1, 1, len);
+    dummyObj.updateMatrix();
+
+    const colorIdx = palette.indexOf(edgeColors[i]);
+    const mesh = meshes[colorIdx];
+    mesh.setMatrixAt(mesh.count, dummyObj.matrix);
+    mesh.count++;
+  }
+
+  for (const m of meshes) m.instanceMatrix.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  const angle = t * 0.15; // slow tumble in the chosen 2-plane
+  updateGeometry(angle);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
