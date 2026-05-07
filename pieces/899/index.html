@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>899 · apricity</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0d1a; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">899</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Perlin noise (inherited from t0g) ── */
+function fade(t){ return t*t*t*(t*(t*6-15)+10); }
+function lerp(a,b,t){ return a+t*(b-a); }
+class PerlinNoise {
+  constructor(seed){
+    this.p = new Array(512);
+    const perm = Array.from({length:256},(_,i)=>i);
+    let s = seed;
+    const rng = ()=>{ s=(s*1664525+1013904223)|0; return((s>>>0)/4294967296); };
+    for(let i=255;i>0;i--){
+      const j=Math.floor(rng()*(i+1));
+      [perm[i],perm[j]]=[perm[j],perm[i]];
+    }
+    for(let i=0;i<256;i++){this.p[i]=this.p[i+256]=perm[i];}
+  }
+  grad(hash,x,y,z){
+    const h=hash&15;
+    const u=h<8?x:y, v=h<4?y:h===12||h===14?x:z;
+    return((h&1)===0?u:-u)+((h&2)===0?v:-v);
+  }
+  noise(x,y,z){
+    const X=Math.floor(x)&255, Y=Math.floor(y)&255, Z=Math.floor(z)&255;
+    x-=Math.floor(x); y-=Math.floor(y); z-=Math.floor(z);
+    const u=fade(x), v=fade(y), w=fade(z);
+    const A=this.p[X]+Y, AA=this.p[A]+Z, AB=this.p[A+1]+Z,
+          B=this.p[X+1]+Y, BA=this.p[B]+Z, BB=this.p[B+1]+Z;
+    return lerp(lerp(lerp(this.grad(this.p[AA],x,y,z),this.grad(this.p[BA],x-1,y,z),u),
+                     lerp(this.grad(this.p[AB],x,y-1,z),this.grad(this.p[BB],x-1,y-1,z),u),v),
+                lerp(lerp(this.grad(this.p[AA+1],x,y,z-1),this.grad(this.p[BA+1],x-1,y,z-1),u),
+                     lerp(this.grad(this.p[AB+1],x,y-1,z-1),this.grad(this.p[BB+1],x-1,y-1,z-1),u),v),w);
+  }
+}
+const perlin = new PerlinNoise(42);
+
+/* ── Scene — winter dusk palette ── */
+const BG = 0x0a0d1a;
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(BG, 0.022);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 15, 35);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+controls.maxDistance = 80;
+controls.minDistance = 8;
+
+/* ── Ground plane — frost floor ── */
+const substrateGeom = new THREE.PlaneGeometry(60, 60, 1, 1);
+const substrateMat = new THREE.MeshBasicMaterial({
+  color: 0x141830,
+  side: THREE.DoubleSide,
+  transparent: true,
+  opacity: 0.5
+});
+const substrate = new THREE.Mesh(substrateGeom, substrateMat);
+substrate.rotation.x = -Math.PI/2;
+substrate.position.y = -0.5;
+scene.add(substrate);
+
+/* ── Coral → frost-coral instances ── */
+const CORAL_COUNT = 180;
+const uniforms = {
+  uTime: { value: 0 },
+  uMorphRate: { value: 0.4 },
+  uApricity: { value: 0 },
+};
+
+/* Species archetypes preserved from parent */
+const branchGeom = new THREE.CylinderGeometry(0.08, 0.15, 1.5, 6, 4);
+const tubeGeom = new THREE.CylinderGeometry(0.2, 0.2, 2.0, 8, 1);
+const plateGeom = new THREE.BoxGeometry(1.2, 0.15, 0.9);
+const brainGeom = new THREE.SphereGeometry(0.6, 16, 12);
+
+/*
+  Apricity morph: coral subsurface scattering pivots from
+  bioluminescent underwater → frost-crystal catching low winter sun.
+  Technique ref: Joanie Lemercier's laser-on-ice projections —
+  light as warmth revealing structure in cold material.
+*/
+const coralMat = new THREE.ShaderMaterial({
+  uniforms: {
+    ...uniforms,
+    uSpeciesParam: { value: 0 },
+    uSeed: { value: 0 },
+  },
+  vertexShader: `
+    uniform float uTime;
+    uniform float uSpeciesParam;
+    uniform float uSeed;
+    uniform float uApricity;
+    varying vec3 vNormal;
+    varying vec3 vPos;
+    varying float vSpecies;
+    varying float vHeight;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.25 + uSeed * 6.28;
+      /* slower, crystalline undulation — frost stiffens the coral */
+      float stiffness = mix(1.0, 0.3, uApricity);
+      p.x += 0.04 * stiffness * sin(t * 0.7 + p.y * 2.0);
+      p.z += 0.04 * stiffness * cos(t * 0.6 + p.y * 2.0);
+      /* frost expansion — forms grow slightly taller, more angular */
+      float frostGrow = 1.0 + uApricity * 0.25 * (0.5 + 0.5 * sin(p.y * 5.0 + uSeed * 20.0));
+      p.y *= mix(1.0, frostGrow, uApricity);
+      /* species morph — sharper edges at higher apricity */
+      float bulge = 1.0 + 0.2 * sin(uSpeciesParam * 6.28 + p.y * 3.0);
+      float crystalFacet = 1.0 + uApricity * 0.15 * step(0.5, fract(p.y * 4.0 + uSeed * 10.0));
+      p.x *= bulge * crystalFacet;
+      p.z *= bulge * crystalFacet;
+      vNormal = normalize(normalMatrix * normal);
+      vPos = (modelMatrix * vec4(p, 1.0)).xyz;
+      vSpecies = uSpeciesParam;
+      vHeight = p.y;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uSeed;
+    uniform float uApricity;
+    varying vec3 vNormal;
+    varying vec3 vPos;
+    varying float vSpecies;
+    varying float vHeight;
+    void main(){
+      /* low winter sun direction — raking angle */
+      vec3 sunDir = normalize(vec3(0.8, 0.25, 0.3));
+      float ndl = dot(vNormal, sunDir);
+      float sss = pow(clamp(1.0 - ndl, 0.0, 1.0), 2.5) * 0.5;
+      float rim = pow(1.0 - abs(dot(vNormal, vec3(0,0,1))), 3.0) * 0.5;
+
+      /* palette transition: underwater → frost-and-gold
+         turquoise/coral/lime → ice blue / warm amber / pale rose */
+      vec3 turquoise = vec3(0.12, 0.82, 0.78);
+      vec3 coral = vec3(0.95, 0.45, 0.55);
+      vec3 lime = vec3(0.65, 0.92, 0.35);
+
+      vec3 iceBlue = vec3(0.72, 0.85, 0.95);
+      vec3 warmAmber = vec3(0.95, 0.75, 0.35);
+      vec3 paleRose = vec3(0.92, 0.82, 0.80);
+
+      /* morph palette based on apricity uniform */
+      vec3 c1 = mix(turquoise, iceBlue, uApricity);
+      vec3 c2 = mix(coral, warmAmber, uApricity);
+      vec3 c3 = mix(lime, paleRose, uApricity);
+
+      vec3 col = mix(c1, c2, smoothstep(0.0, 0.5, vSpecies));
+      col = mix(col, c3, smoothstep(0.5, 1.0, vSpecies));
+
+      /* sun-kiss: warm highlight on faces catching low sun */
+      float sunCatch = max(0.0, ndl);
+      vec3 sunColor = vec3(1.0, 0.85, 0.55);
+      col += uApricity * sunCatch * sunCatch * sunColor * 0.4;
+
+      /* frost sparkle replacing wet shimmer */
+      float sparkleFreq = mix(8.0, 20.0, uApricity);
+      float shimmer = 0.12 * sin(uTime * 1.5 + vPos.x * sparkleFreq + vPos.z * sparkleFreq * 0.7 + uSeed * 40.0);
+      /* frost makes sparkle whiter */
+      vec3 sparkleCol = mix(vec3(1.0), vec3(1.0, 0.95, 0.8), uApricity);
+      col += shimmer * sparkleCol;
+
+      /* subtle latent-space flicker (reduced in frost) */
+      float flickerAmp = mix(0.08, 0.03, uApricity);
+      float flicker = flickerAmp * sin(uTime * 5.0 + uSeed * 100.0);
+      col += flicker * vec3(sin(vPos.y*20.0), cos(vPos.y*18.0), sin(vPos.y*22.0));
+
+      /* lighting */
+      float ambient = mix(0.3, 0.4, uApricity);
+      float diffuse = max(0.0, ndl) * 0.5;
+      col *= (ambient + diffuse + sss + rim);
+
+      /* top-lit warmth gradient: higher parts catch more sun */
+      col += uApricity * 0.08 * sunColor * clamp(vHeight * 0.3, 0.0, 1.0);
+
+      /* manual fog */
+      float depth = gl_FragCoord.z / gl_FragCoord.w;
+      float fogFactor = 1.0 - exp(-0.022 * depth);
+      vec3 fogCol = mix(vec3(0.016, 0.082, 0.098), vec3(0.06, 0.06, 0.12), uApricity);
+      col = mix(col, fogCol, fogFactor);
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+  side: THREE.DoubleSide
+});
+
+const coralInstances = [];
+const geomPool = [branchGeom, tubeGeom, plateGeom, brainGeom];
+
+for (let i = 0; i < CORAL_COUNT; i++){
+  const seed = Math.random();
+  const geomIdx = Math.floor(seed * 4);
+  const geom = geomPool[geomIdx];
+  const mat = coralMat.clone();
+  mat.uniforms.uSeed.value = seed;
+  const mesh = new THREE.Mesh(geom, mat);
+  const angle = Math.random() * Math.PI * 2;
+  const radius = 4 + Math.random() * 18;
+  mesh.position.x = Math.cos(angle) * radius;
+  mesh.position.z = Math.sin(angle) * radius;
+  mesh.position.y = Math.random() * 0.5;
+  const scale = 0.6 + Math.random() * 1.8;
+  mesh.scale.set(scale, scale, scale);
+  mesh.rotation.y = Math.random() * Math.PI * 2;
+  mesh.userData = {
+    seed,
+    speciesOffset: Math.random() * 100,
+  };
+  scene.add(mesh);
+  coralInstances.push(mesh);
+}
+
+/* ── Particles: plankton → dust motes in winter light ── */
+const planktonCount = 5000;
+const planktonGeom = new THREE.BufferGeometry();
+const planktonPos = new Float32Array(planktonCount * 3);
+const planktonSeeds = new Float32Array(planktonCount);
+for (let i = 0; i < planktonCount; i++){
+  planktonPos[i*3] = (Math.random()-0.5) * 70;
+  planktonPos[i*3+1] = Math.random() * 30;
+  planktonPos[i*3+2] = (Math.random()-0.5) * 70;
+  planktonSeeds[i] = Math.random();
+}
+planktonGeom.setAttribute('position', new THREE.BufferAttribute(planktonPos, 3));
+planktonGeom.setAttribute('seed', new THREE.BufferAttribute(planktonSeeds, 1));
+
+const planktonMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: uniforms.uTime,
+    uPixel: { value: renderer.getPixelRatio() },
+    uApricity: uniforms.uApricity,
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uApricity;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.2 + seed * 6.28;
+
+      /* drift slows, becomes more vertical — motes rising in warm air */
+      float hDrift = mix(2.0, 0.8, uApricity);
+      float vDrift = mix(0.5, 1.5, uApricity);
+      p.x += sin(t * 0.6 + seed * 10.0) * hDrift;
+      p.z += cos(t * 0.5 + seed * 12.0) * hDrift;
+      p.y += sin(t * 0.4) * vDrift;
+
+      /* wrap y */
+      if (p.y > 30.0) p.y -= 30.0;
+      if (p.y < 0.0) p.y += 30.0;
+
+      /* palette morph: bioluminescence → golden dust motes */
+      float energy = 0.5 + 0.5 * sin(t * 2.0);
+      vec3 cyan = vec3(0.2, 0.9, 0.95);
+      vec3 lime = vec3(0.6, 1.0, 0.4);
+      vec3 gold = vec3(1.0, 0.88, 0.5);
+      vec3 warmWhite = vec3(1.0, 0.95, 0.85);
+
+      vec3 coldCol = mix(cyan, lime, seed);
+      vec3 warmCol = mix(gold, warmWhite, seed);
+      vCol = mix(coldCol, warmCol, uApricity);
+
+      vAlpha = 0.25 + 0.4 * energy;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float baseSize = mix(0.8, 1.2, uApricity);
+      gl_PointSize = (baseSize + 0.6 * energy) * uPixel * (30.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 10.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const planktonPoints = new THREE.Points(planktonGeom, planktonMat);
+scene.add(planktonPoints);
+
+/* ── Sun shaft geometry — slanting warm light beams ── */
+const shaftCount = 6;
+const shaftGroup = new THREE.Group();
+for (let i = 0; i < shaftCount; i++){
+  const g = new THREE.PlaneGeometry(2.5, 30, 1, 1);
+  const m = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: uniforms.uTime,
+      uApricity: uniforms.uApricity,
+      uSeed: { value: Math.random() },
+    },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    vertexShader: `
+      uniform float uTime;
+      varying vec2 vUv;
+      void main(){
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uApricity;
+      uniform float uSeed;
+      varying vec2 vUv;
+      void main(){
+        /* vertical fade: strong at top, fading downward */
+        float vFade = pow(1.0 - vUv.y, 1.5);
+        /* horizontal fade: soft edges */
+        float hFade = 1.0 - pow(abs(vUv.x - 0.5) * 2.0, 2.0);
+        /* shimmer */
+        float shimmer = 0.7 + 0.3 * sin(uTime * 0.8 + uSeed * 20.0 + vUv.y * 5.0);
+        vec3 col = vec3(1.0, 0.9, 0.6);
+        float a = vFade * hFade * shimmer * uApricity * 0.12;
+        gl_FragColor = vec4(col * a, a);
+      }
+    `
+  });
+  const shaft = new THREE.Mesh(g, m);
+  const angle = (i / shaftCount) * Math.PI * 2 + 0.3;
+  shaft.position.set(Math.cos(angle) * 12, 15, Math.sin(angle) * 12);
+  shaft.rotation.z = -0.3 + Math.random() * 0.15;
+  shaft.rotation.y = angle;
+  shaftGroup.add(shaft);
+}
+scene.add(shaftGroup);
+
+/* ── Lights — shift from cool underwater to warm winter sun ── */
+const ambLight = new THREE.AmbientLight(0x406080, 0.6);
+scene.add(ambLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(10, 20, 5);
+scene.add(dirLight);
+/* low winter sun — warm, raking */
+const sunLight = new THREE.DirectionalLight(0xffcc77, 0);
+sunLight.position.set(20, 6, 10);
+scene.add(sunLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── Centroid tracking ── */
+const centroid = new THREE.Vector3();
+function updateCentroid(){
+  centroid.set(0, 0, 0);
+  let count = 0;
+  for (const c of coralInstances){
+    centroid.add(c.position);
+    count++;
+  }
+  if (count > 0) centroid.divideScalar(count);
+  centroid.y = Math.max(centroid.y, 4);
+}
+updateCentroid();
+
+/* ── Animation loop ── */
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  /* Apricity builds slowly over ~30s, plateaus, breathes gently */
+  const risePhase = Math.min(elapsed / 30.0, 1.0);
+  const breathe = 0.05 * Math.sin(elapsed * 0.15);
+  const apricity = risePhase * (0.85 + breathe);
+  uniforms.uApricity.value = apricity;
+
+  /* Morph lights with apricity */
+  ambLight.color.setRGB(
+    lerp(0.25, 0.35, apricity),
+    lerp(0.375, 0.32, apricity),
+    lerp(0.5, 0.4, apricity)
+  );
+  sunLight.intensity = apricity * 0.6;
+  dirLight.intensity = lerp(0.8, 0.5, apricity);
+
+  /* Background color morph */
+  const bgR = lerp(0.04, 0.06, apricity);
+  const bgG = lerp(0.05, 0.055, apricity);
+  const bgB = lerp(0.1, 0.12, apricity);
+  renderer.setClearColor(new THREE.Color(bgR, bgG, bgB), 1);
+  scene.fog.color.setRGB(bgR, bgG, bgB);
+
+  /* morph rate — slows with cold, pulses gently */
+  const humPhase = elapsed * 0.12;
+  const morphRate = 0.2 + 0.15 * Math.sin(humPhase) + 0.08 * Math.sin(humPhase * 2.3);
+  uniforms.uMorphRate.value = morphRate;
+
+  /* update coral species via 4D Perlin latent space */
+  for (const coral of coralInstances){
+    const seed = coral.userData.seed;
+    const offset = coral.userData.speciesOffset;
+    const nx = perlin.noise(offset + elapsed * morphRate * 0.06, seed * 10, 0);
+    const ny = perlin.noise(seed * 10, offset + elapsed * morphRate * 0.06, 0);
+    const speciesParam = (nx * 0.5 + 0.5) * 0.7 + (ny * 0.5 + 0.5) * 0.3;
+    coral.material.uniforms.uSpeciesParam.value = speciesParam;
+    coral.material.uniforms.uTime.value = elapsed;
+    coral.material.uniforms.uApricity.value = apricity;
+  }
+
+  /* gentle camera drift toward centroid */
+  controls.target.lerp(centroid, 0.005);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
