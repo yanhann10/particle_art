@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: gather, intensity: gentle -->
+<title>fsf · the weather inside a flock</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; }
+  body {
+    background: radial-gradient(ellipse at 50% 45%, #1a1510 0%, #0e0c0a 40%, #080706 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.6; font-size:10px; letter-spacing:0.06em; color:#c08030; }
+</style>
+</head>
+<body>
+<div class="id">fsf</div>
+<div class="arc" id="arc">together · 100%</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Olafur Eliasson — The Weather Project (Tate Modern, 2003).
+// A half-circle of mono-frequency sodium lamps behind a mist screen,
+// reflected by a mirror ceiling, became a communal sun for thousands
+// who lay on the Turbine Hall floor gazing up at their own silhouettes.
+//
+// Here the flock IS the sun. 481 translucent planes, sodium-amber,
+// additive-blended so overlap = brightness. When the flock is tight
+// (TOGETHER) the planes stack into a blazing disc of accumulated light.
+// When the straggler drifts (LOSS → SEEKING), the disc thins, cools
+// at the edges, and one small warm ember wanders alone in the dark.
+// RETURN: the ember re-merges and the sun reconstitutes.
+//
+// Background: near-black with subtle warm grain — Tate Turbine Hall
+// darkness, not a void. Faint starfield dust for inhabitation.
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 250);
+camera.position.set(0, 0, 32);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ─── starfield dust: 600 tiny warm specks for inhabitation ───
+const starCount = 600;
+const starGeo = new THREE.BufferGeometry();
+const starPos = new Float32Array(starCount * 3);
+const starAlpha = new Float32Array(starCount);
+for (let i = 0; i < starCount; i++){
+  starPos[i*3]   = (Math.random() - 0.5) * 120;
+  starPos[i*3+1] = (Math.random() - 0.5) * 80;
+  starPos[i*3+2] = (Math.random() - 0.5) * 60 - 20;
+  starAlpha[i] = Math.random();
+}
+starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+starGeo.setAttribute('aAlpha', new THREE.BufferAttribute(starAlpha, 1));
+const starMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    attribute float aAlpha;
+    varying float vA;
+    uniform float uTime;
+    void main(){
+      vA = aAlpha * (0.3 + 0.15 * sin(uTime * 0.4 + aAlpha * 40.0));
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = (1.0 + aAlpha * 1.2) * (20.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 16.0) * vA;
+      gl_FragColor = vec4(0.7, 0.5, 0.3, 1.0) * a;
+    }
+  `
+});
+scene.add(new THREE.Points(starGeo, starMat));
+
+// ─── boids simulation (preserved from sav) ───
+const N = 481;
+const STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+
+for (let i = 0; i < N; i++){
+  const r = Math.random() * 1.6 + 0.4;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI - Math.PI * 0.5;
+  pos[i*3]   = Math.cos(th) * Math.cos(ph) * r;
+  pos[i*3+1] = Math.sin(ph) * r;
+  pos[i*3+2] = Math.sin(th) * Math.cos(ph) * r;
+  vel[i*3]   = 0.3 + (Math.random() - 0.5) * 0.4;
+  vel[i*3+1] = (Math.random() - 0.5) * 0.3;
+  vel[i*3+2] = (Math.random() - 0.5) * 0.4;
+}
+pos[0] = -1.2; pos[1] = 0.6; pos[2] = 0.0;
+
+const PERCEPTION_R = 4.0, SEPARATION_R = 0.9;
+const W_COH = 0.018, W_ALI = 0.060, W_SEP = 0.080;
+const MAX_SPEED = 1.4, MAX_FORCE = 0.030;
+
+let cohesion = 1.0;
+let arcStage = 'together';
+const arcEl = document.getElementById('arc');
+
+function step(dt){
+  let cx=0, cy=0, cz=0;
+  for(let i=1;i<N;i++){ cx+=pos[i*3]; cy+=pos[i*3+1]; cz+=pos[i*3+2]; }
+  cx/=(N-1); cy/=(N-1); cz/=(N-1);
+  const sx=pos[0]-cx, sy=pos[1]-cy, sz=pos[2]-cz;
+  const stragDist=Math.sqrt(sx*sx+sy*sy+sz*sz);
+  const targetCoh=Math.max(0,Math.min(1,1-stragDist/8));
+  cohesion+=(targetCoh-cohesion)*dt*0.45;
+  if(cohesion>0.85) arcStage='together';
+  else if(cohesion>0.5&&stragDist>4.5) arcStage='loss';
+  else if(cohesion<0.5) arcStage='seeking';
+  else if(arcStage==='seeking'&&cohesion>0.65) arcStage='return';
+  arcEl.textContent=`${arcStage} · ${Math.round(cohesion*100)}%`;
+
+  const acc=new Float32Array(N*3);
+  for(let i=0;i<N;i++){
+    let chX=0,chY=0,chZ=0,chN=0,alX=0,alY=0,alZ=0,alN=0,spX=0,spY=0,spZ=0;
+    const px=pos[i*3],py=pos[i*3+1],pz=pos[i*3+2];
+    const isS=i===STRAGGLER;
+    const pR=isS?PERCEPTION_R*0.55:PERCEPTION_R;
+    for(let j=0;j<N;j++){
+      if(i===j)continue;
+      const dx=pos[j*3]-px,dy=pos[j*3+1]-py,dz=pos[j*3+2]-pz;
+      const d2=dx*dx+dy*dy+dz*dz;
+      if(d2>pR*pR||d2<1e-6)continue;
+      chX+=pos[j*3];chY+=pos[j*3+1];chZ+=pos[j*3+2];chN++;
+      alX+=vel[j*3];alY+=vel[j*3+1];alZ+=vel[j*3+2];alN++;
+      if(d2<SEPARATION_R*SEPARATION_R){
+        const inv=1/Math.sqrt(d2);
+        spX-=dx*inv;spY-=dy*inv;spZ-=dz*inv;
+      }
+    }
+    if(isS){
+      const drift=Math.sin(performance.now()*0.0003)*0.4;
+      acc[i*3]+=drift; acc[i*3+1]+=-0.25+Math.cos(performance.now()*0.0002)*0.2; acc[i*3+2]+=drift*0.6;
+    }
+    if(!isS&&(arcStage==='seeking'||arcStage==='return')){
+      const tx=pos[0]-px,ty=pos[1]-py,tz=pos[2]-pz;
+      const td=Math.sqrt(tx*tx+ty*ty+tz*tz)+1e-3;
+      const sk=arcStage==='seeking'?0.020:0.012;
+      acc[i*3]+=tx/td*sk;acc[i*3+1]+=ty/td*sk;acc[i*3+2]+=tz/td*sk;
+    }
+    if(chN>0){acc[i*3]+=(chX/chN-px)*W_COH;acc[i*3+1]+=(chY/chN-py)*W_COH;acc[i*3+2]+=(chZ/chN-pz)*W_COH;}
+    if(alN>0){acc[i*3]+=(alX/alN-vel[i*3])*W_ALI;acc[i*3+1]+=(alY/alN-vel[i*3+1])*W_ALI;acc[i*3+2]+=(alZ/alN-vel[i*3+2])*W_ALI;}
+    acc[i*3]+=spX*W_SEP;acc[i*3+1]+=spY*W_SEP;acc[i*3+2]+=spZ*W_SEP;
+    const d2c=px*px+py*py+pz*pz;
+    if(d2c>90){const inv=0.012/Math.sqrt(d2c);acc[i*3]-=px*inv;acc[i*3+1]-=py*inv;acc[i*3+2]-=pz*inv;}
+  }
+  const spdM=arcStage==='loss'||arcStage==='seeking'?0.55:arcStage==='return'?0.85:1.0;
+  for(let i=0;i<N;i++){
+    let ax=acc[i*3],ay=acc[i*3+1],az=acc[i*3+2];
+    const af=Math.sqrt(ax*ax+ay*ay+az*az);
+    if(af>MAX_FORCE){ax*=MAX_FORCE/af;ay*=MAX_FORCE/af;az*=MAX_FORCE/af;}
+    vel[i*3]+=ax;vel[i*3+1]+=ay;vel[i*3+2]+=az;
+    let vx=vel[i*3],vy=vel[i*3+1],vz=vel[i*3+2];
+    const sp=Math.sqrt(vx*vx+vy*vy+vz*vz);
+    if(sp>MAX_SPEED){vx*=MAX_SPEED/sp;vy*=MAX_SPEED/sp;vz*=MAX_SPEED/sp;vel[i*3]=vx;vel[i*3+1]=vy;vel[i*3+2]=vz;}
+    pos[i*3]+=vel[i*3]*dt*spdM;pos[i*3+1]+=vel[i*3+1]*dt*spdM;pos[i*3+2]+=vel[i*3+2]*dt*spdM;
+  }
+}
+
+// ─── instanced planes: each boid = translucent quad ───
+// Varying sizes: straggler larger, flock members have gentle size variation.
+// All billboard to camera in shader. Additive blend, low opacity.
+const planeGeo = new THREE.PlaneGeometry(1, 1, 1, 1);
+const instanceCount = N;
+
+// Per-instance attributes: offset (vec3), seed (float), isStrag (float)
+const iMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, depthTest: true,
+  blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  uniforms: {
+    uTime:     { value: 0 },
+    uCohesion: { value: 1.0 },
+    uCamUp:    { value: new THREE.Vector3(0,1,0) },
+    uCamRight: { value: new THREE.Vector3(1,0,0) }
+  },
+  vertexShader: `
+    uniform float uTime;
+    uniform float uCohesion;
+    uniform vec3 uCamUp;
+    uniform vec3 uCamRight;
+
+    attribute vec3 iOffset;
+    attribute float iSeed;
+    attribute float iStrag;
+
+    varying float vAlpha;
+    varying vec2 vUv;
+    varying vec3 vCol;
+
+    void main(){
+      vUv = uv;
+
+      // size: base 0.45-0.85 for flock, straggler 1.2-1.6, gentle breathe
+      float breathe = 0.92 + 0.08 * sin(uTime * 1.2 + iSeed * 40.0);
+      float sz = mix(0.45 + iSeed * 0.4, 1.3, iStrag) * breathe;
+
+      // billboard: expand quad in camera-aligned plane
+      vec3 worldPos = iOffset
+        + uCamRight * (position.x * sz)
+        + uCamUp    * (position.y * sz);
+
+      // slight per-instance tilt for organic feel — rotate around camera forward
+      float tilt = sin(iSeed * 30.0 + uTime * 0.3) * 0.12;
+      vec3 tilted = worldPos;
+      tilted += uCamUp * (position.x * tilt * sz * 0.4);
+
+      vec4 mv = viewMatrix * vec4(tilted, 1.0);
+      float dist = -mv.z;
+
+      // sodium amber palette — Olafur Eliasson Weather Project
+      // Sodium lamps: ~589nm, that specific deep amber-orange
+      vec3 sodium    = vec3(0.95, 0.62, 0.12);   // sodium lamp core
+      vec3 sodiumHot = vec3(1.00, 0.85, 0.45);   // overexposed center
+      vec3 coolEdge  = vec3(0.35, 0.30, 0.42);   // cool violet at loss
+
+      vec3 warm = mix(sodium, sodiumHot, iStrag * 0.6 + pow(iSeed, 3.0) * 0.3);
+      vec3 cool = mix(coolEdge, sodium * 0.4, iSeed * 0.5);
+      vCol = mix(cool, warm, smoothstep(0.0, 1.0, uCohesion));
+
+      // straggler always warmer — it's the ember
+      vCol = mix(vCol, sodiumHot, iStrag * 0.5);
+
+      // opacity: low base, straggler slightly more visible
+      // deeper overlap = brighter (additive does this automatically)
+      float baseAlpha = mix(0.055, 0.10, iStrag);
+      // cohesion boost: when together, slightly more opaque (denser sun)
+      baseAlpha *= mix(0.7, 1.0, uCohesion);
+      // distance fade
+      float distFade = clamp(1.0 - (dist - 20.0) / 40.0, 0.0, 1.0);
+      vAlpha = baseAlpha * distFade;
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying vec2 vUv;
+    varying vec3 vCol;
+
+    void main(){
+      // soft radial falloff — plane reads as a luminous sheet, not a sharp quad
+      vec2 c = vUv - 0.5;
+      float r2 = dot(c, c);
+      // softer than a circle: gaussian-ish falloff
+      float soft = exp(-r2 * 6.0);
+      // slight rectangular hint preserved — it's a plane, not a sphere
+      float rect = smoothstep(0.5, 0.35, max(abs(c.x), abs(c.y)));
+      float shape = mix(soft, rect, 0.25);
+
+      float a = shape * vAlpha;
+      if(a < 0.001) discard;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const mesh = new THREE.InstancedMesh(planeGeo, iMat, instanceCount);
+mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+// Custom instanced attributes
+const iOffsetAttr = new THREE.InstancedBufferAttribute(new Float32Array(N * 3), 3);
+iOffsetAttr.setUsage(THREE.DynamicDrawUsage);
+const iSeedAttr = new THREE.InstancedBufferAttribute(new Float32Array(N), 1);
+const iStragAttr = new THREE.InstancedBufferAttribute(new Float32Array(N), 1);
+for(let i = 0; i < N; i++){
+  iSeedAttr.setX(i, Math.random());
+  iStragAttr.setX(i, i === STRAGGLER ? 1.0 : 0.0);
+}
+mesh.geometry.setAttribute('iOffset', iOffsetAttr);
+mesh.geometry.setAttribute('iSeed', iSeedAttr);
+mesh.geometry.setAttribute('iStrag', iStragAttr);
+
+// identity matrices (positioning handled in shader via iOffset)
+const dummy = new THREE.Object3D();
+for(let i = 0; i < N; i++){
+  dummy.position.set(0,0,0);
+  dummy.updateMatrix();
+  mesh.setMatrixAt(i, dummy.matrix);
+}
+mesh.instanceMatrix.needsUpdate = true;
+scene.add(mesh);
+
+// ─── atmospheric haze layer: large planes behind the flock ───
+// Faint sodium-tinted fog sheets at varying depths
+const hazeCount = 18;
+const hazeGeo = new THREE.PlaneGeometry(50, 35);
+const hazeMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  uniforms: { uTime: { value: 0 }, uCohesion: { value: 1.0 } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uCohesion;
+    varying vec2 vUv;
+    void main(){
+      vec2 c = vUv - 0.5;
+      float r = length(c);
+      // radial gradient: brighter center
+      float g = exp(-r * r * 3.5);
+      // sodium tint
+      vec3 col = mix(vec3(0.18,0.12,0.08), vec3(0.5,0.3,0.06), uCohesion);
+      float a = g * 0.012 * mix(0.5, 1.0, uCohesion);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+for(let i = 0; i < hazeCount; i++){
+  const h = new THREE.Mesh(hazeGeo, hazeMat.clone());
+  h.position.z = -8 - i * 1.8;
+  h.position.y = (Math.random() - 0.5) * 4;
+  h.position.x = (Math.random() - 0.5) * 4;
+  h.rotation.z = (Math.random() - 0.5) * 0.15;
+  scene.add(h);
+}
+
+// ─── ground horizon line: faint warm line ───
+const horizGeo = new THREE.PlaneGeometry(80, 0.06);
+const horizMat = new THREE.MeshBasicMaterial({
+  color: 0x6a4520, transparent: true, opacity: 0.08,
+  blending: THREE.AdditiveBlending, depthWrite: false
+});
+const horiz = new THREE.Mesh(horizGeo, horizMat);
+horiz.position.set(0, -9, -10);
+scene.add(horiz);
+
+// ─── paper grain overlay (screen-space noise texture) ───
+const grainGeo = new THREE.PlaneGeometry(2, 2);
+const grainMat = new THREE.ShaderMaterial({
+  transparent: true, depthTest: false, depthWrite: false,
+  blending: THREE.NormalBlending,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.0,1.0); }`,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+    void main(){
+      vec2 uv = vUv * 800.0 + uTime * 3.0;
+      float n = hash(floor(uv));
+      // very subtle warm grain
+      float a = n * 0.025;
+      gl_FragColor = vec4(0.4, 0.28, 0.15, a);
+    }
+  `
+});
+const grainQuad = new THREE.Mesh(grainGeo, grainMat);
+grainQuad.frustumCulled = false;
+grainQuad.renderOrder = 999;
+const grainScene = new THREE.Scene();
+grainScene.add(grainQuad);
+const grainCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm
+for(let s = 0; s < 250; s++) step(0.05);
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  const t = now / 1000;
+
+  step(dt);
+
+  // update instanced offsets from simulation
+  for(let i = 0; i < N; i++){
+    iOffsetAttr.setXYZ(i, pos[i*3], pos[i*3+1], pos[i*3+2]);
+  }
+  iOffsetAttr.needsUpdate = true;
+
+  // uniforms
+  iMat.uniforms.uTime.value = t;
+  iMat.uniforms.uCohesion.value = cohesion;
+  starMat.uniforms.uTime.value = t;
+  grainMat.uniforms.uTime.value = t;
+
+  // update haze cohesion
+  scene.traverse(c => {
+    if(c.material && c.material.uniforms && c.material.uniforms.uCohesion){
+      c.material.uniforms.uCohesion.value = cohesion;
+      if(c.material.uniforms.uTime) c.material.uniforms.uTime.value = t;
+    }
+  });
+
+  // billboard vectors from camera
+  const camRight = new THREE.Vector3();
+  const camUp = new THREE.Vector3();
+  camera.matrixWorld.extractBasis(camRight, camUp, new THREE.Vector3());
+  iMat.uniforms.uCamRight.value.copy(camRight);
+  iMat.uniforms.uCamUp.value.copy(camUp);
+
+  // slow orbit — slightly elliptical, gentle vertical bob
+  const ang = now * 0.00008;
+  camera.position.x = Math.sin(ang) * 28;
+  camera.position.z = Math.cos(ang) * 30;
+  camera.position.y = Math.sin(ang * 0.7) * 2.5;
+  camera.lookAt(0, 0, 0);
+
+  renderer.autoClear = true;
+  renderer.render(scene, camera);
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
