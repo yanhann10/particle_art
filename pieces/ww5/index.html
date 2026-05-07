@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ww5 · the flock that shatters along cell boundaries</title>
+<!-- MOTION: dispersing, intensity: vigorous -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a14; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background:
+      radial-gradient(ellipse at 50% 35%,
+        #1c1a28 0%,
+        #151320 40%,
+        #0e0d18 70%,
+        #080710 100%);
+  }
+  canvas { display:block; cursor:crosshair; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">ww5 · the flock that shatters along cell boundaries</div>
+<div class="hint">move mouse · the bird breaks along voronoi seams · rest state is whole</div>
+<div class="src">descended from sav · voronoi shatter dispersion · boids → object</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// sav was pure boids (emergent swarm). This descendant INVERTS the relationship:
+// the REST STATE is a recognizable bird figure (point-cloud silhouette).
+// On mouse movement, particles disperse BUT they tear along VORONOI CELL BOUNDARIES —
+// the figure shatters into irregular fragments, each fragment drifting as a unit.
+// When mouse is still, the bird reconstitutes.
+//
+// Implementation:
+//  - N=481 particles positioned on a bird silhouette (dorsal view, wings spread).
+//  - Each particle is assigned to one of K voronoi sites (random seeds in the figure).
+//  - Shatter force drives particles AWAY from their voronoi site centroid when
+//    mouse moves, creating fragmentation. Each cell explodes outward as a chunk.
+//  - Return force pulls particles back to their rest positions when mouse is still.
+//  - Color shifts with dispersion: warm amber (whole) → cool steel-violet (shattered).
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0e0d18, 0.022);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+const N = 481;
+const K = 24;  // voronoi sites
+
+// ────────────── bird silhouette generator (dorsal view, wings spread)
+// body: vertical ellipse from (-0.8,0) to (0.8,0), width 1.6
+// wings: two arcs from body midpoint, sweeping outward and back
+// tail: three fan lines from body bottom
+function birdSilhouette(count){
+  const pts = [];
+  // body
+  const bodyN = Math.floor(count * 0.30);
+  for (let i = 0; i < bodyN; i++){
+    const t = (i / bodyN) * Math.PI * 2;
+    const rx = 0.7 + Math.random() * 0.3;
+    const ry = 1.6 + Math.random() * 0.5;
+    pts.push([Math.cos(t) * rx, Math.sin(t) * ry, 0]);
+  }
+  // left wing
+  const wingN = Math.floor(count * 0.28);
+  for (let i = 0; i < wingN; i++){
+    const u = i / wingN;
+    const angle = -Math.PI * 0.5 + u * Math.PI * 0.8;  // arc sweep
+    const r = 3.2 + u * 2.8 + Math.random() * 0.6;
+    const baseY = -0.4 + u * 0.6;
+    pts.push([Math.cos(angle) * r - 1.2, baseY + Math.sin(angle) * 0.8, Math.random() * 0.3 - 0.15]);
+  }
+  // right wing (mirror)
+  for (let i = 0; i < wingN; i++){
+    const u = i / wingN;
+    const angle = -Math.PI * 0.5 - u * Math.PI * 0.8;
+    const r = 3.2 + u * 2.8 + Math.random() * 0.6;
+    const baseY = -0.4 + u * 0.6;
+    pts.push([Math.cos(angle) * r + 1.2, baseY + Math.sin(angle) * 0.8, Math.random() * 0.3 - 0.15]);
+  }
+  // tail feathers
+  const tailN = count - bodyN - wingN * 2;
+  for (let i = 0; i < tailN; i++){
+    const u = (i / tailN - 0.5) * 2.0;  // -1..1
+    const len = 2.0 + Math.abs(u) * 1.4 + Math.random() * 0.8;
+    pts.push([u * 0.5, -2.2 - len, Math.random() * 0.2 - 0.1]);
+  }
+  return pts;
+}
+
+const restPos = birdSilhouette(N);
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const cellID = new Uint8Array(N);  // voronoi cell assignment
+const cellCenters = [];
+
+// initialize voronoi sites randomly within bird bounds
+for (let k = 0; k < K; k++){
+  const i = Math.floor(Math.random() * N);
+  cellCenters.push([restPos[i][0], restPos[i][1], restPos[i][2]]);
+}
+
+// assign each particle to nearest voronoi site
+for (let i = 0; i < N; i++){
+  const [x, y, z] = restPos[i];
+  let minD = Infinity, minK = 0;
+  for (let k = 0; k < K; k++){
+    const dx = x - cellCenters[k][0];
+    const dy = y - cellCenters[k][1];
+    const dz = z - cellCenters[k][2];
+    const d2 = dx*dx + dy*dy + dz*dz;
+    if (d2 < minD){ minD = d2; minK = k; }
+  }
+  cellID[i] = minK;
+  pos[i*3] = x;
+  pos[i*3+1] = y;
+  pos[i*3+2] = z;
+  vel[i*3] = 0; vel[i*3+1] = 0; vel[i*3+2] = 0;
+}
+
+// ────────────── input tracking
+let mouseX = 0, mouseY = 0;
+let mouseVelMag = 0;
+let lastMouseX = 0, lastMouseY = 0;
+addEventListener('mousemove', e => {
+  mouseX = (e.clientX / innerWidth) * 2 - 1;
+  mouseY = -(e.clientY / innerHeight) * 2 + 1;
+  const dx = mouseX - lastMouseX;
+  const dy = mouseY - lastMouseY;
+  mouseVelMag = Math.sqrt(dx*dx + dy*dy);
+  lastMouseX = mouseX;
+  lastMouseY = mouseY;
+});
+
+// dispersion: high when mouse moves, decays when still
+let dispersion = 0.0;
+
+function step(dt){
+  // dispersion rises with mouse velocity, decays otherwise
+  dispersion += (mouseVelMag * 18.0 - dispersion) * dt * 4.0;
+  dispersion = Math.max(0.0, Math.min(1.0, dispersion));
+  mouseVelMag *= 0.88;
+
+  // per-cell centroid in CURRENT positions (so fragments move as units)
+  const cellCtr = Array(K).fill(0).map(() => [0,0,0]);
+  const cellCnt = Array(K).fill(0);
+  for (let i = 0; i < N; i++){
+    const k = cellID[i];
+    cellCtr[k][0] += pos[i*3];
+    cellCtr[k][1] += pos[i*3+1];
+    cellCtr[k][2] += pos[i*3+2];
+    cellCnt[k]++;
+  }
+  for (let k = 0; k < K; k++){
+    if (cellCnt[k] > 0){
+      cellCtr[k][0] /= cellCnt[k];
+      cellCtr[k][1] /= cellCnt[k];
+      cellCtr[k][2] /= cellCnt[k];
+    }
+  }
+
+  for (let i = 0; i < N; i++){
+    const k = cellID[i];
+    const [rx, ry, rz] = restPos[i];
+    const px = pos[i*3], py = pos[i*3+1], pz = pos[i*3+2];
+
+    // shatter force: push particle away from its cell centroid
+    const [ccx, ccy, ccz] = cellCtr[k];
+    let shatterX = px - ccx;
+    let shatterY = py - ccy;
+    let shatterZ = pz - ccz;
+    const shatterD = Math.sqrt(shatterX*shatterX + shatterY*shatterY + shatterZ*shatterZ) + 1e-3;
+    shatterX /= shatterD;
+    shatterY /= shatterD;
+    shatterZ /= shatterD;
+    const shatterMag = dispersion * 0.12;
+
+    // return force: pull toward rest position
+    const returnX = (rx - px) * 0.06;
+    const returnY = (ry - py) * 0.06;
+    const returnZ = (rz - pz) * 0.06;
+
+    // apply forces
+    vel[i*3]   += shatterX * shatterMag + returnX;
+    vel[i*3+1] += shatterY * shatterMag + returnY;
+    vel[i*3+2] += shatterZ * shatterMag + returnZ;
+
+    // damping
+    vel[i*3]   *= 0.92;
+    vel[i*3+1] *= 0.92;
+    vel[i*3+2] *= 0.92;
+
+    // integrate
+    pos[i*3]   += vel[i*3]   * dt;
+    pos[i*3+1] += vel[i*3+1] * dt;
+    pos[i*3+2] += vel[i*3+2] * dt;
+  }
+}
+
+// ────────────── render
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+const seedArr = new Float32Array(N);
+for (let i = 0; i < N; i++) seedArr[i] = Math.random();
+geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+const cellArr = new Float32Array(N);
+for (let i = 0; i < N; i++) cellArr[i] = cellID[i] / K;
+geom.setAttribute('cell', new THREE.BufferAttribute(cellArr, 1));
+
+const uniforms = {
+  uTime:       { value: 0 },
+  uPixel:      { value: renderer.getPixelRatio() },
+  uDispersion: { value: 0.0 }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uDispersion;
+    attribute float seed;
+    attribute float cell;
+    varying vec3  vCol;
+    varying float vFade;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.5 + seed * 6.28;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float baseSize = 1.4 + 0.6 * sin(t);
+      gl_PointSize = baseSize * uPixel * (18.0 / dist);
+      vFade = clamp(1.0 - (dist - 26.0) / 32.0, 0.0, 1.0);
+
+      // color palette: whole (warm amber/cream) → shattered (cool steel/violet)
+      vec3 whole1   = vec3(0.92, 0.62, 0.28);   // warm amber
+      vec3 whole2   = vec3(0.98, 0.88, 0.72);   // cream
+      vec3 broken1  = vec3(0.38, 0.48, 0.68);   // steel blue
+      vec3 broken2  = vec3(0.52, 0.28, 0.58);   // violet
+      vec3 wholeCol = mix(whole1, whole2, smoothstep(0.3, 0.7, sin(t * 0.3 + cell * 12.0)));
+      vec3 brokenCol = mix(broken1, broken2, cell);
+      vCol = mix(wholeCol, brokenCol, smoothstep(0.0, 1.0, uDispersion));
+      // per-cell hue shift when shattered
+      vCol *= (1.0 + uDispersion * cell * 0.3);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vFade;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vFade;
+      gl_FragColor = vec4(vCol * a * 0.9, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = now / 1000;
+  uniforms.uDispersion.value = dispersion;
+  step(dt);
+  geom.attributes.position.needsUpdate = true;
+
+  // slow auto-orbit
+  const ang = now * 0.00012;
+  camera.position.x = Math.sin(ang) * 28;
+  camera.position.z = Math.cos(ang) * 28;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
