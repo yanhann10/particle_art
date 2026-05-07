@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>o6i · Chladni nodal figures — sand settling on resonant plate</title>
+<!-- MOTION: settling, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background: linear-gradient(135deg, #1a1512 0%, #0d0b09 100%);
+    color: #cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.2' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.08  0 0 0 0 0.06  0 0 0 0 0.05  0 0 0 0.18 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    mix-blend-mode: overlay; opacity: 0.65;
+  }
+  canvas { display:block; position: relative; z-index: 0; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; z-index:5; color: #cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.50; font-size: 10px; letter-spacing: 0.04em; z-index:5; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.40; font-size: 9px; letter-spacing: 0.03em; z-index:5; line-height: 1.6; text-align: right; max-width: 280px; }
+</style>
+</head>
+<body>
+<div class="id">o6i · Chladni nodal figures — sand settling on resonant plate</div>
+<div class="hint">click to cycle resonant mode · hold space for continuous hum</div>
+<div class="src">Ernst Chladni, Entdeckungen über die Theorie des Klanges (1787)<br>Nigel Stanford 'Cymatics' (2014)<br>eigenmode-driven self-organization</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Chladni plate simulation: 50k sand particles on a vibrating square plate settle
+// into nodal lines (where eigenmode u=0). Physics: each particle moves along −∇|u|
+// toward nearest nodal line, plus Brownian jitter. Pattern snaps from chaos to
+// crystalline geometry as mode (m,n) changes.
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 8, 10);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0d0b09);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── PLATE GEOMETRY — dark oxidized bronze square
+const plateSize = 6.0;
+const plateMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(plateSize, plateSize, 1, 1),
+  new THREE.MeshStandardMaterial({
+    color: 0x1a1410, metalness: 0.85, roughness: 0.40, side: THREE.DoubleSide
+  })
+);
+plateMesh.rotation.x = -Math.PI * 0.02; // slight tilt toward viewer
+scene.add(plateMesh);
+
+// ────────────── LIGHTING — single warm point above, cool ambient
+const ambient = new THREE.AmbientLight(0x3a3632, 0.30);
+scene.add(ambient);
+const key = new THREE.PointLight(0xffeedd, 1.8, 0, 2);
+key.position.set(-3, 7, 4);
+scene.add(key);
+
+// ────────────── CHLADNI EIGENMODE — plate vibration u(x,y) = cos(mπx/L)cos(nπy/L) − cos(nπx/L)cos(mπy/L)
+// Nodal lines where u=0; particles settle there. Classic modes produce rosettes, grids, stars.
+let modeM = 3, modeN = 2; // starting mode (3,2) — six-pointed star
+let targetM = modeM, targetN = modeN;
+let modePhase = 0; // time-varying phase for vibration amplitude
+
+function eigenmode(x, y, m, n, L, phase){
+  // normalized coords [-1,1]
+  const pi = Math.PI;
+  const u = Math.cos(m * pi * x / L) * Math.cos(n * pi * y / L)
+          - Math.cos(n * pi * x / L) * Math.cos(m * pi * y / L);
+  // multiply by sin(phase) to simulate oscillation
+  return u * Math.sin(phase);
+}
+
+function eigenmodeGradient(x, y, m, n, L, phase){
+  const pi = Math.PI;
+  const eps = 0.01;
+  const u0 = eigenmode(x, y, m, n, L, phase);
+  const ux = (eigenmode(x + eps, y, m, n, L, phase) - u0) / eps;
+  const uy = (eigenmode(x, y + eps, m, n, L, phase) - u0) / eps;
+  return { dx: ux, dy: uy };
+}
+
+// ────────────── SAND PARTICLES — 50k white grains
+const N = 50000;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 2); // vx, vy in plate space
+const seeds = new Float32Array(N);
+
+for (let i = 0; i < N; i++){
+  // spawn randomly across plate
+  positions[i*3]     = (Math.random() - 0.5) * plateSize;
+  positions[i*3 + 1] = 0.01; // just above plate surface
+  positions[i*3 + 2] = (Math.random() - 0.5) * plateSize;
+  velocities[i*2]    = 0;
+  velocities[i*2+1]  = 0;
+  seeds[i]           = Math.random();
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vSpeed;
+    varying float vSeed;
+    void main(){
+      vec3 p = position;
+      // slight Brownian jitter in z (particles don't lie perfectly flat)
+      p.y += sin(uTime * 3.0 + seed * 6.28) * 0.004;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      vSpeed = length(vec2(p.x, p.z)) * 0.1; // distance from center as proxy for speed
+      vSeed = seed;
+      gl_PointSize = (1.0 + 0.4 * seed) * uPixel * (6.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vSpeed;
+    varying float vSeed;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 22.0);
+      // sand: pale cream-white with slight warm tint
+      vec3 col = vec3(0.98, 0.94, 0.88);
+      // particles near nodal lines glow slightly brighter (higher density)
+      float glow = 0.75 + 0.25 * (1.0 - vSpeed);
+      gl_FragColor = vec4(col * glow, a * 0.90);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── PHYSICS UPDATE — particles move toward nodal lines
+let lastTime = performance.now();
+function updateParticles(dt){
+  const L = plateSize;
+  const damping = 0.92; // velocity damping per frame
+  const forceScale = 2.5; // strength of gradient descent
+  const brownian = 0.015; // random jitter
+
+  for (let i = 0; i < N; i++){
+    let x = positions[i*3];
+    let z = positions[i*3 + 2];
+    let vx = velocities[i*2];
+    let vy = velocities[i*2 + 1];
+
+    // compute gradient of |u| and move downhill
+    const grad = eigenmodeGradient(x, z, modeM, modeN, L, modePhase);
+    const mag = Math.sqrt(grad.dx * grad.dx + grad.dy * grad.dy);
+    if (mag > 0.001){
+      vx -= (grad.dx / mag) * forceScale * dt;
+      vy -= (grad.dy / mag) * forceScale * dt;
+    }
+
+    // Brownian motion
+    vx += (Math.random() - 0.5) * brownian;
+    vy += (Math.random() - 0.5) * brownian;
+
+    // damping
+    vx *= damping;
+    vy *= damping;
+
+    // integrate position
+    x += vx * dt;
+    z += vy * dt;
+
+    // clamp to plate bounds with soft reflection
+    if (Math.abs(x) > L * 0.5){
+      x = Math.sign(x) * L * 0.5;
+      vx *= -0.5;
+    }
+    if (Math.abs(z) > L * 0.5){
+      z = Math.sign(z) * L * 0.5;
+      vy *= -0.5;
+    }
+
+    positions[i*3]     = x;
+    positions[i*3 + 2] = z;
+    velocities[i*2]    = vx;
+    velocities[i*2+1]  = vy;
+  }
+
+  geom.attributes.position.needsUpdate = true;
+}
+
+// ────────────── MODE CYCLING — classic Chladni modes
+const modes = [
+  {m:3, n:2}, {m:4, n:2}, {m:5, n:3}, {m:6, n:3}, {m:7, n:4},
+  {m:2, n:2}, {m:3, n:3}, {m:4, n:4}, {m:5, n:5}, {m:6, n:6}
+];
+let modeIndex = 0;
+
+function nextMode(){
+  modeIndex = (modeIndex + 1) % modes.length;
+  targetM = modes[modeIndex].m;
+  targetN = modes[modeIndex].n;
+}
+
+addEventListener('click', () => {
+  nextMode();
+});
+
+let spaceHeld = false;
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space') spaceHeld = true;
+});
+addEventListener('keyup', (e) => {
+  if (e.code === 'Space') spaceHeld = false;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ────────────── ANIMATION LOOP
+const start = performance.now();
+function loop(now){
+  const t = (now - start) / 1000;
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  uniforms.uTime.value = t;
+
+  // smooth mode transition
+  const modeBlend = 0.08;
+  modeM += (targetM - modeM) * modeBlend;
+  modeN += (targetN - modeN) * modeBlend;
+
+  // vibration phase — continuous hum when space held, else slow cycle
+  if (spaceHeld){
+    modePhase += dt * 22.0; // fast oscillation
+  } else {
+    modePhase += dt * 3.5; // slow drift
+  }
+
+  updateParticles(dt);
+
+  // slow camera orbit — viewing the plate from slightly above
+  const camRadius = 12;
+  const camAngle = t * 0.08;
+  camera.position.x = Math.sin(camAngle) * camRadius * 0.3;
+  camera.position.z = Math.cos(camAngle) * camRadius;
+  camera.position.y = 8 + Math.sin(t * 0.12) * 1.0;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop(performance.now());
+</script>
+</body>
+</html>
