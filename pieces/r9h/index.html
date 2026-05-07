@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>r9h · calyx (Reas process · monochrome drift)</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#2e2a26; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">r9h</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 12, 18);
+camera.lookAt(0, 2, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x2e2a26, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+let geom, points;
+
+const uniforms = {
+  uTime:     { value: 0 },
+  uPhase:    { value: 0 },
+  uPixel:    { value: renderer.getPixelRatio() },
+  uRowFreq:  { value: 1.2 },
+  uColFreq:  { value: 1.0 },
+  uWaveAmp:  { value: 0.5 },
+  uTwist:    { value: 0.0 },
+  uMorph:    { value: 0.0 },
+  uPetals:   { value: 5.0 },
+  uCupDepth: { value: 4.0 },
+  uLightAz:  { value: 0.0 },
+  uLightEl:  { value: 0.6 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPhase;
+    uniform float uRowFreq;
+    uniform float uColFreq;
+    uniform float uWaveAmp;
+    uniform float uTwist;
+    uniform float uMorph;
+    uniform float uPetals;
+    uniform float uCupDepth;
+    uniform float uLightAz;
+    uniform float uLightEl;
+
+    attribute vec2 gridPos;
+    attribute float seed;
+
+    varying float vRule;
+    varying float vLightDot;
+    varying float vHeight;
+    varying float vRadius;
+
+    void main(){
+      vec2 gp = gridPos;
+
+      /* Riley wave interference — 2x speed */
+      float rowWave = sin(gp.y * uRowFreq + uTime * 1.2 + uPhase) * uWaveAmp;
+      float colWave = sin(gp.x * uColFreq + uTime * 0.7) * uWaveAmp;
+
+      float twist = uTwist * length(gp) * 0.04;
+      float ct = cos(twist); float st = sin(twist);
+      vec2 twisted = vec2(gp.x * ct - gp.y * st, gp.x * st + gp.y * ct);
+
+      /* Calyx morph */
+      float r = length(gp);
+      float maxR = 12.0;
+      float nr = clamp(r / maxR, 0.0, 1.0);
+      float theta = atan(gp.y, gp.x);
+
+      float petalShape = 0.5 + 0.5 * cos(theta * uPetals);
+      float cupProfile = uCupDepth * nr * nr * (0.6 + 0.4 * petalShape);
+      float flare = 1.0 + 0.15 * nr * nr * uMorph;
+
+      float m = uMorph;
+      vec3 flatPos = vec3(twisted.x + rowWave, twisted.y + colWave, 0.0);
+
+      float cx = twisted.x * flare + rowWave * (1.0 - 0.5 * m);
+      float cy = twisted.y * flare + colWave * (1.0 - 0.5 * m);
+      float cz = cupProfile * m;
+
+      vec3 p = mix(flatPos, vec3(cx, cy, cz), m);
+
+      /* --- Reas Process rule: deterministic threshold ---
+         Binary on/off from interference crossing a slowly-shifting threshold.
+         No noise. Pure wave superposition → quantized state. */
+      float wave1 = sin(gp.y * uRowFreq * 2.0 + uTime * 1.2);
+      float wave2 = sin(gp.x * uColFreq * 2.0 + uTime * 0.7);
+      float wave3 = sin((gp.x + gp.y) * 0.8 + uTime * 0.4);
+      float compound = wave1 * wave2 + wave3 * 0.3;
+
+      /* Threshold shifts slowly — creates propagating on/off fronts */
+      float threshold = sin(uTime * 0.15) * 0.4;
+      vRule = step(threshold, compound);
+
+      /* Particles that are "off" get pushed to degenerate position */
+      if (vRule < 0.5) {
+        p = vec3(0.0, -100.0, 0.0);
+      }
+
+      vHeight = cz;
+      vRadius = nr;
+
+      /* Surface normal approximation for lighting */
+      float dr = 0.1;
+      float cupR = uCupDepth * nr * nr;
+      float cupR1 = uCupDepth * clamp((r + dr) / maxR, 0.0, 1.0);
+      cupR1 = cupR1 * cupR1;
+      vec3 normal = normalize(vec3(
+        -cos(theta) * (cupR1 - cupR) / dr * m,
+        -sin(theta) * (cupR1 - cupR) / dr * m,
+        1.0
+      ));
+
+      /* Turrell-style drifting light direction */
+      vec3 lightDir = normalize(vec3(
+        sin(uLightAz) * cos(uLightEl),
+        cos(uLightAz) * cos(uLightEl),
+        sin(uLightEl)
+      ));
+      vLightDot = max(0.0, dot(normal, lightDir));
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * max(1.5, 3.2 - dist * 0.06);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vRule;
+    varying float vLightDot;
+    varying float vHeight;
+    varying float vRadius;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      /* Near-monochrome: warm light gray on dark warm ground.
+         Saturation ≈ 0.05-0.08, well under 0.15 limit. */
+      vec3 baseLight = vec3(0.82, 0.79, 0.76);  /* warm pale stone */
+      vec3 baseDark  = vec3(0.50, 0.47, 0.44);  /* warm mid-gray */
+
+      /* Curvature shading from height */
+      float shade = mix(0.6, 1.0, vLightDot);
+      vec3 col = mix(baseDark, baseLight, shade);
+
+      /* Single accent: muted amber, only where Turrell light
+         hits the upper cup surface strongly */
+      vec3 accent = vec3(0.78, 0.52, 0.28); /* burnt amber, low sat */
+      float accentMask = smoothstep(0.7, 0.95, vLightDot)
+                       * smoothstep(0.2, 0.6, vHeight / 5.0);
+      col = mix(col, accent, accentMask * 0.45);
+
+      /* Subtle vignette at rim */
+      float rimFade = smoothstep(0.85, 1.0, vRadius);
+      float alpha = (1.0 - smoothstep(0.18, 0.25, r)) * (1.0 - rimFade * 0.5);
+
+      gl_FragColor = vec4(col, alpha * 0.92);
+    }
+  `
+});
+
+function buildGrid(rows, cols, seed){
+  const positions = new Float32Array(N * 3);
+  const gridPositions = new Float32Array(N * 2);
+  const seeds = new Float32Array(N);
+
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const width = 24, height = 24;
+  const cellW = width / cols, cellH = height / rows;
+
+  let idx = 0;
+  for (let i = 0; i < rows && idx < N; i++){
+    for (let j = 0; j < cols && idx < N; j++){
+      const pointsPerCell = Math.floor(N / (rows * cols));
+      for (let k = 0; k < pointsPerCell && idx < N; k++){
+        const x = (j + rng() - 0.5) * cellW - width * 0.5;
+        const y = (i + rng() - 0.5) * cellH - height * 0.5;
+        positions[idx * 3] = x;
+        positions[idx * 3 + 1] = y;
+        positions[idx * 3 + 2] = 0;
+        gridPositions[idx * 2] = x;
+        gridPositions[idx * 2 + 1] = y;
+        seeds[idx] = rng();
+        idx++;
+      }
+    }
+  }
+  while (idx < N){
+    const x = (rng() - 0.5) * width;
+    const y = (rng() - 0.5) * height;
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = 0;
+    gridPositions[idx * 2] = x;
+    gridPositions[idx * 2 + 1] = y;
+    seeds[idx] = rng();
+    idx++;
+  }
+  return { positions, gridPositions, seeds };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random() * 1e9);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const rows = 80 + Math.floor(rng() * 60);
+  const cols = 80 + Math.floor(rng() * 60);
+
+  uniforms.uRowFreq.value = 0.8 + rng() * 1.0;
+  uniforms.uColFreq.value = 0.8 + rng() * 1.0;
+  uniforms.uWaveAmp.value = 0.3 + rng() * 0.5;
+  uniforms.uTwist.value = rng() * 4.0;
+  uniforms.uPhase.value = rng() * 6.28;
+  uniforms.uPetals.value = 4 + Math.floor(rng() * 4);
+  uniforms.uCupDepth.value = 3.0 + rng() * 3.0;
+  uniforms.uMorph.value = 0.0;
+
+  const { positions, gridPositions, seeds } = buildGrid(rows, cols, seed);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('gridPos', new THREE.BufferAttribute(gridPositions, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.gridPos.array.set(gridPositions);
+    geom.attributes.gridPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);
+    geom.attributes.seed.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+}
+
+regenerate();
+addEventListener('click', (e) => {
+  if (e.target.tagName === 'CANVAS') regenerate();
+});
+
+/* Orbit drag */
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 0.55;
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi = Math.max(0.1, Math.min(1.4, orbitPhi - (e.clientY - prevY) * 0.005));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  /* Morph: flat → calyx over 5 seconds */
+  uniforms.uMorph.value += (1.0 - uniforms.uMorph.value) * 0.018;
+
+  /* Turrell light: very slow drift around the form
+     ~45 second full orbit, elevation oscillates gently */
+  uniforms.uLightAz.value = t * 0.14;
+  uniforms.uLightEl.value = 0.5 + 0.2 * Math.sin(t * 0.08);
+
+  /* Slow auto-orbit + manual */
+  const autoTheta = t * 0.06;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 22;
+
+  const centroidY = 1.5 * uniforms.uMorph.value;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    centroidY + radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, centroidY, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
