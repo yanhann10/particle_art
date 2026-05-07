@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4xz · cumulus (border drift)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1715; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">4xz · cumulus (border drift)</div>
+<div class="hint">atmospheric data crossing invisible geopolitical line</div>
+<div class="src">MORAKANA · Lumen Prize Gold 2025</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Cloud particles advected by curl-noise field, drifting east across an invisible border.
+// Particles that cross the line (x > 0) are tinted oxidized red — atmosphere meets border.
+// The border itself is silent, visible only through the color shift.
+// REF: MORAKANA 'Cumulus' — data-as-weather, satellite cloud fields, border topology.
+
+const W = 256, H = 200;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1715, 1);
+document.body.appendChild(renderer.domElement);
+
+// ---- ping-pong state RTs ----
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// init: scatter particles in a horizontal slab (cloud layer)
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  // wide horizontal extent, thin vertical layer
+  init[i*4]   = (Math.random() - 0.5) * 100.0 - 30.0; // start west of border
+  init[i*4+1] = (Math.random() - 0.5) * 12.0;
+  init[i*4+2] = (Math.random() - 0.5) * 80.0;
+  init[i*4+3] = Math.random(); // density / opacity seed
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// ---- simulation pass: curl-noise advection + east wind ----
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt:  { value: 0.016 },
+  uTime: { value: 0.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uTime;
+    varying vec2 vUv;
+
+    // 3D simplex-style noise for curl derivation
+    vec3 hash3(vec3 p){
+      p = fract(p * vec3(443.897, 441.423, 437.195));
+      p += dot(p, p.yzx + 19.19);
+      return fract((p.xxy + p.yxx) * p.zyx);
+    }
+    float noise3(vec3 p){
+      vec3 i = floor(p);
+      vec3 f = fract(p);
+      f = f*f*(3.0 - 2.0*f);
+      float a = mix(mix(dot(hash3(i), f), dot(hash3(i+vec3(1,0,0)), f-vec3(1,0,0)), f.x),
+                    mix(dot(hash3(i+vec3(0,1,0)), f-vec3(0,1,0)), dot(hash3(i+vec3(1,1,0)), f-vec3(1,1,0)), f.x), f.y);
+      float b = mix(mix(dot(hash3(i+vec3(0,0,1)), f-vec3(0,0,1)), dot(hash3(i+vec3(1,0,1)), f-vec3(1,0,1)), f.x),
+                    mix(dot(hash3(i+vec3(0,1,1)), f-vec3(0,1,1)), dot(hash3(i+vec3(1,1,1)), f-vec3(1,1,1)), f.x), f.y);
+      return mix(a, b, f.z) * 0.5 + 0.5;
+    }
+    vec3 curl(vec3 p){
+      float e = 0.15;
+      float n1 = noise3(p + vec3(0, e, 0));
+      float n2 = noise3(p + vec3(0,-e, 0));
+      float s1 = noise3(p + vec3(e, 0, 0));
+      float s2 = noise3(p + vec3(-e,0, 0));
+      float t1 = noise3(p + vec3(0, 0, e));
+      float t2 = noise3(p + vec3(0, 0,-e));
+      vec3 c = vec3(
+        (t1 - t2) - (n1 - n2),
+        (s1 - s2) - (t1 - t2),
+        (n1 - n2) - (s1 - s2)
+      ) / (2.0 * e);
+      return c;
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float dens = s.w;
+
+      // slow evolving curl field
+      vec3 noisePos = p * 0.02 + uTime * 0.02;
+      vec3 c = curl(noisePos);
+      // add constant eastward wind
+      vec3 wind = vec3(1.8, 0.0, 0.0);
+      vec3 vel = c * 1.2 + wind;
+
+      p += vel * uDt;
+
+      // wrap horizontally (clouds loop), clamp vertically
+      p.x = mod(p.x + 50.0, 100.0) - 50.0;
+      p.y = clamp(p.y, -6.0, 6.0);
+
+      gl_FragColor = vec4(p, dens);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// ---- render pass: instanced soft sprites ----
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 22, 50);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uTime;
+    attribute vec2 uvIdx;
+    varying float vDens;
+    varying float vCrossed; // 1.0 if particle crossed border (x>0)
+    varying float vDepth;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vDens = s.w;
+      vCrossed = step(0.0, p.x); // 1.0 if x>=0 (crossed border)
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      float size = (18.0 + vDens * 14.0) * uPixel * (60.0 / vDepth);
+      gl_PointSize = size;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDens;
+    varying float vCrossed;
+    varying float vDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      float soft = 1.0 - smoothstep(0.2, 0.5, r);
+      float a = soft * (0.25 + vDens * 0.35);
+
+      // palette: bone-white west of border, oxidized red east
+      vec3 west = vec3(0.92, 0.90, 0.88); // bone white
+      vec3 east = vec3(0.78, 0.28, 0.22); // oxidized red
+      vec3 col = mix(west, east, vCrossed);
+      
+      // depth fog — distant clouds fade to dust
+      float fog = smoothstep(80.0, 40.0, vDepth);
+      col = mix(vec3(0.62, 0.58, 0.54), col, fog);
+      
+      gl_FragColor = vec4(col, a * fog);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// faint dust-brown ambient
+scene.add(new THREE.AmbientLight(0x4a4542, 0.6));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = (now - lastTime) / 1000; lastTime = now;
+  simUniforms.uTime.value = now / 1000;
+
+  // step sim
+  simUniforms.prev.value = rtA.texture;
+  renderer.setRenderTarget(rtB);
+  renderer.render(simScene, camOrtho);
+  const tmp = rtA; rtA = rtB; rtB = tmp;
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = now / 1000;
+
+  // slow camera drift — follows cloud field, slight parallax
+  camera.position.x = Math.sin(now * 0.00008) * 8.0;
+  camera.position.y = 22 + Math.cos(now * 0.00012) * 4.0;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
