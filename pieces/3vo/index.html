@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: jitter, intensity: vigorous -->
+<title>3vo · aizawa glitch attractor</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">3vo</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*  Rosa Menkman glitch attractor — the Aizawa system rendered through
+    deliberate JPEG-block decomposition, channel separation, posterization,
+    and temporal scrub-ahead bursts. Error is information.
+    Palette: 5 colors — coal black, interference magenta, CRT green,
+    compression-artifact cyan, bone white. Posterized hard.            */
+
+const W = 320, H = 320, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080a, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping, depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// scene render target for post-processing
+const rtScene = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: true });
+
+// init particles near basin
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 0.5;
+  init[i*4+1] = (Math.random()*2-1) * 0.5;
+  init[i*4+2] = (Math.random()*2-1) * 0.5;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// simulation
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.012 },
+  uA: { value: 0.95 }, uB: { value: 0.70 }, uC: { value: 0.60 },
+  uD: { value: 3.50 }, uE: { value: 0.25 }, uF: { value: 0.10 },
+  uScrub: { value: 1.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF, uScrub;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      float dt = uDt * uScrub;
+      vec3 dp = vec3(
+        (p.z - uB) * p.x - uD * p.y,
+        uD * p.x + (p.z - uB) * p.y,
+        uC + uA * p.z - (p.z*p.z*p.z)/3.0
+          - (p.x*p.x + p.y*p.y)*(1.0 + uE*p.z)
+          + uF * p.z * p.x*p.x*p.x
+      );
+      p += dp * dt;
+      age = mod(age + dt * 0.06, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// particle render
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.05, 50);
+camera.position.set(0, 0, 4);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state: { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vSpeed;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float speed = length(p) * 0.5;
+      vSpeed = clamp(speed, 0.0, 1.0);
+      vAge = s.w;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + 1.4 * vSpeed) * uPixel * (8.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vSpeed;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      // 5-color posterized palette: coal, interference magenta, CRT green, artifact cyan, bone
+      vec3 c0 = vec3(0.08, 0.06, 0.10);  // coal
+      vec3 c1 = vec3(0.85, 0.12, 0.58);  // interference magenta
+      vec3 c2 = vec3(0.10, 0.82, 0.32);  // CRT green
+      vec3 c3 = vec3(0.15, 0.72, 0.85);  // artifact cyan
+      vec3 c4 = vec3(0.92, 0.90, 0.86);  // bone white
+      float k = mod(vAge + vSpeed * 0.5, 1.0);
+      // hard posterization steps
+      vec3 col;
+      if (k < 0.2) col = mix(c0, c1, smoothstep(0.0, 0.2, k));
+      else if (k < 0.4) col = mix(c1, c2, smoothstep(0.2, 0.4, k));
+      else if (k < 0.6) col = mix(c2, c3, smoothstep(0.4, 0.6, k));
+      else if (k < 0.8) col = mix(c3, c4, smoothstep(0.6, 0.8, k));
+      else col = mix(c4, c1, smoothstep(0.8, 1.0, k));
+      // posterize to 5 levels per channel
+      col = floor(col * 5.0 + 0.5) / 5.0;
+      gl_FragColor = vec4(col * a * (0.5 + vSpeed * 0.8), a);
+    }
+  `
+});
+scene.add(new THREE.Points(pointsGeom, pointsMat));
+
+// post-processing glitch pass
+const glitchUniforms = {
+  tScene: { value: rtScene.texture },
+  uTime: { value: 0 },
+  uRes: { value: new THREE.Vector2(innerWidth, innerHeight) },
+  uBlockStr: { value: 0.0 },
+  uScrubBurst: { value: 0.0 },
+  uStretchY: { value: 0.0 },
+  uStretchPos: { value: 0.5 }
+};
+const glitchMat = new THREE.ShaderMaterial({
+  uniforms: glitchUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tScene;
+    uniform float uTime, uBlockStr, uScrubBurst, uStretchY, uStretchPos;
+    uniform vec2 uRes;
+    varying vec2 vUv;
+
+    // simple hash
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float hash1(float n){ return fract(sin(n) * 43758.5453); }
+
+    void main(){
+      vec2 uv = vUv;
+
+      // --- vertical pixel stretch (zalgo) ---
+      float stretchBand = smoothstep(uStretchPos - 0.04, uStretchPos, uv.y)
+                        - smoothstep(uStretchPos, uStretchPos + 0.04, uv.y);
+      uv.y = mix(uv.y, uStretchPos, stretchBand * uStretchY);
+
+      // --- 8x8 JPEG block quantization ---
+      float blockSize = 8.0;
+      vec2 blockUv = floor(uv * uRes / blockSize) * blockSize / uRes;
+      float blockHash = hash(blockUv * 100.0 + floor(uTime * 3.0));
+
+      // some blocks glitch harder
+      float glitchBlock = step(0.82 - uBlockStr * 0.3, blockHash);
+      vec2 sampleUv = mix(uv, blockUv, glitchBlock * uBlockStr);
+
+      // block-level color shift for glitched blocks
+      float blockShift = glitchBlock * uBlockStr * 0.015;
+
+      // --- RGB channel separation (chromatic aberration) ---
+      float caBase = 0.003 + uScrubBurst * 0.012;
+      float caDir = hash1(floor(uTime * 7.0)) * 6.28;
+      vec2 caOffset = vec2(cos(caDir), sin(caDir)) * caBase;
+
+      float r = texture2D(tScene, sampleUv + caOffset + vec2(blockShift, 0.0)).r;
+      float g = texture2D(tScene, sampleUv - vec2(0.0, blockShift)).g;
+      float b = texture2D(tScene, sampleUv - caOffset - vec2(blockShift, 0.0)).b;
+      vec3 col = vec3(r, g, b);
+
+      // --- scanline interference ---
+      float scan = sin(uv.y * uRes.y * 1.5 + uTime * 12.0) * 0.5 + 0.5;
+      col *= 0.92 + 0.08 * scan;
+
+      // --- posterize to 6 levels ---
+      col = floor(col * 6.0 + 0.5) / 6.0;
+
+      // --- horizontal tear lines (2-4 at a time) ---
+      for (int i = 0; i < 3; i++){
+        float tearY = hash1(float(i) + floor(uTime * 5.0)) ;
+        float tearW = 0.002 + 0.003 * hash1(float(i) + 77.0);
+        float inTear = smoothstep(tearY - tearW, tearY, uv.y)
+                     - smoothstep(tearY, tearY + tearW, uv.y);
+        float tearShift = (hash1(float(i) + floor(uTime * 8.0) + 33.0) - 0.5) * 0.06 * uBlockStr;
+        vec3 tearCol = texture2D(tScene, vec2(uv.x + tearShift, uv.y)).rgb;
+        tearCol = floor(tearCol * 6.0 + 0.5) / 6.0;
+        col = mix(col, tearCol, inTear * 0.9);
+      }
+
+      // --- vignette (CRT monitor) ---
+      vec2 vc = uv - 0.5;
+      float vig = 1.0 - dot(vc, vc) * 1.2;
+      col *= clamp(vig, 0.0, 1.0);
+
+      // --- subtle CRT curvature tint at edges ---
+      float edgeDist = max(abs(vc.x), abs(vc.y));
+      col.r *= 1.0 + smoothstep(0.4, 0.5, edgeDist) * 0.15;
+      col.b *= 1.0 - smoothstep(0.4, 0.5, edgeDist) * 0.10;
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const glitchScene = new THREE.Scene();
+glitchScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), glitchMat));
+
+// resize
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  rtScene.setSize(innerWidth, innerHeight);
+  glitchUniforms.uRes.value.set(innerWidth, innerHeight);
+});
+
+// pointer perturbations
+const target = { a: 0.95, c: 0.60 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth) - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.a = 0.95 + nx * 0.08;
+  target.c = 0.60 + ny * 0.10;
+});
+
+// glitch event state
+let scrubBurst = 0, blockStr = 0, stretchY = 0, stretchPos = 0.5;
+let nextGlitchTime = 2000 + Math.random() * 3000;
+let scrubMult = 1.0;
+
+const t0 = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = now - t0;
+  const dt = 1/60;
+
+  // parameter smoothing
+  simUniforms.uA.value += (target.a - simUniforms.uA.value) * 0.04;
+  simUniforms.uC.value += (target.c - simUniforms.uC.value) * 0.04;
+
+  // glitch event scheduling — irregular bursts
+  if (elapsed > nextGlitchTime) {
+    const intensity = 0.4 + Math.random() * 0.6;
+    scrubBurst = intensity;
+    blockStr = 0.3 + intensity * 0.7;
+    if (Math.random() > 0.5) {
+      stretchY = 0.4 + Math.random() * 0.6;
+      stretchPos = 0.2 + Math.random() * 0.6;
+    }
+    scrubMult = 1.0 + intensity * 8.0; // temporal scrub-ahead
+    nextGlitchTime = elapsed + 1500 + Math.random() * 4000;
+  }
+
+  // decay glitch parameters
+  scrubBurst *= 0.92;
+  blockStr *= 0.95;
+  stretchY *= 0.90;
+  scrubMult += (1.0 - scrubMult) * 0.06;
+
+  simUniforms.uScrub.value = scrubMult;
+  glitchUniforms.uBlockStr.value = blockStr;
+  glitchUniforms.uScrubBurst.value = scrubBurst;
+  glitchUniforms.uStretchY.value = stretchY;
+  glitchUniforms.uStretchPos.value = stretchPos;
+  glitchUniforms.uTime.value = elapsed * 0.001;
+
+  // sim steps
+  const steps = scrubMult > 2.0 ? 8 : 4;
+  for (let i = 0; i < steps; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+
+  // camera orbit — jittery during glitch
+  const ang = elapsed * 0.00015;
+  const jx = scrubBurst * (Math.random() - 0.5) * 0.15;
+  const jy = scrubBurst * (Math.random() - 0.5) * 0.10;
+  camera.position.x = Math.sin(ang) * 4 + jx;
+  camera.position.z = Math.cos(ang) * 4;
+  camera.position.y = Math.sin(ang * 0.7) * 1.0 + jy;
+  camera.lookAt(0, 0, 1.0);
+
+  // render scene to texture
+  renderer.setRenderTarget(rtScene);
+  renderer.setClearColor(0x06080a, 1);
+  renderer.clear();
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+
+  // glitch post-process
+  glitchUniforms.tScene.value = rtScene.texture;
+  renderer.render(glitchScene, camOrtho);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
