@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vsl · fidenza flow ribbons</title>
+<!-- MOTION: flow, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#e8e2d5; overflow:hidden;
+               color:#3a332a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">vsl</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 18, 24);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xe8e2d5, 1);
+document.body.appendChild(renderer.domElement);
+
+// Simplex noise (simple 2D implementation)
+function noise2D(x, y) {
+  const X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+  x -= Math.floor(x); y -= Math.floor(y);
+  const u = fade(x), v = fade(y);
+  const A = (p[X] + Y) & 255, B = (p[X+1] + Y) & 255;
+  return lerp(v, lerp(u, grad(p[A], x, y), grad(p[B], x-1, y)),
+                 lerp(u, grad(p[A+1], x, y-1), grad(p[B+1], x-1, y-1)));
+}
+function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+function lerp(t, a, b) { return a + t * (b - a); }
+function grad(hash, x, y) {
+  const h = hash & 3;
+  const u = h < 2 ? x : y;
+  const v = h < 2 ? y : x;
+  return ((h & 1) ? -u : u) + ((h & 2) ? -2*v : 2*v);
+}
+const p = new Uint8Array(512);
+for (let i = 0; i < 256; i++) p[i] = p[i+256] = (i * 137) % 256;
+
+// Flow field on 2D grid
+const GRID = 80;
+const SCALE = 0.8;
+const flowField = [];
+for (let i = 0; i <= GRID; i++) {
+  flowField[i] = [];
+  for (let j = 0; j <= GRID; j++) {
+    const x = (i - GRID/2) * SCALE;
+    const y = (j - GRID/2) * SCALE;
+    const n1 = noise2D(x * 0.05 + 10, y * 0.05 + 20);
+    const n2 = noise2D(x * 0.05 + 30, y * 0.05 + 40);
+    const angle = n1 * Math.PI * 2 + n2 * Math.PI * 0.5;
+    flowField[i][j] = { x: Math.cos(angle), y: Math.sin(angle) };
+  }
+}
+
+function getFlow(x, y) {
+  const i = (x / SCALE + GRID/2);
+  const j = (y / SCALE + GRID/2);
+  const i0 = Math.floor(i), j0 = Math.floor(j);
+  if (i0 < 0 || i0 >= GRID || j0 < 0 || j0 >= GRID) return { x: 0, y: 0 };
+  const i1 = Math.min(i0 + 1, GRID), j1 = Math.min(j0 + 1, GRID);
+  const fx = i - i0, fy = j - j0;
+  const a = flowField[i0][j0], b = flowField[i1][j0];
+  const c = flowField[i0][j1], d = flowField[i1][j1];
+  const x1 = a.x * (1-fx) + b.x * fx, x2 = c.x * (1-fx) + d.x * fx;
+  const y1 = a.y * (1-fx) + b.y * fx, y2 = c.y * (1-fx) + d.y * fx;
+  return { x: x1 * (1-fy) + x2 * fy, y: y1 * (1-fy) + y2 * fy };
+}
+
+// Palette: Luxe earth tones (muted, sophisticated)
+const palette = [
+  new THREE.Color(0xd4a574), // sandy tan
+  new THREE.Color(0x8b6f47), // warm brown
+  new THREE.Color(0x4a5d5a), // dusty teal
+  new THREE.Color(0x9c6b6e), // rose taupe
+  new THREE.Color(0x3a4a3b)  // deep olive
+];
+
+// Streamline integration
+function integrateStreamline(sx, sy, maxSteps, stepSize) {
+  const points = [{ x: sx, y: sy }];
+  let x = sx, y = sy;
+  for (let i = 0; i < maxSteps; i++) {
+    const f = getFlow(x, y);
+    const len = Math.sqrt(f.x*f.x + f.y*f.y);
+    if (len < 0.01) break;
+    x += (f.x / len) * stepSize;
+    y += (f.y / len) * stepSize;
+    if (Math.abs(x) > GRID*SCALE*0.5 || Math.abs(y) > GRID*SCALE*0.5) break;
+    points.push({ x, y });
+  }
+  return points;
+}
+
+// Collision structure: grid-based cells for streamline segments
+const CELL_SIZE = 1.2;
+const occupiedCells = new Map();
+function cellKey(x, y) {
+  return `${Math.floor(x/CELL_SIZE)}_${Math.floor(y/CELL_SIZE)}`;
+}
+function checkCollision(x, y, margin) {
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      const key = cellKey(x + dx*CELL_SIZE, y + dy*CELL_SIZE);
+      const segs = occupiedCells.get(key);
+      if (!segs) continue;
+      for (const seg of segs) {
+        const dist = Math.sqrt((seg.x-x)**2 + (seg.y-y)**2);
+        if (dist < margin) return true;
+      }
+    }
+  }
+  return false;
+}
+function registerSegment(x, y) {
+  const key = cellKey(x, y);
+  if (!occupiedCells.has(key)) occupiedCells.set(key, []);
+  occupiedCells.get(key).push({ x, y });
+}
+
+// Generate non-overlapping streamlines
+const ribbons = [];
+const NUM_SEEDS = 65;
+const seeds = [];
+for (let i = 0; i < NUM_SEEDS; i++) {
+  seeds.push({
+    x: (Math.random() - 0.5) * GRID * SCALE * 0.7,
+    y: (Math.random() - 0.5) * GRID * SCALE * 0.7
+  });
+}
+
+for (const seed of seeds) {
+  const points = integrateStreamline(seed.x, seed.y, 200, 0.35);
+  if (points.length < 10) continue;
+  
+  // Check collision along entire path
+  const margin = 0.8 + Math.random() * 0.6;
+  let collides = false;
+  for (const p of points) {
+    if (checkCollision(p.x, p.y, margin)) {
+      collides = true;
+      break;
+    }
+  }
+  if (collides) continue;
+  
+  // Register this streamline
+  for (const p of points) registerSegment(p.x, p.y);
+  
+  ribbons.push({ points, color: palette[Math.floor(Math.random() * palette.length)], margin });
+}
+
+// Create tube geometry for each ribbon with varying thickness
+const group = new THREE.Group();
+for (const ribbon of ribbons) {
+  const curve = new THREE.CatmullRomCurve3(
+    ribbon.points.map((p, i) => {
+      const t = i / (ribbon.points.length - 1);
+      const h = noise2D(p.x * 0.1, p.y * 0.1) * 2.5 + 1.0;
+      return new THREE.Vector3(p.x, h, p.y);
+    })
+  );
+  
+  const segments = ribbon.points.length * 2;
+  const radiusFunc = (u) => {
+    const n = noise2D(u * 8 + ribbon.points[0].x, u * 8 + ribbon.points[0].y);
+    return ribbon.margin * (0.6 + 0.5 * Math.abs(n));
+  };
+  
+  const tubeGeom = new THREE.TubeGeometry(curve, segments, 0.5, 8, false);
+  const positions = tubeGeom.attributes.position.array;
+  
+  // Modulate radius per vertex
+  for (let i = 0; i < positions.length; i += 3) {
+    const idx = Math.floor((i/3) / 8);
+    const u = idx / segments;
+    const r = radiusFunc(u);
+    const x = positions[i], y = positions[i+1], z = positions[i+2];
+    const center = curve.getPointAt(Math.min(u, 1));
+    const dx = x - center.x, dz = z - center.z;
+    const dist = Math.sqrt(dx*dx + dz*dz);
+    if (dist > 0.01) {
+      const scale = r / dist;
+      positions[i] = center.x + dx * scale;
+      positions[i+2] = center.z + dz * scale;
+    }
+  }
+  tubeGeom.attributes.position.needsUpdate = true;
+  tubeGeom.computeVertexNormals();
+  
+  const mat = new THREE.MeshBasicMaterial({
+    color: ribbon.color,
+    side: THREE.DoubleSide
+  });
+  const mesh = new THREE.Mesh(tubeGeom, mat);
+  group.add(mesh);
+}
+
+scene.add(group);
+
+// Subtle ambient light for depth
+const light = new THREE.AmbientLight(0xffffff, 0.9);
+scene.add(light);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  group.rotation.y = Math.sin(t * 0.08) * 0.15;
+  group.rotation.x = Math.cos(t * 0.06) * 0.08 - 0.15;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
