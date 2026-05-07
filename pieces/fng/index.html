@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>fng · tender light strings · disrupted drape</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">fng</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Felix Gonzalez-Torres · disrupted drape · pulled threads</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*  Disrupted drape — Felix Gonzalez-Torres light strings with
+    intentional breaks: burned-out gaps, gathered bunches, a stray
+    strand that fell away, one frayed end. Like pulled threads
+    in a weave — the imperfections are the intimacy.  */
+
+const BG = 0x0a0807;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(1.5, 2, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0.5, -1, 0);
+
+// --- curve parameters ---
+const MAX_VERTS = 3200;
+const ATTRACT   = 0.05;
+const REPEL_R   = 0.48;
+const REPEL_STR = 0.10;
+const NOISE     = 0.002;
+const PRESSURE  = 0.002;
+const GRAVITY   = 0.008;
+const MAX_D     = 0.36;
+const ANCHOR_N  = 6;
+
+// --- DISRUPTION 1: asymmetric anchor points (off-center, not evenly spaced) ---
+// Main string: hung from left-heavy points, right side longer/looser
+const verts = [];
+const NV0 = 44;
+for (let i = 0; i < NV0; i++) {
+  const t = (i / (NV0 - 1)) * 2 - 1;
+  // asymmetric: string starts higher on left, sags more on right
+  const x = t * 6.5 + 0.8; // shifted right of center
+  const sag = t > 0.2 ? 1.6 : 1.0; // right side sags more
+  const y = -Math.abs(t) * sag + Math.sin(t * Math.PI * 2) * 0.25;
+  verts.push({
+    x, z: 0, y, age: 0,
+    pinY: i < ANCHOR_N || i >= NV0 - 3 // fewer pins on right → looser end
+  });
+}
+
+// --- DISRUPTION 2: secondary stray strand (fell from the main drape) ---
+const strayVerts = [];
+const NS0 = 18;
+// starts near main string vertex ~30%, drops lower and to the side
+const strayOriginX = -1.5;
+const strayOriginY = -1.8;
+for (let i = 0; i < NS0; i++) {
+  const t = i / (NS0 - 1);
+  const x = strayOriginX + t * 2.8 + Math.sin(t * Math.PI) * 0.4;
+  const y = strayOriginY - t * 2.2 - Math.sin(t * Math.PI * 1.5) * 0.5;
+  strayVerts.push({
+    x, z: 0.3, y, age: 0.3 + t * 0.2,
+    pinY: i === 0 // only first vertex pinned (hanging by one point)
+  });
+}
+
+// --- DISRUPTION 3: burned-out zones (indices along main curve where density → 0) ---
+// These are normalized positions along the curve [0..1] where bulbs are dark
+const burnedZones = [
+  { center: 0.32, radius: 0.04 },  // a gap left of center
+  { center: 0.71, radius: 0.03 },  // a gap on the right sag
+  { center: 0.88, radius: 0.025 }, // near the frayed end
+];
+
+// --- DISRUPTION 4: density spike (gathered bunch where string was pushed together) ---
+const gatherZones = [
+  { center: 0.18, radius: 0.035, mult: 3.5 }, // left cluster
+  { center: 0.55, radius: 0.03, mult: 4.0 },  // center-right bright knot
+];
+
+// spatial hash
+const CELL = REPEL_R;
+const grid = new Map();
+function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+
+function rebuildGrid(vs) {
+  grid.clear();
+  for (let i = 0; i < vs.length; i++) {
+    const v = vs[i], k = gridKey(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function nearby(v) {
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function stepCurve(vs, maxVerts, anchorN, gravMul) {
+  const n = vs.length;
+  if (n >= maxVerts) return;
+  rebuildGrid(vs);
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = vs[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = vs[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? vs[i - 1] : null;
+    const next = i < n - 1 ? vs[i + 1] : null;
+    const v = vs[i];
+    if (prev) {
+      dx[i] += (prev.x - v.x) * ATTRACT;
+      dz[i] += (prev.z - v.z) * ATTRACT;
+      dy[i] += (prev.y - v.y) * ATTRACT;
+    }
+    if (next) {
+      dx[i] += (next.x - v.x) * ATTRACT;
+      dz[i] += (next.z - v.z) * ATTRACT;
+      dy[i] += (next.y - v.y) * ATTRACT;
+    }
+  }
+
+  let cx = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += vs[i].x; cz += vs[i].z; }
+  cx /= n; cz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = vs[i].x - cx, oz = vs[i].z - cz;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dz[i] += (oz / d) * PRESSURE;
+  }
+
+  for (let i = 0; i < n; i++) {
+    vs[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    vs[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+    const grav = vs[i].pinY ? GRAVITY * 0.05 : GRAVITY * gravMul;
+    vs[i].y += dy[i] - grav + (Math.random() - 0.5) * NOISE * 0.5;
+    vs[i].age += 0.0004;
+  }
+
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = vs[i], b = vs[i + 1];
+    grown.push(a);
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    if (ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && vs.length + grown.length < maxVerts) {
+      grown.push({
+        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.02,
+        z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.02,
+        y: (a.y + b.y) * 0.5,
+        age: Math.max(a.age, b.age) * 0.7,
+        pinY: false
+      });
+    }
+  }
+  grown.push(vs[n - 1]);
+  vs.length = 0;
+  for (const v of grown) vs.push(v);
+}
+
+// --- rendering ---
+const N_RENDER = 40000;
+const MAIN_SHARE = 34000;
+const STRAY_SHARE = 6000;
+const rPos   = new Float32Array(N_RENDER * 3);
+const rSeeds = new Float32Array(N_RENDER);
+const rAge   = new Float32Array(N_RENDER);
+const rBurn  = new Float32Array(N_RENDER); // 0 = normal, 1 = burned out zone
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('burn',     new THREE.BufferAttribute(rBurn, 1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.033 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uFogDensity;
+    attribute float seed;
+    attribute float age;
+    attribute float burn;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+
+    void main() {
+      vec3 p = position;
+
+      float t = uTime * 0.25 + seed * 6.28;
+      float sway = sin(t) * 0.007 * (1.0 + seed);
+      p.x += sway;
+      p.z += cos(t * 0.7) * 0.004;
+
+      float pulse = 0.85 + 0.15 * sin(uTime * 1.0 + seed * 40.0);
+
+      // palette: warm filament → soft peach → dim ember in burned zones
+      vec3 amber  = vec3(1.0, 0.72, 0.32);
+      vec3 warm   = vec3(1.0, 0.86, 0.68);
+      vec3 peach  = vec3(0.98, 0.82, 0.72);
+      vec3 ember  = vec3(0.35, 0.18, 0.08); // nearly dead bulb
+
+      float k = clamp(age * 1.2, 0.0, 1.0);
+      vCol = mix(amber, warm, k);
+      vCol = mix(vCol, peach, smoothstep(0.7, 1.0, k) * 0.25);
+      vCol *= pulse;
+
+      // burned zones: dim to ember, lower alpha
+      vCol = mix(vCol, ember * 0.4, burn * 0.85);
+      float burnDim = 1.0 - burn * 0.88;
+
+      vAlpha = (0.5 + 0.2 * pulse) * burnDim;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // gathered zones get slightly larger bulbs (handled via age boost on CPU)
+      float sz = 1.7 * uPixel * (45.0 / dist);
+      sz *= mix(1.0, 0.35, burn); // burned bulbs shrink
+      gl_PointSize = sz;
+      gl_Position = projectionMatrix * mv;
+
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      float core = exp(-r * 24.0);
+      float halo = exp(-r * 8.0) * 0.3;
+      float a = (core + halo) * vAlpha;
+
+      vec3 col = vCol;
+      col = mix(col, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.8);
+
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// wire for main string
+const wireGeom = new THREE.BufferGeometry();
+const wirePositions = new Float32Array(MAX_VERTS * 3);
+wireGeom.setAttribute('position', new THREE.BufferAttribute(wirePositions, 3));
+const wireMat = new THREE.LineBasicMaterial({
+  color: 0x2a2420, transparent: true, opacity: 0.25
+});
+const wireLine = new THREE.Line(wireGeom, wireMat);
+scene.add(wireLine);
+
+// wire for stray strand (slightly different tone — older, dustier)
+const strayWireGeom = new THREE.BufferGeometry();
+const strayWirePos = new Float32Array(600 * 3);
+strayWireGeom.setAttribute('position', new THREE.BufferAttribute(strayWirePos, 3));
+const strayWireMat = new THREE.LineBasicMaterial({
+  color: 0x221e1a, transparent: true, opacity: 0.2
+});
+const strayWireLine = new THREE.Line(strayWireGeom, strayWireMat);
+scene.add(strayWireLine);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow
+for (let s = 0; s < 500; s++) {
+  stepCurve(verts, MAX_VERTS, ANCHOR_N, 1.0);
+  stepCurve(strayVerts, 500, 1, 1.3); // stray hangs heavier
+}
+
+function distributeParticles(vs, offset, count, applyDisruption) {
+  const n = vs.length;
+  if (n < 2) return;
+
+  const lengths = [];
+  let total = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const a = vs[i], b = vs[i + 1];
+    const L = Math.sqrt((b.x-a.x)**2 + (b.z-a.z)**2 + (b.y-a.y)**2);
+    lengths.push(L);
+    total += L;
+  }
+  if (total === 0) return;
+
+  // compute density multiplier per segment
+  const segMult = new Float32Array(n - 1);
+  let cumLen = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const segCenter = (cumLen + lengths[i] * 0.5) / total; // normalized position
+    cumLen += lengths[i];
+    let mult = 1.0;
+
+    if (applyDisruption) {
+      // burned zones: near-zero density
+      for (const bz of burnedZones) {
+        const d = Math.abs(segCenter - bz.center);
+        if (d < bz.radius) {
+          mult *= 0.06; // almost no particles
+        } else if (d < bz.radius * 2.5) {
+          mult *= 0.3 + 0.7 * ((d - bz.radius) / (bz.radius * 1.5));
+        }
+      }
+      // gather zones: boosted density
+      for (const gz of gatherZones) {
+        const d = Math.abs(segCenter - gz.center);
+        if (d < gz.radius) {
+          mult *= gz.mult;
+        } else if (d < gz.radius * 2.0) {
+          const f = 1.0 - (d - gz.radius) / gz.radius;
+          mult *= 1.0 + (gz.mult - 1.0) * f;
+        }
+      }
+    }
+    segMult[i] = mult;
+  }
+
+  // normalize so total particles = count
+  let totalWeight = 0;
+  for (let i = 0; i < n - 1; i++) totalWeight += lengths[i] * segMult[i];
+
+  let written = 0;
+  cumLen = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const share = (i === n - 2)
+      ? count - written
+      : Math.max(0, Math.round(count * lengths[i] * segMult[i] / totalWeight));
+    const a = vs[i], b = vs[i + 1];
+    const segCenter = (cumLen + lengths[i] * 0.5) / total;
+    cumLen += lengths[i];
+
+    // is this segment in a burned zone?
+    let isBurned = false;
+    if (applyDisruption) {
+      for (const bz of burnedZones) {
+        if (Math.abs(segCenter - bz.center) < bz.radius * 2.0) isBurned = true;
+      }
+    }
+
+    for (let k = 0; k < share && written < count; k++) {
+      const idx = offset + written;
+      const u = Math.random();
+      const cu = u < 0.5 ? u * u * 2 : 1 - (1 - u) * (1 - u) * 2;
+      const spread = isBurned ? 0.003 : 0.015;
+      rPos[idx * 3]     = a.x + (b.x - a.x) * cu + (Math.random() - 0.5) * spread;
+      rPos[idx * 3 + 1] = a.y + (b.y - a.y) * cu + (Math.random() - 0.5) * spread * 0.5;
+      rPos[idx * 3 + 2] = a.z + (b.z - a.z) * cu + (Math.random() - 0.5) * spread;
+      rAge[idx] = Math.max(a.age, b.age);
+      rBurn[idx] = isBurned ? 1.0 : 0.0;
+      written++;
+    }
+  }
+}
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (!paused) {
+    for (let s = 0; s < 3; s++) {
+      stepCurve(verts, MAX_VERTS, ANCHOR_N, 1.0);
+      stepCurve(strayVerts, 500, 1, 1.3);
+    }
+  }
+
+  const n = verts.length;
+  const sn = strayVerts.length;
+
+  // update main wire
+  for (let i = 0; i < n; i++) {
+    wirePositions[i * 3]     = verts[i].x;
+    wirePositions[i * 3 + 1] = verts[i].y;
+    wirePositions[i * 3 + 2] = verts[i].z;
+  }
+  wireGeom.setDrawRange(0, n);
+  wireGeom.attributes.position.needsUpdate = true;
+
+  // update stray wire
+  for (let i = 0; i < sn; i++) {
+    strayWirePos[i * 3]     = strayVerts[i].x;
+    strayWirePos[i * 3 + 1] = strayVerts[i].y;
+    strayWirePos[i * 3 + 2] = strayVerts[i].z;
+  }
+  strayWireGeom.setDrawRange(0, sn);
+  strayWireGeom.attributes.position.needsUpdate = true;
+
+  // camera tracks combined centroid, biased toward main string
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  // include stray with lower weight
+  for (let i = 0; i < sn; i++) {
+    cx += strayVerts[i].x * 0.3;
+    cy += strayVerts[i].y * 0.3;
+    cz += strayVerts[i].z * 0.3;
+  }
+  const tw = n + sn * 0.3;
+  cx /= tw; cy /= tw; cz /= tw;
+  controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.02);
+
+  // distribute particles
+  distributeParticles(verts, 0, MAIN_SHARE, true);
+  distributeParticles(strayVerts, MAIN_SHARE, STRAY_SHARE, false);
+
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+  geom.attributes.burn.needsUpdate = true;
+
+  statEl.textContent = `vertices=${n + sn}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
