@@ -49,10 +49,15 @@ ARTIST_PERSONALITIES = REPO / "scripts" / "artist_personalities.json"
 LOG     = REPO / "scripts" / "improv_log.jsonl"
 
 # mode-sample distribution. Sums to 1.0.
-# chain: continues current thread (parent = most recent piece). 50%.
-# surprise: NEW branch + delightful swerve injected. 25%.
-# artist: NEW branch in a named artist's personality. 25%.
-MODE_WEIGHTS = {"chain": 0.50, "surprise": 0.25, "artist": 0.25}
+#
+# Tuned 2026-05-07 from empirical data over 68 scored pieces + 106 thumbnails:
+#   surprise: score-mean=6.94, px-coverage-mean=18.1%  (best in both)
+#   artist:   score-mean=6.84, px-coverage-mean=12.2%  (mid)
+#   chain:    score-mean=6.72, px-coverage-mean=14.7%  (weakest, also
+#             dominates bottom-quartile of weak pieces 11/25)
+# So we lean toward surprise/artist branches (which produce more legible
+# distinct work) and away from chain (which drifts after gen ≥ 4).
+MODE_WEIGHTS = {"chain": 0.30, "surprise": 0.40, "artist": 0.30}
 
 
 def load_json(p: Path) -> dict:

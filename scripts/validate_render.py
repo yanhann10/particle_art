@@ -24,10 +24,17 @@ REPO = Path(__file__).resolve().parent.parent
 PIECES = REPO / "pieces"
 LINEAGE = REPO / "lineage.json"
 
-# What counts as "broken"? If <0.5% of pixels are >5 channel-units brighter
-# than the median (background) color, the piece is rendering essentially
-# nothing — typically a shader compile failure or a misframed camera.
-MIN_NONBACKGROUND_FRACTION = 0.005
+# What counts as "broken"? If <1% of pixels are >12 channel-units away
+# from the median (background) color, the piece is rendering essentially
+# nothing — typically a shader compile failure, missing model load,
+# or a design that waits for an input that never arrives in headless.
+#
+# Tuned 2026-05-07 from 0.5% → 1.0% based on coverage distribution over
+# 106 existing pieces (median=12.75%, p25=4.58%). At 1%, we cull 11/106
+# (10%) of pieces — exactly the pieces the user flagged as "don't show"
+# (ytq/ww9/t6y/93o etc. at <0.1%). At 0.5% the gate was passing pieces
+# the user perceived as empty.
+MIN_NONBACKGROUND_FRACTION = 0.01
 
 W, H = 800, 500
 
