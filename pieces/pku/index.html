@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>pku · slow attractor · lorenz patience</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080d; overflow:hidden;
+               font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id     { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+            color:#cdd2dc; letter-spacing:0.06em; z-index:10; }
+  .breath { position:fixed; right:14px; bottom:12px; opacity:0.0; font-size:10px;
+            color:#cdd2dc; letter-spacing:0.04em; z-index:10;
+            transition: opacity 8s ease-in; }
+  .breath.visible { opacity:0.40; }
+</style>
+</head>
+<body>
+<div class="id">pku</div>
+<div class="breath" id="breath">&#x25CB;</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── Slow Art: Lorenz attractor that appears static, then slowly reveals
+   its butterfly wings over 60-120s of patient viewing.
+
+   Inspired by Olafur Eliasson's durational installations and the Slow Art
+   Day movement. The viewer who scrolls past sees a dim cloud; the one
+   who stays sees the form breathe open.
+
+   Palette (hand-chosen):
+     deep slate  #181d2a — the void
+     warm ember  #c4956a — first warmth to appear
+     dusk rose   #7e5a6e — mid-palette body
+     pale bone   #d4c4a0 — attractor wing tips
+     cold teal   #2a4a5a — shadow side
+   ── */
+
+const W = 320, H = 320, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080d, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtP = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtP);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtP);
+
+// init particles in a tight cluster near the Lorenz attractor's center
+function makeInit(){
+  const d = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++){
+    // tight gaussian cluster at (0, 1, 25) — near the unstable fixed point
+    d[i*4]   = (Math.random()-0.5)*1.2;
+    d[i*4+1] = 1.0 + (Math.random()-0.5)*1.2;
+    d[i*4+2] = 25.0 + (Math.random()-0.5)*1.2;
+    d[i*4+3] = Math.random();
+  }
+  const t = new THREE.DataTexture(d, W, H, THREE.RGBAFormat, THREE.FloatType);
+  t.needsUpdate = true; return t;
+}
+
+const camO = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex:{value:makeInit()} },
+  vertexShader:`varying vec2 v;void main(){v=uv;gl_Position=vec4(position,1.);}`,
+  fragmentShader:`uniform sampler2D tex;varying vec2 v;void main(){gl_FragColor=texture2D(tex,v);}`
+});
+const blitSc = new THREE.Scene();
+blitSc.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitSc, camO);
+renderer.setRenderTarget(rtB); renderer.render(blitSc, camO);
+renderer.setRenderTarget(null);
+
+// ── GPGPU simulation ──
+const simU = { prev:{value:rtA.texture}, uDt:{value:0}, uReveal:{value:0} };
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simU,
+  vertexShader:`varying vec2 v;void main(){v=uv;gl_Position=vec4(position,1.);}`,
+  fragmentShader:`
+    uniform sampler2D prev;
+    uniform float uDt, uReveal;
+    varying vec2 v;
+
+    vec3 lorenz(vec3 p){
+      return vec3(10.0*(p.y-p.x), p.x*(28.0-p.z)-p.y, p.x*p.y-(8.0/3.0)*p.z);
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, v);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      // dt scales with reveal — nearly zero at start, grows over 90s
+      // minimum 0.002 so particles aren't perfectly frozen (subtle shimmer)
+      float speed = mix(0.002, 0.15, uReveal * uReveal);
+      float dt = uDt * speed;
+
+      vec3 dp = lorenz(p);
+      p += dp * dt;
+
+      age = mod(age + dt * 0.04, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simSc = new THREE.Scene();
+simSc.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// ── render scene ──
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 80);
+camera.position.set(0, 0.8, 5.5);
+
+// grain overlay — fullscreen quad
+const grainMat = new THREE.ShaderMaterial({
+  uniforms: { uTime:{value:0} },
+  transparent:true, depthWrite:false, depthTest:false,
+  vertexShader:`varying vec2 v;void main(){v=uv;gl_Position=vec4(position,1.);}`,
+  fragmentShader:`
+    uniform float uTime;
+    varying vec2 v;
+    float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+    void main(){
+      float g = hash(v*vec2(1920.,1080.)+uTime*17.3);
+      gl_FragColor = vec4(vec3(g), 0.035);
+    }
+  `
+});
+const grainCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const grainSc = new THREE.Scene();
+grainSc.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), grainMat));
+
+// subtle ambient fog plane — horizontal, below the attractor
+const fogPlaneGeo = new THREE.PlaneGeometry(14, 14);
+const fogPlaneMat = new THREE.ShaderMaterial({
+  uniforms: { uReveal:{value:0} },
+  transparent:true, depthWrite:false, side:THREE.DoubleSide,
+  blending: THREE.AdditiveBlending,
+  vertexShader:`varying vec2 v;varying float vFD;
+    void main(){v=uv;vec4 mv=modelViewMatrix*vec4(position,1.);vFD=-mv.z;
+    gl_Position=projectionMatrix*mv;}`,
+  fragmentShader:`
+    uniform float uReveal;
+    varying vec2 v;
+    void main(){
+      float r = length(v - 0.5);
+      float a = (1.0 - smoothstep(0.0, 0.5, r)) * 0.04 * (0.3 + uReveal * 0.7);
+      vec3 c = mix(vec3(0.10,0.14,0.20), vec3(0.16,0.12,0.10), uReveal);
+      gl_FragColor = vec4(c * a, a);
+    }
+  `
+});
+const fogPlane = new THREE.Mesh(fogPlaneGeo, fogPlaneMat);
+fogPlane.rotation.x = -Math.PI * 0.5;
+fogPlane.position.y = -0.6;
+scene.add(fogPlane);
+
+// points
+const ptGeo = new THREE.BufferGeometry();
+const uvIdx = new Float32Array(N * 2);
+for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+  const i=y*W+x; uvIdx[i*2]=(x+.5)/W; uvIdx[i*2+1]=(y+.5)/H;
+}
+ptGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3),3));
+ptGeo.setAttribute('uvIdx', new THREE.BufferAttribute(uvIdx,2));
+
+const ptMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:{value:rtA.texture},
+    uPx:{value:renderer.getPixelRatio()},
+    uReveal:{value:0},
+    uTime:{value:0}
+  },
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  vertexShader:`
+    uniform sampler2D state;
+    uniform float uPx, uReveal, uTime;
+    attribute vec2 uvIdx;
+    varying vec3 vCol;
+    varying float vA;
+    varying float vFD;
+
+    // palette: monochrome slate → warm differentiated
+    // deep slate #181d2a, ember #c4956a, dusk rose #7e5a6e, bone #d4c4a0, teal #2a4a5a
+    vec3 coldSlate = vec3(0.094, 0.114, 0.165);
+    vec3 ember     = vec3(0.769, 0.584, 0.416);
+    vec3 duskRose  = vec3(0.494, 0.353, 0.431);
+    vec3 bone      = vec3(0.831, 0.769, 0.627);
+    vec3 coldTeal  = vec3(0.165, 0.290, 0.353);
+
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      // normalize Lorenz to ~unit cube
+      vec3 disp = (p - vec3(0., 0., 25.)) / 25.0;
+
+      // color: starts monochrome slate, slowly differentiates by position
+      float wing = smoothstep(-0.3, 0.3, disp.x); // left vs right wing
+      float ht = smoothstep(-0.5, 0.5, disp.y);
+
+      // cold monochrome phase
+      vec3 cold = mix(coldSlate, coldSlate * 1.15, age);
+      // warm differentiated phase
+      vec3 warm = mix(
+        mix(coldTeal, duskRose, wing),
+        mix(ember, bone, ht),
+        smoothstep(0.3, 0.7, age)
+      );
+
+      // blend based on reveal
+      float colorReveal = smoothstep(0.15, 0.7, uReveal);
+      vCol = mix(cold, warm, colorReveal);
+
+      // brightness: starts dim, grows
+      float bright = mix(0.35, 0.75, smoothstep(0.0, 0.5, uReveal));
+      vCol *= bright;
+
+      vec4 mv = modelViewMatrix * vec4(disp, 1.0);
+      vFD = -mv.z;
+
+      // fog density decreases with reveal
+      float fogDens = mix(0.09, 0.025, uReveal);
+      float fog = 1.0 - exp(-fogDens * vFD * vFD);
+      vCol = mix(vCol, vec3(0.024, 0.031, 0.051), fog);
+
+      vA = 1.0;
+      float sz = (1.5 + 0.8 * uReveal) * uPx * (3.0 / max(vFD, 0.5));
+      gl_PointSize = sz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader:`
+    varying vec3 vCol;
+    varying float vA;
+    varying float vFD;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 16.0) * vA;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const pts = new THREE.Points(ptGeo, ptMat);
+scene.add(pts);
+
+// ── breath counter ──
+const breathEl = document.getElementById('breath');
+let breathCount = 0;
+const BREATH_CYCLE = 4.0; // seconds per breath
+let breathPhase = 0;
+let breathShown = false;
+
+// ── animation ──
+const t0 = performance.now();
+let lastT = t0;
+const REVEAL_DURATION = 100.0; // seconds to full reveal
+
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+
+  const elapsed = (now - t0) / 1000;
+
+  // reveal: 0→1 over REVEAL_DURATION seconds, ease-in curve
+  const reveal = Math.min(1.0, elapsed / REVEAL_DURATION);
+  // use a slow ease-in so first 30s is barely perceptible
+  const easedReveal = reveal * reveal * reveal;
+
+  simU.uDt.value = dt;
+  simU.uReveal.value = easedReveal;
+
+  // substeps — fewer early on (particles barely moving anyway)
+  const substeps = easedReveal < 0.05 ? 2 : 4;
+  for(let i=0; i<substeps; i++){
+    simU.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simSc, camO);
+    const tmp=rtA; rtA=rtB; rtB=tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  ptMat.uniforms.state.value = rtA.texture;
+  ptMat.uniforms.uReveal.value = easedReveal;
+  ptMat.uniforms.uTime.value = elapsed;
+  fogPlaneMat.uniforms.uReveal.value = easedReveal;
+
+  // camera: imperceptibly slow orbit — full revolution in ~10 minutes
+  const ang = elapsed * 0.0105;
+  const camDist = 5.5 - easedReveal * 0.8; // slowly moves closer
+  camera.position.x = Math.sin(ang) * camDist;
+  camera.position.z = Math.cos(ang) * camDist;
+  camera.position.y = 0.3 + Math.sin(ang * 0.37) * 0.5 * easedReveal;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+
+  // grain overlay
+  grainMat.uniforms.uTime.value = elapsed;
+  renderer.autoClear = false;
+  renderer.render(grainSc, grainCam);
+  renderer.autoClear = true;
+
+  // breath counter
+  breathPhase += dt;
+  if(breathPhase >= BREATH_CYCLE){
+    breathPhase -= BREATH_CYCLE;
+    breathCount++;
+    // show after 10 seconds
+    if(!breathShown && elapsed > 10){
+      breathEl.classList.add('visible');
+      breathShown = true;
+    }
+    // update text with a subtle inhale/exhale symbol
+    const sym = breathCount % 2 === 0 ? '\u25CB' : '\u25CF'; // ○ ●
+    breathEl.textContent = `${sym} ${breathCount}`;
+  }
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
