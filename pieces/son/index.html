@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>industrial · judd stacks · specific metal object</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0c10; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">&lt;NEW_ID&gt;</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Donald Judd: stacked metal boxes with precise interval.
+// Take the strange-attractor GPGPU engine but constrain particles to unit-cube
+// grid subdivisions — 10 horizontal slabs, particles locked to their assigned
+// slab, evolving only within XZ plane via simplified attractor. Each slab is
+// a distinct metal color (anodized aluminum gradient). Camera fixed orthographic
+// side-view to emphasize the stack architecture. No fog, hard edges, specificity.
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0c10, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// 10 slabs, each Y = -4.5 + i*1.0, thickness 0.8
+const SLABS = 10;
+function makeInitTexture(){
+  const init = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++){
+    const slab = Math.floor(Math.random() * SLABS);
+    const y = -4.5 + slab * 1.0;
+    init[i*4]   = (Math.random() - 0.5) * 8.0;  // x range
+    init[i*4+1] = y;
+    init[i*4+2] = (Math.random() - 0.5) * 8.0;  // z range
+    init[i*4+3] = slab / (SLABS - 1);           // slab index normalized
+  }
+  const t = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+  t.needsUpdate = true;
+  return t;
+}
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: makeInitTexture() } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(rtB); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// simulation: particles evolve in XZ plane only, Y locked to slab
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uTime: { value: 0.0 },
+  uDt:   { value: 0.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uTime;
+    uniform float uDt;
+    varying vec2 vUv;
+
+    // simplified 2D attractor in XZ plane
+    vec2 flow(vec2 p, float slabIdx){
+      // per-slab phase offset
+      float phase = slabIdx * 6.28318;
+      float t = uTime * 0.3 + phase;
+      
+      // circular attraction + radial drift
+      float r = length(p);
+      float ang = atan(p.y, p.x);
+      float targetR = 3.0 + 0.8 * sin(slabIdx * 3.0 + t * 0.5);
+      
+      vec2 dp = vec2(0.0);
+      dp.x = -p.y * 0.4 - (r - targetR) * cos(ang) * 0.2;
+      dp.y =  p.x * 0.4 - (r - targetR) * sin(ang) * 0.2;
+      
+      // subtle drift
+      dp += vec2(sin(t + p.x * 0.1), cos(t * 1.3 + p.y * 0.1)) * 0.08;
+      
+      return dp;
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float slabIdx = s.w;
+      
+      vec2 xz = p.xz;
+      vec2 dp = flow(xz, slabIdx);
+      
+      xz += dp * uDt;
+      
+      // hard boundary (wrap to keep in frame)
+      xz.x = mod(xz.x + 4.0, 8.0) - 4.0;
+      xz.y = mod(xz.y + 4.0, 8.0) - 4.0;
+      
+      gl_FragColor = vec4(xz.x, p.y, xz.y, slabIdx);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// render scene: orthographic side view
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-7, 7, 7 * (innerHeight/innerWidth), -7 * (innerHeight/innerWidth), 0.1, 100);
+camera.position.set(12, 0, 0);
+camera.lookAt(0, 0, 0);
+
+// points geometry
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtA.texture },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying vec3 vCol;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float slabIdx = s.w;
+      
+      // anodized aluminum color gradient per slab
+      // cold blue-gray → warm bronze
+      vec3 cold = vec3(0.65, 0.70, 0.75);
+      vec3 warm = vec3(0.75, 0.62, 0.48);
+      vec3 col = mix(cold, warm, slabIdx);
+      
+      // subtle brightness variation by X position (simulated directional light)
+      float light = 0.85 + 0.15 * (p.x / 4.0);
+      vCol = col * light;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 2.4 * uPixel;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      gl_FragColor = vec4(vCol, 1.0);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// thin wireframe boxes around each slab (Judd specificity)
+for (let i = 0; i < SLABS; i++){
+  const y = -4.5 + i * 1.0;
+  const boxGeom = new THREE.BoxGeometry(8.0, 0.8, 8.0);
+  const edges = new THREE.EdgesGeometry(boxGeom);
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x3a3f48, transparent: true, opacity: 0.25 });
+  const box = new THREE.LineSegments(edges, lineMat);
+  box.position.y = y;
+  scene.add(box);
+}
+
+addEventListener('resize', () => {
+  const aspect = innerWidth / innerHeight;
+  camera.left = -7;
+  camera.right = 7;
+  camera.top = 7 * (1 / aspect);
+  camera.bottom = -7 * (1 / aspect);
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  
+  simUniforms.uTime.value = now / 1000;
+  simUniforms.uDt.value = dt;
+
+  // sim 3 substeps
+  for (let i = 0; i < 3; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
