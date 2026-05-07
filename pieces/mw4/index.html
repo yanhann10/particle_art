@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mw4 · cosmic-giggle phyllotaxis</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0410; overflow:hidden;
+               color:#e5d6f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size:11px; letter-spacing:0.04em; }
+  button.start { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+                 background:#150a25; color:#e5d6f0; border:1px solid #4a2a6a;
+                 padding:12px 22px; border-radius:4px; cursor:pointer;
+                 font-family:inherit; font-size:13px; letter-spacing:0.06em; }
+  button.start:hover { background:#22113a; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · clap, sing, hum</button>
+<div class="id">mw4</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 30);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0410, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── Fibonacci phyllotaxis on 5 nested shells ── */
+const SHELLS = 5;
+const PER_SHELL = 4000;
+const N = SHELLS * PER_SHELL;
+const PHI_ANGLE = Math.PI * (3 - Math.sqrt(5)); // golden angle
+
+const positions  = new Float32Array(N * 3);
+const shellIdxA  = new Float32Array(N);
+const seedA      = new Float32Array(N);
+const spiralIdxA = new Float32Array(N); // normalized spiral position
+
+for (let s = 0; s < SHELLS; s++) {
+  const baseR = 3.2 + s * 2.6;
+  for (let i = 0; i < PER_SHELL; i++) {
+    const idx = s * PER_SHELL + i;
+    const frac = i / PER_SHELL;
+    // phyllotaxis: golden-angle spiral on sphere surface
+    const theta = PHI_ANGLE * i;
+    const phi = Math.acos(1 - 2 * frac);
+    const r = baseR * (0.85 + 0.15 * Math.sin(frac * Math.PI * 8)); // gentle radial ripple
+    positions[idx*3]   = r * Math.sin(phi) * Math.cos(theta);
+    positions[idx*3+1] = r * Math.sin(phi) * Math.sin(theta);
+    positions[idx*3+2] = r * Math.cos(phi);
+    shellIdxA[idx]  = s;
+    seedA[idx]      = Math.random();
+    spiralIdxA[idx] = frac;
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position',  new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('shellIdx',  new THREE.BufferAttribute(shellIdxA, 1));
+geom.setAttribute('seed',      new THREE.BufferAttribute(seedA, 1));
+geom.setAttribute('spiralIdx', new THREE.BufferAttribute(spiralIdxA, 1));
+
+const uBands = new THREE.Vector4(0,0,0,0);
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uBands:  { value: uBands },
+  uTreble: { value: 0 },
+  uGiggle: { value: 0 },  // 0→1 during the giggle event
+  uGigglePhase: { value: 0 } // sub-phase for color flash
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec4  uBands;
+    uniform float uTreble;
+    uniform float uGiggle;
+    uniform float uGigglePhase;
+    attribute float shellIdx;
+    attribute float seed;
+    attribute float spiralIdx;
+    varying vec3  vCol;
+    varying float vEnergy;
+
+    void main(){
+      /* band energy per shell */
+      float e;
+      if      (shellIdx < 0.5) e = uBands.x;
+      else if (shellIdx < 1.5) e = uBands.y;
+      else if (shellIdx < 2.5) e = uBands.z;
+      else if (shellIdx < 3.5) e = uBands.w;
+      else                     e = uTreble;
+      vEnergy = e;
+
+      vec3 p = position;
+      float r = length(p);
+      vec3 dir = p / max(r, 0.001);
+
+      /* ── THE GIGGLE: shell radii invert inside-out ── */
+      /* shell 0 (innermost, r≈3.2) swaps with shell 4 (outermost, r≈13.6) */
+      float maxR = 3.2 + 4.0 * 2.6;  // 13.6
+      float minR = 3.2;
+      float normalR = minR + shellIdx * 2.6;
+      float invertR = maxR - (shellIdx * 2.6);
+      float gigR = mix(normalR, invertR, uGiggle);
+      /* rescale position to new radius */
+      float baseR = minR + shellIdx * 2.6;
+      float scale = gigR / max(baseR, 0.01);
+      /* add spiral-arm wiggle that intensifies during giggle */
+      float spiralWiggle = sin(spiralIdx * 80.0 + uTime * 2.0) * 0.3 * uGiggle;
+      p = dir * (r * scale * (1.0 + e * 0.7) + spiralWiggle);
+
+      /* tangential golden-spiral swirl */
+      float t = uTime * 0.35 + seed * 6.28 + shellIdx * 0.8;
+      vec3 up = vec3(0.0, 1.0, 0.0);
+      vec3 perp = normalize(cross(dir, up + 0.1 * sin(seed * 9.0)));
+      p += perp * sin(t) * (0.3 + e * 0.8);
+
+      /* phyllotaxis rotation — visible spiral arms */
+      float spiralTwist = uTime * 0.12 * (1.0 + shellIdx * 0.15);
+      float ct = cos(spiralTwist), st = sin(spiralTwist);
+      p.xz = mat2(ct, -st, st, ct) * p.xz;
+
+      /* ── palette ── */
+      /* normal: amber → cyan duotone */
+      vec3 amber = vec3(0.98, 0.68, 0.22);
+      vec3 cyan  = vec3(0.25, 0.85, 0.95);
+      float k = clamp(shellIdx / 4.0 + e * 0.3, 0.0, 1.0);
+      vec3 normalCol = mix(amber, cyan, k);
+
+      /* giggle: brief magenta-chartreuse flash (Calder comic-palette) */
+      vec3 magenta    = vec3(0.95, 0.18, 0.72);
+      vec3 chartreuse = vec3(0.62, 0.98, 0.22);
+      vec3 giggleCol  = mix(magenta, chartreuse, k);
+
+      /* flash peaks at gigglePhase ~0.5 then fades */
+      float flashMix = uGiggle * smoothstep(0.0, 0.3, uGigglePhase)
+                                * (1.0 - smoothstep(0.5, 1.0, uGigglePhase));
+      vCol = mix(normalCol, giggleCol, flashMix * 0.7);
+      vCol *= (0.55 + e * 1.3);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + 2.0 * e + 0.8 * uGiggle) * uPixel * (48.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vEnergy;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * (0.4 + 0.6 * vEnergy);
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── audio ── */
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+let analyser = null, freqData = null;
+
+async function startAudio(){
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting mic…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.7;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'live · phyllotaxis shells';
+  } catch(e) {
+    hint.textContent = 'mic denied — passive synthetic mode';
+  }
+}
+startBtn.addEventListener('click', startAudio);
+
+function bandEnergy(arr, lo, hi){
+  let s = 0;
+  for (let i = lo; i < hi; i++) s += arr[i];
+  return (s / (hi - lo)) / 255;
+}
+
+/* ── giggle timing ──
+   Every ~18 s, a 2.5 s giggle event fires:
+   smooth rise → hold → smooth recover.
+   Comic timing: slightly asymmetric (quick onset, lazier recovery)
+   like a Tinguely machine hiccup. */
+const GIGGLE_PERIOD  = 18.0;
+const GIGGLE_DUR     = 2.8;
+const GIGGLE_ATTACK  = 0.35; // fraction of duration for ramp-up
+const GIGGLE_SUSTAIN = 0.25;
+
+function giggleEnvelope(t) {
+  const cycle = t % GIGGLE_PERIOD;
+  if (cycle > GIGGLE_DUR) return { g: 0, phase: 0 };
+  const f = cycle / GIGGLE_DUR; // 0→1 through event
+  let g;
+  if (f < GIGGLE_ATTACK) {
+    // quick ease-in
+    const x = f / GIGGLE_ATTACK;
+    g = x * x * (3 - 2*x); // smoothstep
+  } else if (f < GIGGLE_ATTACK + GIGGLE_SUSTAIN) {
+    g = 1.0;
+  } else {
+    // lazier ease-out
+    const x = (f - GIGGLE_ATTACK - GIGGLE_SUSTAIN) / (1 - GIGGLE_ATTACK - GIGGLE_SUSTAIN);
+    g = 1 - x * x * (3 - 2*x);
+  }
+  return { g, phase: f };
+}
+
+/* ── camera: gentle orbit that tracks centroid ── */
+const camTarget = new THREE.Vector3();
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  /* gentle tumble */
+  points.rotation.y = t * 0.05;
+  points.rotation.x = Math.sin(t * 0.07) * 0.15;
+
+  /* giggle */
+  const { g, phase } = giggleEnvelope(t);
+  uniforms.uGiggle.value = g;
+  uniforms.uGigglePhase.value = phase;
+
+  /* camera breathes outward slightly during giggle */
+  const baseDist = 28;
+  const gigglePush = g * 4.0;
+  camera.position.set(
+    Math.sin(t * 0.03) * 3,
+    Math.cos(t * 0.04) * 2,
+    baseDist + gigglePush
+  );
+  camTarget.set(0, 0, 0);
+  camera.lookAt(camTarget);
+
+  /* audio → bands */
+  if (analyser){
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    uBands.x = bandEnergy(freqData, 0, Math.floor(n*0.04));
+    uBands.y = bandEnergy(freqData, Math.floor(n*0.04), Math.floor(n*0.12));
+    uBands.z = bandEnergy(freqData, Math.floor(n*0.12), Math.floor(n*0.30));
+    uBands.w = bandEnergy(freqData, Math.floor(n*0.30), Math.floor(n*0.55));
+    uniforms.uTreble.value = bandEnergy(freqData, Math.floor(n*0.55), n);
+  } else {
+    uBands.x = 0.35 + 0.35 * Math.sin(t*1.3);
+    uBands.y = 0.30 + 0.30 * Math.sin(t*2.1 + 1.1);
+    uBands.z = 0.25 + 0.25 * Math.sin(t*3.0 + 2.0);
+    uBands.w = 0.20 + 0.20 * Math.sin(t*4.7 + 0.4);
+    uniforms.uTreble.value = 0.18 + 0.18 * Math.sin(t*7.0);
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
