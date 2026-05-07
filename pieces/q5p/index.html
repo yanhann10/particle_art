@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>q5p · Rousseau jungle canopy</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a110d; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">q5p</div>
+<div class="hint">drag to orbit · click to regrow</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*
+  Henri Rousseau × L-system particle tree
+  ─────────────────────────────────────────
+  Rousseau's jungle paintings: dense flat foliage layers, every leaf
+  rendered with equal naïve attention, dreamlike stillness, deep
+  saturated greens with occasional warm fruit/flower accents.
+
+  Technique: multiple L-system growths layered at different depths,
+  particles rendered as flat disc-leaves with hard edges (no soft glow),
+  frontal tableau composition, very slow breathing sway.
+*/
+
+const RULES = {
+  'F': [
+    { p: 0.35, s: 'FF[+F-F][-F+F][/F\\F]' },
+    { p: 0.30, s: 'F[+F][&F][-F]F' },
+    { p: 0.20, s: 'F[/F][\\F][+F]F' },
+    { p: 0.15, s: 'FF[+F][-F][&F]' },
+  ],
+};
+const ANGLE = THREE.MathUtils.degToRad(25);
+const STEP_BASE = 1.0;
+
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function expand(axiom, depth, rng) {
+  let s = axiom;
+  for (let d = 0; d < depth; d++) {
+    let out = '';
+    for (const ch of s) {
+      if (ch in RULES) {
+        const r = rng();
+        let acc = 0;
+        for (const opt of RULES[ch]) {
+          acc += opt.p;
+          if (r <= acc) { out += opt.s; break; }
+        }
+      } else out += ch;
+    }
+    s = out;
+  }
+  return s;
+}
+
+function turtle(str, depthFactor) {
+  const H = new THREE.Vector3(0, 1, 0);
+  const L = new THREE.Vector3(-1, 0, 0);
+  const U = new THREE.Vector3(0, 0, 1);
+  const stack = [];
+  const segments = [];
+  let pos = new THREE.Vector3(0, 0, 0);
+  let h = H.clone(), l = L.clone(), u = U.clone();
+  let gen = 0;
+
+  const rotate = (axis, ang) => {
+    const q = new THREE.Quaternion().setFromAxisAngle(axis, ang);
+    h.applyQuaternion(q); l.applyQuaternion(q); u.applyQuaternion(q);
+  };
+
+  for (const ch of str) {
+    switch (ch) {
+      case 'F': {
+        const step = STEP_BASE * Math.pow(depthFactor, gen);
+        const nextPos = pos.clone().addScaledVector(h, step);
+        segments.push({ from: pos.clone(), to: nextPos.clone(), gen });
+        pos = nextPos;
+        break;
+      }
+      case '+': rotate(u, +ANGLE); break;
+      case '-': rotate(u, -ANGLE); break;
+      case '&': rotate(l, +ANGLE); break;
+      case '^': rotate(l, -ANGLE); break;
+      case '/': rotate(h, +ANGLE); break;
+      case '\\': rotate(h, -ANGLE); break;
+      case '[':
+        stack.push({ pos: pos.clone(), h: h.clone(), l: l.clone(), u: u.clone(), gen });
+        gen += 1;
+        break;
+      case ']': {
+        const f = stack.pop();
+        pos = f.pos; h = f.h; l = f.l; u = f.u; gen = f.gen;
+        break;
+      }
+    }
+  }
+  return segments;
+}
+
+function buildLayerParticles(segments, count, layerIdx, totalLayers, rng) {
+  const lens = segments.map(s => s.from.distanceTo(s.to));
+  const total = lens.reduce((a, b) => a + b, 0);
+  const positions = new Float32Array(count * 3);
+  const seeds = new Float32Array(count);
+  const gens = new Float32Array(count);
+  const layers = new Float32Array(count);
+  const isFlower = new Float32Array(count);
+  const v = new THREE.Vector3();
+  let written = 0;
+
+  for (let i = 0; i < segments.length && written < count; i++) {
+    const share = i === segments.length - 1
+      ? count - written
+      : Math.max(1, Math.floor(count * lens[i] / total));
+    for (let k = 0; k < share && written < count; k++) {
+      const t = rng();
+      v.lerpVectors(segments[i].from, segments[i].to, t);
+      // Rousseau: leaves are flat but spread wide — more lateral jitter at tips
+      const gen = segments[i].gen;
+      const spread = gen >= 3 ? 0.35 : 0.05 * gen;
+      v.x += (rng() - 0.5) * spread;
+      v.y += (rng() - 0.5) * spread * 0.3;
+      v.z += (rng() - 0.5) * spread;
+
+      positions[written * 3] = v.x;
+      positions[written * 3 + 1] = v.y;
+      positions[written * 3 + 2] = v.z;
+      seeds[written] = rng();
+      gens[written] = gen;
+      layers[written] = layerIdx / Math.max(1, totalLayers - 1);
+      // rare flowers on outer branches
+      isFlower[written] = (gen >= 4 && rng() < 0.03) ? 1.0 : 0.0;
+      written++;
+    }
+  }
+  return { positions, seeds, gens, layers, isFlower, count: written };
+}
+
+// --- Scene ---
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 6, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a110d, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.target.set(0, 5, 0);
+
+// Multiple jungle layers — Rousseau stacks flat planes of vegetation
+const LAYER_COUNT = 5;
+const PARTICLES_PER_LAYER = 16000;
+const TOTAL = LAYER_COUNT * PARTICLES_PER_LAYER;
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    attribute float seed;
+    attribute float gen;
+    attribute float layer;
+    attribute float flower;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFlower;
+
+    void main() {
+      vec3 p = position;
+      float t = uTime * 0.18 + seed * 6.28;
+
+      // Rousseau: very slow, dreamlike breathing — barely perceptible sway
+      float sway = 0.025 * gen * (0.5 + 0.5 * sin(t * 0.4));
+      p.x += sway * sin(t * 0.3 + p.y * 0.15);
+      p.z += sway * cos(t * 0.25 + p.y * 0.15);
+
+      // reveal: leaves drift down from above like flat cutouts settling
+      vec3 entry = vec3(p.x + (seed - 0.5) * 3.0, p.y + 18.0 + seed * 6.0, p.z);
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      // Rousseau palette: deep jungle greens, each layer slightly different value
+      // Trunk/bark: dark umber. Branches: deep green. Canopy: rich emerald.
+      // Occasional warm flowers (cadmium orange / crimson)
+      vec3 bark = vec3(0.22, 0.14, 0.08);
+      vec3 deepGreen = vec3(0.08, 0.28, 0.12);
+      vec3 midGreen = vec3(0.14, 0.42, 0.18);
+      vec3 canopy = vec3(0.18, 0.52, 0.22);
+      vec3 brightLeaf = vec3(0.30, 0.58, 0.20);
+
+      float k = clamp(gen * 0.2, 0.0, 1.0);
+      vec3 col = mix(bark, deepGreen, smoothstep(0.0, 0.3, k));
+      col = mix(col, midGreen, smoothstep(0.3, 0.55, k));
+      col = mix(col, canopy, smoothstep(0.55, 0.8, k));
+      col = mix(col, brightLeaf, smoothstep(0.8, 1.0, k));
+
+      // depth variation per layer — farther layers slightly darker/bluer (aerial perspective)
+      col *= (0.7 + 0.3 * (1.0 - layer));
+      col += vec3(-0.01, -0.01, 0.02) * layer;
+
+      // flowers: warm cadmium / crimson accents
+      vec3 flowerCol = seed < 0.5
+        ? vec3(0.85, 0.25, 0.12)   // crimson
+        : vec3(0.92, 0.65, 0.15);  // cadmium orange
+      col = mix(col, flowerCol, flower);
+
+      vCol = col;
+      vFlower = flower;
+      // Rousseau: flat, equal opacity — naïve rendering treats every leaf the same
+      vAlpha = mix(0.72, 0.92, k) * (0.6 + 0.4 * uReady);
+      vAlpha = mix(vAlpha, 0.95, flower);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // flat disc-like leaves: larger at tips (gen), flowers slightly bigger
+      float baseSize = (1.5 + gen * 0.6 + flower * 2.0);
+      gl_PointSize = baseSize * uPixel * (45.0 / dist) * (0.3 + 0.7 * uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFlower;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+      // Rousseau: hard-edged flat leaves, not soft gaussian blobs
+      // disc with slight softening at edge
+      if (r2 > 0.22) discard;
+      float edge = 1.0 - smoothstep(0.15, 0.22, r2);
+      float a = vAlpha * edge;
+      // slight vein darkening toward center for leaves
+      float vein = 1.0 - 0.12 * (1.0 - vFlower) * exp(-r2 * 30.0);
+      gl_FragColor = vec4(vCol * vein, a);
+    }
+  `
+});
+
+let geom, points;
+let revealStart = 0;
+let centroid = new THREE.Vector3(0, 5, 0);
+
+function regrow(baseSeed) {
+  const allPos = new Float32Array(TOTAL * 3);
+  const allSeed = new Float32Array(TOTAL);
+  const allGen = new Float32Array(TOTAL);
+  const allLayer = new Float32Array(TOTAL);
+  const allFlower = new Float32Array(TOTAL);
+  const bb = new THREE.Box3();
+  let offset = 0;
+
+  for (let li = 0; li < LAYER_COUNT; li++) {
+    const rng = makeRng(baseSeed + li * 7919);
+    const layerZ = (li - (LAYER_COUNT - 1) / 2) * 3.2;
+    const layerX = (rng() - 0.5) * 4.0;
+    const depth = li === 2 ? 5 : 4; // center layer = biggest tree
+    const str = expand('F', depth, rng);
+    const segs = turtle(str, 0.72);
+
+    // center each tree and offset in z for layering
+    const lbb = new THREE.Box3();
+    for (const s of segs) { lbb.expandByPoint(s.from); lbb.expandByPoint(s.to); }
+    const ctr = lbb.getCenter(new THREE.Vector3());
+    for (const s of segs) {
+      s.from.x -= ctr.x; s.from.z -= ctr.z; s.from.y -= lbb.min.y;
+      s.to.x -= ctr.x; s.to.z -= ctr.z; s.to.y -= lbb.min.y;
+      s.from.z += layerZ; s.to.z += layerZ;
+      s.from.x += layerX; s.to.x += layerX;
+    }
+
+    const data = buildLayerParticles(segs, PARTICLES_PER_LAYER, li, LAYER_COUNT, rng);
+    allPos.set(data.positions.subarray(0, data.count * 3), offset * 3);
+    allSeed.set(data.seeds.subarray(0, data.count), offset);
+    allGen.set(data.gens.subarray(0, data.count), offset);
+    allLayer.set(data.layers.subarray(0, data.count), offset);
+    allFlower.set(data.isFlower.subarray(0, data.count), offset);
+    offset += data.count;
+
+    for (const s of segs) { bb.expandByPoint(s.from); bb.expandByPoint(s.to); }
+  }
+
+  centroid = bb.getCenter(new THREE.Vector3());
+
+  if (!geom) {
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(allPos, 3));
+    geom.setAttribute('seed', new THREE.BufferAttribute(allSeed, 1));
+    geom.setAttribute('gen', new THREE.BufferAttribute(allGen, 1));
+    geom.setAttribute('layer', new THREE.BufferAttribute(allLayer, 1));
+    geom.setAttribute('flower', new THREE.BufferAttribute(allFlower, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(allPos); geom.attributes.position.needsUpdate = true;
+    geom.attributes.seed.array.set(allSeed); geom.attributes.seed.needsUpdate = true;
+    geom.attributes.gen.array.set(allGen); geom.attributes.gen.needsUpdate = true;
+    geom.attributes.layer.array.set(allLayer); geom.attributes.layer.needsUpdate = true;
+    geom.attributes.flower.array.set(allFlower); geom.attributes.flower.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+  revealStart = performance.now();
+}
+
+regrow(Math.floor(Math.random() * 1e9));
+
+addEventListener('click', (e) => {
+  if (e.target.closest('.id, .hint')) return;
+  regrow(Math.floor(Math.random() * 1e9));
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Firefly particles — tiny warm specks drifting through the jungle
+const FF_COUNT = 200;
+const ffGeom = new THREE.BufferGeometry();
+const ffPos = new Float32Array(FF_COUNT * 3);
+const ffSeed = new Float32Array(FF_COUNT);
+for (let i = 0; i < FF_COUNT; i++) {
+  ffPos[i * 3] = (Math.random() - 0.5) * 16;
+  ffPos[i * 3 + 1] = Math.random() * 14;
+  ffPos[i * 3 + 2] = (Math.random() - 0.5) * 14;
+  ffSeed[i] = Math.random();
+}
+ffGeom.setAttribute('position', new THREE.BufferAttribute(ffPos, 3));
+ffGeom.setAttribute('seed', new THREE.BufferAttribute(ffSeed, 1));
+
+const ffMat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    attribute float seed;
+    varying float vBright;
+    void main() {
+      vec3 p = position;
+      float t = uTime * 0.3 + seed * 6.28;
+      p.x += sin(t * 0.7 + seed * 10.0) * 0.5;
+      p.y += sin(t * 0.5 + seed * 5.0) * 0.3 + uTime * 0.02;
+      p.z += cos(t * 0.6 + seed * 8.0) * 0.4;
+      // wrap vertically
+      p.y = mod(p.y, 16.0);
+      vBright = 0.3 + 0.7 * pow(0.5 + 0.5 * sin(t * 2.0 + seed * 12.0), 3.0);
+      vBright *= uReady;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = uPixel * (18.0 / -mv.z) * vBright;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vBright;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vBright * 0.6;
+      vec3 col = vec3(0.95, 0.85, 0.4);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(ffGeom, ffMat));
+
+const start = performance.now();
+function loop() {
+  const now = performance.now();
+  uniforms.uTime.value = (now - start) / 1000;
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (now - revealStart) / 2800);
+  }
+
+  // camera gently tracks centroid — Rousseau's fixed frontal gaze
+  controls.target.lerp(centroid, 0.02);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
