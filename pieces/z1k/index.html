@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>z1k · the bird that is many leaves remembering flight</title>
+<!-- MOTION: gather, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#0a0a0f;
+               font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">z1k</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 150);
+camera.position.set(0, 0, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080f, 1);
+document.body.appendChild(renderer.domElement);
+
+// ── Background: muted gradient + starfield specks + paper grain
+const bgScene = new THREE.Scene();
+const bgCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uTime;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+    void main(){
+      // very subdued gradient — dark indigo to warm umber, low saturation
+      vec3 top = vec3(0.06, 0.06, 0.10);
+      vec3 mid = vec3(0.08, 0.06, 0.07);
+      vec3 bot = vec3(0.10, 0.07, 0.05);
+      vec3 col = mix(top, mid, smoothstep(0.0, 0.5, vUv.y));
+      col = mix(col, bot, smoothstep(0.5, 1.0, vUv.y));
+      // starfield specks
+      float star = hash(floor(vUv * 400.0));
+      star = step(0.997, star) * (0.15 + 0.1 * sin(uTime * 0.5 + star * 30.0));
+      col += vec3(star * 0.6, star * 0.55, star * 0.7);
+      // paper grain texture
+      float grain = (hash(vUv * 800.0 + uTime * 0.01) - 0.5) * 0.012;
+      col += grain;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const bgQuad = new THREE.Mesh(new THREE.PlaneGeometry(2,2), bgMat);
+bgScene.add(bgQuad);
+
+// ── Leaf geometry: a curved sheet with midrib curl
+function makeLeafGeom(segsU, segsV){
+  const positions = [], normals = [], uvs = [], indices = [];
+  for(let j = 0; j <= segsV; j++){
+    const v = j / segsV;
+    for(let i = 0; i <= segsU; i++){
+      const u = i / segsU;
+      // leaf shape: wider in middle, tapered at tip and base
+      const width = 0.5 * Math.sin(v * Math.PI) * (1.0 - 0.3 * v);
+      const x = (u - 0.5) * width;
+      const y = v - 0.5; // -0.5 to 0.5
+      // curl: midrib bends, edges curl inward
+      const curl = 0.12 * Math.sin(v * Math.PI * 1.2) * (1.0 - Math.abs(u - 0.5) * 0.6);
+      const edgeCurl = 0.06 * Math.pow(Math.abs(u - 0.5) * 2.0, 2.0) * Math.sin(v * Math.PI);
+      const z = curl + edgeCurl;
+      positions.push(x, y, z);
+      normals.push(0, 0, 1);
+      uvs.push(u, v);
+    }
+  }
+  for(let j = 0; j < segsV; j++){
+    for(let i = 0; i < segsU; i++){
+      const a = j * (segsU+1) + i;
+      const b = a + 1;
+      const c = a + (segsU+1);
+      const d = c + 1;
+      indices.push(a,c,b, b,c,d);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  g.setIndex(indices);
+  g.computeVertexNormals();
+  return g;
+}
+
+const leafGeom = makeLeafGeom(6, 10);
+
+// ── Bird silhouette: generate target positions shaped like a bird in flight
+const LEAF_COUNT = 220;
+const leafData = []; // { target, phase, scale, rotAxis, detachTime, state }
+
+function birdPoint(i, total){
+  // parametric bird: body + two wings
+  const t = (i / total);
+  let x, y, z;
+  if(t < 0.15){
+    // head/neck
+    const s = t / 0.15;
+    x = 2.5 + s * 1.2;
+    y = 0.3 * Math.sin(s * Math.PI * 0.7);
+    z = (Math.random() - 0.5) * 0.3;
+  } else if(t < 0.35){
+    // body
+    const s = (t - 0.15) / 0.20;
+    x = -1.0 + s * 3.5;
+    y = (Math.random() - 0.5) * 0.6;
+    z = (Math.random() - 0.5) * 0.5;
+  } else if(t < 0.65){
+    // left wing
+    const s = (t - 0.35) / 0.30;
+    const span = s * 4.5;
+    x = 0.8 - s * 1.5 + (Math.random()-0.5) * 0.4;
+    y = span * 0.7 + (Math.random()-0.5) * 0.3;
+    z = -span * 0.15 + (Math.random()-0.5) * 0.3;
+  } else if(t < 0.92){
+    // right wing
+    const s = (t - 0.65) / 0.27;
+    const span = s * 4.5;
+    x = 0.8 - s * 1.5 + (Math.random()-0.5) * 0.4;
+    y = -span * 0.7 + (Math.random()-0.5) * 0.3;
+    z = -span * 0.15 + (Math.random()-0.5) * 0.3;
+  } else {
+    // tail
+    const s = (t - 0.92) / 0.08;
+    x = -1.5 - s * 1.5;
+    y = (Math.random() - 0.5) * (0.5 + s * 1.0);
+    z = (Math.random() - 0.5) * 0.4;
+  }
+  return new THREE.Vector3(x, y, z);
+}
+
+// palette: warm amber / sodium / cream / oxide — hand-picked
+const palette = [
+  new THREE.Color(0.92, 0.58, 0.22),  // sodium amber
+  new THREE.Color(0.85, 0.42, 0.15),  // oxide orange
+  new THREE.Color(1.00, 0.88, 0.65),  // cream
+  new THREE.Color(0.62, 0.30, 0.12),  // umber
+  new THREE.Color(0.45, 0.22, 0.08),  // dark russet
+];
+
+const leafMat = new THREE.ShaderMaterial({
+  side: THREE.DoubleSide,
+  transparent: true,
+  depthWrite: true,
+  uniforms: {
+    uTime: { value: 0 },
+    uCohesion: { value: 1.0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    varying vec3 vWorldPos;
+    uniform float uTime;
+    void main(){
+      vUv = uv;
+      vNormal = normalize(normalMatrix * normal);
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorldPos = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    varying vec3 vWorldPos;
+    uniform float uTime;
+    uniform float uCohesion;
+    void main(){
+      // midrib vein line
+      float midrib = 1.0 - smoothstep(0.0, 0.04, abs(vUv.x - 0.5));
+      // side veins
+      float veinAngle = vUv.y * 12.0 + vUv.x * 3.0;
+      float sideVein = smoothstep(0.02, 0.0, abs(fract(veinAngle) - 0.5) - 0.46) * 0.3;
+      // lighting
+      vec3 lightDir = normalize(vec3(0.4, 0.8, 0.6));
+      float diff = max(dot(vNormal, lightDir), 0.0) * 0.6 + 0.4;
+      // subsurface glow
+      float ss = max(dot(-vNormal, lightDir), 0.0) * 0.25;
+      // base color from instance (approximated via world position)
+      float colorSeed = fract(vWorldPos.x * 0.13 + vWorldPos.y * 0.17);
+      vec3 warm = mix(vec3(0.92,0.58,0.22), vec3(1.0,0.88,0.65), colorSeed);
+      vec3 cool = mix(vec3(0.45,0.22,0.08), vec3(0.62,0.30,0.12), colorSeed);
+      vec3 col = mix(cool, warm, uCohesion);
+      col *= diff + ss;
+      col += midrib * vec3(0.15, 0.08, 0.02);
+      col += sideVein * vec3(0.1, 0.05, 0.01);
+      // edge fade
+      float edgeFade = smoothstep(0.0, 0.08, vUv.x) * smoothstep(1.0, 0.92, vUv.x);
+      float tipFade = smoothstep(0.0, 0.05, vUv.y) * smoothstep(1.0, 0.92, vUv.y);
+      float alpha = edgeFade * tipFade * 0.92;
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+// ── Create instanced leaves as individual meshes for per-leaf animation
+const leaves = [];
+for(let i = 0; i < LEAF_COUNT; i++){
+  const mesh = new THREE.Mesh(leafGeom, leafMat);
+  const target = birdPoint(i, LEAF_COUNT);
+  const scale = 0.28 + Math.random() * 0.22;
+  mesh.scale.set(scale, scale * (0.9 + Math.random() * 0.3), scale);
+  mesh.position.copy(target);
+  // initial rotation: roughly aligned to wing surface
+  mesh.rotation.set(
+    (Math.random() - 0.5) * 0.4,
+    (Math.random() - 0.5) * 0.3,
+    Math.random() * Math.PI * 0.3 - 0.15
+  );
+  scene.add(mesh);
+  leaves.push({
+    mesh,
+    target: target.clone(),
+    current: target.clone(),
+    phase: Math.random() * Math.PI * 2,
+    baseScale: scale,
+    rotSpeed: (Math.random() - 0.5) * 0.2,
+    detached: false,
+    detachTimer: 8 + Math.random() * 25, // seconds until this leaf detaches
+    returnTimer: 0,
+    driftVel: new THREE.Vector3(),
+    wingFactor: (i/LEAF_COUNT > 0.35 && i/LEAF_COUNT < 0.92) ? 1.0 : 0.0
+  });
+}
+
+// ── Narrative arc: cohesion cycles as leaves detach and return
+let cohesion = 1.0;
+let detachedCount = 0;
+const MAX_DETACHED = 35;
+
+// ── Ambient light
+const ambLight = new THREE.AmbientLight(0x2a1f18, 0.4);
+scene.add(ambLight);
+const dirLight = new THREE.DirectionalLight(0xffe0b0, 0.7);
+dirLight.position.set(3, 5, 4);
+scene.add(dirLight);
+const rimLight = new THREE.DirectionalLight(0x4a3020, 0.3);
+rimLight.position.set(-3, -2, -3);
+scene.add(rimLight);
+
+// ── Dust motes for atmospheric texture
+const dustCount = 80;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+for(let i = 0; i < dustCount; i++){
+  dustPos[i*3] = (Math.random()-0.5) * 20;
+  dustPos[i*3+1] = (Math.random()-0.5) * 12;
+  dustPos[i*3+2] = (Math.random()-0.5) * 10;
+}
+dustGeom.setAttribute('position', new THREE.Float32BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({
+  size: 0.04, color: 0xd0a060, transparent: true, opacity: 0.2,
+  blending: THREE.AdditiveBlending, depthWrite: false
+});
+const dustPoints = new THREE.Points(dustGeom, dustMat);
+scene.add(dustPoints);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  const t = now / 1000;
+
+  bgMat.uniforms.uTime.value = t;
+  leafMat.uniforms.uTime.value = t;
+
+  // update leaves
+  detachedCount = 0;
+  for(let i = 0; i < leaves.length; i++){
+    const L = leaves[i];
+    if(!L.detached){
+      L.detachTimer -= dt;
+      if(L.detachTimer <= 0 && detachedCount < MAX_DETACHED){
+        L.detached = true;
+        L.returnTimer = 4 + Math.random() * 8;
+        L.driftVel.set(
+          (Math.random()-0.5) * 1.5,
+          (Math.random()-0.5) * 0.8 - 0.3,
+          (Math.random()-0.5) * 1.0
+        );
+      }
+    }
+    if(L.detached){
+      detachedCount++;
+      L.returnTimer -= dt;
+      if(L.returnTimer <= 0){
+        // return phase: drift back toward target
+        const diff = L.target.clone().sub(L.current);
+        const d = diff.length();
+        if(d < 0.1){
+          L.detached = false;
+          L.detachTimer = 10 + Math.random() * 20;
+          L.current.copy(L.target);
+        } else {
+          L.current.add(diff.normalize().multiplyScalar(dt * 2.5));
+        }
+      } else {
+        // drifting away
+        L.driftVel.y -= dt * 0.15; // gentle gravity
+        L.current.add(L.driftVel.clone().multiplyScalar(dt));
+      }
+    } else {
+      // breathing: subtle oscillation around target
+      const breath = Math.sin(t * 0.8 + L.phase) * 0.06;
+      const wingBeat = L.wingFactor * Math.sin(t * 1.2 + L.phase * 0.5) * 0.12;
+      L.current.x = L.target.x + Math.sin(t * 0.3 + L.phase) * 0.03;
+      L.current.y = L.target.y + breath + wingBeat;
+      L.current.z = L.target.z + Math.cos(t * 0.4 + L.phase) * 0.02;
+    }
+    L.mesh.position.lerp(L.current, dt * 4.0);
+    // gentle rotation breathing
+    L.mesh.rotation.z += L.rotSpeed * dt * (L.detached ? 3.0 : 0.3);
+    if(L.detached){
+      L.mesh.rotation.x += dt * 0.5;
+    }
+  }
+
+  cohesion = 1.0 - (detachedCount / MAX_DETACHED) * 0.8;
+  leafMat.uniforms.uCohesion.value = cohesion;
+
+  // dust drift
+  for(let i = 0; i < dustCount; i++){
+    dustPos[i*3] += Math.sin(t * 0.2 + i) * dt * 0.05;
+    dustPos[i*3+1] += dt * 0.02;
+    if(dustPos[i*3+1] > 6) dustPos[i*3+1] = -6;
+  }
+  dustGeom.attributes.position.needsUpdate = true;
+
+  // camera: slow orbit tracking centroid of bird form
+  const ang = t * 0.06;
+  const camR = 16 + Math.sin(t * 0.1) * 2;
+  camera.position.x = Math.sin(ang) * camR;
+  camera.position.z = Math.cos(ang) * camR;
+  camera.position.y = Math.sin(t * 0.08) * 1.5 + 1.0;
+  camera.lookAt(0, 0, 0);
+
+  renderer.autoClear = false;
+  renderer.clear();
+  renderer.render(bgScene, bgCam);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
