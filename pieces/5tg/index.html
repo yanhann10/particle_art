@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5tg · attractor lamp · 4 stages</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#04060a; overflow:hidden;
+               color:#cfe1d4; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; color:#cdd2dc;
+           font-family: ui-monospace, "SF Mono", Menlo, monospace; letter-spacing:0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .stage { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size:11px; letter-spacing:0.08em; }
+</style>
+</head>
+<body>
+<div class="id">5tg</div>
+<div class="hint">click to cycle attractor · auto-cycles every 14s</div>
+<div class="stage" id="stage">stage 1/4 · lorenz</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const MODES = [
+  { id:'lorenz',    basinCenter:[0,0,27],    basinSize:8,
+    normCenter:[0,0,25],  normScale:25,  pal:[[0.20,0.32,0.78],[0.85,0.32,0.62],[0.98,0.86,0.50]] },
+  { id:'aizawa',    basinCenter:[0.1,0,0],   basinSize:0.6,
+    normCenter:[0,0,0],   normScale:1.6, pal:[[0.20,0.62,0.45],[0.55,0.30,0.78],[0.92,0.95,0.98]] },
+  { id:'thomas',    basinCenter:[0.5,0,0.5], basinSize:1.2,
+    normCenter:[0,0,0],   normScale:5.0, pal:[[0.92,0.55,0.20],[0.98,0.78,0.32],[0.55,0.20,0.05]] },
+  { id:'halvorsen', basinCenter:[-1,-1,-1],  basinSize:1.8,
+    normCenter:[0,0,0],   normScale:7.0, pal:[[0.42,0.78,0.92],[0.88,0.42,0.62],[0.92,0.92,0.85]] },
+];
+
+const W=320, H=320, N=W*H;
+
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.setClearColor(0x04060a,1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type:THREE.HalfFloatType, format:THREE.RGBAFormat,
+  minFilter:THREE.NearestFilter, magFilter:THREE.NearestFilter,
+  wrapS:THREE.ClampToEdgeWrapping, wrapT:THREE.ClampToEdgeWrapping, depthBuffer:false };
+let rtA = new THREE.WebGLRenderTarget(W,H,rtParams);
+let rtB = new THREE.WebGLRenderTarget(W,H,rtParams);
+
+function makeInitTexture(mi){
+  const m=MODES[mi], init=new Float32Array(N*4);
+  for(let i=0;i<N;i++){
+    init[i*4]  =m.basinCenter[0]+(Math.random()-0.5)*m.basinSize;
+    init[i*4+1]=m.basinCenter[1]+(Math.random()-0.5)*m.basinSize;
+    init[i*4+2]=m.basinCenter[2]+(Math.random()-0.5)*m.basinSize;
+    init[i*4+3]=Math.random();
+  }
+  const t=new THREE.DataTexture(init,W,H,THREE.RGBAFormat,THREE.FloatType);
+  t.needsUpdate=true; return t;
+}
+
+const camOrtho=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat=new THREE.ShaderMaterial({
+  uniforms:{tex:{value:makeInitTexture(0)}},
+  vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position,1.0);}`,
+  fragmentShader:`uniform sampler2D tex;varying vec2 vUv;void main(){gl_FragColor=texture2D(tex,vUv);}`
+});
+const blitScene=new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2),blitMat));
+
+function reinitTo(mi){
+  blitMat.uniforms.tex.value=makeInitTexture(mi);
+  renderer.setRenderTarget(rtA);renderer.render(blitScene,camOrtho);
+  renderer.setRenderTarget(rtB);renderer.render(blitScene,camOrtho);
+  renderer.setRenderTarget(null);
+}
+reinitTo(0);
+
+const simUniforms={prev:{value:rtA.texture},uDt:{value:0},uMode:{value:0}};
+const simMat=new THREE.ShaderMaterial({
+  uniforms:simUniforms,
+  vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position,1.0);}`,
+  fragmentShader:`
+    uniform sampler2D prev;uniform float uDt;uniform int uMode;varying vec2 vUv;
+    vec3 lorenz(vec3 p){return vec3(10.0*(p.y-p.x),p.x*(28.0-p.z)-p.y,p.x*p.y-(8.0/3.0)*p.z);}
+    vec3 aizawa(vec3 p){float a=0.95,b=0.7,c=0.6,d=3.5,e=0.25,f=0.1;
+      return vec3((p.z-b)*p.x-d*p.y,d*p.x+(p.z-b)*p.y,
+        c+a*p.z-p.z*p.z*p.z/3.0-(p.x*p.x+p.y*p.y)*(1.0+e*p.z)+f*p.z*p.x*p.x*p.x);}
+    vec3 thomasA(vec3 p){float B=0.208186;return vec3(sin(p.y)-B*p.x,sin(p.z)-B*p.y,sin(p.x)-B*p.z);}
+    vec3 halvorsen(vec3 p){float a=1.4;
+      return vec3(-a*p.x-4.0*p.y-4.0*p.z-p.y*p.y,-a*p.y-4.0*p.z-4.0*p.x-p.z*p.z,-a*p.z-4.0*p.x-4.0*p.y-p.x*p.x);}
+    void main(){
+      vec4 s=texture2D(prev,vUv);vec3 p=s.xyz;float age=s.w;
+      vec3 dp;
+      if(uMode==0)dp=lorenz(p);else if(uMode==1)dp=aizawa(p);
+      else if(uMode==2)dp=thomasA(p);else dp=halvorsen(p);
+      float dt=uDt;
+      if(uMode==0)dt*=0.15;else if(uMode==3)dt*=0.4;
+      p+=dp*dt;age=mod(age+dt*0.06,1.0);
+      gl_FragColor=vec4(p,age);
+    }`
+});
+const simScene=new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2),simMat));
+
+// ──── render scene ────
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,0.1,80);
+camera.position.set(0,1.5,6);
+camera.lookAt(0,0,0);
+
+// warm ambient + directional for the lamp model
+const ambLight=new THREE.AmbientLight(0x1a1520,0.6);
+scene.add(ambLight);
+const dirLight=new THREE.DirectionalLight(0xffeedd,1.2);
+dirLight.position.set(2,4,3);
+scene.add(dirLight);
+
+// point light at lamp position — warm glow
+const lampGlow=new THREE.PointLight(0xffe4b5,3.0,12,1.5);
+lampGlow.position.set(0,0.6,0);
+scene.add(lampGlow);
+
+// ground-plane fog band (horizon gradient per Olafur directive)
+const horizonGeom=new THREE.PlaneGeometry(40,40);
+const horizonMat=new THREE.ShaderMaterial({
+  transparent:true,depthWrite:false,side:THREE.DoubleSide,
+  uniforms:{uTime:{value:0}},
+  vertexShader:`varying vec3 vPos;void main(){vPos=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+  fragmentShader:`varying vec3 vPos;uniform float uTime;
+    void main(){
+      float d=length(vPos.xz);
+      float a=0.12*exp(-d*d*0.008)*(0.9+0.1*sin(uTime*0.3));
+      vec3 warm=vec3(0.30,0.18,0.10);vec3 cool=vec3(0.08,0.12,0.20);
+      vec3 c=mix(warm,cool,smoothstep(0.0,15.0,d));
+      gl_FragColor=vec4(c,a);
+    }`
+});
+const horizon=new THREE.Mesh(horizonGeom,horizonMat);
+horizon.rotation.x=-Math.PI/2;
+horizon.position.y=-1.2;
+scene.add(horizon);
+
+// volumetric glow cone from lamp
+const glowGeom=new THREE.ConeGeometry(2.5,8,32,1,true);
+glowGeom.translate(0,4,0);
+const glowMat=new THREE.ShaderMaterial({
+  uniforms:{uTime:{value:0},uColor:{value:new THREE.Color(1.0,0.92,0.7)}},
+  transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,side:THREE.DoubleSide,
+  vertexShader:`varying vec3 vL;varying float vY;
+    void main(){vL=position;vY=position.y/8.0;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+  fragmentShader:`uniform float uTime;uniform vec3 uColor;varying vec3 vL;varying float vY;
+    void main(){
+      float r=length(vec2(vL.x,vL.z));
+      float edge=1.0-smoothstep(0.0,2.5*(1.0-vY),r);
+      float vert=1.0-smoothstep(0.0,1.0,vY);
+      float a=edge*vert*0.08*(0.9+0.1*sin(uTime*0.5));
+      gl_FragColor=vec4(uColor*a,a);
+    }`
+});
+const glowCone=new THREE.Mesh(glowGeom,glowMat);
+glowCone.position.set(0,0.4,0);
+scene.add(glowCone);
+
+// dust motes (atmosphere)
+const dustCount=600;
+const dustGeom=new THREE.BufferGeometry();
+const dustPos=new Float32Array(dustCount*3);
+const dustAlpha=new Float32Array(dustCount);
+for(let i=0;i<dustCount;i++){
+  dustPos[i*3]=(Math.random()-0.5)*10;
+  dustPos[i*3+1]=Math.random()*6-1.5;
+  dustPos[i*3+2]=(Math.random()-0.5)*10;
+  dustAlpha[i]=Math.random();
+}
+dustGeom.setAttribute('position',new THREE.BufferAttribute(dustPos,3));
+dustGeom.setAttribute('aAlpha',new THREE.BufferAttribute(dustAlpha,1));
+const dustMat=new THREE.ShaderMaterial({
+  uniforms:{uTime:{value:0}},
+  transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,
+  vertexShader:`attribute float aAlpha;varying float vA;uniform float uTime;
+    void main(){
+      vec3 p=position;
+      p.y+=sin(uTime*0.15+position.x*0.5)*0.3;
+      p.x+=sin(uTime*0.1+position.z)*0.2;
+      vA=aAlpha*(0.5+0.5*sin(uTime*0.4+aAlpha*6.28));
+      vec4 mv=modelViewMatrix*vec4(p,1.0);
+      gl_PointSize=1.5*(4.0/(-mv.z));
+      gl_Position=projectionMatrix*mv;
+    }`,
+  fragmentShader:`varying float vA;
+    void main(){
+      float r=length(gl_PointCoord-0.5);if(r>0.5)discard;
+      float a=0.15*vA*exp(-r*8.0);
+      gl_FragColor=vec4(0.9,0.85,0.7,a);
+    }`
+});
+scene.add(new THREE.Points(dustGeom,dustMat));
+
+// ──── particle points ────
+const pointsGeom=new THREE.BufferGeometry();
+const idxArr=new Float32Array(N*2);
+for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+  const i=y*W+x;
+  idxArr[i*2]=(x+0.5)/W;
+  idxArr[i*2+1]=(y+0.5)/H;
+}
+pointsGeom.setAttribute('position',new THREE.BufferAttribute(new Float32Array(N*3),3));
+pointsGeom.setAttribute('uvIdx',new THREE.BufferAttribute(idxArr,2));
+
+const pointsMat=new THREE.ShaderMaterial({
+  uniforms:{
+    state:{value:rtA.texture},
+    uPixel:{value:renderer.getPixelRatio()},
+    uPalA:{value:new THREE.Vector3(...MODES[0].pal[0])},
+    uPalB:{value:new THREE.Vector3(...MODES[0].pal[1])},
+    uPalC:{value:new THREE.Vector3(...MODES[0].pal[2])},
+    uNormCenter:{value:new THREE.Vector3(...MODES[0].normCenter)},
+    uNormScale:{value:MODES[0].normScale},
+    uFade:{value:1.0},
+    uLampPos:{value:new THREE.Vector3(0,0.5,0)}
+  },
+  transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,
+  vertexShader:`
+    uniform sampler2D state;uniform float uPixel;
+    uniform vec3 uPalA,uPalB,uPalC,uNormCenter,uLampPos;
+    uniform float uNormScale,uFade;
+    attribute vec2 uvIdx;
+    varying vec3 vCol;varying float vAlpha;varying float vFogDepth;varying float vGlow;
+    void main(){
+      vec4 s=texture2D(state,uvIdx);
+      vec3 p=s.xyz;float age=s.w;
+      vec3 disp=(p-uNormCenter)/uNormScale;
+      // lamp proximity glow
+      float lampDist=length(disp-uLampPos);
+      float glow=exp(-lampDist*lampDist*2.0);
+      vGlow=glow;
+      float k=mod(age,1.0);
+      vec3 col=mix(uPalA,uPalB,smoothstep(0.0,0.5,k));
+      col=mix(col,uPalC,smoothstep(0.5,1.0,k));
+      // warm tint near lamp
+      col=mix(col,col*1.3+vec3(0.08,0.05,0.02),glow*0.5);
+      vCol=col;
+      vAlpha=uFade;
+      vec4 mv=modelViewMatrix*vec4(disp,1.0);
+      vFogDepth=-mv.z;
+      gl_PointSize=(1.8+2.0*glow)*uPixel*(3.0/max(vFogDepth,0.5));
+      gl_Position=projectionMatrix*mv;
+    }`,
+  fragmentShader:`
+    varying vec3 vCol;varying float vAlpha;varying float vFogDepth;varying float vGlow;
+    void main(){
+      vec2 d=gl_PointCoord-0.5;float r=dot(d,d);
+      if(r>0.25)discard;
+      float a=exp(-r*14.0);
+      float fogF=1.0-exp(-0.004*vFogDepth*vFogDepth);
+      vec3 fogCol=vec3(0.025,0.022,0.03);
+      vec3 col=mix(vCol,fogCol,fogF);
+      gl_FragColor=vec4(col*a*(0.55+vGlow*0.7)*vAlpha,a*vAlpha);
+    }`
+});
+const points=new THREE.Points(pointsGeom,pointsMat);
+scene.add(points);
+
+// ──── load lamp model ────
+let lampGroup=null;
+function makeFallbackLamp(){
+  const g=new THREE.Group();
+  // simple geometric lamp: base cylinder + shade cone
+  const baseMat=new THREE.MeshStandardMaterial({color:0x886644,metalness:0.6,roughness:0.3});
+  const base=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.2,0.8,16),baseMat);
+  base.position.y=-0.4;
+  g.add(base);
+  const shadeMat=new THREE.MeshStandardMaterial({color:0xffe8c0,metalness:0.1,roughness:0.5,
+    emissive:0xffd090,emissiveIntensity:0.4,transparent:true,opacity:0.85,side:THREE.DoubleSide});
+  const shade=new THREE.Mesh(new THREE.ConeGeometry(0.5,0.6,16,1,true),shadeMat);
+  shade.position.y=0.3;
+  g.add(shade);
+  const bulb=new THREE.Mesh(new THREE.SphereGeometry(0.1,12,12),
+    new THREE.MeshStandardMaterial({emissive:0xffeedd,emissiveIntensity:2.0,color:0x000000}));
+  bulb.position.y=0.1;
+  g.add(bulb);
+  return g;
+}
+
+function addLampToScene(obj){
+  lampGroup=obj;
+  const box=new THREE.Box3().setFromObject(obj);
+  const size=new THREE.Vector3();box.getSize(size);
+  const center=new THREE.Vector3();box.getCenter(center);
+  const maxDim=Math.max(size.x,size.y,size.z);
+  const targetSize=1.8;
+  const s=targetSize/maxDim;
+  obj.scale.setScalar(s);
+  obj.position.sub(center.multiplyScalar(s));
+  obj.position.y-=0.3;
+  scene.add(obj);
+}
+
+const loader=new GLTFLoader();
+loader.load(
+  'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/IridescenceLamp/glTF-Binary/IridescenceLamp.glb',
+  (gltf)=>{addLampToScene(gltf.scene);},
+  undefined,
+  ()=>{addLampToScene(makeFallbackLamp());}
+);
+// immediate fallback if load takes too long
+setTimeout(()=>{if(!lampGroup)addLampToScene(makeFallbackLamp());},4000);
+
+// ──── mode switching ────
+let mode=0,switching=false,switchStartT=0,switchTargetMode=0;
+const SWITCH_S=1.4;
+const stageEl=document.getElementById('stage');
+function setStageText(){stageEl.textContent=`stage ${mode+1}/4 · ${MODES[mode].id}`;}
+setStageText();
+
+function updateUniformsForMode(m){
+  pointsMat.uniforms.uPalA.value.set(...MODES[m].pal[0]);
+  pointsMat.uniforms.uPalB.value.set(...MODES[m].pal[1]);
+  pointsMat.uniforms.uPalC.value.set(...MODES[m].pal[2]);
+  pointsMat.uniforms.uNormCenter.value.set(...MODES[m].normCenter);
+  pointsMat.uniforms.uNormScale.value=MODES[m].normScale;
+  simUniforms.uMode.value=m;
+  // shift lamp glow color per mode
+  const palMid=MODES[m].pal[1];
+  lampGlow.color.setRGB(
+    0.5+palMid[0]*0.5,
+    0.5+palMid[1]*0.4,
+    0.5+palMid[2]*0.3
+  );
+}
+
+function startSwitch(target){
+  if(switching)return;
+  switching=true;switchStartT=performance.now();switchTargetMode=target;
+}
+addEventListener('click',()=>startSwitch((mode+1)%MODES.length));
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+setInterval(()=>{if(!switching)startSwitch((mode+1)%MODES.length);},14000);
+
+let lastT=performance.now();
+function loop(){
+  const now=performance.now();
+  const dt=Math.min(0.05,(now-lastT)/1000);
+  lastT=now;
+  const t=now/1000;
+
+  glowMat.uniforms.uTime.value=t;
+  horizonMat.uniforms.uTime.value=t;
+  dustMat.uniforms.uTime.value=t;
+  simUniforms.uDt.value=dt;
+
+  // lamp slow rotation
+  if(lampGroup){
+    lampGroup.rotation.y=t*0.15;
+  }
+  // lamp glow pulse
+  lampGlow.intensity=2.5+0.8*Math.sin(t*0.6);
+
+  // wipe transition
+  if(switching){
+    const u=(now-switchStartT)/(SWITCH_S*1000);
+    if(u<0.5){
+      pointsMat.uniforms.uFade.value=1.0-u*2.0;
+    }else if(u<1.0){
+      if(pointsMat.uniforms.uFade.value<=0.05&&mode!==switchTargetMode){
+        mode=switchTargetMode;
+        updateUniformsForMode(mode);
+        reinitTo(mode);
+        setStageText();
+      }
+      pointsMat.uniforms.uFade.value=(u-0.5)*2.0;
+    }else{
+      pointsMat.uniforms.uFade.value=1.0;
+      switching=false;
+    }
+  }
+
+  // sim 4 substeps
+  for(let i=0;i<4;i++){
+    simUniforms.prev.value=rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene,camOrtho);
+    const tmp=rtA;rtA=rtB;rtB=tmp;
+  }
+  renderer.setRenderTarget(null);
+  pointsMat.uniforms.state.value=rtA.texture;
+
+  // camera orbits, centered slightly above lamp
+  const ang=now*0.00015;
+  const radius=5.5;
+  camera.position.x=Math.sin(ang)*radius;
+  camera.position.z=Math.cos(ang)*radius;
+  camera.position.y=1.0+Math.sin(ang*0.6)*0.8;
+  camera.lookAt(0,0.2,0);
+
+  renderer.render(scene,camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
