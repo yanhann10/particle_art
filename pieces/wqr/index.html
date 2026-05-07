@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wqr · Double pendulum phase-space trajectories</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background:
+      radial-gradient(ellipse at 32% 38%, #faf2dd 0%, #ecdcb6 38%, #c5a571 78%, #6e4926 100%),
+      #6e4926;
+    background-blend-mode: normal;
+    color: #2a1a08; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.18  0 0 0 0 0.10  0 0 0 0 0.04  0 0 0 0.32 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/></svg>");
+    mix-blend-mode: multiply; opacity: 0.50;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background: radial-gradient(ellipse 90% 80% at 18% 20%, rgba(255,238,195,0.32), rgba(255,238,195,0) 55%);
+    mix-blend-mode: screen;
+  }
+  canvas { display:block; position: relative; z-index: 0; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; z-index:5; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; z-index:5; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">wqr</div>
+<div class="hint">drag X to control damping: left=fixed point · center=limit cycle · right=chaos · Y resets initial conditions</div>
+<div class="src">double-pendulum phase portrait (θ₁,ω₁) and (θ₂,ω₂) · sensitivity to γ · bifurcation visible</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Double pendulum in phase space: we render trajectories of (θ₁, ω₁) and (θ₂, ω₂)
+// as particle ribbons. Pointer X controls damping coefficient γ, driving the system
+// through regimes: underdamped periodic → limit cycle → period-doubling → chaos.
+// The FORM is the phase-space attractor itself — stable orbits vs. strange attractors.
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 16);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// Control parameter: damping γ (driven by pointer X)
+// γ=0.05 → underdamped periodic orbits
+// γ=0.15 → limit cycle
+// γ=0.30 → period-doubling
+// γ=0.50+ → chaotic
+let gamma = 0.15;
+let theta1_0 = Math.PI * 0.6;
+let theta2_0 = Math.PI * 0.8;
+let omega1_0 = 0.0;
+let omega2_0 = 0.0;
+
+// We simulate two coupled pendulums and emit particles along the 4D phase trajectory,
+// projecting into two separate 2D phase planes.
+const N_HISTORY = 50000;
+const positions = new Float32Array(N_HISTORY * 3);
+const ages      = new Float32Array(N_HISTORY);
+
+// State: [θ₁, ω₁, θ₂, ω₂]
+let state = [theta1_0, omega1_0, theta2_0, omega2_0];
+let writeIdx = 0;
+let integrationTime = 0;
+
+// Double pendulum ODEs (simplified model with damping):
+// ω̇₁ = -γ·ω₁ - (m₁+m₂)/(m₁l₁) g sin(θ₁) - (m₂/m₁) (l₂/l₁) ω₂² sin(θ₁-θ₂)
+// ω̇₂ = -γ·ω₂ - g/l₂ sin(θ₂) + (l₁/l₂) ω₁² sin(θ₁-θ₂)
+// We simplify with m₁=m₂=1, l₁=l₂=1, g=9.8 but scaled for visual effect.
+function derivative(s, g){
+  const [th1, w1, th2, w2] = s;
+  const dth = th1 - th2;
+  const G = 4.0;  // scaled gravity
+  const dw1 = -g * w1 - 2.0 * G * Math.sin(th1) - 0.5 * w2*w2 * Math.sin(dth);
+  const dw2 = -g * w2 - G * Math.sin(th2) + 0.5 * w1*w1 * Math.sin(dth);
+  return [w1, dw1, w2, dw2];
+}
+
+// RK4 integration
+function integrate(s, g, dt){
+  const k1 = derivative(s, g);
+  const k2 = derivative([s[0]+k1[0]*dt/2, s[1]+k1[1]*dt/2, s[2]+k1[2]*dt/2, s[3]+k1[3]*dt/2], g);
+  const k3 = derivative([s[0]+k2[0]*dt/2, s[1]+k2[1]*dt/2, s[2]+k2[2]*dt/2, s[3]+k2[3]*dt/2], g);
+  const k4 = derivative([s[0]+k3[0]*dt,   s[1]+k3[1]*dt,   s[2]+k3[2]*dt,   s[3]+k3[3]*dt], g);
+  return [
+    s[0] + (k1[0] + 2*k2[0] + 2*k3[0] + k4[0]) * dt/6,
+    s[1] + (k1[1] + 2*k2[1] + 2*k3[1] + k4[1]) * dt/6,
+    s[2] + (k1[2] + 2*k2[2] + 2*k3[2] + k4[2]) * dt/6,
+    s[3] + (k1[3] + 2*k2[3] + 2*k3[3] + k4[3]) * dt/6
+  ];
+}
+
+// Project phase-space coordinates into 3D visualization:
+// We map (θ₁, ω₁) → (x,y) left side, (θ₂, ω₂) → (x,y) right side, with z=time-depth
+function phaseToWorld(s, depth){
+  const [th1, w1, th2, w2] = s;
+  // Left orbit: (θ₁, ω₁) centered at x=-4
+  const x1 = -4.5 + th1 * 1.2;
+  const y1 = w1 * 0.8;
+  // Right orbit: (θ₂, ω₂) centered at x=+4
+  const x2 = 4.5 + th2 * 1.2;
+  const y2 = w2 * 0.8;
+  return { left: [x1, y1, depth], right: [x2, y2, depth] };
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('age',      new THREE.BufferAttribute(ages, 1));
+
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uGamma:  { value: gamma }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uGamma;
+    attribute float age;
+    varying float vAge;
+    varying float vDepth;
+    void main(){
+      vec3 p = position;
+      // Gentle breathing displacement: orbits pulse in the z-plane
+      float breathe = 0.08 * sin(uTime * 0.4 + age * 3.14);
+      p.z += breathe;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      vAge = age;
+      // Older points fade and shrink
+      float sizeMod = 1.0 - age * 0.65;
+      gl_PointSize = (1.8 + 0.6 * sin(uTime * 0.5 + age * 6.28)) * uPixel * (6.0 / vDepth) * sizeMod;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uGamma;
+    varying float vAge;
+    varying float vDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 18.0);
+      // Color shifts with control parameter γ: low γ=cool ordered blue, high γ=warm chaotic red
+      vec3 colLow  = vec3(0.12, 0.18, 0.28);  // stable: dark blue-grey
+      vec3 colMid  = vec3(0.22, 0.14, 0.10);  // limit cycle: warm brown
+      vec3 colHigh = vec3(0.32, 0.08, 0.06);  // chaos: deep red-brown
+      float gNorm = clamp(uGamma / 0.60, 0.0, 1.0);
+      vec3 col = mix(colLow, colMid, smoothstep(0.0, 0.4, gNorm));
+      col = mix(col, colHigh, smoothstep(0.4, 1.0, gNorm));
+      // Depth haze
+      float haze = clamp((vDepth - 12.0) / 8.0, 0.0, 0.60);
+      col = mix(col, vec3(0.85, 0.78, 0.62), haze);
+      // Age fade
+      float ageFade = 1.0 - vAge * 0.75;
+      gl_FragColor = vec4(col, a * 0.85 * ageFade * (1.0 - haze * 0.5));
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Dust motes (inherited atmosphere)
+const N_DUST = 180;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos  = new Float32Array(N_DUST * 3);
+const dustSeed = new Float32Array(N_DUST);
+for (let i = 0; i < N_DUST; i++){
+  dustPos[i*3]     = (Math.random() - 0.5) * 18;
+  dustPos[i*3 + 1] = (Math.random() - 0.5) * 10;
+  dustPos[i*3 + 2] = (Math.random() - 0.5) * 10;
+  dustSeed[i]      = Math.random();
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('seed',     new THREE.BufferAttribute(dustSeed, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: uniforms.uTime, uPixel: uniforms.uPixel },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vGlow;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.10 + seed * 6.28;
+      p.x += sin(t * 1.3 + seed * 30.0) * 0.4;
+      p.y -= mod(uTime * 0.08 + seed * 7.0, 4.0) - 2.0;
+      p.z += cos(t * 1.1 + seed * 22.0) * 0.3;
+      float sx = -p.x / 9.0;
+      float sy =  p.y / 5.0;
+      vGlow = clamp(0.30 + 0.55 * smoothstep(-0.2, 0.6, sx + sy), 0.0, 1.0);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = (1.0 + 1.4 * vGlow) * uPixel * (4.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vGlow;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 24.0);
+      vec3 col = vec3(1.00, 0.94, 0.78) * vGlow;
+      gl_FragColor = vec4(col, a * 0.70 * vGlow);
+    }
+  `
+});
+const dust = new THREE.Points(dustGeom, dustMat);
+scene.add(dust);
+
+// Interaction: pointer X drives gamma (bifurcation parameter)
+addEventListener('pointermove', (e) => {
+  const nx = e.clientX / innerWidth;
+  const ny = e.clientY / innerHeight;
+  // Map X → gamma: 0.02 (left, stable) to 0.65 (right, chaos)
+  gamma = 0.02 + nx * 0.63;
+  uniforms.uGamma.value = gamma;
+  // Map Y → initial θ₁ shift (user explores sensitivity to IC)
+  theta1_0 = Math.PI * (0.3 + ny * 0.6);
+});
+addEventListener('click', () => {
+  // Reset trajectory with current ICs
+  state = [theta1_0, omega1_0, theta2_0, omega2_0];
+  writeIdx = 0;
+  integrationTime = 0;
+  for (let i = 0; i < N_HISTORY; i++){
+    positions[i*3] = 0; positions[i*3+1] = -20; positions[i*3+2] = 0;
+    ages[i] = 1;
+  }
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+});
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Initialize positions offscreen
+for (let i = 0; i < N_HISTORY; i++){
+  positions[i*3] = 0; positions[i*3+1] = -20; positions[i*3+2] = 0;
+  ages[i] = 1;
+}
+
+const start = performance.now();
+const dt = 0.004;  // integration timestep
+let accum = 0;
+function loop(){
+  const now = (performance.now() - start) / 1000;
+  const delta = Math.min(now - uniforms.uTime.value, 0.05);
+  uniforms.uTime.value = now;
+  accum += delta;
+  // Integrate the system and emit particles
+  while (accum > dt){
+    accum -= dt;
+    state = integrate(state, gamma, dt);
+    integrationTime += dt;
+    // Emit two particles per step (one per phase plane)
+    const depth = -integrationTime * 0.5;  // time maps to z-depth
+    const proj = phaseToWorld(state, depth);
+    // Left orbit particle (θ₁, ω₁)
+    const idx1 = writeIdx % N_HISTORY;
+    positions[idx1*3]     = proj.left[0];
+    positions[idx1*3 + 1] = proj.left[1];
+    positions[idx1*3 + 2] = proj.left[2];
+    ages[idx1] = 0;
+    writeIdx++;
+    // Right orbit particle (θ₂, ω₂)
+    const idx2 = writeIdx % N_HISTORY;
+    positions[idx2*3]     = proj.right[0];
+    positions[idx2*3 + 1] = proj.right[1];
+    positions[idx2*3 + 2] = proj.right[2];
+    ages[idx2] = 0;
+    writeIdx++;
+  }
+  // Age all particles
+  for (let i = 0; i < N_HISTORY; i++){
+    ages[i] = Math.min(ages[i] + delta * 0.20, 1.0);
+  }
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+  // Camera breathes slightly
+  camera.position.y = 0.3 + Math.sin(now * 0.12) * 0.4;
+  camera.lookAt(0, 0, -2);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
