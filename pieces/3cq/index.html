@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3cq · atmospheric color fields</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0c0908; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">3cq</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Mark Rothko · color field boundaries · differential growth</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*  Rothko color fields via differential growth.
+    Three horizontal curves grow & undulate, defining the soft
+    boundaries between stacked color regions. Particles fill
+    each band with dense, matte pigment — NormalBlending for
+    that light-absorbing, soaked-into-canvas density.
+    Spatial color temperature: warmer at center, cooler at edges. */
+
+const BG = 0x0c0908;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+// --- three differential-growth curves as field boundaries ---
+const MAX_VERTS = 1200;
+const ATTRACT   = 0.06;
+const REPEL_R   = 0.42;
+const REPEL_STR = 0.09;
+const NOISE     = 0.0015;
+const PRESSURE  = 0.0015;
+const MAX_D     = 0.34;
+
+function makeCurve(yBase, span) {
+  const pts = [];
+  const NV = 30;
+  for (let i = 0; i < NV; i++) {
+    const t = (i / (NV - 1)) * 2 - 1;
+    pts.push({
+      x: t * span,
+      y: yBase + Math.sin(t * Math.PI) * 0.15,
+      z: 0,
+      age: 0,
+      pinX: i < 3 || i >= NV - 3
+    });
+  }
+  return pts;
+}
+
+// three horizontal boundaries: top, middle, bottom
+const curves = [
+  makeCurve( 2.8, 5.5),
+  makeCurve( 0.0, 5.8),
+  makeCurve(-2.6, 5.5)
+];
+
+const CELL = REPEL_R;
+function stepCurve(verts) {
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  const grid = new Map();
+  const key = (x, y) => ((x / CELL) | 0) + ',' + ((y / CELL) | 0);
+  for (let i = 0; i < n; i++) {
+    const k = key(verts[i].x, verts[i].y);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+  function nearby(v) {
+    const cx = (v.x / CELL) | 0, cy = (v.y / CELL) | 0, out = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+      const arr = grid.get((cx + dx) + ',' + (cy + dy));
+      if (arr) for (const idx of arr) out.push(idx);
+    }
+    return out;
+  }
+
+  const dx = new Float32Array(n), dy = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y;
+      const d2 = ex * ex + ey * ey;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dy[i] += ey * f;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? verts[i - 1] : null;
+    const next = i < n - 1 ? verts[i + 1] : null;
+    const v = verts[i];
+    if (prev) { dx[i] += (prev.x - v.x) * ATTRACT; dy[i] += (prev.y - v.y) * ATTRACT; }
+    if (next) { dx[i] += (next.x - v.x) * ATTRACT; dy[i] += (next.y - v.y) * ATTRACT; }
+  }
+  let cx2 = 0, cy2 = 0;
+  for (let i = 0; i < n; i++) { cx2 += verts[i].x; cy2 += verts[i].y; }
+  cx2 /= n; cy2 /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - cx2, oy = verts[i].y - cy2;
+    const d = Math.hypot(ox, oy) + 1e-6;
+    dy[i] += (oy / d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++) {
+    if (!verts[i].pinX) verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].y += dy[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].age += 0.0003;
+  }
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    grown.push(a);
+    const ex = b.x - a.x, ey = b.y - a.y;
+    if (ex * ex + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({
+        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.015,
+        y: (a.y + b.y) * 0.5 + (Math.random() - 0.5) * 0.015,
+        z: 0, age: Math.max(a.age, b.age) * 0.6, pinX: false
+      });
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+// --- particles: fill three color bands between curves ---
+const N_RENDER = 40000;
+const BAND_PARTICLES = [14000, 14000, 12000]; // top, middle, bottom bands
+const rPos   = new Float32Array(N_RENDER * 3);
+const rBand  = new Float32Array(N_RENDER);     // which band (0,1,2)
+const rSeed  = new Float32Array(N_RENDER);
+const rLocalX = new Float32Array(N_RENDER);    // normalized x position for spatial modulation
+
+for (let i = 0; i < N_RENDER; i++) rSeed[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('band',     new THREE.BufferAttribute(rBand, 1));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeed, 1));
+geom.setAttribute('localX',   new THREE.BufferAttribute(rLocalX, 1));
+
+const uniforms = {
+  uTime:       { value: 0 },
+  uPixel:      { value: renderer.getPixelRatio() },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.025 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float band;
+    attribute float seed;
+    attribute float localX;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform float uFogDensity;
+
+    void main() {
+      vec3 p = position;
+
+      // very subtle drift — Rothko's fields breathe, not jitter
+      float t = uTime * 0.15 + seed * 6.28;
+      p.x += sin(t) * 0.003;
+      p.y += cos(t * 0.8 + seed * 3.0) * 0.002;
+
+      // === Rothko palette: three bands ===
+      // Top band: deep crimson / cadmium red
+      vec3 topWarm  = vec3(0.62, 0.10, 0.08);  // warm center
+      vec3 topCool  = vec3(0.45, 0.08, 0.12);  // cooler edges
+
+      // Middle band: dark burnt orange / ochre
+      vec3 midWarm  = vec3(0.58, 0.28, 0.06);
+      vec3 midCool  = vec3(0.40, 0.20, 0.10);
+
+      // Bottom band: deep maroon / near black
+      vec3 botWarm  = vec3(0.28, 0.06, 0.06);
+      vec3 botCool  = vec3(0.18, 0.05, 0.08);
+
+      // spatial modulation: warmer center, cooler edges
+      float edgeness = abs(localX);  // 0 at center, 1 at edges
+      float warmth = 1.0 - smoothstep(0.3, 0.9, edgeness);
+
+      // subtle per-particle temperature variation
+      float variation = sin(seed * 47.0 + uTime * 0.2) * 0.08;
+      warmth = clamp(warmth + variation, 0.0, 1.0);
+
+      vec3 col;
+      if (band < 0.5) {
+        col = mix(topCool, topWarm, warmth);
+      } else if (band < 1.5) {
+        col = mix(midCool, midWarm, warmth);
+      } else {
+        col = mix(botCool, botWarm, warmth);
+      }
+
+      // subtle luminosity breathing — NOT uniform, varies with position
+      float breathe = 0.92 + 0.08 * sin(uTime * 0.4 + localX * 2.0 + band * 1.5);
+      col *= breathe;
+
+      vCol = col;
+      vAlpha = 0.72 + 0.08 * warmth;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // dense matte particles — larger, softer
+      gl_PointSize = 2.4 * uPixel * (48.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // matte, soaked-into-canvas falloff — NOT glowy
+      float core = smoothstep(0.25, 0.02, r);
+      float a = core * vAlpha;
+
+      vec3 col = vCol;
+      col = mix(col, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.7);
+
+      gl_FragColor = vec4(col, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow curves
+for (let s = 0; s < 400; s++) {
+  for (const c of curves) stepCurve(c);
+}
+
+// helper: get y value on curve at given x by linear interpolation
+function curveYAtX(verts, x) {
+  if (verts.length < 2) return 0;
+  // clamp to curve extent
+  if (x <= verts[0].x) return verts[0].y;
+  if (x >= verts[verts.length - 1].x) return verts[verts.length - 1].y;
+  for (let i = 0; i < verts.length - 1; i++) {
+    if (x >= verts[i].x && x <= verts[i + 1].x) {
+      const t = (x - verts[i].x) / (verts[i + 1].x - verts[i].x + 1e-8);
+      return verts[i].y + (verts[i + 1].y - verts[i].y) * t;
+    }
+  }
+  return verts[verts.length - 1].y;
+}
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function fillBand(bandIdx, pStart, pCount, topCurve, botCurve, xMin, xMax) {
+  for (let i = 0; i < pCount; i++) {
+    const idx = pStart + i;
+    const u = Math.random();
+    const x = xMin + u * (xMax - xMin);
+    const yTop = topCurve ? curveYAtX(topCurve, x) : 5.0;
+    const yBot = botCurve ? curveYAtX(botCurve, x) : -5.0;
+    const v = Math.random();
+    const y = yBot + v * (yTop - yBot);
+    // slight z scatter for depth
+    const z = (Math.random() - 0.5) * 0.3;
+
+    rPos[idx * 3]     = x;
+    rPos[idx * 3 + 1] = y;
+    rPos[idx * 3 + 2] = z;
+    rBand[idx] = bandIdx;
+    // normalized x: -1..1 for spatial color modulation
+    rLocalX[idx] = (x - xMin) / (xMax - xMin) * 2.0 - 1.0;
+  }
+}
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (!paused) {
+    for (let s = 0; s < 2; s++) {
+      for (const c of curves) stepCurve(c);
+    }
+  }
+
+  // determine horizontal extent from curves
+  let xMin = Infinity, xMax = -Infinity;
+  for (const c of curves) {
+    for (const v of c) {
+      if (v.x < xMin) xMin = v.x;
+      if (v.x > xMax) xMax = v.x;
+    }
+  }
+  // slight padding
+  xMin -= 0.3;
+  xMax += 0.3;
+
+  // band 0: above curve 0 (top field — crimson)
+  fillBand(0, 0, BAND_PARTICLES[0],
+    null, curves[0], xMin, xMax);
+  // band 1: between curve 0 and curve 1 (middle field — orange)
+  fillBand(1, BAND_PARTICLES[0], BAND_PARTICLES[1],
+    curves[0], curves[1], xMin, xMax);
+  // band 2: between curve 1 and curve 2 (bottom field — maroon)
+  fillBand(2, BAND_PARTICLES[0] + BAND_PARTICLES[1], BAND_PARTICLES[2],
+    curves[1], curves[2], xMin, xMax);
+
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.band.needsUpdate = true;
+  geom.attributes.localX.needsUpdate = true;
+
+  // camera tracks centroid
+  let cx = 0, cy = 0;
+  let total = 0;
+  for (const c of curves) {
+    for (const v of c) { cx += v.x; cy += v.y; total++; }
+  }
+  cx /= total; cy /= total;
+  controls.target.lerp(new THREE.Vector3(cx, cy, 0), 0.015);
+
+  // auto-adjust camera distance to keep form filling frame
+  let maxExtent = Math.max(xMax - xMin, 8);
+  const topY = curves[0].reduce((m, v) => Math.max(m, v.y), -Infinity);
+  const botY = curves[2].reduce((m, v) => Math.min(m, v.y), Infinity);
+  const heightExtent = (topY - botY) + 4;
+  maxExtent = Math.max(maxExtent, heightExtent);
+  const targetZ = maxExtent / (2 * Math.tan(camera.fov * Math.PI / 360)) + 2;
+  camera.position.z += (targetZ - camera.position.z) * 0.01;
+
+  const totalVerts = curves.reduce((s, c) => s + c.length, 0);
+  statEl.textContent = `vertices=${totalVerts}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
