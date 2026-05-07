@@ -138,6 +138,27 @@ def debate(piece_id: str) -> dict | None:
     # also stash into the piece's meta.json for permanence
     meta.setdefault("swarm_debate", []).append(entry)
     meta_path.write_text(json.dumps(meta, indent=2))
+
+    # commit + push so the experts page can read it (and so it survives across machines).
+    # tolerated to fail — the mutation already shipped, this is a follow-up.
+    import subprocess
+    try:
+        subprocess.run(["git", "add", str(ADVICE.relative_to(REPO)),
+                        str(meta_path.relative_to(REPO))],
+                       cwd=REPO, check=False, capture_output=True)
+        r = subprocess.run(["git", "diff", "--cached", "--quiet"],
+                           cwd=REPO, capture_output=True)
+        if r.returncode != 0:  # something staged
+            subprocess.run(["git", "commit", "-m", f"swarm advice for {piece_id}"],
+                           cwd=REPO, check=False, capture_output=True)
+            for _ in range(3):
+                p = subprocess.run(["git", "push"], cwd=REPO, capture_output=True)
+                if p.returncode == 0:
+                    break
+                subprocess.run(["git", "pull", "--rebase", "-X", "theirs", "--autostash"],
+                               cwd=REPO, check=False, capture_output=True)
+    except Exception:
+        pass
     return entry
 
 
