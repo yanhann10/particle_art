@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9bz · Tinguely jam · differential growth tower</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080b; overflow:hidden;
+               color:#dde6d8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">9bz · Tinguely jam · kinetic tower</div>
+<div class="hint">drag to orbit · scroll to zoom · click to pause/resume</div>
+<div class="src">descended from 5gm · Jean Tinguely kinetic-machine surprise episodes</div>
+<div class="stat" id="stat">vertices=0</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// 5gm: calm differential-growth tower rising upward.
+// 9bz: same tower, but every ~10 seconds a "Tinguely jam" erupts —
+// a horizontal band of the tower starts rattling mechanically like one of
+// Jean Tinguely's kinetic sculptures. Vertices in the band vibrate rapidly,
+// particles flash to a warm rust/copper tone, and a faint rotational torque
+// spins that section. After ~2.5 seconds the machine winds down and the
+// tower resumes its quiet growth. Playful, not destructive.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x06080b, 0.038);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080b, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+// ─────────────────────────── curve state (full 3D)
+const MAX_VERTS = 4000;
+const ATTRACT  = 0.06;
+const REPEL_R  = 0.42;
+const REPEL_STR= 0.12;
+const NOISE    = 0.003;
+const PRESSURE = 0.0028;
+const RISE     = 0.0045;
+const MAX_D    = 0.32;
+let paused = false;
+
+const verts = [];
+for (let i = 0; i < 24; i++){
+  const th = i / 24 * Math.PI * 2;
+  const r = 1.4 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function key(x, y, z){
+  return Math.floor(x/CELL)+','+Math.floor(y/CELL)+','+Math.floor(z/CELL);
+}
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i]; const k = key(v.x, v.y, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++)
+    for (let dy=-1; dy<=1; dy++)
+      for (let dz=-1; dz<=1; dz++){
+        const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+        if (arr) for (const idx of arr) out.push(idx);
+      }
+  return out;
+}
+
+// ─────────────────────────── Tinguely jam state
+// jam = { active, startTime, bandY, bandH, phase, torqueDir }
+const jam = {
+  active: false,
+  startTime: 0,
+  bandY: 0,         // center Y of the rattling band
+  bandH: 2.5,       // half-height of band
+  phase: 0,         // 0→1 progress through the jam
+  torqueDir: 1,     // +1 or -1 spin direction
+  nextJam: 8 + Math.random() * 4  // seconds until first jam
+};
+const JAM_DURATION = 2.8;  // seconds
+const JAM_INTERVAL_MIN = 9;
+const JAM_INTERVAL_MAX = 15;
+
+function startJam(time){
+  // pick a random Y band within the current tower extent
+  let yMin = Infinity, yMax = -Infinity;
+  for (const v of verts){ if (v.y < yMin) yMin = v.y; if (v.y > yMax) yMax = v.y; }
+  const range = yMax - yMin;
+  if (range < 1) return; // tower too small
+  jam.active = true;
+  jam.startTime = time;
+  jam.bandY = yMin + range * (0.2 + Math.random() * 0.6); // avoid very top/bottom
+  jam.bandH = Math.max(1.2, range * 0.18);
+  jam.torqueDir = Math.random() < 0.5 ? 1 : -1;
+  jam.phase = 0;
+}
+
+function updateJam(time){
+  if (!jam.active){
+    if (time > jam.nextJam) startJam(time);
+    return;
+  }
+  jam.phase = (time - jam.startTime) / JAM_DURATION;
+  if (jam.phase >= 1.0){
+    jam.active = false;
+    jam.nextJam = time + JAM_INTERVAL_MIN + Math.random() * (JAM_INTERVAL_MAX - JAM_INTERVAL_MIN);
+    jam.phase = 0;
+  }
+}
+
+// envelope: ramps up, sustains, then winds down
+function jamEnvelope(phase){
+  if (phase < 0.15) return phase / 0.15;                 // attack
+  if (phase < 0.7) return 1.0;                            // sustain
+  return 1.0 - (phase - 0.7) / 0.3;                      // decay
+}
+
+function step(time){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    const cands = neighbors(v);
+    for (const j of cands){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x + b.x - 2*v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2*v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2*v.z) * ATTRACT;
+  }
+  let ccx = 0, ccy = 0, ccz = 0;
+  for (let i = 0; i < n; i++){ ccx += verts[i].x; ccy += verts[i].y; ccz += verts[i].z; }
+  ccx /= n; ccy /= n; ccz /= n;
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x - ccx, oy = verts[i].y - ccy, oz = verts[i].z - ccz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox/d) * PRESSURE;
+    dy[i] += (oy/d) * PRESSURE * 0.4;
+    dz[i] += (oz/d) * PRESSURE;
+  }
+
+  // apply forces + Tinguely rattle for vertices in the jam band
+  const jamActive = jam.active;
+  const env = jamActive ? jamEnvelope(jam.phase) : 0;
+  const rattleFreq = 45;  // high-frequency mechanical rattle
+  const rattleT = time * rattleFreq;
+
+  for (let i = 0; i < n; i++){
+    const a = verts[i].age;
+    const upward = RISE * (0.3 + 1.2 * Math.min(a * 1.5, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE;
+    verts[i].y += dy[i] + (Math.random()-0.5)*NOISE * 0.5 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE;
+    verts[i].age += 0.0012;
+
+    // Tinguely jam: mechanical vibration + rotational torque in the band
+    if (jamActive){
+      const distFromBand = Math.abs(verts[i].y - jam.bandY);
+      if (distFromBand < jam.bandH){
+        const proximity = 1.0 - distFromBand / jam.bandH;
+        const strength = env * proximity;
+        // high-freq rattle (like a loose gear)
+        const rPhase = rattleT + i * 0.7;
+        verts[i].x += Math.sin(rPhase) * 0.025 * strength;
+        verts[i].z += Math.cos(rPhase * 1.3) * 0.025 * strength;
+        verts[i].y += Math.sin(rPhase * 0.8 + 2.0) * 0.012 * strength;
+        // rotational torque around Y axis (Tinguely machines spin)
+        const rx = verts[i].x - ccx;
+        const rz = verts[i].z - ccz;
+        const torque = 0.008 * strength * jam.torqueDir;
+        verts[i].x += -rz * torque;
+        verts[i].z += rx * torque;
+      }
+    }
+  }
+
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if (ex*ex + ey*ey + ez*ez > MAX_D*MAX_D && verts.length + grown.length < MAX_VERTS){
+      grown.push({
+        x: (a.x+b.x)*0.5,
+        y: (a.y+b.y)*0.5 - 0.05,
+        z: (a.z+b.z)*0.5,
+        age: Math.max(a.age, b.age) * 0.5
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// pre-warm
+const preTime = performance.now() / 1000;
+for (let s = 0; s < 800; s++) step(preTime);
+
+addEventListener('click', () => { paused = !paused; });
+
+// ─────────────────────────── rendering
+const N_RENDER = 50000;
+const rPos = new Float32Array(N_RENDER * 3);
+const rSeed = new Float32Array(N_RENDER);
+const rAge = new Float32Array(N_RENDER);
+const rHeight = new Float32Array(N_RENDER);
+const rJam = new Float32Array(N_RENDER);  // jam intensity per particle
+for (let i = 0; i < N_RENDER; i++) rSeed[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeed, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('hgt',      new THREE.BufferAttribute(rHeight, 1));
+geom.setAttribute('jamAmt',   new THREE.BufferAttribute(rJam, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uYMax: { value: 1 },
+  uJamPhase: { value: 0 },   // 0 = no jam, >0 = jam active (envelope value)
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uYMax;
+    uniform float uJamPhase;
+    attribute float seed;
+    attribute float age;
+    attribute float hgt;
+    attribute float jamAmt;
+    varying vec3 vCol;
+    varying float vJam;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.5 + seed * 6.28;
+      p.x += 0.005 * sin(t);
+      p.z += 0.005 * cos(t);
+
+      // during jam, affected particles get extra jitter (sparks flying off gears)
+      float jI = jamAmt * uJamPhase;
+      if (jI > 0.01) {
+        float jt = uTime * 38.0 + seed * 100.0;
+        p.x += sin(jt) * 0.04 * jI;
+        p.z += cos(jt * 1.2) * 0.04 * jI;
+        p.y += sin(jt * 0.7 + 3.0) * 0.02 * jI;
+      }
+
+      float h = clamp(hgt / max(uYMax, 0.5), 0.0, 1.0);
+
+      // normal palette: algae → coral → bone
+      vec3 a = vec3(0.42, 0.86, 0.55);
+      vec3 b = vec3(0.95, 0.40, 0.38);
+      vec3 c = vec3(0.94, 0.92, 0.84);
+      vec3 col = mix(a, b, smoothstep(0.0, 0.55, h));
+      col = mix(col, c, smoothstep(0.55, 1.0, h));
+
+      // jam color shift: rust copper / hot orange — like sparking metal
+      vec3 rustA = vec3(0.95, 0.55, 0.18);  // bright copper
+      vec3 rustB = vec3(1.0, 0.78, 0.32);   // hot spark
+      vec3 rustCol = mix(rustA, rustB, sin(uTime * 12.0 + seed * 20.0) * 0.5 + 0.5);
+      col = mix(col, rustCol, jI * 0.85);
+
+      vCol = col;
+      vJam = jI;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      // jam particles get slightly bigger (sparks)
+      float sizeBoost = 1.0 + jI * 0.6;
+      gl_PointSize = 1.4 * uPixel * (40.0 / -mv.z) * sizeBoost;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vJam;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 18.0) * (0.62 + vJam * 0.3);
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+const startMs = performance.now();
+
+function loop(){
+  const elapsed = (performance.now() - startMs) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  updateJam(elapsed);
+
+  for (let s = 0; s < 3; s++) step(elapsed);
+
+  const n = verts.length;
+  let yMax = 0;
+  const jamActive = jam.active;
+  const env = jamActive ? jamEnvelope(jam.phase) : 0;
+
+  if (n > 1){
+    const lengths = []; let total = 0;
+    for (let i = 0; i < n; i++){
+      const a = verts[i], b = verts[(i+1)%n];
+      const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+      const L = Math.sqrt(ex*ex + ey*ey + ez*ez);
+      lengths.push(L); total += L;
+      if (a.y > yMax) yMax = a.y;
+    }
+    if (total > 0){
+      let written = 0;
+      for (let i = 0; i < n; i++){
+        const share = (i === n - 1) ? N_RENDER - written : Math.max(1, Math.floor(N_RENDER * lengths[i] / total));
+        const a = verts[i], b = verts[(i+1)%n];
+        for (let k = 0; k < share && written < N_RENDER; k++){
+          const u = Math.random();
+          const py = a.y + (b.y-a.y)*u;
+          rPos[written*3]   = a.x + (b.x-a.x)*u + (Math.random()-0.5)*0.018;
+          rPos[written*3+1] = py + (Math.random()-0.5)*0.018;
+          rPos[written*3+2] = a.z + (b.z-a.z)*u + (Math.random()-0.5)*0.018;
+          rAge[written]    = Math.max(a.age, b.age);
+          rHeight[written] = py;
+          // compute jam intensity for this particle
+          if (jamActive){
+            const distFromBand = Math.abs(py - jam.bandY);
+            rJam[written] = distFromBand < jam.bandH ? (1.0 - distFromBand / jam.bandH) : 0;
+          } else {
+            rJam[written] = 0;
+          }
+          written++;
+        }
+      }
+      geom.attributes.position.needsUpdate = true;
+      geom.attributes.age.needsUpdate = true;
+      geom.attributes.hgt.needsUpdate = true;
+      geom.attributes.jamAmt.needsUpdate = true;
+    }
+  }
+  uniforms.uYMax.value = Math.max(yMax, 1.0);
+  uniforms.uJamPhase.value = env;
+
+  // camera follows tower centroid
+  let yMean = 0;
+  if (n > 0){ for (let i = 0; i < n; i++) yMean += verts[i].y; yMean /= n; }
+  const targetY = Math.max(yMean, 2.0);
+  controls.target.y += (targetY - controls.target.y) * 0.04;
+  const desiredCamY = targetY + 4;
+  camera.position.y += (desiredCamY - camera.position.y) * 0.04;
+
+  // subtle camera shake during jam
+  if (jamActive){
+    const shakeStr = env * 0.06;
+    camera.position.x += (Math.random() - 0.5) * shakeStr;
+    camera.position.z += (Math.random() - 0.5) * shakeStr;
+  }
+
+  const jamLabel = jamActive ? ` · JAM ${(jam.phase*100)|0}%` : '';
+  statEl.textContent = `vertices=${n} · height=${yMax.toFixed(1)}${jamLabel}${paused ? ' · paused' : ''}`;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
