@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0vf · mohr hypercube · 6D projection</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020204; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">0vf</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Manfred Mohr — 6D hypercube projected to 3D
+// Givens rotations in randomly chosen 2-planes of R^6
+// Edges colored by dimension-pair: red, blue, yellow, white
+// Algorithmic edge selection: ~65% kept per Mohr's selective display
+
+const DIM = 6;
+const NVERT = 1 << DIM; // 64
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020204, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0.3, 6.5);
+camera.lookAt(0, 0, 0);
+
+// Generate 6D hypercube vertices (±1 in each dimension)
+const vertices6D = [];
+for (let i = 0; i < NVERT; i++) {
+  const v = [];
+  for (let d = 0; d < DIM; d++) v.push(((i >> d) & 1) * 2 - 1);
+  vertices6D.push(v);
+}
+
+// Generate edges: connect vertices differing in exactly 1 bit
+const edges = [];
+for (let i = 0; i < NVERT; i++) {
+  for (let d = 0; d < DIM; d++) {
+    const j = i ^ (1 << d);
+    if (j > i) edges.push({ a: i, b: j, dim: d });
+  }
+}
+// Total edges: 6 * 32 = 192
+
+// Algorithmic edge selection (Mohr-style rule):
+// Keep edges where (vertexIndex XOR dimension) satisfies a modular condition
+const keptEdges = edges.filter(e => {
+  const rule = (e.a + e.b + e.dim * 7) % 11;
+  return rule < 7; // ~64% kept
+});
+
+// Palette by dimension pair
+const PALETTE = [
+  new THREE.Color(0.92, 0.12, 0.15), // dim 0: red
+  new THREE.Color(0.92, 0.12, 0.15), // dim 1: red
+  new THREE.Color(0.10, 0.28, 0.88), // dim 2: blue
+  new THREE.Color(0.10, 0.28, 0.88), // dim 3: blue
+  new THREE.Color(0.95, 0.82, 0.08), // dim 4: yellow
+  new THREE.Color(0.95, 0.95, 0.92), // dim 5: white
+];
+
+// Projection matrix R^6 → R^3 (initial random orthogonal-ish)
+// We'll use a fixed initial projection and animate via Givens rotations
+let projMatrix = [
+  [0.45, -0.35, 0.50, -0.20, 0.40, 0.15],
+  [0.25, 0.55, -0.10, 0.45, -0.30, 0.40],
+  [-0.30, 0.20, 0.45, 0.35, 0.50, -0.35],
+];
+
+// Givens rotation: rotate in plane (p, q) by angle theta
+function givensRotate6D(verts, p, q, theta) {
+  const c = Math.cos(theta), s = Math.sin(theta);
+  const out = [];
+  for (const v of verts) {
+    const nv = [...v];
+    nv[p] = v[p] * c - v[q] * s;
+    nv[q] = v[p] * s + v[q] * c;
+    out.push(nv);
+  }
+  return out;
+}
+
+// Project R^6 → R^3
+function project(v6) {
+  return new THREE.Vector3(
+    projMatrix[0].reduce((s, w, i) => s + w * v6[i], 0),
+    projMatrix[1].reduce((s, w, i) => s + w * v6[i], 0),
+    projMatrix[2].reduce((s, w, i) => s + w * v6[i], 0)
+  );
+}
+
+// Choose 3 random rotation planes for animation
+const rotPlanes = [];
+for (let i = 0; i < 3; i++) {
+  let p = Math.floor(Math.random() * DIM);
+  let q = (p + 1 + Math.floor(Math.random() * (DIM - 1))) % DIM;
+  if (p === q) q = (q + 1) % DIM;
+  rotPlanes.push({ p, q, speed: 0.08 + Math.random() * 0.12 });
+}
+
+// Build line geometry
+const positions = new Float32Array(keptEdges.length * 6);
+const colors = new Float32Array(keptEdges.length * 6);
+
+// Set colors (static)
+for (let i = 0; i < keptEdges.length; i++) {
+  const col = PALETTE[keptEdges[i].dim];
+  colors[i*6]   = col.r; colors[i*6+1] = col.g; colors[i*6+2] = col.b;
+  colors[i*6+3] = col.r; colors[i*6+4] = col.g; colors[i*6+5] = col.b;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+const mat = new THREE.ShaderMaterial({
+  vertexShader: `
+    attribute vec3 color;
+    varying vec3 vColor;
+    varying float vDepth;
+    void main() {
+      vColor = color;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vDepth = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vDepth;
+    void main() {
+      // Depth-based alpha for subtle atmospheric perspective
+      float fog = 1.0 - smoothstep(2.0, 12.0, vDepth);
+      float alpha = 0.75 * fog + 0.15;
+      gl_FragColor = vec4(vColor * alpha, alpha);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const lines = new THREE.LineSegments(geom, mat);
+scene.add(lines);
+
+// Add vertex markers — small dots at projected vertices (subset)
+const dotGeom = new THREE.BufferGeometry();
+const dotPositions = new Float32Array(NVERT * 3);
+dotGeom.setAttribute('position', new THREE.BufferAttribute(dotPositions, 3));
+const dotMat = new THREE.PointsMaterial({
+  size: 2.5,
+  color: 0xe8e8e0,
+  transparent: true,
+  opacity: 0.4,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  sizeAttenuation: true
+});
+const dots = new THREE.Points(dotGeom, dotMat);
+scene.add(dots);
+
+// Second layer: a ghost of the FULL edge set at low opacity for depth
+const ghostPositions = new Float32Array(edges.length * 6);
+const ghostColors = new Float32Array(edges.length * 6);
+for (let i = 0; i < edges.length; i++) {
+  const col = PALETTE[edges[i].dim];
+  ghostColors[i*6]   = col.r * 0.3; ghostColors[i*6+1] = col.g * 0.3; ghostColors[i*6+2] = col.b * 0.3;
+  ghostColors[i*6+3] = col.r * 0.3; ghostColors[i*6+4] = col.g * 0.3; ghostColors[i*6+5] = col.b * 0.3;
+}
+const ghostGeom = new THREE.BufferGeometry();
+ghostGeom.setAttribute('position', new THREE.BufferAttribute(ghostPositions, 3));
+ghostGeom.setAttribute('color', new THREE.BufferAttribute(ghostColors, 3));
+const ghostMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    attribute vec3 color;
+    varying vec3 vColor;
+    varying float vDepth;
+    void main() {
+      vColor = color;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vDepth = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vDepth;
+    void main() {
+      float fog = 1.0 - smoothstep(3.0, 10.0, vDepth);
+      float alpha = 0.18 * fog;
+      gl_FragColor = vec4(vColor, alpha);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+const ghostLines = new THREE.LineSegments(ghostGeom, ghostMat);
+scene.add(ghostLines);
+
+// Subtle background grid floor for depth reference
+const gridHelper = new THREE.GridHelper(12, 24, 0x101418, 0x0a0c10);
+gridHelper.position.y = -2.2;
+gridHelper.material.opacity = 0.15;
+gridHelper.material.transparent = true;
+scene.add(gridHelper);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop() {
+  const now = performance.now();
+  const t = now * 0.001;
+
+  // Apply Givens rotations to vertices
+  let rotated = vertices6D.map(v => [...v]);
+  for (const rp of rotPlanes) {
+    const angle = t * rp.speed;
+    const c = Math.cos(angle), s = Math.sin(angle);
+    for (const v of rotated) {
+      const vp = v[rp.p], vq = v[rp.q];
+      v[rp.p] = vp * c - vq * s;
+      v[rp.q] = vp * s + vq * c;
+    }
+  }
+
+  // Project all vertices
+  const projected = rotated.map(v => project(v));
+
+  // Update kept-edge positions
+  const pos = geom.attributes.position.array;
+  for (let i = 0; i < keptEdges.length; i++) {
+    const e = keptEdges[i];
+    const a = projected[e.a], b = projected[e.b];
+    pos[i*6]   = a.x; pos[i*6+1] = a.y; pos[i*6+2] = a.z;
+    pos[i*6+3] = b.x; pos[i*6+4] = b.y; pos[i*6+5] = b.z;
+  }
+  geom.attributes.position.needsUpdate = true;
+
+  // Update ghost edges
+  const gpos = ghostGeom.attributes.position.array;
+  for (let i = 0; i < edges.length; i++) {
+    const e = edges[i];
+    const a = projected[e.a], b = projected[e.b];
+    gpos[i*6]   = a.x; gpos[i*6+1] = a.y; gpos[i*6+2] = a.z;
+    gpos[i*6+3] = b.x; gpos[i*6+4] = b.y; gpos[i*6+5] = b.z;
+  }
+  ghostGeom.attributes.position.needsUpdate = true;
+
+  // Update dot positions
+  const dpos = dotGeom.attributes.position.array;
+  for (let i = 0; i < NVERT; i++) {
+    dpos[i*3] = projected[i].x;
+    dpos[i*3+1] = projected[i].y;
+    dpos[i*3+2] = projected[i].z;
+  }
+  dotGeom.attributes.position.needsUpdate = true;
+
+  // Gentle camera drift (not orbit — Mohr is frontal, plotter-like)
+  const camAng = t * 0.03;
+  camera.position.x = Math.sin(camAng) * 0.8;
+  camera.position.y = 0.3 + Math.sin(camAng * 0.7) * 0.3;
+  camera.position.z = 6.5 + Math.cos(camAng * 0.5) * 0.5;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
