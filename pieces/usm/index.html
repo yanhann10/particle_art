@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>usm · collage body (Mutu)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">usm</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+const BG = 0x0a0807;
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 3, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 1.5, 0);
+
+/* ── GROWTH SYSTEM ── each is a closed curve with its own params & palette zone ── */
+class GrowthCurve {
+  constructor(opts) {
+    this.verts = [];
+    this.maxVerts = opts.maxVerts || 800;
+    this.attract = opts.attract || 0.055;
+    this.repelR = opts.repelR || 0.38;
+    this.repelStr = opts.repelStr || 0.11;
+    this.noise = opts.noise || 0.003;
+    this.pressure = opts.pressure || 0.003;
+    this.maxD = opts.maxD || 0.30;
+    this.yBase = opts.yBase || 0;
+    this.yDrift = opts.yDrift || 0;
+    this.zone = opts.zone || 0;       // palette zone id
+    this.plane = opts.plane || 'xz';  // growth plane
+    this.tilt = opts.tilt || 0;       // tilt angle around x-axis
+    this.offsetX = opts.offsetX || 0;
+    this.offsetZ = opts.offsetZ || 0;
+    // init circle
+    const nv = opts.initN || 18;
+    const r0 = opts.initR || 0.8;
+    for (let i = 0; i < nv; i++) {
+      const th = i / nv * Math.PI * 2;
+      this.verts.push({
+        x: Math.cos(th) * r0 + (Math.random()-0.5)*0.05,
+        z: Math.sin(th) * r0 + (Math.random()-0.5)*0.05,
+        y: 0, age: 0
+      });
+    }
+    this.cell = this.repelR;
+    this.grid = new Map();
+  }
+  rebuildGrid() {
+    this.grid.clear();
+    const c = this.cell;
+    for (let i = 0; i < this.verts.length; i++) {
+      const v = this.verts[i];
+      const k = Math.floor(v.x/c)+','+Math.floor(v.z/c);
+      if (!this.grid.has(k)) this.grid.set(k, []);
+      this.grid.get(k).push(i);
+    }
+  }
+  neighbors(v) {
+    const c = this.cell, cx = Math.floor(v.x/c), cz = Math.floor(v.z/c);
+    const out = [];
+    for (let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++){
+      const a = this.grid.get((cx+dx)+','+(cz+dz));
+      if (a) for (const idx of a) out.push(idx);
+    }
+    return out;
+  }
+  step() {
+    const vs = this.verts, n = vs.length;
+    if (n >= this.maxVerts) return;
+    this.rebuildGrid();
+    const dx = new Float32Array(n), dz = new Float32Array(n);
+    for (let i=0;i<n;i++){
+      const v = vs[i], cands = this.neighbors(v);
+      for (const j of cands){
+        if(j===i) continue;
+        const u=vs[j], ex=v.x-u.x, ez=v.z-u.z, d2=ex*ex+ez*ez;
+        if(d2>this.repelR*this.repelR||d2<1e-6) continue;
+        const d=Math.sqrt(d2), f=this.repelStr*(1-d/this.repelR)/d;
+        dx[i]+=ex*f; dz[i]+=ez*f;
+      }
+    }
+    for (let i=0;i<n;i++){
+      const a=vs[(i-1+n)%n], b=vs[(i+1)%n], v=vs[i];
+      dx[i]+=(a.x+b.x-2*v.x)*this.attract;
+      dz[i]+=(a.z+b.z-2*v.z)*this.attract;
+    }
+    let cx=0,cz=0;
+    for(let i=0;i<n;i++){cx+=vs[i].x;cz+=vs[i].z;}
+    cx/=n;cz/=n;
+    for(let i=0;i<n;i++){
+      const ox=vs[i].x-cx,oz=vs[i].z-cz,d=Math.hypot(ox,oz)+1e-6;
+      dx[i]+=(ox/d)*this.pressure; dz[i]+=(oz/d)*this.pressure;
+    }
+    for(let i=0;i<n;i++){
+      vs[i].x+=dx[i]+(Math.random()-0.5)*this.noise;
+      vs[i].z+=dz[i]+(Math.random()-0.5)*this.noise;
+      vs[i].age+=0.0005;
+      vs[i].y=-Math.min(vs[i].age*this.yDrift, 1.2);
+    }
+    const grown=[];
+    for(let i=0;i<n;i++){
+      const a=vs[i],b=vs[(i+1)%n];
+      grown.push(a);
+      const ex=b.x-a.x,ez=b.z-a.z;
+      if(ex*ex+ez*ez>this.maxD*this.maxD && vs.length+grown.length<this.maxVerts){
+        grown.push({x:(a.x+b.x)*0.5,z:(a.z+b.z)*0.5,y:(a.y+b.y)*0.5,age:Math.max(a.age,b.age)*0.85});
+      }
+    }
+    vs.length=0;
+    for(const v of grown) vs.push(v);
+  }
+  // get world-space positions: transform from local growth plane to 3D
+  getWorldPos(v) {
+    const ct = Math.cos(this.tilt), st = Math.sin(this.tilt);
+    if (this.plane === 'xz') {
+      // growth on XZ, tilt around X
+      return {
+        x: v.x + this.offsetX,
+        y: this.yBase + v.z * st + v.y * ct,
+        z: v.z * ct - v.y * st + this.offsetZ
+      };
+    } else {
+      // growth on XY plane (vertical)
+      return {
+        x: v.x + this.offsetX,
+        y: this.yBase + v.z,
+        z: v.y + this.offsetZ
+      };
+    }
+  }
+}
+
+// Zone 0: Torso — vertical growth ring, warm ochre/amber skin
+const torso = new GrowthCurve({
+  maxVerts: 1200, initN: 20, initR: 0.7,
+  attract: 0.05, repelR: 0.35, repelStr: 0.10,
+  pressure: 0.004, maxD: 0.28, noise: 0.002,
+  yBase: 0, yDrift: 0, plane: 'xy', offsetX: 0, offsetZ: 0,
+  zone: 0
+});
+
+// Zone 1: Left shoulder — coral branching, deep teal/botanical
+const shoulder = new GrowthCurve({
+  maxVerts: 900, initN: 14, initR: 0.5,
+  attract: 0.04, repelR: 0.40, repelStr: 0.13,
+  pressure: 0.005, maxD: 0.32, noise: 0.004,
+  yBase: 3.2, yDrift: 0.3, plane: 'xz', offsetX: -1.8, offsetZ: 0,
+  tilt: 0.6, zone: 1
+});
+
+// Zone 2: Right arm — vascular tendrils, deep crimson/wine
+const arm = new GrowthCurve({
+  maxVerts: 700, initN: 12, initR: 0.35,
+  attract: 0.035, repelR: 0.32, repelStr: 0.14,
+  pressure: 0.006, maxD: 0.26, noise: 0.003,
+  yBase: 2.0, yDrift: 0.5, plane: 'xz', offsetX: 2.2, offsetZ: 0.3,
+  tilt: -0.8, zone: 2
+});
+
+// Zone 3: Head/crown — insect-wing fan, pale ivory/bone with flecks
+const crown = new GrowthCurve({
+  maxVerts: 800, initN: 16, initR: 0.4,
+  attract: 0.06, repelR: 0.30, repelStr: 0.09,
+  pressure: 0.0045, maxD: 0.24, noise: 0.002,
+  yBase: 5.5, yDrift: 0, plane: 'xz', offsetX: 0.3, offsetZ: 0,
+  tilt: 0.2, zone: 3
+});
+
+// Zone 4: Hip/root — fungal mycelium, dark earth/umber
+const root = new GrowthCurve({
+  maxVerts: 600, initN: 16, initR: 0.9,
+  attract: 0.05, repelR: 0.44, repelStr: 0.12,
+  pressure: 0.003, maxD: 0.34, noise: 0.004,
+  yBase: -1.8, yDrift: 0.2, plane: 'xz', offsetX: 0, offsetZ: 0,
+  tilt: 0, zone: 4
+});
+
+const curves = [torso, shoulder, arm, crown, root];
+
+// pre-grow each curve different amounts for asymmetry
+const preSteps = [500, 400, 350, 450, 300];
+for (let c = 0; c < curves.length; c++)
+  for (let s = 0; s < preSteps[c]; s++) curves[c].step();
+
+// ── RENDERING ──
+const N_RENDER = 50000;
+const rPos = new Float32Array(N_RENDER * 3);
+const rSeed = new Float32Array(N_RENDER);
+const rZone = new Float32Array(N_RENDER);
+const rAge = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeed[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(rSeed, 1));
+geom.setAttribute('zone', new THREE.BufferAttribute(rZone, 1));
+geom.setAttribute('age', new THREE.BufferAttribute(rAge, 1));
+
+const uniforms = { uTime: {value:0}, uPixel: {value: renderer.getPixelRatio()} };
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float zone;
+    attribute float age;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.4 + seed * 6.28;
+      p += 0.004 * vec3(sin(t), cos(t*0.7), sin(t*1.3));
+
+      // Mutu palette per zone
+      // 0: torso — warm ochre/amber
+      // 1: shoulder — deep teal/botanical green
+      // 2: arm — crimson/wine red
+      // 3: crown — pale ivory/bone
+      // 4: root — dark earth umber
+      float k = clamp(age * 0.7, 0.0, 1.0);
+
+      vec3 col;
+      if (zone < 0.5) {
+        vec3 young = vec3(0.92, 0.72, 0.45);
+        vec3 old   = vec3(0.78, 0.52, 0.32);
+        col = mix(young, old, k);
+      } else if (zone < 1.5) {
+        vec3 young = vec3(0.22, 0.68, 0.55);
+        vec3 old   = vec3(0.15, 0.48, 0.42);
+        col = mix(young, old, k);
+      } else if (zone < 2.5) {
+        vec3 young = vec3(0.82, 0.18, 0.22);
+        vec3 old   = vec3(0.58, 0.10, 0.14);
+        col = mix(young, old, k);
+      } else if (zone < 3.5) {
+        vec3 young = vec3(0.92, 0.90, 0.82);
+        vec3 old   = vec3(0.75, 0.70, 0.60);
+        col = mix(young, old, k);
+      } else {
+        vec3 young = vec3(0.48, 0.32, 0.18);
+        vec3 old   = vec3(0.30, 0.20, 0.12);
+        col = mix(young, old, k);
+      }
+      vCol = col;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // vary point size by zone for texture contrast
+      float baseSize = zone < 0.5 ? 1.2 : (zone < 2.5 ? 1.5 : (zone < 3.5 ? 1.8 : 1.0));
+      gl_PointSize = baseSize * uPixel * (40.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      // fog by hand
+      float fogFactor = 1.0 - exp(-0.0025 * dist * dist);
+      vCol = mix(vCol, vec3(0.039, 0.031, 0.027), fogFactor);
+      vAlpha = mix(0.7, 0.0, fogFactor);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Add faint connective tissue lines between adjacent zones to unify the figure
+const lineGeo = new THREE.BufferGeometry();
+const linePos = new Float32Array(200 * 3);
+lineGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
+const lineMat = new THREE.LineBasicMaterial({
+  color: 0x886655, transparent: true, opacity: 0.12, blending: THREE.AdditiveBlending
+});
+const lines = new THREE.LineSegments(lineGeo, lineMat);
+scene.add(lines);
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (!paused) {
+    // step each curve at different rates for temporal collage
+    for (let s = 0; s < 3; s++) torso.step();
+    for (let s = 0; s < 2; s++) shoulder.step();
+    for (let s = 0; s < 2; s++) arm.step();
+    for (let s = 0; s < 3; s++) crown.step();
+    for (let s = 0; s < 1; s++) root.step();
+  }
+
+  // distribute particles across all curves
+  const totalVerts = curves.reduce((s,c) => s + c.verts.length, 0);
+  let written = 0;
+
+  for (let ci = 0; ci < curves.length; ci++) {
+    const curve = curves[ci];
+    const vs = curve.verts, n = vs.length;
+    if (n < 3) continue;
+
+    // allocate particles proportionally
+    const share = ci === curves.length - 1
+      ? N_RENDER - written
+      : Math.floor(N_RENDER * n / Math.max(totalVerts, 1));
+
+    // measure segment lengths
+    let totalL = 0;
+    const lens = [];
+    for (let i = 0; i < n; i++) {
+      const a = vs[i], b = vs[(i+1)%n];
+      const L = Math.hypot(b.x-a.x, b.z-a.z, b.y-a.y);
+      lens.push(L); totalL += L;
+    }
+    if (totalL < 1e-6) continue;
+
+    let cWritten = 0;
+    for (let i = 0; i < n && cWritten < share && written < N_RENDER; i++) {
+      const segShare = (i === n-1)
+        ? share - cWritten
+        : Math.max(1, Math.floor(share * lens[i] / totalL));
+      const a = vs[i], b = vs[(i+1)%n];
+      for (let k = 0; k < segShare && written < N_RENDER; k++) {
+        const u = Math.random();
+        const local = {
+          x: a.x+(b.x-a.x)*u + (Math.random()-0.5)*0.015,
+          z: a.z+(b.z-a.z)*u + (Math.random()-0.5)*0.015,
+          y: a.y+(b.y-a.y)*u
+        };
+        const wp = curve.getWorldPos(local);
+        rPos[written*3]   = wp.x;
+        rPos[written*3+1] = wp.y;
+        rPos[written*3+2] = wp.z;
+        rZone[written] = curve.zone;
+        rAge[written] = Math.max(a.age, b.age);
+        written++; cWritten++;
+      }
+    }
+  }
+  // zero out remaining
+  for (let i = written; i < N_RENDER; i++) {
+    rPos[i*3] = rPos[i*3+1] = rPos[i*3+2] = 0;
+    rZone[i] = 0; rAge[i] = 0;
+  }
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.zone.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+
+  // connective tissue: draw lines between nearest points of adjacent zones
+  const zonePairs = [[0,1],[0,2],[0,3],[0,4],[1,3]];
+  let li = 0;
+  for (const [za, zb] of zonePairs) {
+    if (li >= 100) break;
+    const ca = curves[za], cb = curves[zb];
+    // sample a few bridge points
+    const nBridge = Math.min(18, Math.floor(Math.min(ca.verts.length, cb.verts.length)/4));
+    for (let b = 0; b < nBridge && li < 100; b++) {
+      const ai = Math.floor(Math.random() * ca.verts.length);
+      const bi = Math.floor(Math.random() * cb.verts.length);
+      const pa = ca.getWorldPos(ca.verts[ai]);
+      const pb = cb.getWorldPos(cb.verts[bi]);
+      const dist = Math.hypot(pa.x-pb.x, pa.y-pb.y, pa.z-pb.z);
+      if (dist < 2.5) {
+        linePos[li*6]   = pa.x; linePos[li*6+1] = pa.y; linePos[li*6+2] = pa.z;
+        linePos[li*6+3] = pb.x; linePos[li*6+4] = pb.y; linePos[li*6+5] = pb.z;
+        li++;
+      }
+    }
+  }
+  lineGeo.setDrawRange(0, li * 2);
+  lineGeo.attributes.position.needsUpdate = true;
+
+  // camera tracks centroid of all curves
+  let cx = 0, cy = 0, cz = 0, cnt = 0;
+  for (const curve of curves) {
+    for (const v of curve.verts) {
+      const wp = curve.getWorldPos(v);
+      cx += wp.x; cy += wp.y; cz += wp.z; cnt++;
+    }
+  }
+  if (cnt > 0) {
+    cx/=cnt; cy/=cnt; cz/=cnt;
+    controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.02);
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
