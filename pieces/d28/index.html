@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>d28 · relational field (Riley × Bourriaud)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0b1026; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+  .social{ position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; color:#7a8a9e; text-align:right; z-index:10; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.35; font-size:10px; letter-spacing:0.04em; color:#7a8a9e; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">d28</div>
+<div class="social" id="social">0 tabs · 0 pulses</div>
+<div class="hint">open another tab — the field responds</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── social layer ─────────────────────────────────────── */
+const myId = crypto.randomUUID().slice(0,8);
+const peers = new Map();          // id → { lastSeen, mx, my }
+let externalPulse = 0;            // accumulated external beats
+let pulseIntensity = 0;           // smoothed pulse signal 0-1
+let sharedPhase = 0;              // phase accumulator from all inputs
+const bc = new BroadcastChannel('relational_field_2g4');
+
+bc.onmessage = e => {
+  const d = e.data;
+  if (d.type === 'heartbeat' && d.id !== myId) {
+    peers.set(d.id, { lastSeen: performance.now(), mx: d.mx, my: d.my, phase: d.phase });
+  }
+  if (d.type === 'pulse') {
+    pulseIntensity = Math.min(pulseIntensity + 0.15, 1.0);
+    sharedPhase += d.dp;
+  }
+};
+
+setInterval(() => {
+  bc.postMessage({ type:'heartbeat', id:myId, mx:mouseNorm.x, my:mouseNorm.y, phase:sharedPhase });
+  const now = performance.now();
+  for (const [k,v] of peers) { if (now - v.lastSeen > 4000) peers.delete(k); }
+}, 500);
+
+/* ── binance websocket for external rhythm ────────────── */
+let ws = null, wsRetry = 0;
+function connectWs() {
+  try {
+    ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade');
+    ws.onmessage = () => {
+      externalPulse++;
+      pulseIntensity = Math.min(pulseIntensity + 0.02, 1.0);
+      sharedPhase += 0.003;
+      if (externalPulse % 20 === 0) {
+        bc.postMessage({ type:'pulse', dp: 0.05 });
+      }
+    };
+    ws.onerror = () => { ws.close(); };
+    ws.onclose = () => { setTimeout(connectWs, Math.min(5000, ++wsRetry * 1000)); };
+  } catch(_) { setTimeout(connectWs, 5000); }
+}
+connectWs();
+
+/* ── three.js setup ───────────────────────────────────── */
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 28;
+const camera = new THREE.OrthographicCamera(
+  frustumSize * aspect / -2, frustumSize * aspect / 2,
+  frustumSize / 2, frustumSize / -2, 0.1, 100
+);
+camera.position.set(0, 0, 10);
+camera.lookAt(0,0,0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0b1026, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+const mouseNorm = { x:0, y:0 };
+addEventListener('pointermove', e => {
+  mouseNorm.x = (e.clientX / innerWidth) * 2 - 1;
+  mouseNorm.y = (e.clientY / innerHeight) * 2 - 1;
+});
+
+const uniforms = {
+  uTime:       { value: 0 },
+  uPixel:      { value: renderer.getPixelRatio() },
+  uRowFreq:    { value: 1.2 },
+  uColFreq:    { value: 1.0 },
+  uWaveAmp:    { value: 0.5 },
+  uTwist:      { value: 1.5 },
+  uPhase:      { value: 0 },
+  uPulse:      { value: 0 },        // smoothed pulse 0-1
+  uPeerCount:  { value: 0 },        // number of connected tabs
+  uSharedPhase:{ value: 0 },        // accumulator from social input
+  uPeerMouse:  { value: new THREE.Vector2(0,0) }, // averaged peer mouse
+  uMyMouse:    { value: new THREE.Vector2(0,0) },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPhase;
+    uniform float uRowFreq;
+    uniform float uColFreq;
+    uniform float uWaveAmp;
+    uniform float uTwist;
+    uniform float uPulse;
+    uniform float uPeerCount;
+    uniform float uSharedPhase;
+    uniform vec2  uPeerMouse;
+    uniform vec2  uMyMouse;
+
+    attribute vec2 gridPos;
+    attribute float seed;
+
+    varying float vDensity;
+    varying float vLiquid;
+    varying vec2  vGP;
+
+    void main(){
+      vec2 gp = gridPos;
+
+      /* social modulation: peer presence widens the liquid zone */
+      float social = clamp(uPeerCount / 3.0, 0.0, 1.0);
+      float ampMod = uWaveAmp * (1.0 + social * 0.4 + uPulse * 0.3);
+
+      /* riley wave displacement */
+      float rowWave = sin(gp.y * uRowFreq + uTime * 0.6 + uPhase + uSharedPhase * 0.3) * ampMod;
+      float colWave = sin(gp.x * uColFreq + uTime * 0.35 + uPulse * 3.14) * ampMod;
+
+      /* twist — modulated by peer presence */
+      float tw = uTwist * (1.0 + social * 0.3) * length(gp) * 0.04;
+      float ct = cos(tw); float st = sin(tw);
+      vec2 twisted = vec2(gp.x*ct - gp.y*st, gp.x*st + gp.y*ct);
+
+      /* peer mouse attraction — gentle gravity toward shared attention */
+      vec2 peerWorld = uPeerMouse * 12.0;
+      vec2 myWorld   = uMyMouse * 12.0;
+      vec2 toP = peerWorld - twisted;
+      vec2 toM = myWorld - twisted;
+      float dP = length(toP);
+      float dM = length(toM);
+      vec2 attract = vec2(0.0);
+      if(uPeerCount > 0.5){
+        attract += toP * 0.15 * exp(-dP*dP*0.01) * social;
+      }
+      attract += toM * 0.05 * exp(-dM*dM*0.015);
+
+      vec3 p = vec3(twisted.x + rowWave + attract.x, twisted.y + colWave + attract.y, 0.0);
+
+      /* interference — drives density & phase transition */
+      float interf = sin(gp.y * uRowFreq * 2.0 + uTime * 0.6 + uSharedPhase * 0.5)
+                   * sin(gp.x * uColFreq * 2.0 + uTime * 0.35);
+      vDensity = interf;
+
+      /* liquid factor: high near convergence zones, increased by social presence */
+      float convergence = 0.5 + 0.5 * sin(gp.y * uRowFreq + uTime * 0.3) * sin(gp.x * uColFreq + uTime * 0.2);
+      float pulseLiquid = uPulse * 0.4;
+      vLiquid = clamp(convergence * (0.3 + social * 0.5 + pulseLiquid), 0.0, 1.0);
+      vGP = gp;
+
+      /* point size: particles shrink, liquid grows */
+      float baseSize = mix(1.8, 4.5, vLiquid);
+      gl_PointSize = uPixel * baseSize;
+
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vDensity;
+    varying float vLiquid;
+    varying vec2  vGP;
+
+    uniform float uTime;
+    uniform float uPulse;
+    uniform float uPeerCount;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+
+      /* liquid phase: soft circle; particle phase: hard dot */
+      float edge = mix(0.25, 0.20, vLiquid);
+      if(r > edge) discard;
+
+      /* 3-color palette: ochre, indigo, transitional rose */
+      vec3 ochre  = vec3(0.85, 0.65, 0.30);
+      vec3 indigo = vec3(0.22, 0.18, 0.55);
+      vec3 rose   = vec3(0.78, 0.38, 0.42);
+      vec3 cream  = vec3(0.92, 0.88, 0.80);
+
+      /* color by interference zone */
+      float zone = vDensity * 0.5 + 0.5;
+      vec3 col;
+      if(zone < 0.4){
+        col = mix(indigo, rose, zone / 0.4);
+      } else if(zone < 0.7){
+        col = mix(rose, ochre, (zone - 0.4) / 0.3);
+      } else {
+        col = mix(ochre, cream, (zone - 0.7) / 0.3);
+      }
+
+      /* liquid zones lighten and soften */
+      col = mix(col, cream * 0.9, vLiquid * 0.25);
+
+      /* social presence warms the palette slightly */
+      float social = clamp(uPeerCount / 3.0, 0.0, 1.0);
+      col = mix(col, col * vec3(1.1, 1.0, 0.9), social * 0.2);
+
+      /* pulse flash */
+      col += vec3(0.08, 0.04, 0.02) * uPulse;
+
+      /* alpha: particles opaque, liquid semi-transparent for smooth blend */
+      float softEdge = 1.0 - smoothstep(edge * 0.5, edge, r);
+      float alpha = mix(0.85, 0.5, vLiquid) * softEdge;
+
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+/* ── build particle grid ──────────────────────────────── */
+let geom, points;
+
+function buildGrid(rows, cols, seed){
+  const positions = new Float32Array(N * 3);
+  const gridPositions = new Float32Array(N * 2);
+  const seeds = new Float32Array(N);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  const w = 22, h = 22;
+  const cellW = w / cols, cellH = h / rows;
+  let idx = 0;
+  const ppc = Math.floor(N / (rows * cols));
+  for(let i = 0; i < rows && idx < N; i++){
+    for(let j = 0; j < cols && idx < N; j++){
+      for(let k = 0; k < ppc && idx < N; k++){
+        const x = (j + rng() - 0.5) * cellW - w * 0.5;
+        const y = (i + rng() - 0.5) * cellH - h * 0.5;
+        positions[idx*3] = x; positions[idx*3+1] = y; positions[idx*3+2] = 0;
+        gridPositions[idx*2] = x; gridPositions[idx*2+1] = y;
+        seeds[idx] = rng(); idx++;
+      }
+    }
+  }
+  while(idx < N){
+    const x = (rng()-0.5)*w, y = (rng()-0.5)*h;
+    positions[idx*3]=x; positions[idx*3+1]=y; positions[idx*3+2]=0;
+    gridPositions[idx*2]=x; gridPositions[idx*2+1]=y;
+    seeds[idx]=rng(); idx++;
+  }
+  return { positions, gridPositions, seeds };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random()*1e9);
+  let s = seed >>> 0;
+  const rng = () => { s|=0; s=s+0x6D2B79F5|0; let t=Math.imul(s^s>>>15,1|s); t=t+Math.imul(t^t>>>7,61|t)^t; return((t^t>>>14)>>>0)/4294967296; };
+  const rows = 90 + Math.floor(rng()*50);
+  const cols = 90 + Math.floor(rng()*50);
+  uniforms.uRowFreq.value = 0.9 + rng()*1.0;
+  uniforms.uColFreq.value = 0.9 + rng()*1.0;
+  uniforms.uWaveAmp.value = 0.35 + rng()*0.55;
+  uniforms.uTwist.value = 0.5 + rng()*4.0;
+  uniforms.uPhase.value = rng()*6.28;
+  const { positions, gridPositions, seeds } = buildGrid(rows, cols, seed);
+  if(!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('gridPos', new THREE.BufferAttribute(gridPositions, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.gridPos.array.set(gridPositions);
+    geom.attributes.gridPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);
+    geom.attributes.seed.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+}
+regenerate();
+addEventListener('click', regenerate);
+
+/* ── background gradient plane ────────────────────────── */
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false,
+  uniforms: { uTime: uniforms.uTime, uPulse: uniforms.uPulse },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uTime;
+    uniform float uPulse;
+    void main(){
+      vec2 c = vUv - 0.5;
+      float dist = length(c);
+      vec3 deep  = vec3(0.043, 0.063, 0.15);
+      vec3 mid   = vec3(0.06, 0.07, 0.13);
+      vec3 warm  = vec3(0.09, 0.07, 0.10);
+      vec3 col = mix(mid, deep, smoothstep(0.0, 0.7, dist));
+      col = mix(col, warm, smoothstep(0.3, 0.8, dist) * 0.3);
+      /* subtle pulse warmth */
+      col += vec3(0.015, 0.005, 0.002) * uPulse;
+      /* faint grain */
+      float grain = fract(sin(dot(vUv * 400.0, vec2(12.9898,78.233))) * 43758.5453);
+      col += (grain - 0.5) * 0.015;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const bgPlane = new THREE.Mesh(new THREE.PlaneGeometry(60,60), bgMat);
+bgPlane.position.z = -1;
+scene.add(bgPlane);
+
+/* ── resize ───────────────────────────────────────────── */
+addEventListener('resize', () => {
+  const a = innerWidth / innerHeight;
+  camera.left = frustumSize * a / -2;
+  camera.right = frustumSize * a / 2;
+  camera.top = frustumSize / 2;
+  camera.bottom = frustumSize / -2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+/* ── render loop ──────────────────────────────────────── */
+const socialEl = document.getElementById('social');
+const start = performance.now();
+let lastSocialUpdate = 0;
+
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  /* decay pulse */
+  pulseIntensity *= 0.97;
+  uniforms.uPulse.value = pulseIntensity;
+  uniforms.uSharedPhase.value = sharedPhase;
+
+  /* peer data */
+  const pc = peers.size;
+  uniforms.uPeerCount.value = pc;
+  uniforms.uMyMouse.value.set(mouseNorm.x, -mouseNorm.y);
+
+  if(pc > 0){
+    let ax = 0, ay = 0;
+    for(const p of peers.values()){ ax += p.mx; ay += p.my; }
+    uniforms.uPeerMouse.value.set(ax/pc, -ay/pc);
+  }
+
+  /* update social display ~2×/sec */
+  if(now - lastSocialUpdate > 500){
+    lastSocialUpdate = now;
+    const tabWord = pc === 1 ? 'tab' : 'tabs';
+    socialEl.textContent = `${pc + 1} ${tabWord} · ${externalPulse} pulses`;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
