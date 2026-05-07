@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nlm · dark ecology</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0c0a; overflow:hidden;
+               color:#8a8478; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .counter { position:fixed; right:14px; bottom:12px; opacity:0.6; font-size:10px;
+             letter-spacing:0.04em; color:#7a756d; text-align:right; line-height:1.6; }
+  .era { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px;
+         letter-spacing:0.08em; color:#6a6459; text-transform:uppercase; }
+</style>
+</head>
+<body>
+<div class="id">nlm</div>
+<div class="counter" id="counter"></div>
+<div class="era" id="era"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 2, 30);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0d0c0a, 1);
+document.body.appendChild(renderer.domElement);
+
+// Deep time parameters
+const TOTAL_YEARS = 4500000000; // 4.5 billion years
+const CYCLE_SECONDS = 300; // full cycle in 5 minutes, then loops
+const N = 24000;
+
+// Mass extinction events (year, severity 0-1)
+const EXTINCTIONS = [
+  { year: 443e6, name: 'Ordovician', severity: 0.6 },
+  { year: 372e6, name: 'Late Devonian', severity: 0.5 },
+  { year: 252e6, name: 'Permian', severity: 0.9 },
+  { year: 201e6, name: 'Triassic', severity: 0.5 },
+  { year: 66e6, name: 'Cretaceous', severity: 0.7 },
+  { year: 0.01e6, name: 'Anthropocene', severity: 0.4 }
+];
+
+// Eras (years before present)
+const ERAS = [
+  { start: 4500e6, name: 'Hadean' },
+  { start: 4000e6, name: 'Archean' },
+  { start: 2500e6, name: 'Proterozoic' },
+  { start: 541e6, name: 'Paleozoic' },
+  { start: 252e6, name: 'Mesozoic' },
+  { start: 66e6, name: 'Cenozoic' },
+  { start: 0.01e6, name: 'Anthropocene' }
+];
+
+// Particle attributes
+const positions = new Float32Array(N * 3);
+const basePositions = new Float32Array(N * 3);
+const ages = new Float32Array(N); // when this particle "appeared" (0-1 normalized time)
+const resilience = new Float32Array(N); // how resistant to extinction
+
+for (let i = 0; i < N; i++) {
+  // Stratified sphere — layers represent geological strata
+  const layer = Math.random();
+  const r = 5 + layer * 8;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const x = r * Math.sin(phi) * Math.cos(theta);
+  const y = r * Math.sin(phi) * Math.sin(theta) * 0.7; // slightly oblate
+  const z = r * Math.cos(phi);
+  positions[i*3] = x;
+  positions[i*3+1] = y;
+  positions[i*3+2] = z;
+  basePositions[i*3] = x;
+  basePositions[i*3+1] = y;
+  basePositions[i*3+2] = z;
+  ages[i] = Math.random() * 0.6; // most life appeared in later eras
+  resilience[i] = Math.random();
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('basePosition', new THREE.BufferAttribute(basePositions, 3));
+geom.setAttribute('age', new THREE.BufferAttribute(ages, 1));
+geom.setAttribute('resilience', new THREE.BufferAttribute(resilience, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uProgress: { value: 0 }, // 0 = 4.5Gya, 1 = now
+  uCO2: { value: 0 },
+  uExtinction: { value: 0 }, // current extinction intensity
+  uCulled: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uProgress;
+    uniform float uCO2;
+    uniform float uExtinction;
+    uniform float uCulled;
+    uniform float uPixel;
+    attribute vec3 basePosition;
+    attribute float age;
+    attribute float resilience;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    // Simplex-ish noise
+    float hash(vec3 p){ return fract(sin(dot(p, vec3(127.1,311.7,74.7)))*43758.5453); }
+    float noise3(vec3 p){
+      vec3 i = floor(p); vec3 f = fract(p);
+      f = f*f*(3.0-2.0*f);
+      float a = hash(i); float b = hash(i+vec3(1,0,0));
+      float c = hash(i+vec3(0,1,0)); float d = hash(i+vec3(1,1,0));
+      float e = hash(i+vec3(0,0,1)); float f2 = hash(i+vec3(1,0,1));
+      float g = hash(i+vec3(0,1,1)); float h = hash(i+vec3(1,1,1));
+      float x1 = mix(a,b,f.x); float x2 = mix(c,d,f.x);
+      float x3 = mix(e,f2,f.x); float x4 = mix(g,h,f.x);
+      float y1 = mix(x1,x2,f.y); float y2 = mix(x3,x4,f.y);
+      return mix(y1,y2,f.z);
+    }
+
+    void main(){
+      // particle only visible after its "age"
+      float alive = step(age, uProgress);
+      // extinction culling — lower resilience particles die
+      float survives = step(uExtinction * (1.0 - resilience * 0.7), resilience * 0.5 + 0.2);
+      float visible = alive * survives;
+
+      vec3 p = basePosition;
+
+      // CO2 deformation — exponential growth warps outer shells outward
+      float r = length(p);
+      vec3 dir = p / max(r, 0.001);
+      float co2Warp = uCO2 * 0.3 * (r / 13.0);
+      p += dir * co2Warp;
+
+      // Geological drift — slow tectonic movement
+      float drift = uTime * 0.02;
+      float n = noise3(p * 0.08 + drift);
+      p += vec3(n - 0.5, (n*n) - 0.3, noise3(p * 0.1 - drift) - 0.5) * 1.5 * uProgress;
+
+      // Deep-time entropy — particles slowly disperse as time passes
+      p += dir * sin(uTime * 0.1 + resilience * 6.28) * 0.4 * uProgress;
+
+      // Palette: iron oxide →ite → calcium → ash grey → dead grey
+      vec3 ironOxide = vec3(0.45, 0.18, 0.08);
+      vec3 ite = vec3(0.35, 0.28, 0.15);
+      vec3 calcium = vec3(0.55, 0.50, 0.40);
+      vec3 ashGrey = vec3(0.38, 0.36, 0.33);
+      vec3 deadGrey = vec3(0.25, 0.24, 0.23);
+
+      float t = uProgress;
+      vec3 col;
+      if (t < 0.25) col = mix(ironOxide, ite, t * 4.0);
+      else if (t < 0.5) col = mix(ite, calcium, (t - 0.25) * 4.0);
+      else if (t < 0.75) col = mix(calcium, ashGrey, (t - 0.5) * 4.0);
+      else col = mix(ashGrey, deadGrey, (t - 0.75) * 4.0);
+
+      // Extinction flash — brief sickly amber
+      col = mix(col, vec3(0.5, 0.35, 0.1), uExtinction * 0.4);
+
+      vCol = col;
+      vAlpha = visible * (0.35 + 0.25 * resilience) * (1.0 - uExtinction * 0.3);
+
+      // Hide culled particles
+      if (visible < 0.5) {
+        gl_Position = vec4(0.0, 0.0, -999.0, 1.0);
+        gl_PointSize = 0.0;
+        return;
+      }
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.8 + resilience * 1.2) * uPixel * (45.0 / max(dist, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float falloff = exp(-r * 10.0);
+      float a = vAlpha * falloff;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Faint dust layer — atmospheric haze
+const dustN = 3000;
+const dustPos = new Float32Array(dustN * 3);
+for (let i = 0; i < dustN; i++) {
+  dustPos[i*3] = (Math.random() - 0.5) * 60;
+  dustPos[i*3+1] = (Math.random() - 0.5) * 40;
+  dustPos[i*3+2] = (Math.random() - 0.5) * 60;
+}
+const dustGeom = new THREE.BufferGeometry();
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({
+  size: 0.15, color: 0x3a3530, transparent: true, opacity: 0.15,
+  blending: THREE.AdditiveBlending, depthWrite: false
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const counterEl = document.getElementById('counter');
+const eraEl = document.getElementById('era');
+const startTime = performance.now();
+
+function getExtinctionIntensity(yearsBeforePresent) {
+  let intensity = 0;
+  for (const ext of EXTINCTIONS) {
+    const dist = Math.abs(yearsBeforePresent - ext.year);
+    const window = 5e6; // 5 million year window
+    if (dist < window) {
+      intensity = Math.max(intensity, ext.severity * (1.0 - dist / window));
+    }
+  }
+  return intensity;
+}
+
+function getEra(yearsBeforePresent) {
+  for (let i = ERAS.length - 1; i >= 0; i--) {
+    if (yearsBeforePresent <= ERAS[i].start) return ERAS[i].name;
+  }
+  return ERAS[0].name;
+}
+
+function getCO2(progress) {
+  // Rough CO2 curve: low in early earth, spikes, then exponential in anthropocene
+  if (progress < 0.88) return 0.2 + progress * 0.5;
+  // Exponential rise in last 12% (roughly industrial age onward in piece-time)
+  const t = (progress - 0.88) / 0.12;
+  return 0.7 + t * t * 4.0;
+}
+
+let totalCulled = 0;
+
+function loop() {
+  const elapsed = (performance.now() - startTime) / 1000;
+  const progress = (elapsed % CYCLE_SECONDS) / CYCLE_SECONDS;
+  const yearsBeforePresent = TOTAL_YEARS * (1.0 - progress);
+  const yearsElapsed = TOTAL_YEARS * progress;
+
+  uniforms.uTime.value = elapsed;
+  uniforms.uProgress.value = progress;
+  uniforms.uCO2.value = getCO2(progress);
+
+  const extinction = getExtinctionIntensity(yearsBeforePresent);
+  uniforms.uExtinction.value = extinction;
+
+  // Count approximate culled particles
+  let culled = 0;
+  for (const ext of EXTINCTIONS) {
+    if (yearsBeforePresent < ext.year) {
+      culled += Math.floor(N * ext.severity * 0.15);
+    }
+  }
+  totalCulled = Math.min(culled, Math.floor(N * 0.6));
+  uniforms.uCulled.value = totalCulled / N;
+
+  // Slow camera orbit — geological patience
+  const camAngle = elapsed * 0.015;
+  const camR = 28 + Math.sin(elapsed * 0.03) * 3;
+  camera.position.set(
+    Math.sin(camAngle) * camR,
+    2 + Math.sin(elapsed * 0.02) * 2,
+    Math.cos(camAngle) * camR
+  );
+  camera.lookAt(0, 0, 0);
+
+  // Slow rotation of the body itself
+  points.rotation.y = elapsed * 0.005;
+
+  // Update UI
+  const era = getEra(yearsBeforePresent);
+  eraEl.textContent = era;
+
+  const yearsStr = yearsElapsed > 1e9
+    ? (yearsElapsed / 1e9).toFixed(2) + ' Ga'
+    : yearsElapsed > 1e6
+    ? (yearsElapsed / 1e6).toFixed(1) + ' Ma'
+    : Math.floor(yearsElapsed).toLocaleString() + ' y';
+
+  counterEl.innerHTML =
+    `${yearsStr} elapsed<br>` +
+    `${(N - totalCulled).toLocaleString()} remaining<br>` +
+    `${totalCulled.toLocaleString()} culled`;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
