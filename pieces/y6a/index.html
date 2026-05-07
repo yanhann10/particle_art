@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>y6a · cosmic web</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000408; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">y6a · cosmic web</div>
+<div class="hint">MillenniumTNG · 200 Mpc/h scale</div>
+<div class="src">voronoi filament structure · gravitational infall</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// MillenniumTNG-style cosmic web: Voronoi tessellation edges as dark-matter filaments,
+// vertices as galaxy clusters. 50k particles concentrated along edges, drifting toward nodes.
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000408, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 1, 2000);
+camera.position.set(0, 0, 420);
+
+// ---- Generate 3D Voronoi by placing N nodes and computing edges ----
+const N_NODES = 200;
+const BOX = 400; // comoving Mpc/h scale
+const nodes = [];
+for (let i = 0; i < N_NODES; i++){
+  nodes.push(new THREE.Vector3(
+    (Math.random() - 0.5) * BOX,
+    (Math.random() - 0.5) * BOX,
+    (Math.random() - 0.5) * BOX
+  ));
+}
+
+// Build edge list: connect each node to its K nearest neighbors (K=6 typical for cosmic web)
+const K = 6;
+const edges = [];
+const edgeSet = new Set();
+for (let i = 0; i < N_NODES; i++){
+  const dists = nodes.map((n, j) => ({ j, d: nodes[i].distanceTo(n) }));
+  dists.sort((a, b) => a.d - b.d);
+  for (let k = 1; k <= K && k < dists.length; k++){
+    const j = dists[k].j;
+    const key = i < j ? `${i}_${j}` : `${j}_${i}`;
+    if (!edgeSet.has(key)){
+      edgeSet.add(key);
+      edges.push({ a: i, b: j, len: dists[k].d });
+    }
+  }
+}
+
+// ---- Place 50k particles along edges with Gaussian falloff perpendicular ----
+const N_PARTICLES = 50000;
+const positions = new Float32Array(N_PARTICLES * 3);
+const targetNodes = new Uint16Array(N_PARTICLES); // nearest node index for drift
+const edgeParams = new Float32Array(N_PARTICLES); // t along edge [0,1]
+
+for (let i = 0; i < N_PARTICLES; i++){
+  // Pick random edge weighted by length (longer filaments get more particles)
+  const totalLen = edges.reduce((s, e) => s + e.len, 0);
+  let r = Math.random() * totalLen;
+  let edge = edges[0];
+  for (let e of edges){
+    r -= e.len;
+    if (r <= 0){ edge = e; break; }
+  }
+
+  const nA = nodes[edge.a];
+  const nB = nodes[edge.b];
+  const t = Math.random();
+  edgeParams[i] = t;
+
+  // Position along edge with Gaussian perpendicular scatter (filament thickness)
+  const mid = new THREE.Vector3().lerpVectors(nA, nB, t);
+  const axis = new THREE.Vector3().subVectors(nB, nA).normalize();
+  const perp1 = new THREE.Vector3(axis.y, -axis.x, 0).normalize();
+  const perp2 = new THREE.Vector3().crossVectors(axis, perp1);
+  
+  // Gaussian scatter: thicker near nodes, thinner mid-filament
+  const nodeDist = Math.min(t, 1 - t) * 2; // 0 at ends, 1 at midpoint
+  const sigma = 1.5 + nodeDist * 2.5; // filaments ~1.5 Mpc/h thick at clusters, ~4 mid-span
+  const r1 = (Math.random() + Math.random() + Math.random() + Math.random() - 2) * sigma;
+  const r2 = (Math.random() + Math.random() + Math.random() + Math.random() - 2) * sigma;
+  
+  mid.addScaledVector(perp1, r1);
+  mid.addScaledVector(perp2, r2);
+
+  positions[i*3]   = mid.x;
+  positions[i*3+1] = mid.y;
+  positions[i*3+2] = mid.z;
+
+  // Assign nearest node (for gravitational drift)
+  const dA = mid.distanceTo(nA);
+  const dB = mid.distanceTo(nB);
+  targetNodes[i] = dA < dB ? edge.a : edge.b;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('targetNode', new THREE.BufferAttribute(targetNodes, 1));
+geom.setAttribute('edgeParam', new THREE.BufferAttribute(edgeParams, 1));
+
+// Pack node positions into a DataTexture for shader access
+const nodeTexSize = Math.ceil(Math.sqrt(N_NODES));
+const nodeData = new Float32Array(nodeTexSize * nodeTexSize * 4);
+for (let i = 0; i < N_NODES; i++){
+  nodeData[i*4]   = nodes[i].x;
+  nodeData[i*4+1] = nodes[i].y;
+  nodeData[i*4+2] = nodes[i].z;
+  nodeData[i*4+3] = 1.0;
+}
+const nodeTex = new THREE.DataTexture(nodeData, nodeTexSize, nodeTexSize, THREE.RGBAFormat, THREE.FloatType);
+nodeTex.needsUpdate = true;
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uNodes: { value: nodeTex },
+    uNodeTexSize: { value: nodeTexSize },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform sampler2D uNodes;
+    uniform float uNodeTexSize;
+    attribute float targetNode;
+    attribute float edgeParam;
+    varying float vDistToNode;
+    varying float vEdgeParam;
+
+    vec3 getNode(float idx){
+      float x = mod(idx, uNodeTexSize);
+      float y = floor(idx / uNodeTexSize);
+      vec2 uv = (vec2(x, y) + 0.5) / uNodeTexSize;
+      return texture2D(uNodes, uv).xyz;
+    }
+
+    void main(){
+      vec3 pos = position;
+      vec3 target = getNode(targetNode);
+      
+      // Drift toward nearest node (gravitational infall) — slow, ~0.1% of distance per second
+      vec3 dir = target - pos;
+      float dist = length(dir);
+      pos += normalize(dir) * min(dist * 0.0008 * uTime, dist * 0.3);
+      
+      vDistToNode = dist;
+      vEdgeParam = edgeParam;
+
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      float depth = -mv.z;
+      gl_PointSize = (0.8 + 0.4 * (1.0 - smoothstep(0.0, 80.0, dist))) * (120.0 / depth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDistToNode;
+    varying float vEdgeParam;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float alpha = exp(-r * 12.0);
+
+      // Color: hot magenta near nodes (clusters), cool cyan-blue mid-filament, dark in voids
+      // MillenniumTNG palette: #ff3d8a (cluster core) → #4a90e2 (filament) → #000408 (void)
+      float clusterProx = smoothstep(80.0, 5.0, vDistToNode);
+      vec3 clusterCol = vec3(1.0, 0.24, 0.54); // magenta
+      vec3 filamentCol = vec3(0.29, 0.56, 0.89); // blue
+      vec3 col = mix(filamentCol, clusterCol, clusterProx);
+      
+      // Dim particles far from both endpoints (mid-filament thinning)
+      float midFade = 1.0 - smoothstep(0.3, 0.7, abs(vEdgeParam - 0.5) * 2.0) * 0.6;
+      alpha *= midFade * (0.3 + clusterProx * 0.7);
+
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Add a few bright cluster cores as small sphere meshes
+const clusterGeom = new THREE.SphereGeometry(2.5, 12, 12);
+const clusterMat = new THREE.MeshBasicMaterial({ color: 0xff3d8a, transparent: true, opacity: 0.6 });
+const clusters = new THREE.InstancedMesh(clusterGeom, clusterMat, 20);
+clusters.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+const dummy = new THREE.Object3D();
+for (let i = 0; i < 20; i++){
+  const node = nodes[Math.floor(Math.random() * N_NODES)];
+  dummy.position.copy(node);
+  dummy.scale.setScalar(1 + Math.random() * 0.5);
+  dummy.updateMatrix();
+  clusters.setMatrixAt(i, dummy.matrix);
+}
+scene.add(clusters);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let t0 = performance.now();
+function loop(now){
+  const t = (now - t0) / 1000;
+  mat.uniforms.uTime.value = t;
+
+  // Slow camera orbit — cosmological scale feels vast, unhurried
+  const ang = t * 0.03;
+  const rad = 420;
+  camera.position.x = Math.sin(ang) * rad;
+  camera.position.z = Math.cos(ang) * rad;
+  camera.position.y = Math.sin(ang * 0.3) * 80;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop(t0);
+</script>
+</body>
+</html>
