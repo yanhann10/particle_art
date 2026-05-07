@@ -386,6 +386,34 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "index.html").write_text(final_html)
 
+    # ── render-content gate ──────────────────────────────────────────
+    # Mirrors mutate.py's gate (commit 12b5182). Blank/black pieces
+    # (shader compile failure, design that waits for an input that never
+    # comes, misframed camera, missing model load, network race) must
+    # NEVER ship to Vercel — Playwright headless render here, before commit.
+    #
+    # If render < threshold pixels, the piece is wiped and the tick
+    # exits with rc=7 so improv_cron.sh skips the push retry block
+    # entirely (no commit to retry).
+    try:
+        import shutil as _shutil
+        from validate_render import validate as render_validate
+        rc = render_validate([new_id], record_clip=False)
+        if rc != 0:
+            rej = REPO / "scripts" / f"reject_{new_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
+            rej.write_text(final_html)
+            print(f"render gate: REJECTED {new_id} (saved to {rej.name})")
+            _shutil.rmtree(out_dir, ignore_errors=True)
+            thumb = REPO / "thumbs" / f"{new_id}.png"
+            if thumb.exists():
+                thumb.unlink()
+            return 7
+        print(f"render gate: PASS {new_id}")
+    except ImportError as e:
+        print(f"render gate: SKIPPED ({e}) — pip install playwright pillow numpy && playwright install chromium")
+    except Exception as e:
+        print(f"render gate: SKIPPED on exception ({e})")
+
     # Save the loser for inspection (gitignored).
     loser_label = "v2" if score_log["picked"] == "v1" else "v1"
     loser_html = None
