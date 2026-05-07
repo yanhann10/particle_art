@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kyt · thread vessel · Chiharu Shiota</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#0a0608;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;letter-spacing:0.06em;color:#cdd2dc;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+</style>
+</head>
+<body>
+<div class="id">kyt</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 3, 30);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0608, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── Boat hull — Shiota's suspended vessel ── */
+const BOAT_LEN = 7, BOAT_W = 2.8, BOAT_H = 1.8;
+const N_BOAT = 350;
+const boatPts = [];
+for (let i = 0; i < N_BOAT; i++) {
+  const z = (Math.random() * 2 - 1) * BOAT_LEN;
+  const taper = Math.sqrt(Math.max(0, 1 - (z / BOAT_LEN) ** 2));
+  const w = BOAT_W * taper;
+  const h = BOAT_H * taper;
+  if (Math.random() < 0.3) {
+    // gunwale rim
+    const side = Math.random() < 0.5 ? -1 : 1;
+    boatPts.push(new THREE.Vector3(side * w, 0, z));
+  } else if (Math.random() < 0.15) {
+    // keel line
+    boatPts.push(new THREE.Vector3(0, -h, z));
+  } else {
+    const a = Math.PI * Math.random();
+    boatPts.push(new THREE.Vector3(Math.cos(a) * w, -Math.sin(a) * h, z));
+  }
+}
+
+/* ── Ceiling anchor field ── */
+const N_CEIL = 280;
+const CEIL_Y = 15;
+const ceilPts = [];
+for (let i = 0; i < N_CEIL; i++) {
+  ceilPts.push(new THREE.Vector3(
+    (Math.random() * 2 - 1) * 15,
+    CEIL_Y + Math.random() * 2.5,
+    (Math.random() * 2 - 1) * 12
+  ));
+}
+
+/* ── Build thread line segments ── */
+const tv = []; // vertex coords
+const ts = []; // per-vertex seed
+
+function pushSeg(a, b) {
+  const s = Math.random();
+  tv.push(a.x, a.y, a.z, b.x, b.y, b.z);
+  ts.push(s, s);
+}
+
+// Ceiling → boat descent threads
+for (let i = 0; i < N_CEIL; i++) {
+  const n = 2 + Math.floor(Math.random() * 4);
+  for (let c = 0; c < n; c++) {
+    pushSeg(ceilPts[i], boatPts[Math.floor(Math.random() * N_BOAT)]);
+  }
+}
+
+// Overhead cross-web (ceiling ↔ ceiling)
+for (let i = 0; i < N_CEIL; i++) {
+  for (let j = i + 1; j < N_CEIL; j++) {
+    if (ceilPts[i].distanceTo(ceilPts[j]) < 5.5 && Math.random() < 0.06) {
+      pushSeg(ceilPts[i], ceilPts[j]);
+    }
+  }
+}
+
+// Side wall → boat threads
+for (let i = 0; i < 140; i++) {
+  const side = Math.random() < 0.5 ? -1 : 1;
+  const anchor = new THREE.Vector3(
+    side * (11 + Math.random() * 4),
+    (Math.random() * 2 - 1) * 9,
+    (Math.random() * 2 - 1) * 10
+  );
+  pushSeg(anchor, boatPts[Math.floor(Math.random() * N_BOAT)]);
+}
+
+// Boat internal web — dense cross-threads on hull
+for (let i = 0; i < N_BOAT; i++) {
+  for (let j = i + 1; j < N_BOAT; j++) {
+    const d = boatPts[i].distanceTo(boatPts[j]);
+    if (d < 2.0 && Math.random() < 0.22) {
+      pushSeg(boatPts[i], boatPts[j]);
+    }
+  }
+}
+
+// Floor → boat threads (sparse)
+for (let i = 0; i < 80; i++) {
+  const anchor = new THREE.Vector3(
+    (Math.random() * 2 - 1) * 10,
+    -10 - Math.random() * 3,
+    (Math.random() * 2 - 1) * 10
+  );
+  pushSeg(anchor, boatPts[Math.floor(Math.random() * N_BOAT)]);
+}
+
+const threadPositions = new Float32Array(tv);
+const threadSeeds = new Float32Array(ts);
+
+const threadGeom = new THREE.BufferGeometry();
+threadGeom.setAttribute('position', new THREE.BufferAttribute(threadPositions, 3));
+threadGeom.setAttribute('seed', new THREE.BufferAttribute(threadSeeds, 1));
+
+const threadMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    attribute float seed;
+    varying float vAlpha;
+    varying float vDepth;
+    void main() {
+      vec3 p = position;
+      float phase = seed * 6.2832;
+      // air-current sway
+      p.x += sin(p.y * 0.22 + uTime * 0.32 + phase) * 0.2;
+      p.z += sin(p.y * 0.17 + uTime * 0.25 + phase * 1.4) * 0.14;
+      p.y += cos(p.x * 0.15 + uTime * 0.18 + phase * 0.7) * 0.06;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_Position = projectionMatrix * mv;
+      float dist = -mv.z;
+      vDepth = clamp(dist / 55.0, 0.0, 1.0);
+      vAlpha = 0.14 + 0.22 * (1.0 - vDepth) + seed * 0.06;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vDepth;
+    void main() {
+      vec3 col = mix(vec3(0.62, 0.07, 0.09), vec3(0.30, 0.03, 0.04), vDepth);
+      gl_FragColor = vec4(col, vAlpha);
+    }
+  `
+});
+
+const threads = new THREE.LineSegments(threadGeom, threadMat);
+scene.add(threads);
+
+/* ── Node particles — knots where threads meet ── */
+const allNodes = [...boatPts, ...ceilPts];
+const nodePos = new Float32Array(allNodes.length * 3);
+const nodeSeeds = new Float32Array(allNodes.length);
+const nodeIsBoat = new Float32Array(allNodes.length);
+for (let i = 0; i < allNodes.length; i++) {
+  nodePos[i * 3]     = allNodes[i].x;
+  nodePos[i * 3 + 1] = allNodes[i].y;
+  nodePos[i * 3 + 2] = allNodes[i].z;
+  nodeSeeds[i] = Math.random();
+  nodeIsBoat[i] = i < N_BOAT ? 1.0 : 0.0;
+}
+
+const nodeGeom = new THREE.BufferGeometry();
+nodeGeom.setAttribute('position', new THREE.BufferAttribute(nodePos, 3));
+nodeGeom.setAttribute('seed', new THREE.BufferAttribute(nodeSeeds, 1));
+nodeGeom.setAttribute('isBoat', new THREE.BufferAttribute(nodeIsBoat, 1));
+
+const nodeMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float isBoat;
+    varying float vAlpha;
+    varying float vBoat;
+    void main() {
+      vec3 p = position;
+      float phase = seed * 6.2832;
+      p.x += sin(p.y * 0.22 + uTime * 0.32 + phase) * 0.2;
+      p.z += sin(p.y * 0.17 + uTime * 0.25 + phase * 1.4) * 0.14;
+      p.y += cos(p.x * 0.15 + uTime * 0.18 + phase * 0.7) * 0.06;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sz = isBoat > 0.5 ? 2.0 + seed * 1.2 : 1.0 + seed * 0.8;
+      gl_PointSize = sz * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+      vAlpha = isBoat > 0.5 ? 0.5 + seed * 0.3 : 0.15 + seed * 0.1;
+      vBoat = isBoat;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vBoat;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha;
+      vec3 col = vBoat > 0.5
+        ? vec3(0.72, 0.10, 0.12)
+        : vec3(0.45, 0.06, 0.07);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const nodes = new THREE.Points(nodeGeom, nodeMat);
+scene.add(nodes);
+
+/* ── Resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── Camera orbit — centroid tracks the boat ── */
+const centroid = new THREE.Vector3(0, 1.5, 0);
+
+function loop() {
+  const t = performance.now() * 0.001;
+  threadMat.uniforms.uTime.value = t;
+  nodeMat.uniforms.uTime.value = t;
+
+  // slow contemplative orbit
+  const angle = t * 0.05;
+  const radius = 32 + Math.sin(t * 0.03) * 4;
+  camera.position.set(
+    Math.cos(angle) * radius,
+    3 + Math.sin(angle * 0.35) * 5,
+    Math.sin(angle) * radius
+  );
+  camera.lookAt(centroid);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
