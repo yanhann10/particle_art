@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5iq · nest of you</title>
+<!-- MOTION: orbit, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f5f3f1; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#988f99; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; color:#988f99; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; color:#988f99; }
+</style>
+</head>
+<body>
+<div class="id">5iq</div>
+<div class="hint">move pointer · nest forms where you linger</div>
+<div class="src">Wang & Söderström · Lumen Prize 2023 · soft-body accretion</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* Nest of You — Wang & Söderström biomorphic metaballs orbit and
+   accrete around pointer position. When pointer is still, blobs
+   slow and cluster (sticky accretion). When pointer moves fast,
+   blobs shed and trail (data exhaust). Pearl, lavender, mercury. */
+
+const BG = 0xf5f3f1;
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(BG, 8, 28);
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0, 15);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+
+// pointer tracking (NDC → world plane at z=0)
+const pointer = { x: 0, y: 0, z: 0, vx: 0, vy: 0, speed: 0 };
+let pointerPrev = { x: 0, y: 0 };
+const raycaster = new THREE.Raycaster();
+const planeZ0 = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth) * 2 - 1;
+  const ny = -(e.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera({ x: nx, y: ny }, camera);
+  const hit = new THREE.Vector3();
+  raycaster.ray.intersectPlane(planeZ0, hit);
+  if (hit) {
+    pointerPrev.x = pointer.x;
+    pointerPrev.y = pointer.y;
+    pointer.x = hit.x;
+    pointer.y = hit.y;
+    pointer.vx = pointer.x - pointerPrev.x;
+    pointer.vy = pointer.y - pointerPrev.y;
+    pointer.speed = Math.sqrt(pointer.vx ** 2 + pointer.vy ** 2);
+  }
+});
+
+// blob system: each blob orbits pointer with inertia and velocity-dependent stickiness
+const blobs = [];
+const N_BLOBS = 180;
+const MAX_TRAIL = 400; // shed blobs become trailing particles
+
+for (let i = 0; i < N_BLOBS; i++) {
+  const angle = (i / N_BLOBS) * Math.PI * 2;
+  const r = 3 + Math.random() * 6;
+  blobs.push({
+    x: Math.cos(angle) * r,
+    y: Math.sin(angle) * r,
+    z: (Math.random() - 0.5) * 2,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    radius: 0.2 + Math.random() * 0.15,
+    orbitPhase: Math.random() * Math.PI * 2,
+    orbitSpeed: 0.3 + Math.random() * 0.4,
+    damping: 0.92 + Math.random() * 0.06,
+    seed: Math.random(),
+    hue: i / N_BLOBS, // for subtle color variation
+    sticky: false, // becomes true when slow near pointer
+    age: 0
+  });
+}
+
+// trail particles (shed from fast movement)
+const trail = [];
+
+// metaball rendering via instanced soft spheres
+const blobGeom = new THREE.SphereGeometry(1, 16, 12);
+const blobInst = new THREE.InstancedMesh(
+  blobGeom,
+  new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uPointer: { value: new THREE.Vector3() }
+    },
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    vertexShader: `
+      uniform float uTime;
+      uniform vec3 uPointer;
+      attribute vec3 offset;
+      attribute float radius;
+      attribute float seed;
+      attribute float hue;
+      attribute float sticky;
+      varying vec3 vNormal;
+      varying vec3 vPos;
+      varying float vHue;
+      varying float vSticky;
+      varying float vDist;
+
+      void main() {
+        vec3 p = position * radius;
+        
+        // gentle breathing pulse
+        float pulse = 1.0 + sin(uTime * 1.2 + seed * 6.28) * 0.08;
+        p *= pulse;
+        
+        p += offset;
+        
+        vPos = p;
+        vNormal = normalize((modelMatrix * vec4(normalize(position), 0.0)).xyz);
+        vHue = hue;
+        vSticky = sticky;
+        vDist = length(p - uPointer);
+        
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      varying vec3 vNormal;
+      varying vec3 vPos;
+      varying float vHue;
+      varying float vSticky;
+      varying float vDist;
+      
+      vec3 hsl2rgb(float h, float s, float l) {
+        float c = (1.0 - abs(2.0 * l - 1.0)) * s;
+        float x = c * (1.0 - abs(mod(h * 6.0, 2.0) - 1.0));
+        float m = l - c * 0.5;
+        vec3 rgb = vec3(0.0);
+        if (h < 1.0/6.0)      rgb = vec3(c, x, 0.0);
+        else if (h < 2.0/6.0) rgb = vec3(x, c, 0.0);
+        else if (h < 3.0/6.0) rgb = vec3(0.0, c, x);
+        else if (h < 4.0/6.0) rgb = vec3(0.0, x, c);
+        else if (h < 5.0/6.0) rgb = vec3(x, 0.0, c);
+        else                  rgb = vec3(c, 0.0, x);
+        return rgb + m;
+      }
+
+      void main() {
+        vec3 n = normalize(vNormal);
+        vec3 light = normalize(vec3(0.5, 1.0, 0.8));
+        float diff = max(0.0, dot(n, light)) * 0.6 + 0.4;
+        
+        // pearl base with lavender/mercury tint per blob
+        vec3 pearl = vec3(0.95, 0.94, 0.96);
+        vec3 lavender = vec3(0.88, 0.82, 0.92);
+        vec3 mercury = vec3(0.85, 0.88, 0.92);
+        
+        float huePhase = fract(vHue + uTime * 0.05);
+        vec3 tint = mix(lavender, mercury, sin(huePhase * 3.14159) * 0.5 + 0.5);
+        vec3 col = mix(pearl, tint, 0.4);
+        
+        // sticky blobs glow slightly warmer
+        if (vSticky > 0.5) {
+          col = mix(col, vec3(1.0, 0.96, 0.92), 0.15);
+        }
+        
+        col *= diff;
+        
+        // soft fresnel glow
+        vec3 view = normalize(cameraPosition - vPos);
+        float fresnel = pow(1.0 - abs(dot(n, view)), 2.0);
+        col += fresnel * 0.2 * tint;
+        
+        // fade by distance from pointer (data exhaust fades)
+        float fade = smoothstep(12.0, 3.0, vDist);
+        float alpha = 0.85 * fade;
+        
+        gl_FragColor = vec4(col, alpha);
+      }
+    `
+  }),
+  N_BLOBS
+);
+
+const offsets = new Float32Array(N_BLOBS * 3);
+const radii = new Float32Array(N_BLOBS);
+const seeds = new Float32Array(N_BLOBS);
+const hues = new Float32Array(N_BLOBS);
+const stickies = new Float32Array(N_BLOBS);
+
+blobGeom.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
+blobGeom.setAttribute('radius', new THREE.InstancedBufferAttribute(radii, 1));
+blobGeom.setAttribute('seed', new THREE.InstancedBufferAttribute(seeds, 1));
+blobGeom.setAttribute('hue', new THREE.InstancedBufferAttribute(hues, 1));
+blobGeom.setAttribute('sticky', new THREE.InstancedBufferAttribute(stickies, 1));
+
+scene.add(blobInst);
+
+// trail particles (smaller, fading)
+const trailGeom = new THREE.BufferGeometry();
+const trailPos = new Float32Array(MAX_TRAIL * 3);
+const trailSizes = new Float32Array(MAX_TRAIL);
+const trailAlpha = new Float32Array(MAX_TRAIL);
+const trailHues = new Float32Array(MAX_TRAIL);
+trailGeom.setAttribute('position', new THREE.BufferAttribute(trailPos, 3));
+trailGeom.setAttribute('size', new THREE.BufferAttribute(trailSizes, 1));
+trailGeom.setAttribute('alpha', new THREE.BufferAttribute(trailAlpha, 1));
+trailGeom.setAttribute('hue', new THREE.BufferAttribute(trailHues, 1));
+
+const trailMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPixel: { value: renderer.getPixelRatio() } },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uPixel;
+    attribute float size;
+    attribute float alpha;
+    attribute float hue;
+    varying float vAlpha;
+    varying float vHue;
+    
+    void main() {
+      vAlpha = alpha;
+      vHue = hue;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * uPixel * (20.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vHue;
+    
+    vec3 hsl2rgb(float h, float s, float l) {
+      float c = (1.0 - abs(2.0 * l - 1.0)) * s;
+      float x = c * (1.0 - abs(mod(h * 6.0, 2.0) - 1.0));
+      float m = l - c * 0.5;
+      vec3 rgb = vec3(0.0);
+      if (h < 1.0/6.0)      rgb = vec3(c, x, 0.0);
+      else if (h < 2.0/6.0) rgb = vec3(x, c, 0.0);
+      else if (h < 3.0/6.0) rgb = vec3(0.0, c, x);
+      else if (h < 4.0/6.0) rgb = vec3(0.0, x, c);
+      else if (h < 5.0/6.0) rgb = vec3(x, 0.0, c);
+      else                  rgb = vec3(c, 0.0, x);
+      return rgb + m;
+    }
+    
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float core = exp(-r * 16.0);
+      
+      float huePhase = fract(vHue);
+      vec3 lavender = vec3(0.88, 0.82, 0.92);
+      vec3 mercury = vec3(0.85, 0.88, 0.92);
+      vec3 col = mix(lavender, mercury, sin(huePhase * 3.14159) * 0.5 + 0.5);
+      
+      float a = core * vAlpha * 0.4;
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const trailPoints = new THREE.Points(trailGeom, trailMat);
+scene.add(trailPoints);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  trailMat.uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+
+// gentle camera orbit
+let cameraAngle = 0;
+const CAMERA_R = 15;
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  blobInst.material.uniforms.uTime.value = t;
+  trailMat.uniforms.uTime.value = t;
+  
+  // camera orbit
+  cameraAngle += 0.002;
+  camera.position.x = Math.cos(cameraAngle) * CAMERA_R * 0.3;
+  camera.position.z = CAMERA_R + Math.sin(cameraAngle) * CAMERA_R * 0.15;
+  camera.position.y = Math.sin(cameraAngle * 0.7) * 2;
+  camera.lookAt(0, 0, 0);
+  
+  // decay pointer speed
+  pointer.speed *= 0.95;
+  
+  // update blobs
+  for (let i = 0; i < blobs.length; i++) {
+    const b = blobs[i];
+    b.age += 0.016;
+    
+    // orbit pointer with inertia
+    const dx = pointer.x - b.x;
+    const dy = pointer.y - b.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    
+    // when pointer is slow and blob is close, become sticky (cluster)
+    if (pointer.speed < 0.05 && dist < 2.5) {
+      b.sticky = true;
+    } else if (pointer.speed > 0.15 || dist > 4.0) {
+      b.sticky = false;
+    }
+    
+    // sticky blobs move slower, cluster tighter
+    const attractStr = b.sticky ? 0.008 : 0.015;
+    const orbitStr = b.sticky ? 0.3 : 1.0;
+    
+    if (dist > 0.01) {
+      b.vx += (dx / dist) * attractStr;
+      b.vy += (dy / dist) * attractStr;
+    }
+    
+    // orbital component
+    b.orbitPhase += b.orbitSpeed * 0.01 * orbitStr;
+    const orbitR = 0.5 + Math.sin(b.orbitPhase) * 0.3;
+    const ox = Math.cos(b.orbitPhase) * orbitR;
+    const oy = Math.sin(b.orbitPhase) * orbitR;
+    b.vx += ox * 0.002;
+    b.vy += oy * 0.002;
+    
+    // z drift (gentle depth variation)
+    b.vz += (Math.sin(t * 0.5 + b.seed * 6.28) * 0.5 - b.z) * 0.001;
+    
+    // damping
+    const damp = b.sticky ? 0.88 : b.damping;
+    b.vx *= damp;
+    b.vy *= damp;
+    b.vz *= 0.96;
+    
+    b.x += b.vx;
+    b.y += b.vy;
+    b.z += b.vz;
+    
+    // shed trail when fast
+    if (pointer.speed > 0.2 && trail.length < MAX_TRAIL && Math.random() < 0.3) {
+      trail.push({
+        x: b.x,
+        y: b.y,
+        z: b.z,
+        size: b.radius * 0.6,
+        alpha: 1.0,
+        hue: b.hue,
+        life: 0
+      });
+    }
+    
+    offsets[i * 3] = b.x;
+    offsets[i * 3 + 1] = b.y;
+    offsets[i * 3 + 2] = b.z;
+    radii[i] = b.radius;
+    seeds[i] = b.seed;
+    hues[i] = b.hue;
+    stickies[i] = b.sticky ? 1.0 : 0.0;
+  }
+  
+  blobGeom.attributes.offset.needsUpdate = true;
+  blobGeom.attributes.sticky.needsUpdate = true;
+  blobInst.material.uniforms.uPointer.value.set(pointer.x, pointer.y, pointer.z);
+  
+  // update trail
+  for (let i = trail.length - 1; i >= 0; i--) {
+    const p = trail[i];
+    p.life += 0.016;
+    p.alpha = Math.max(0, 1 - p.life / 2.0);
+    if (p.alpha <= 0) {
+      trail.splice(i, 1);
+    }
+  }
+  
+  for (let i = 0; i < trail.length; i++) {
+    const p = trail[i];
+    trailPos[i * 3] = p.x;
+    trailPos[i * 3 + 1] = p.y;
+    trailPos[i * 3 + 2] = p.z;
+    trailSizes[i] = p.size;
+    trailAlpha[i] = p.alpha;
+    trailHues[i] = p.hue;
+  }
+  trailGeom.setDrawRange(0, trail.length);
+  trailGeom.attributes.position.needsUpdate = true;
+  trailGeom.attributes.size.needsUpdate = true;
+  trailGeom.attributes.alpha.needsUpdate = true;
+  trailGeom.attributes.hue.needsUpdate = true;
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
