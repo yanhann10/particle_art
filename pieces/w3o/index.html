@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>slime mold aggregation · dictyostelium lucy</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0806; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.6; letter-spacing:0.06em;
+             font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#e5dcd2; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">aggregating …</div>
+<div class="id">w3o</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 400);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0806, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 65000;
+const NUM_CENTERS = 6;
+
+/* aggregation centers — will be placed on Lucy surface */
+const centers = [];
+for (let i = 0; i < NUM_CENTERS; i++) {
+  centers.push({
+    pos: new THREE.Vector3(
+      (Math.random() - 0.5) * 8,
+      (Math.random() - 0.5) * 14,
+      (Math.random() - 0.5) * 8
+    ),
+    phase: Math.random() * Math.PI * 2,
+    freq: 0.3 + Math.random() * 0.2,
+    strength: 0.6 + Math.random() * 0.4
+  });
+}
+
+const centerUniforms = {};
+for (let i = 0; i < NUM_CENTERS; i++) {
+  centerUniforms[`uCenter${i}`] = { value: centers[i].pos };
+  centerUniforms[`uCenterPhase${i}`] = { value: centers[i].phase };
+  centerUniforms[`uCenterFreq${i}`] = { value: centers[i].freq };
+  centerUniforms[`uCenterStr${i}`] = { value: centers[i].strength };
+}
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0.0 },
+  uAggregation: { value: 0.0 },
+  ...centerUniforms
+};
+
+const vertexShader = `
+  uniform float uTime;
+  uniform float uPixel;
+  uniform float uReady;
+  uniform float uAggregation;
+  uniform vec3 uCenter0, uCenter1, uCenter2, uCenter3, uCenter4, uCenter5;
+  uniform float uCenterPhase0, uCenterPhase1, uCenterPhase2, uCenterPhase3, uCenterPhase4, uCenterPhase5;
+  uniform float uCenterFreq0, uCenterFreq1, uCenterFreq2, uCenterFreq3, uCenterFreq4, uCenterFreq5;
+  uniform float uCenterStr0, uCenterStr1, uCenterStr2, uCenterStr3, uCenterStr4, uCenterStr5;
+
+  attribute vec3 rest;
+  attribute float seed;
+  attribute float phase;
+
+  varying vec3 vCol;
+  varying float vAlpha;
+
+  /* cAMP wave function — expanding rings from center */
+  float campWave(vec3 p, vec3 center, float t, float freq, float ph) {
+    float dist = length(p - center);
+    float wave = sin(dist * 2.5 - t * freq * 6.2831 + ph);
+    float envelope = exp(-dist * 0.08);
+    return wave * envelope;
+  }
+
+  /* gradient of cAMP concentration — chemotaxis direction */
+  vec3 campGradient(vec3 p, float t) {
+    vec3 grad = vec3(0.0);
+    float eps = 0.3;
+
+    vec3 centers[6];
+    centers[0] = uCenter0; centers[1] = uCenter1; centers[2] = uCenter2;
+    centers[3] = uCenter3; centers[4] = uCenter4; centers[5] = uCenter5;
+    float phases[6];
+    phases[0] = uCenterPhase0; phases[1] = uCenterPhase1; phases[2] = uCenterPhase2;
+    phases[3] = uCenterPhase3; phases[4] = uCenterPhase4; phases[5] = uCenterPhase5;
+    float freqs[6];
+    freqs[0] = uCenterFreq0; freqs[1] = uCenterFreq1; freqs[2] = uCenterFreq2;
+    freqs[3] = uCenterFreq3; freqs[4] = uCenterFreq4; freqs[5] = uCenterFreq5;
+    float strs[6];
+    strs[0] = uCenterStr0; strs[1] = uCenterStr1; strs[2] = uCenterStr2;
+    strs[3] = uCenterStr3; strs[4] = uCenterStr4; strs[5] = uCenterStr5;
+
+    for (int i = 0; i < 6; i++) {
+      float cx = campWave(p + vec3(eps,0,0), centers[i], t, freqs[i], phases[i])
+               - campWave(p - vec3(eps,0,0), centers[i], t, freqs[i], phases[i]);
+      float cy = campWave(p + vec3(0,eps,0), centers[i], t, freqs[i], phases[i])
+               - campWave(p - vec3(0,eps,0), centers[i], t, freqs[i], phases[i]);
+      float cz = campWave(p + vec3(0,0,eps), centers[i], t, freqs[i], phases[i])
+               - campWave(p - vec3(0,0,eps), centers[i], t, freqs[i], phases[i]);
+      grad += vec3(cx, cy, cz) * strs[i];
+    }
+    return grad / (2.0 * eps);
+  }
+
+  void main() {
+    float t = uTime;
+    vec3 p = rest;
+
+    /* chemotaxis — particles flow along cAMP gradient toward centers */
+    vec3 grad = campGradient(p, t);
+    float gradLen = length(grad);
+
+    /* stream flow: particles move along gradient with phase-dependent speed */
+    float speed = 0.4 + 0.3 * sin(phase * 6.2831 + t * 0.3);
+    vec3 flowDir = gradLen > 0.001 ? normalize(grad) : vec3(0.0);
+
+    /* displacement accumulates over time — streaming toward centers */
+    float streamPhase = phase * 6.2831 + t * 0.15;
+    float streamAmt = uAggregation * speed * (1.0 + 0.5 * sin(streamPhase));
+
+    /* nearest center attraction — stronger as aggregation progresses */
+    float minDist = 1000.0;
+    vec3 nearestCenter = uCenter0;
+    vec3 centers[6];
+    centers[0] = uCenter0; centers[1] = uCenter1; centers[2] = uCenter2;
+    centers[3] = uCenter3; centers[4] = uCenter4; centers[5] = uCenter5;
+    for (int i = 0; i < 6; i++) {
+      float d = length(p - centers[i]);
+      if (d < minDist) { minDist = d; nearestCenter = centers[i]; }
+    }
+
+    vec3 toCenter = nearestCenter - p;
+    float pullStr = uAggregation * 0.6 * (1.0 - exp(-uAggregation * 2.0));
+
+    /* combine: gradient flow + center pull + organic jitter */
+    vec3 displacement = flowDir * streamAmt * 1.2 + toCenter * pullStr;
+
+    /* add streaming filament motion — cells form rivers toward centers */
+    float filament = sin(dot(p, vec3(1.3, 0.7, 0.9)) * 0.8 + t * 0.2 + phase * 12.0);
+    vec3 tangent = normalize(cross(flowDir, vec3(0.0, 1.0, 0.0)) + 0.001);
+    displacement += tangent * filament * 0.15 * uAggregation;
+
+    /* breathing pulse once aggregated — pseudoplasmodium contracts */
+    float aggregated = smoothstep(3.0, 1.0, minDist) * uAggregation;
+    float breathe = sin(t * 0.8 + phase * 3.0) * 0.12 * aggregated;
+    displacement += normalize(toCenter + 0.001) * breathe;
+
+    p += displacement;
+
+    /* reveal: scatter → converge */
+    float reveal = smoothstep(0.0, 1.0, uReady);
+    vec3 scattered = rest + vec3(
+      sin(phase * 47.0) * 18.0,
+      cos(phase * 31.0) * 12.0,
+      sin(phase * 63.0) * 18.0
+    );
+    p = mix(scattered, p, reveal);
+
+    /* color: amber-golden for aggregating cells, pale for scattered */
+    float proximity = smoothstep(6.0, 1.5, minDist);
+    float waveColor = campWave(p, nearestCenter, t, 0.35, 0.0) * 0.5 + 0.5;
+
+    vec3 scatteredCol = vec3(0.85, 0.78, 0.55);    /* pale wheat — isolated amoeba */
+    vec3 streamCol    = vec3(0.95, 0.65, 0.15);     /* amber — streaming cells */
+    vec3 slugCol      = vec3(0.90, 0.35, 0.08);     /* deep orange — pseudoplasmodium */
+
+    float streamFactor = uAggregation * (1.0 - proximity);
+    float slugFactor   = proximity * uAggregation;
+    vCol = mix(scatteredCol, streamCol, streamFactor);
+    vCol = mix(vCol, slugCol, slugFactor);
+    vCol *= 0.8 + 0.2 * waveColor;
+
+    /* fog: amber atmospheric depth */
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    float fogDist = -mv.z;
+    float fog = 1.0 - exp(-fogDist * 0.018);
+    vec3 fogCol = vec3(0.12, 0.07, 0.03);
+    vCol = mix(vCol, fogCol, fog);
+
+    vAlpha = reveal * (0.7 + 0.3 * (1.0 - fog)) * (0.6 + 0.4 * uAggregation * proximity);
+
+    float sz = (1.4 + 0.8 * slugFactor) * uPixel * (35.0 / max(fogDist, 1.0)) * reveal;
+    gl_PointSize = max(1.0, sz);
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+
+const fragmentShader = `
+  varying vec3 vCol;
+  varying float vAlpha;
+  void main() {
+    vec2 d = gl_PointCoord - 0.5;
+    float r2 = dot(d, d);
+    if (r2 > 0.25) discard;
+    float a = smoothstep(0.25, 0.04, r2) * vAlpha;
+    gl_FragColor = vec4(vCol * a, a);
+  }
+`;
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: true,
+  depthTest: true,
+  blending: THREE.AdditiveBlending,
+  vertexShader,
+  fragmentShader
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── ambient fog plane for atmosphere ── */
+const fogGeo = new THREE.PlaneGeometry(300, 300);
+fogGeo.rotateX(-Math.PI / 2);
+const fogMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  uniforms: { uTime: uniforms.uTime, uReady: uniforms.uReady },
+  vertexShader: `
+    varying vec3 vWPos;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWPos = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uReady;
+    varying vec3 vWPos;
+    void main() {
+      float dist = length(vWPos.xz);
+      float fade = smoothstep(120.0, 20.0, dist);
+      float pulse = 0.5 + 0.5 * sin(dist * 0.05 - uTime * 0.3);
+      vec3 col = vec3(0.14, 0.08, 0.03) * (0.8 + 0.2 * pulse);
+      gl_FragColor = vec4(col, fade * 0.2 * uReady);
+    }
+  `
+});
+const fogPlane = new THREE.Mesh(fogGeo, fogMat);
+fogPlane.position.y = -9.0;
+scene.add(fogPlane);
+
+/* ── load Lucy ── */
+const loadingEl = document.getElementById('loading');
+let revealStart = 0;
+
+new PLYLoader().load(
+  'https://threejs.org/examples/models/ply/binary/Lucy100k.ply',
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const baseScale = 16 / Math.max(size.x, size.y, size.z);
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(baseScale, baseScale, baseScale);
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp = new THREE.Vector3();
+
+    const restArr = new Float32Array(N * 3);
+    const seedArr = new Float32Array(N);
+    const phaseArr = new Float32Array(N);
+    const posArr = new Float32Array(N * 3);
+
+    /* place aggregation centers on actual surface */
+    for (let i = 0; i < NUM_CENTERS; i++) {
+      sampler.sample(tmp);
+      centers[i].pos.copy(tmp);
+      uniforms[`uCenter${i}`].value.copy(tmp);
+    }
+
+    /* sample particles from surface + dispersion cloud */
+    for (let i = 0; i < N; i++) {
+      sampler.sample(tmp);
+      /* spread some particles off-surface to simulate scattered amoebae */
+      const spread = Math.random() < 0.4 ? 1.0 + Math.random() * 3.0 : 0.0;
+      const dir = new THREE.Vector3(
+        Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5
+      ).normalize();
+      restArr[i * 3]     = tmp.x + dir.x * spread;
+      restArr[i * 3 + 1] = tmp.y + dir.y * spread;
+      restArr[i * 3 + 2] = tmp.z + dir.z * spread;
+      seedArr[i] = Math.random();
+      phaseArr[i] = Math.random();
+    }
+
+    geom.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+    geom.setAttribute('rest', new THREE.BufferAttribute(restArr, 3));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+    geom.setAttribute('phase', new THREE.BufferAttribute(phaseArr, 1));
+
+    loadingEl.style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      loadingEl.textContent = `aggregating · ${(xhr.loaded / xhr.total * 100).toFixed(0)}%`;
+    }
+  },
+  () => { loadingEl.textContent = 'load failed — check network'; }
+);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const startTime = performance.now();
+
+function loop() {
+  const t = (performance.now() - startTime) / 1000;
+  uniforms.uTime.value = t;
+
+  if (revealStart > 0) {
+    const elapsed = (performance.now() - revealStart) / 1000;
+    uniforms.uReady.value = Math.min(1.0, elapsed / 3.0);
+    /* aggregation ramps up over 30s with organic pulsing */
+    const baseAgg = Math.min(1.0, elapsed / 28.0);
+    const pulse = 0.08 * Math.sin(t * 0.4) * Math.sin(t * 0.17);
+    uniforms.uAggregation.value = Math.max(0, baseAgg + pulse * baseAgg);
+  }
+
+  /* camera: orbit tracking centroid, moving closer as aggregation progresses */
+  const agg = uniforms.uAggregation.value;
+  const orbitR = 32 - 6 * agg + 4 * Math.sin(t * 0.04);
+  const angle = t * 0.06;
+  const camY = 4 + 3 * Math.sin(t * 0.05);
+  camera.position.set(
+    Math.sin(angle) * orbitR,
+    camY,
+    Math.cos(angle) * orbitR
+  );
+  camera.lookAt(0, 0.5, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
