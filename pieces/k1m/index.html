@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: propagate, intensity: gentle -->
+<title>k1m · physarum network · slime mold pheromone</title>
+<style>
+html, body { margin:0; padding:0; height:100%; background:#05060a; overflow:hidden; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace;
+      color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">k1m</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  Physarum polycephalum — slime mold pheromone network.
+  Post-human cognition: thousands of headless agents deposit + follow
+  chemical trails, self-organizing optimal transport networks between
+  scattered food sources. No brain, no plan, no center.
+
+  Ref: Jeff Jones (2010) "Characteristics of Pattern Formation and Evolution
+  in Approximations of Physarum Transport Networks."
+  Visual ref: Sage Jenson (@maboroshi_art) — Physarum simulations as art.
+
+  Palette (forest-floor bioluminescence):
+    #05060a  — deep humus black (background)
+    #1a2808  — lichen dark (trail base)
+    #5a8a18  — Physarum yellow-green (mid trail)
+    #a8d040  — bright slime mold (strong trail)
+    #c89830  — decomposing amber (food sources)
+*/
+
+// ─── Physarum simulation on CPU ───
+const W = 256, H = 256;
+const trail = new Float32Array(W * H);
+const trailB = new Float32Array(W * H);
+
+// Food sources — asymmetric, off-center, no axis of symmetry
+const foods = [
+  { x: 0.14, y: 0.28 }, { x: 0.71, y: 0.15 },
+  { x: 0.38, y: 0.76 }, { x: 0.84, y: 0.62 },
+  { x: 0.52, y: 0.42 }, { x: 0.22, y: 0.60 },
+  { x: 0.90, y: 0.38 }, { x: 0.60, y: 0.85 },
+];
+
+const N_AGENTS = 3000;
+const ax = new Float32Array(N_AGENTS);
+const ay = new Float32Array(N_AGENTS);
+const aa = new Float32Array(N_AGENTS);
+
+for (let i = 0; i < N_AGENTS; i++) {
+  const f = foods[i % foods.length];
+  ax[i] = (f.x + (Math.random() - 0.5) * 0.06) * W;
+  ay[i] = (f.y + (Math.random() - 0.5) * 0.06) * H;
+  aa[i] = Math.random() * Math.PI * 2;
+}
+
+const SA = 0.52, SD = 7.0, TS = 0.38, MS = 1.0;
+const DEPOSIT = 0.7, DECAY = 0.965, DIFFUSE = 0.16;
+
+function sense(px, py, angle) {
+  const sx = Math.round(px + Math.cos(angle) * SD);
+  const sy = Math.round(py + Math.sin(angle) * SD);
+  if (sx < 0 || sx >= W || sy < 0 || sy >= H) return 0;
+  return trail[sy * W + sx];
+}
+
+function simStep() {
+  for (let i = 0; i < N_AGENTS; i++) {
+    const sL = sense(ax[i], ay[i], aa[i] - SA);
+    const sC = sense(ax[i], ay[i], aa[i]);
+    const sR = sense(ax[i], ay[i], aa[i] + SA);
+    if (sC >= sL && sC >= sR) { /* straight */ }
+    else if (sL > sR) aa[i] -= TS * (0.5 + Math.random() * 0.5);
+    else if (sR > sL) aa[i] += TS * (0.5 + Math.random() * 0.5);
+    else aa[i] += (Math.random() - 0.5) * TS * 2;
+
+    ax[i] += Math.cos(aa[i]) * MS;
+    ay[i] += Math.sin(aa[i]) * MS;
+    if (ax[i] < 0) ax[i] += W; if (ax[i] >= W) ax[i] -= W;
+    if (ay[i] < 0) ay[i] += H; if (ay[i] >= H) ay[i] -= H;
+
+    const ix = ~~ax[i], iy = ~~ay[i];
+    trail[iy * W + ix] = Math.min(trail[iy * W + ix] + DEPOSIT, 8.0);
+  }
+  for (const f of foods) {
+    const fx = ~~(f.x * W), fy = ~~(f.y * H);
+    for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+      const px = fx + dx, py = fy + dy;
+      if (px >= 0 && px < W && py >= 0 && py < H)
+        trail[py * W + px] = Math.min(trail[py * W + px] + 1.8, 10.0);
+    }
+  }
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let sum = 0, c = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      sum += trail[((y + dy + H) % H) * W + (x + dx + W) % W]; c++;
+    }
+    trailB[y * W + x] = (trail[y * W + x] * (1 - DIFFUSE) + (sum / c) * DIFFUSE) * DECAY;
+  }
+  for (let i = 0; i < W * H; i++) trail[i] = trailB[i];
+}
+
+// pre-run so network is visible on first frame
+for (let i = 0; i < 400; i++) simStep();
+
+// ─── Three.js rendering ───
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x05060a, 0.045);
+
+const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(-4, 22, 10);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x05060a, 1);
+document.body.appendChild(renderer.domElement);
+
+// lighting: dim, observational, not dramatic
+const l1 = new THREE.DirectionalLight(0x8fb830, 0.25);
+l1.position.set(-3, 12, 2); scene.add(l1);
+scene.add(new THREE.AmbientLight(0x0a1204, 0.4));
+const l2 = new THREE.PointLight(0xc89830, 0.35, 25);
+l2.position.set(4, 5, -2); scene.add(l2);
+
+// trail texture (canvas → CanvasTexture)
+const trailCvs = document.createElement('canvas');
+trailCvs.width = W; trailCvs.height = H;
+const tctx = trailCvs.getContext('2d');
+const trailTex = new THREE.CanvasTexture(trailCvs);
+trailTex.minFilter = THREE.LinearFilter;
+trailTex.magFilter = THREE.LinearFilter;
+
+const PS = 20; // plane size
+
+// ground: trail emissive
+const groundMat = new THREE.MeshStandardMaterial({
+  map: trailTex, emissiveMap: trailTex, emissive: 0xffffff,
+  emissiveIntensity: 1.4, roughness: 0.92, metalness: 0.0,
+  transparent: true, opacity: 1.0,
+});
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(PS, PS), groundMat);
+ground.rotation.x = -Math.PI / 2; scene.add(ground);
+
+// dark substrate below
+const subMat = new THREE.MeshStandardMaterial({ color: 0x060804, roughness: 1.0 });
+const sub = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), subMat);
+sub.rotation.x = -Math.PI / 2; sub.position.y = -0.03; scene.add(sub);
+
+// ─── leaf-shaped agent instances ───
+function makeLeafGeo() {
+  const s = new THREE.Shape();
+  s.moveTo(0, 0);
+  s.bezierCurveTo(0.025, 0.03, 0.04, 0.07, 0.018, 0.12);
+  s.bezierCurveTo(0.008, 0.14, -0.008, 0.14, -0.018, 0.12);
+  s.bezierCurveTo(-0.04, 0.07, -0.025, 0.03, 0, 0);
+  return new THREE.ShapeGeometry(s, 3);
+}
+
+const leafMat = new THREE.MeshStandardMaterial({
+  color: 0x5a8a18, emissive: 0x1a3008, emissiveIntensity: 0.5,
+  roughness: 0.7, transparent: true, opacity: 0.65, side: THREE.DoubleSide,
+});
+const leaves = new THREE.InstancedMesh(makeLeafGeo(), leafMat, N_AGENTS);
+scene.add(leaves);
+const dummy = new THREE.Object3D();
+
+function toWorld(agX, agY) {
+  return { x: (agX / W - 0.5) * PS, z: (agY / H - 0.5) * PS };
+}
+
+// food markers — small amber lumps of decaying matter
+for (const f of foods) {
+  const p = toWorld(f.x * W, f.y * H);
+  const gl = new THREE.PointLight(0xc89830, 0.2, 4);
+  gl.position.set(p.x, 0.25, p.z); scene.add(gl);
+  const m = new THREE.Mesh(
+    new THREE.SphereGeometry(0.18, 5, 4),
+    new THREE.MeshStandardMaterial({ color: 0x8a6820, emissive: 0x4a3010, roughness: 0.95 })
+  );
+  m.position.set(p.x, 0.06, p.z); m.scale.y = 0.35; scene.add(m);
+}
+
+// ─── atmospheric dust motes — tiny ascending spores ───
+const MOTE_N = 300;
+const moteGeo = new THREE.BufferGeometry();
+const motePos = new Float32Array(MOTE_N * 3);
+const moteVel = new Float32Array(MOTE_N);
+for (let i = 0; i < MOTE_N; i++) {
+  motePos[i * 3]     = (Math.random() - 0.5) * PS * 1.2;
+  motePos[i * 3 + 1] = Math.random() * 8;
+  motePos[i * 3 + 2] = (Math.random() - 0.5) * PS * 1.2;
+  moteVel[i] = 0.002 + Math.random() * 0.004;
+}
+moteGeo.setAttribute('position', new THREE.BufferAttribute(motePos, 3));
+const moteMat = new THREE.PointsMaterial({
+  color: 0x8a9a50, size: 0.06, transparent: true, opacity: 0.25,
+  sizeAttenuation: true, depthWrite: false,
+});
+const motes = new THREE.Points(moteGeo, moteMat);
+scene.add(motes);
+
+// ─── film grain overlay (Lia Halloran — photochemical imperfection) ───
+const grainCvs = document.createElement('canvas');
+grainCvs.width = 256; grainCvs.height = 256;
+const gctx = grainCvs.getContext('2d');
+const grainTex = new THREE.CanvasTexture(grainCvs);
+const grainScene = new THREE.Scene();
+const grainCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const grainPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2),
+  new THREE.MeshBasicMaterial({ map: grainTex, transparent: true, depthTest: false, opacity: 0.10 })
+);
+grainPlane.renderOrder = 999;
+grainScene.add(grainPlane);
+
+function updateGrain() {
+  const d = gctx.createImageData(256, 256).data.buffer;
+  const u8 = new Uint8ClampedArray(d);
+  for (let i = 0; i < 256 * 256; i++) {
+    const v = Math.random() * 18;
+    u8[i * 4] = u8[i * 4 + 1] = u8[i * 4 + 2] = v;
+    u8[i * 4 + 3] = 28;
+  }
+  gctx.putImageData(new ImageData(u8, 256, 256), 0, 0);
+  grainTex.needsUpdate = true;
+}
+
+// ─── trail → texture ───
+function updateTrailTex() {
+  const img = tctx.createImageData(W, H);
+  const d = img.data;
+  for (let i = 0; i < W * H; i++) {
+    const v = trail[i];
+    const t = Math.min(v / 5.0, 1.0);
+    const t2 = t * t;
+    // color ramp: humus → lichen → slime-mold green → bright
+    d[i * 4]     = ~~(5  + t * 70  + t2 * 98);   // R
+    d[i * 4 + 1] = ~~(6  + t * 120 + t2 * 88);   // G
+    d[i * 4 + 2] = ~~(10 + t * 8   + t2 * 54);   // B
+    d[i * 4 + 3] = ~~(Math.min(t * 1.3, 1.0) * 255);
+  }
+  tctx.putImageData(img, 0, 0);
+  trailTex.needsUpdate = true;
+}
+
+function updateLeaves() {
+  for (let i = 0; i < N_AGENTS; i++) {
+    const p = toWorld(ax[i], ay[i]);
+    dummy.position.set(p.x, 0.008 + Math.sin(i * 3.7) * 0.003, p.z);
+    dummy.rotation.set(-Math.PI / 2, 0, -aa[i] + Math.PI * 0.5);
+    dummy.scale.setScalar(0.55 + Math.sin(i * 11.3) * 0.12);
+    dummy.updateMatrix();
+    leaves.setMatrixAt(i, dummy.matrix);
+  }
+  leaves.instanceMatrix.needsUpdate = true;
+}
+
+function updateMotes() {
+  const p = moteGeo.attributes.position;
+  for (let i = 0; i < MOTE_N; i++) {
+    p.array[i * 3 + 1] += moteVel[i];
+    if (p.array[i * 3 + 1] > 9) {
+      p.array[i * 3 + 1] = 0;
+      p.array[i * 3]     = (Math.random() - 0.5) * PS * 1.2;
+      p.array[i * 3 + 2] = (Math.random() - 0.5) * PS * 1.2;
+    }
+  }
+  p.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const t0 = performance.now();
+let fc = 0;
+
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+
+  // 2 sim steps per frame
+  simStep(); simStep();
+
+  updateTrailTex();
+  updateLeaves();
+  updateMotes();
+
+  // camera: slow non-centered drift — watching the forest floor
+  // off-center lookAt wanders, camera height breathes slowly
+  const ca = t * 0.012;
+  const cr = 15 + Math.sin(t * 0.025) * 2.5;
+  const ch = 16 + Math.sin(t * 0.018 + 0.7) * 2.5;
+  // lookAt drifts off-center in a lissajous
+  const lx = 2.0 * Math.sin(t * 0.007 + 1.0);
+  const lz = 2.0 * Math.cos(t * 0.009 + 2.5);
+  camera.position.set(Math.cos(ca) * cr + lx, ch, Math.sin(ca) * cr + lz);
+  camera.lookAt(lx, 0, lz);
+
+  renderer.autoClear = true;
+  renderer.render(scene, camera);
+
+  // grain overlay every 3rd frame
+  if (fc % 3 === 0) updateGrain();
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+
+  fc++;
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
