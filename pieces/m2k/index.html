@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>m2k · relational ink · shared calligraphic field</title>
+<!-- MOTION: pulse, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08080d; overflow:hidden;
+               color:#d8c895; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+           letter-spacing:0.06em; color:#cdd2dc; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px;
+           letter-spacing:0.04em; }
+  .field { position:fixed; right:14px; bottom:12px; opacity:0.50; font-size:10px;
+           letter-spacing:0.04em; color:#cdd2dc; text-align:right; line-height:1.6; }
+</style>
+</head>
+<body>
+<div class="id">m2k</div>
+<div class="hint">drag to orbit · open more tabs to grow the social field</div>
+<div class="field" id="fieldInfo">1 presence · 0 pulses</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ═══════════════════════════════════════════════════════════════════
+   RELATIONAL AESTHETICS — Nicolas Bourriaud (1998)
+   "Art is a state of encounter." The work is the social field it
+   creates: each browser tab is a presence; each price tick from
+   a public WebSocket is an external pulse. Growth strands from
+   other tabs appear as ghostly companion brushstrokes. External
+   pulses modulate ink pressure — the shared breath of the field.
+   ═══════════════════════════════════════════════════════════════════ */
+
+const MY_ID = crypto.randomUUID().slice(0,8);
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x08080d, 0.012);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(9, 9, 15);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080d, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+// ─── palette: 4 hand-chosen ink tones ───
+// warm parchment for self, muted indigo for peers,
+// vermillion accent on pulse, celadon for old strokes
+const PAL_SELF   = 0xe8dcc0;  // warm bone
+const PAL_PEER   = 0x8090b8;  // steel-indigo ghost
+const PAL_PULSE  = 0xc45c3e;  // cinnabar flash
+const PAL_AGED   = 0x7a9a82;  // celadon patina
+
+// ─── differential growth core (from 2iy/5gm) ───
+const MAX_VERTS = 1400;
+const ATTRACT   = 0.06;
+const REPEL_R   = 0.46;
+const REPEL_STR = 0.13;
+const NOISE     = 0.003;
+const PRESSURE  = 0.0028;
+const RISE      = 0.0042;
+const MAX_D     = 0.36;
+const CELL = REPEL_R;
+
+function createRing(seed){
+  const v = [];
+  for (let i = 0; i < 18; i++){
+    const th = i/18*Math.PI*2;
+    const r = 1.4 + (Math.sin(seed*13.7+i)*0.15);
+    v.push({ x:Math.cos(th)*r, y:0, z:Math.sin(th)*r, age:0 });
+  }
+  return v;
+}
+
+const verts = createRing(0);
+const grid = new Map();
+function key3(x,y,z){ return (x/CELL|0)+','+(y/CELL|0)+','+(z/CELL|0); }
+function rebuildGrid(){
+  grid.clear();
+  for (let i=0;i<verts.length;i++){
+    const v=verts[i], k=key3(v.x,v.y,v.z);
+    if(!grid.has(k))grid.set(k,[]);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx=v.x/CELL|0, cy=v.y/CELL|0, cz=v.z/CELL|0, out=[];
+  for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++)for(let dz=-1;dz<=1;dz++){
+    const a=grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if(a)for(const i of a)out.push(i);
+  }
+  return out;
+}
+
+// ─── pulse state (external heartbeat) ───
+let pulseIntensity = 0;    // 0→1, decays
+let pulseCount = 0;
+let peerCount = 1;         // self
+const peerStrands = new Map(); // id → {pts, lastSeen, mesh}
+
+function step(extraPressure){
+  const n = verts.length;
+  if(n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx=new Float32Array(n), dy=new Float32Array(n), dz=new Float32Array(n);
+  for(let i=0;i<n;i++){
+    const v=verts[i];
+    for(const j of neighbors(v)){
+      if(j===i) continue;
+      const u=verts[j];
+      const ex=v.x-u.x, ey=v.y-u.y, ez=v.z-u.z;
+      const d2=ex*ex+ey*ey+ez*ez;
+      if(d2>REPEL_R*REPEL_R||d2<1e-6)continue;
+      const d=Math.sqrt(d2);
+      const f=REPEL_STR*(1-d/REPEL_R)/d;
+      dx[i]+=ex*f; dy[i]+=ey*f; dz[i]+=ez*f;
+    }
+  }
+  for(let i=0;i<n;i++){
+    const a=verts[(i-1+n)%n], b=verts[(i+1)%n], v=verts[i];
+    dx[i]+=(a.x+b.x-2*v.x)*ATTRACT;
+    dy[i]+=(a.y+b.y-2*v.y)*ATTRACT;
+    dz[i]+=(a.z+b.z-2*v.z)*ATTRACT;
+  }
+  let cx=0,cy=0,cz=0;
+  for(let i=0;i<n;i++){cx+=verts[i].x;cy+=verts[i].y;cz+=verts[i].z;}
+  cx/=n;cy/=n;cz/=n;
+  const pMod = PRESSURE * (1 + extraPressure * 2.5);
+  for(let i=0;i<n;i++){
+    const ox=verts[i].x-cx, oy=verts[i].y-cy, oz=verts[i].z-cz;
+    const d=Math.hypot(ox,oy,oz)+1e-6;
+    dx[i]+=(ox/d)*pMod;
+    dy[i]+=(oy/d)*pMod*0.4;
+    dz[i]+=(oz/d)*pMod;
+  }
+  for(let i=0;i<n;i++){
+    const a=verts[i].age;
+    const upward=RISE*(0.3+1.2*Math.min(a*1.5,1.0));
+    verts[i].x+=dx[i]+(Math.random()-0.5)*NOISE;
+    verts[i].y+=dy[i]+(Math.random()-0.5)*NOISE*0.5+upward;
+    verts[i].z+=dz[i]+(Math.random()-0.5)*NOISE;
+    verts[i].age+=0.0014;
+  }
+  const grown=[];
+  for(let i=0;i<n;i++){
+    const a=verts[i], b=verts[(i+1)%n];
+    grown.push(a);
+    const ex=b.x-a.x,ey=b.y-a.y,ez=b.z-a.z;
+    if(ex*ex+ey*ey+ez*ez>MAX_D*MAX_D && verts.length+grown.length<MAX_VERTS){
+      grown.push({x:(a.x+b.x)*0.5,y:(a.y+b.y)*0.5-0.05,z:(a.z+b.z)*0.5,
+                  age:Math.max(a.age,b.age)*0.5});
+    }
+  }
+  verts.length=0;
+  for(const v of grown) verts.push(v);
+}
+
+// pre-grow
+for(let s=0;s<700;s++) step(0);
+
+// ─── tube builder (variable radius ink stroke) ───
+const RADIAL = 6;
+function buildTube(pts, baseR, mat){
+  const N = Math.min(600, pts.length*2);
+  const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+  const positions = new Float32Array(N*RADIAL*3);
+  const indices = [];
+  const up = new THREE.Vector3(0,1,0);
+  for(let i=0;i<N;i++){
+    const t=i/N;
+    const p=curve.getPointAt(t);
+    const tang=curve.getTangentAt(t).normalize();
+    const dt=1/N;
+    const t1=curve.getTangent(((t-dt)%1+1)%1);
+    const t2=curve.getTangent(t);
+    const t3=curve.getTangent(((t+dt)%1+1)%1);
+    const curv=(2-t1.dot(t2)-t2.dot(t3))*0.5;
+    const pressure=Math.min(1, curv*8);
+    const r=baseR*(0.3+0.7*pressure);
+    const normal=new THREE.Vector3().crossVectors(tang,up).normalize();
+    if(normal.lengthSq()<0.001)normal.set(1,0,0);
+    const binormal=new THREE.Vector3().crossVectors(tang,normal).normalize();
+    for(let j=0;j<RADIAL;j++){
+      const ang=(j/RADIAL)*Math.PI*2;
+      const v=new THREE.Vector3()
+        .copy(normal).multiplyScalar(Math.cos(ang)*r)
+        .add(binormal.clone().multiplyScalar(Math.sin(ang)*r))
+        .add(p);
+      positions[(i*RADIAL+j)*3]=v.x;
+      positions[(i*RADIAL+j)*3+1]=v.y;
+      positions[(i*RADIAL+j)*3+2]=v.z;
+    }
+  }
+  for(let i=0;i<N;i++){
+    const ni=(i+1)%N;
+    for(let j=0;j<RADIAL;j++){
+      const nj=(j+1)%RADIAL;
+      const a=i*RADIAL+j,b=i*RADIAL+nj,c=ni*RADIAL+j,d=ni*RADIAL+nj;
+      indices.push(a,b,c); indices.push(b,d,c);
+    }
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.BufferAttribute(positions,3));
+  g.setIndex(indices);
+  g.computeVertexNormals();
+  return new THREE.Mesh(g, mat);
+}
+
+// ─── materials ───
+const selfMat = new THREE.MeshBasicMaterial({
+  color: PAL_SELF, transparent:true, opacity:0.88
+});
+const peerMat = new THREE.MeshBasicMaterial({
+  color: PAL_PEER, transparent:true, opacity:0.35
+});
+const pulseMat = new THREE.MeshBasicMaterial({
+  color: PAL_PULSE, transparent:true, opacity:0.0
+});
+
+// pulse ring — a thin torus that flashes on external pulse
+const pulseRingGeo = new THREE.TorusGeometry(3, 0.02, 4, 64);
+const pulseRing = new THREE.Mesh(pulseRingGeo, pulseMat);
+pulseRing.rotation.x = Math.PI/2;
+scene.add(pulseRing);
+
+let tubeMesh = null;
+
+// ─── BroadcastChannel: relational field across tabs ───
+let bc = null;
+try { bc = new BroadcastChannel('relational-ink-field'); } catch(e){}
+
+function sampleStrand(){
+  // send a sparse sample of our verts (every 8th) to peers
+  const sample = [];
+  for(let i=0; i<verts.length; i+=8){
+    sample.push([
+      +(verts[i].x.toFixed(2)),
+      +(verts[i].y.toFixed(2)),
+      +(verts[i].z.toFixed(2))
+    ]);
+  }
+  return sample;
+}
+
+let broadcastTimer = 0;
+function broadcastSelf(){
+  if(!bc) return;
+  try{
+    bc.postMessage({ type:'strand', id:MY_ID, pts:sampleStrand(), t:Date.now() });
+  }catch(e){}
+}
+// announce presence
+function broadcastPing(){
+  if(!bc) return;
+  try{ bc.postMessage({ type:'ping', id:MY_ID, t:Date.now() }); }catch(e){}
+}
+
+if(bc){
+  bc.onmessage = (ev) => {
+    const d = ev.data;
+    if(!d || d.id===MY_ID) return;
+    if(d.type==='ping' || d.type==='strand'){
+      if(!peerStrands.has(d.id)){
+        peerStrands.set(d.id, { pts:[], lastSeen:Date.now(), mesh:null });
+      }
+      const ps = peerStrands.get(d.id);
+      ps.lastSeen = Date.now();
+      if(d.type==='strand' && d.pts && d.pts.length>4){
+        ps.pts = d.pts.map(p => new THREE.Vector3(p[0],p[1],p[2]));
+      }
+    }
+    if(d.type==='pong_req'){
+      broadcastPing();
+    }
+  };
+  broadcastPing();
+  // request pongs from existing tabs
+  try{ bc.postMessage({ type:'pong_req', id:MY_ID }); }catch(e){}
+}
+
+// ─── WebSocket: Binance public trade stream (BTC) as external pulse ───
+let ws = null;
+let wsConnected = false;
+function connectWS(){
+  try{
+    ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade');
+    ws.onopen = () => { wsConnected = true; };
+    ws.onmessage = (ev) => {
+      try{
+        const d = JSON.parse(ev.data);
+        if(d.p){
+          const price = parseFloat(d.p);
+          // use fractional part as pulse trigger — each trade is a heartbeat
+          pulseIntensity = Math.min(1, pulseIntensity + 0.12);
+          pulseCount++;
+        }
+      }catch(e){}
+    };
+    ws.onclose = () => { wsConnected = false; setTimeout(connectWS, 5000); };
+    ws.onerror = () => { wsConnected = false; };
+  }catch(e){
+    // fallback: synthetic pulse so the piece still breathes
+    setInterval(()=>{ pulseIntensity = Math.min(1, pulseIntensity+0.08); pulseCount++; }, 2200);
+  }
+}
+connectWS();
+// additional fallback: if WS doesn't connect in 3s, start synthetic pulse
+setTimeout(()=>{
+  if(!wsConnected && pulseCount===0){
+    setInterval(()=>{ pulseIntensity=Math.min(1,pulseIntensity+0.08); pulseCount++; },2000);
+  }
+}, 3000);
+
+// ─── HUD update ───
+const fieldEl = document.getElementById('fieldInfo');
+function updateHUD(){
+  // cull stale peers (>6s)
+  const now = Date.now();
+  for(const [id, ps] of peerStrands){
+    if(now - ps.lastSeen > 6000){
+      if(ps.mesh){ scene.remove(ps.mesh); ps.mesh.geometry.dispose(); }
+      peerStrands.delete(id);
+    }
+  }
+  peerCount = 1 + peerStrands.size;
+  const pLabel = peerCount===1 ? 'presence' : 'presences';
+  const src = wsConnected ? 'BTC' : 'synth';
+  fieldEl.textContent = `${peerCount} ${pLabel} · ${pulseCount} pulses (${src})`;
+}
+
+// ─── resize ───
+addEventListener('resize', ()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+// ─── main loop ───
+let paused = false;
+addEventListener('click', ()=>{ paused=!paused; });
+
+function loop(){
+  // decay pulse
+  pulseIntensity *= 0.94;
+
+  // growth step — pulse modulates pressure
+  if(!paused){
+    for(let s=0;s<2;s++) step(pulseIntensity);
+  }
+
+  // rebuild self tube
+  if(verts.length > 8){
+    const pts = verts.map(v => new THREE.Vector3(v.x,v.y,v.z));
+    if(tubeMesh){ scene.remove(tubeMesh); tubeMesh.geometry.dispose(); }
+    const baseR = 0.06 + 0.08 * pulseIntensity; // ink swells with pulse
+    tubeMesh = buildTube(pts, baseR, selfMat);
+    scene.add(tubeMesh);
+  }
+
+  // broadcast to peers every ~500ms
+  broadcastTimer++;
+  if(broadcastTimer % 30 === 0){
+    broadcastSelf();
+    broadcastPing();
+  }
+
+  // render peer ghost strands
+  for(const [id, ps] of peerStrands){
+    if(ps.pts.length > 4){
+      if(ps.mesh){ scene.remove(ps.mesh); ps.mesh.geometry.dispose(); }
+      ps.mesh = buildTube(ps.pts, 0.04, peerMat);
+      scene.add(ps.mesh);
+    }
+  }
+
+  // pulse ring flash
+  const py = verts.length>0 ? verts.reduce((s,v)=>s+v.y,0)/verts.length : 5;
+  pulseRing.position.y = py;
+  pulseRing.scale.setScalar(1 + pulseIntensity*1.5);
+  pulseMat.opacity = pulseIntensity * 0.35;
+
+  // camera follow centroid
+  let yMean=0; for(const v of verts) yMean+=v.y; yMean/=Math.max(verts.length,1);
+  const targetY = Math.max(yMean, 2);
+  controls.target.y += (targetY-controls.target.y)*0.04;
+  camera.position.y += (targetY+4-camera.position.y)*0.04;
+
+  controls.update();
+  renderer.render(scene, camera);
+
+  if(broadcastTimer % 15 === 0) updateHUD();
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
