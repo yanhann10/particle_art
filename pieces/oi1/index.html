@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oi1 · Richter Farbtafel (chromatic squeegee)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f0ece4; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; color:#666; z-index:10; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; color:#666; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">oi1</div>
+<div class="hint">click to re-squeegee</div>
+<div class="src">Richter · Farbtafel + squeegee · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 28;
+const camera = new THREE.OrthographicCamera(
+  frustumSize * aspect / -2, frustumSize * aspect / 2,
+  frustumSize / 2, frustumSize / -2, 0.1, 100
+);
+camera.position.set(0, 0, 10);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf0ece4, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+
+// Richter palette — 12 hues from his 1024/4096 Farben series
+const PALETTE = [
+  [0.84, 0.22, 0.18], // cadmium red
+  [0.92, 0.58, 0.15], // yellow ochre
+  [0.95, 0.88, 0.25], // cadmium yellow
+  [0.35, 0.65, 0.28], // chrome green
+  [0.18, 0.42, 0.60], // cerulean
+  [0.22, 0.24, 0.55], // ultramarine
+  [0.55, 0.22, 0.48], // mauve
+  [0.72, 0.30, 0.25], // burnt sienna
+  [0.88, 0.75, 0.62], // naples yellow
+  [0.28, 0.52, 0.45], // viridian
+  [0.60, 0.15, 0.22], // alizarin
+  [0.38, 0.35, 0.32], // warm grey
+];
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uSqueegeeT: { value: -1.0 },
+  uSqueegeeY: { value: 0.0 },
+  uSmearDir: { value: 1.0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uSqueegeeT;
+    uniform float uSqueegeeY;
+    uniform float uSmearDir;
+
+    attribute vec2 gridPos;
+    attribute vec3 cellColor;
+    attribute float smearSeed;
+
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying float vThick;
+
+    void main(){
+      vec2 gp = gridPos;
+
+      // Squeegee pass: horizontal drag that sweeps left-to-right (or right-to-left)
+      // uSqueegeeT goes from -1 (not started) through 0..1 (sweeping) to 2 (done)
+      float sweepX = mix(-14.0, 14.0, clamp(uSqueegeeT, 0.0, 1.0));
+      float inSmear = step(0.0, uSqueegeeT) * step(uSqueegeeT, 1.5);
+
+      // Distance from squeegee blade
+      float dx = (gp.x * uSmearDir) - (sweepX * uSmearDir);
+      float behindBlade = step(0.0, -dx); // 1 if blade has passed this point
+
+      // Vertical proximity to squeegee center line — affects drag strength
+      float dy = abs(gp.y - uSqueegeeY);
+      float bandWidth = 3.5 + sin(gp.x * 0.7 + smearSeed * 6.28) * 1.2;
+      float vertProx = smoothstep(bandWidth, 0.0, dy);
+
+      // Drag amount: particles behind blade get dragged horizontally
+      float dragStrength = inSmear * behindBlade * vertProx;
+      float dragDist = dragStrength * (2.5 + smearSeed * 1.8) * uSmearDir;
+
+      // Wobble: visible vertical displacement in smeared region
+      float wobble = dragStrength * sin(gp.x * 1.8 + smearSeed * 12.0 + uTime * 0.3) * 0.6;
+
+      vec3 p = vec3(gp.x + dragDist, gp.y + wobble, 0.0);
+
+      vColor = cellColor;
+      vAlpha = 1.0;
+
+      // Paint thickness: smeared regions get larger points
+      float thickness = 1.0 + dragStrength * 1.4;
+      vThick = thickness;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = uPixel * 2.4 * thickness;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying float vThick;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // Slight edge softness for thicker (smeared) points
+      float edge = 1.0 - smoothstep(0.18, 0.25, r) * 0.3;
+
+      // Smeared paint gets slightly desaturated toward warm grey
+      vec3 smearTint = mix(vColor, vec3(0.72, 0.68, 0.63), (vThick - 1.0) * 0.25);
+
+      gl_FragColor = vec4(smearTint * edge, vAlpha);
+    }
+  `
+});
+
+let geom, points;
+let squeegeeActive = false;
+let squeegeeStart = 0;
+const SQUEEGEE_DURATION = 3.5; // seconds
+
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// Latin-square-style permutation: each row is a shifted permutation of palette indices
+function buildLatinColors(rows, cols, rng) {
+  const nColors = PALETTE.length;
+  // Create a base permutation
+  const basePerm = [];
+  for (let i = 0; i < nColors; i++) basePerm.push(i);
+  // Fisher-Yates shuffle
+  for (let i = nColors - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [basePerm[i], basePerm[j]] = [basePerm[j], basePerm[i]];
+  }
+  // Each row shifts by a different offset — creates visible chromatic gradients
+  const rowShifts = [];
+  for (let i = 0; i < rows; i++) {
+    // Use a second permutation pattern for row offsets to avoid pure diagonal
+    rowShifts.push(Math.floor(rng() * nColors));
+  }
+  return (r, c) => {
+    const idx = (basePerm[c % nColors] + rowShifts[r % rows] + Math.floor(c / nColors)) % nColors;
+    return PALETTE[idx];
+  };
+}
+
+function regenerate() {
+  const seed = Math.floor(Math.random() * 1e9);
+  const rng = makeRng(seed);
+
+  const gridCols = 28 + Math.floor(rng() * 12); // 28-40 columns
+  const gridRows = 20 + Math.floor(rng() * 10); // 20-30 rows
+  const width = 24;
+  const height = 18;
+  const cellW = width / gridCols;
+  const cellH = height / gridRows;
+
+  const getColor = buildLatinColors(gridRows, gridCols, rng);
+
+  const positions = new Float32Array(N * 3);
+  const gridPositions = new Float32Array(N * 2);
+  const cellColors = new Float32Array(N * 3);
+  const smearSeeds = new Float32Array(N);
+
+  let idx = 0;
+  const ppCell = Math.floor(N / (gridRows * gridCols));
+
+  for (let r = 0; r < gridRows && idx < N; r++) {
+    for (let c = 0; c < gridCols && idx < N; c++) {
+      const col = getColor(r, c);
+      const cx = (c + 0.5) * cellW - width * 0.5;
+      const cy = (r + 0.5) * cellH - height * 0.5;
+
+      for (let k = 0; k < ppCell && idx < N; k++) {
+        // Fill cell area with slight inset for grid lines
+        const inset = 0.08;
+        const x = cx + (rng() - 0.5) * cellW * (1 - inset);
+        const y = cy + (rng() - 0.5) * cellH * (1 - inset);
+
+        positions[idx * 3] = x;
+        positions[idx * 3 + 1] = y;
+        positions[idx * 3 + 2] = 0;
+        gridPositions[idx * 2] = x;
+        gridPositions[idx * 2 + 1] = y;
+        cellColors[idx * 3] = col[0];
+        cellColors[idx * 3 + 1] = col[1];
+        cellColors[idx * 3 + 2] = col[2];
+        smearSeeds[idx] = rng();
+        idx++;
+      }
+    }
+  }
+
+  // Fill remainder
+  while (idx < N) {
+    const r = Math.floor(rng() * gridRows);
+    const c = Math.floor(rng() * gridCols);
+    const col = getColor(r, c);
+    const cx = (c + 0.5) * cellW - width * 0.5;
+    const cy = (r + 0.5) * cellH - height * 0.5;
+    const x = cx + (rng() - 0.5) * cellW * 0.9;
+    const y = cy + (rng() - 0.5) * cellH * 0.9;
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = 0;
+    gridPositions[idx * 2] = x;
+    gridPositions[idx * 2 + 1] = y;
+    cellColors[idx * 3] = col[0];
+    cellColors[idx * 3 + 1] = col[1];
+    cellColors[idx * 3 + 2] = col[2];
+    smearSeeds[idx] = rng();
+    idx++;
+  }
+
+  // Squeegee parameters
+  uniforms.uSqueegeeT.value = -1.0;
+  uniforms.uSqueegeeY.value = (rng() - 0.5) * height * 0.6;
+  uniforms.uSmearDir.value = rng() > 0.5 ? 1.0 : -1.0;
+
+  if (!geom) {
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('gridPos', new THREE.BufferAttribute(gridPositions, 2));
+    geom.setAttribute('cellColor', new THREE.BufferAttribute(cellColors, 3));
+    geom.setAttribute('smearSeed', new THREE.BufferAttribute(smearSeeds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.gridPos.array.set(gridPositions);
+    geom.attributes.gridPos.needsUpdate = true;
+    geom.attributes.cellColor.array.set(cellColors);
+    geom.attributes.cellColor.needsUpdate = true;
+    geom.attributes.smearSeed.array.set(smearSeeds);
+    geom.attributes.smearSeed.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+
+  // Start squeegee after brief pause
+  squeegeeActive = true;
+  squeegeeStart = performance.now() + 800;
+}
+
+regenerate();
+addEventListener('click', regenerate);
+
+addEventListener('resize', () => {
+  const a = innerWidth / innerHeight;
+  camera.left = frustumSize * a / -2;
+  camera.right = frustumSize * a / 2;
+  camera.top = frustumSize / 2;
+  camera.bottom = frustumSize / -2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const globalStart = performance.now();
+function loop() {
+  const now = performance.now();
+  uniforms.uTime.value = (now - globalStart) / 1000;
+
+  if (squeegeeActive) {
+    const elapsed = (now - squeegeeStart) / 1000;
+    if (elapsed < 0) {
+      uniforms.uSqueegeeT.value = -1.0;
+    } else {
+      const t = elapsed / SQUEEGEE_DURATION;
+      uniforms.uSqueegeeT.value = Math.min(t, 1.5);
+      if (t > 1.5) squeegeeActive = false;
+    }
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
