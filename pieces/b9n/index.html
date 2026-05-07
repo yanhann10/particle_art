@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>b9n · curl-ink · divergence-free calligraphy</title>
+<!-- MOTION: undulate, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08080d; overflow:hidden;
+               color:#d8c895; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,monospace; }
+</style>
+</head>
+<body>
+<div class="id">b9n</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Curl-ink: differential-growth calligraphic ribbon advected through a
+// time-varying curl-noise field. The growth mechanics (attract/repel/split)
+// keep the form a coherent closed ribbon. The curl field replaces the old
+// rise+pressure law — vertices drift through divergence-free swirling
+// currents, giving the stroke an alive, breathing quality.
+//
+// Reference: Sage Jenson's differential growth + Robert Bridson's curl noise.
+// The ribbon writhes like a brush held by moving water.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x08080d, 0.012);
+
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(10, 6, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080d, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 3, 0);
+
+// ─────────── curl-noise field ───────────
+// Three independent smooth potential fields using layered sin/cos.
+// Curl of the vector potential gives divergence-free advection.
+
+function pot(x, y, z, seed, time) {
+  const s1 = 0.32, s2 = 0.61;
+  return Math.sin(s1 * x + seed * 17.1 + time * 0.08)
+       * Math.cos(s1 * y + seed * 31.7 - time * 0.06)
+       * Math.sin(s1 * z + seed * 23.3 + time * 0.05)
+       + 0.4 * Math.sin(s2 * x + seed * 7.3 + time * 0.12)
+             * Math.cos(s2 * z + seed * 13.1 - time * 0.09)
+             * Math.sin(s2 * y + seed * 41.9);
+}
+
+const EPS = 0.05;
+function curlNoise(x, y, z, time) {
+  // A = (pot(...,1), pot(...,2), pot(...,3))
+  // curl_x = dAz/dy - dAy/dz
+  const dAz_dy = (pot(x, y + EPS, z, 3, time) - pot(x, y - EPS, z, 3, time)) / (2 * EPS);
+  const dAy_dz = (pot(x, y, z + EPS, 2, time) - pot(x, y, z - EPS, 2, time)) / (2 * EPS);
+  // curl_y = dAx/dz - dAz/dx
+  const dAx_dz = (pot(x, y, z + EPS, 1, time) - pot(x, y, z - EPS, 1, time)) / (2 * EPS);
+  const dAz_dx = (pot(x + EPS, y, z, 3, time) - pot(x - EPS, y, z, 3, time)) / (2 * EPS);
+  // curl_z = dAy/dx - dAx/dy
+  const dAy_dx = (pot(x + EPS, y, z, 2, time) - pot(x - EPS, y, z, 2, time)) / (2 * EPS);
+  const dAx_dy = (pot(x, y + EPS, z, 1, time) - pot(x, y - EPS, z, 1, time)) / (2 * EPS);
+  return {
+    x: dAz_dy - dAy_dz,
+    y: dAx_dz - dAz_dx,
+    z: dAy_dx - dAx_dy
+  };
+}
+
+// ─────────── differential growth ───────────
+const MAX_VERTS = 2000;
+const ATTRACT   = 0.055;
+const REPEL_R   = 0.44;
+const REPEL_STR = 0.12;
+const JITTER    = 0.002;
+const MAX_D     = 0.34;
+const CURL_STR  = 0.018;   // curl advection amplitude
+
+const verts = [];
+for (let i = 0; i < 20; i++) {
+  const th = i / 20 * Math.PI * 2;
+  const r = 1.6 + (Math.random() - 0.5) * 0.15;
+  verts.push({ x: Math.cos(th) * r, y: 0, z: Math.sin(th) * r, age: 0 });
+}
+
+const CELL = REPEL_R, grid = new Map();
+function key3(x, y, z) {
+  return Math.floor(x / CELL) + ',' + Math.floor(y / CELL) + ',' + Math.floor(z / CELL);
+}
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i], k = key3(v.x, v.y, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v) {
+  const cx = Math.floor(v.x / CELL), cy = Math.floor(v.y / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++)
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dz = -1; dz <= 1; dz++) {
+        const arr = grid.get((cx + dx) + ',' + (cy + dy) + ',' + (cz + dz));
+        if (arr) for (const idx of arr) out.push(idx);
+      }
+  return out;
+}
+
+let paused = false;
+let simTime = 0;
+
+function step() {
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) { simTime += 0.04; return; }
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+
+  // repulsion
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of neighbors(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex * ex + ey * ey + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f; dy[i] += ey * f; dz[i] += ez * f;
+    }
+  }
+
+  // attraction to neighbors in chain
+  for (let i = 0; i < n; i++) {
+    const a = verts[(i - 1 + n) % n], b = verts[(i + 1) % n], v = verts[i];
+    dx[i] += (a.x + b.x - 2 * v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2 * v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2 * v.z) * ATTRACT;
+  }
+
+  // curl-noise advection — replaces the old rise+pressure law
+  // amplitude grows with age so young vertices settle before drifting
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    const ageScale = Math.min(v.age * 2.5, 1.0);
+    const c = curlNoise(v.x, v.y, v.z, simTime);
+    dx[i] += c.x * CURL_STR * ageScale;
+    dy[i] += c.y * CURL_STR * ageScale;
+    dz[i] += c.z * CURL_STR * ageScale;
+  }
+
+  // gentle upward bias — ink climbs, but curl dominates the character
+  for (let i = 0; i < n; i++) {
+    const upBias = 0.002 * Math.min(verts[i].age * 1.8, 1.0);
+    verts[i].x += dx[i] + (Math.random() - 0.5) * JITTER;
+    verts[i].y += dy[i] + (Math.random() - 0.5) * JITTER * 0.4 + upBias;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * JITTER;
+    verts[i].age += 0.0014;
+  }
+
+  // subdivision
+  const grown = [];
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    grown.push(a);
+    const ex = b.x - a.x, ey = b.y - a.y, ez = b.z - a.z;
+    if (ex * ex + ey * ey + ez * ez > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({
+        x: (a.x + b.x) * 0.5,
+        y: (a.y + b.y) * 0.5 - 0.04,
+        z: (a.z + b.z) * 0.5,
+        age: Math.max(a.age, b.age) * 0.5
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+  simTime += 0.04;
+}
+
+// pre-grow so form is visible on first frame
+for (let s = 0; s < 600; s++) step();
+
+addEventListener('click', () => { paused = !paused; });
+
+// ─────────── ink-tube renderer ───────────
+// Variable-thickness tube: thick where curvature is high (pressed ink),
+// thin on straight runs (lifted brush). Palette: warm bone on dark ground,
+// with a subtle age-tint toward rose at older vertices.
+
+const RADIAL = 6;
+let tubeMesh = null;
+
+// two-tone material: base bone, slight warmth variation via vertex colors
+const tubeMat = new THREE.MeshBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.88,
+});
+
+// palette: bone → faded rose → pale ash
+const colBone = new THREE.Color(0xe8dcc0);
+const colRose = new THREE.Color(0xc9a9a0);
+const colAsh  = new THREE.Color(0xa0a8b0);
+
+function buildTube() {
+  if (verts.length < 10) return;
+  const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+  const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+
+  const N = Math.min(900, verts.length * 2);
+  const radii = new Float32Array(N);
+  const curvatures = new Float32Array(N);
+
+  for (let i = 0; i < N; i++) {
+    const t = i / N;
+    const dt = 1 / N;
+    const t1 = curve.getTangent((t - dt + 1) % 1);
+    const t2 = curve.getTangent(t);
+    const t3 = curve.getTangent((t + dt) % 1);
+    const c = (2 - t1.dot(t2) - t2.dot(t3)) * 0.5;
+    curvatures[i] = c;
+    const pressure = Math.min(1.0, c * 8);
+    radii[i] = 0.016 + 0.11 * pressure;
+  }
+
+  const posArr = new Float32Array(N * RADIAL * 3);
+  const colArr = new Float32Array(N * RADIAL * 3);
+  const indices = [];
+  const up = new THREE.Vector3(0, 1, 0);
+  const tmpN = new THREE.Vector3();
+  const tmpB = new THREE.Vector3();
+  const tmpV = new THREE.Vector3();
+  const tmpCol = new THREE.Color();
+
+  for (let i = 0; i < N; i++) {
+    const t = i / N;
+    const p = curve.getPointAt(t);
+    const tangent = curve.getTangentAt(t).normalize();
+    tmpN.crossVectors(tangent, up).normalize();
+    if (tmpN.lengthSq() < 0.001) tmpN.set(1, 0, 0);
+    tmpB.crossVectors(tangent, tmpN).normalize();
+    const r = radii[i];
+
+    // color: blend bone→rose by height, touch of ash by curvature
+    const hFrac = Math.min(Math.max(p.y / 12, 0), 1);
+    tmpCol.copy(colBone).lerp(colRose, hFrac * 0.5 + curvatures[i] * 2.0);
+    tmpCol.lerp(colAsh, curvatures[i] * 0.8);
+
+    for (let j = 0; j < RADIAL; j++) {
+      const ang = (j / RADIAL) * Math.PI * 2;
+      tmpV.copy(tmpN).multiplyScalar(Math.cos(ang) * r)
+        .add(tmpB.clone().multiplyScalar(Math.sin(ang) * r))
+        .add(p);
+      const idx = (i * RADIAL + j) * 3;
+      posArr[idx] = tmpV.x;
+      posArr[idx + 1] = tmpV.y;
+      posArr[idx + 2] = tmpV.z;
+      colArr[idx] = tmpCol.r;
+      colArr[idx + 1] = tmpCol.g;
+      colArr[idx + 2] = tmpCol.b;
+    }
+  }
+
+  for (let i = 0; i < N; i++) {
+    const ni = (i + 1) % N;
+    for (let j = 0; j < RADIAL; j++) {
+      const nj = (j + 1) % RADIAL;
+      const a = i * RADIAL + j, b = i * RADIAL + nj;
+      const c = ni * RADIAL + j, d = ni * RADIAL + nj;
+      indices.push(a, b, c, b, d, c);
+    }
+  }
+
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(colArr, 3));
+  g.setIndex(indices);
+  g.computeVertexNormals();
+
+  if (tubeMesh) { scene.remove(tubeMesh); tubeMesh.geometry.dispose(); }
+  tubeMesh = new THREE.Mesh(g, tubeMat);
+  scene.add(tubeMesh);
+}
+
+// ─────────── atmosphere: fine dust motes ───────────
+const DUST_N = 280;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(DUST_N * 3);
+const dustAlpha = new Float32Array(DUST_N);
+for (let i = 0; i < DUST_N; i++) {
+  dustPos[i * 3]     = (Math.random() - 0.5) * 24;
+  dustPos[i * 3 + 1] = Math.random() * 18;
+  dustPos[i * 3 + 2] = (Math.random() - 0.5) * 24;
+  dustAlpha[i] = 0.08 + Math.random() * 0.12;
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({
+  color: 0xd8c895,
+  size: 0.04,
+  transparent: true,
+  opacity: 0.15,
+  sizeAttenuation: true,
+});
+scene.add(new THREE.Points(dustGeo, dustMat));
+
+// ─────────── subtle side light gradient via plane ───────────
+const gradGeo = new THREE.PlaneGeometry(60, 40);
+const gradMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  uniforms: {},
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main() {
+      float g = smoothstep(0.0, 0.7, vUv.y);
+      vec3 warm = vec3(0.12, 0.08, 0.04);
+      vec3 cool = vec3(0.02, 0.03, 0.05);
+      vec3 col = mix(cool, warm, g);
+      float a = 0.12 * (1.0 - abs(vUv.x - 0.5) * 1.4);
+      gl_FragColor = vec4(col, a);
+    }
+  `
+});
+const gradPlane = new THREE.Mesh(gradGeo, gradMat);
+gradPlane.position.set(0, 8, -18);
+scene.add(gradPlane);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop() {
+  for (let s = 0; s < 2; s++) step();
+  buildTube();
+
+  // camera tracks centroid
+  let cx = 0, cy = 0, cz = 0;
+  for (const v of verts) { cx += v.x; cy += v.y; cz += v.z; }
+  const n = Math.max(verts.length, 1);
+  cx /= n; cy /= n; cz /= n;
+
+  controls.target.x += (cx - controls.target.x) * 0.03;
+  controls.target.y += (Math.max(cy, 2) - controls.target.y) * 0.03;
+  controls.target.z += (cz - controls.target.z) * 0.03;
+
+  const desiredCamY = Math.max(cy, 2) + 3;
+  camera.position.y += (desiredCamY - camera.position.y) * 0.03;
+
+  // animate dust
+  const dp = dustGeo.attributes.position.array;
+  for (let i = 0; i < DUST_N; i++) {
+    dp[i * 3 + 1] += 0.003;
+    if (dp[i * 3 + 1] > 18) dp[i * 3 + 1] = 0;
+  }
+  dustGeo.attributes.position.needsUpdate = true;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
