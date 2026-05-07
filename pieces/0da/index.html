@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0da · cellular morphogenesis</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">0da</div>
+<div class="hint">cellular forms · subdivision growth</div>
+<div class="src">andy lomas · morphogenetic creations</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Andy Lomas morphogenesis: cells split when nutrient accumulates, neighbor links rewire,
+// form grows into cauliflower-like convolutions. Render as instanced spheres with AO-approximation.
+
+const W = 128, H = 128;
+let N = 4096; // start with 4k cells, will grow to ~12k
+const MAX_N = 16384;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080a, 1);
+document.body.appendChild(renderer.domElement);
+
+// GPGPU: store (x,y,z, nutrient) per cell
+const rtParams = { type: THREE.FloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtState = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtNext  = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// neighbor graph: for each cell, store indices of 6 neighbors + count
+// (nx,ny,nz,nw) = (neighbor0, neighbor1, neighbor2, neighbor3)
+// (nx2,ny2,nz2, count)
+let rtLinks = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtLinks2 = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// init: sphere of cells
+const stateData = new Float32Array(MAX_N * 4);
+const linksData = new Float32Array(MAX_N * 4);
+const links2Data = new Float32Array(MAX_N * 4);
+
+function initCells(){
+  // start with ~50 cells in a tight cluster
+  const seed = 64;
+  for (let i = 0; i < seed; i++){
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const r = 0.08 + Math.random() * 0.04;
+    stateData[i*4]   = r * Math.sin(phi) * Math.cos(theta);
+    stateData[i*4+1] = r * Math.sin(phi) * Math.sin(theta);
+    stateData[i*4+2] = r * Math.cos(phi);
+    stateData[i*4+3] = Math.random() * 0.5; // nutrient
+  }
+  // fill rest with inactive
+  for (let i = seed; i < MAX_N; i++){
+    stateData[i*4]   = 999; stateData[i*4+1] = 999; stateData[i*4+2] = 999; stateData[i*4+3] = 0;
+  }
+  // build initial neighbor graph (nearest 6)
+  for (let i = 0; i < seed; i++){
+    const pi = new THREE.Vector3(stateData[i*4], stateData[i*4+1], stateData[i*4+2]);
+    const dists = [];
+    for (let j = 0; j < seed; j++){
+      if (i === j) continue;
+      const pj = new THREE.Vector3(stateData[j*4], stateData[j*4+1], stateData[j*4+2]);
+      dists.push({ idx: j, d: pi.distanceTo(pj) });
+    }
+    dists.sort((a,b) => a.d - b.d);
+    linksData[i*4]   = dists[0] ? dists[0].idx : -1;
+    linksData[i*4+1] = dists[1] ? dists[1].idx : -1;
+    linksData[i*4+2] = dists[2] ? dists[2].idx : -1;
+    linksData[i*4+3] = dists[3] ? dists[3].idx : -1;
+    links2Data[i*4]  = dists[4] ? dists[4].idx : -1;
+    links2Data[i*4+1]= dists[5] ? dists[5].idx : -1;
+    links2Data[i*4+2]= 0;
+    links2Data[i*4+3]= 6;
+  }
+  N = seed;
+}
+initCells();
+
+const stateTex = new THREE.DataTexture(stateData, W, H, THREE.RGBAFormat, THREE.FloatType);
+stateTex.needsUpdate = true;
+const linksTex = new THREE.DataTexture(linksData, W, H, THREE.RGBAFormat, THREE.FloatType);
+linksTex.needsUpdate = true;
+const links2Tex = new THREE.DataTexture(links2Data, W, H, THREE.RGBAFormat, THREE.FloatType);
+links2Tex.needsUpdate = true;
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+function blitTexture(tex, target){
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { tex: { value: tex } },
+    vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+    fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+  });
+  blitScene.children = [];
+  blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), mat));
+  renderer.setRenderTarget(target);
+  renderer.render(blitScene, camOrtho);
+  renderer.setRenderTarget(null);
+}
+blitTexture(stateTex, rtState);
+blitTexture(linksTex, rtLinks);
+blitTexture(links2Tex, rtLinks2);
+
+// simulation: accumulate nutrient, relax spring forces, split when threshold reached
+const simUniforms = {
+  stateIn: { value: rtState.texture },
+  linksIn: { value: rtLinks.texture },
+  links2In: { value: rtLinks2.texture },
+  uN: { value: N },
+  uMaxN: { value: MAX_N },
+  uDt: { value: 0.008 },
+  uGrowth: { value: 0.0 },
+  uSplitThreshold: { value: 1.0 }
+};
+
+// step 1: relax springs + accumulate nutrient
+const relaxMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D stateIn, linksIn, links2In;
+    uniform int uN;
+    uniform float uDt, uGrowth;
+    varying vec2 vUv;
+
+    vec4 getCell(int idx){
+      int x = idx - (idx / 128) * 128;
+      int y = idx / 128;
+      vec2 uv = (vec2(float(x), float(y)) + 0.5) / 128.0;
+      return texture2D(stateIn, uv);
+    }
+
+    void main(){
+      int idx = int(vUv.x * 128.0) + int(vUv.y * 128.0) * 128;
+      if (idx >= uN){ gl_FragColor = vec4(999.0); return; }
+
+      vec4 s = texture2D(stateIn, vUv);
+      vec3 p = s.xyz;
+      float nutrient = s.w;
+      if (p.x > 900.0){ gl_FragColor = vec4(999.0); return; }
+
+      vec4 ln = texture2D(linksIn, vUv);
+      vec4 ln2 = texture2D(links2In, vUv);
+      int count = int(ln2.w);
+
+      vec3 force = vec3(0.0);
+      float targetDist = 0.12;
+      int neighbors[6];
+      neighbors[0] = int(ln.x);
+      neighbors[1] = int(ln.y);
+      neighbors[2] = int(ln.z);
+      neighbors[3] = int(ln.w);
+      neighbors[4] = int(ln2.x);
+      neighbors[5] = int(ln2.y);
+
+      for (int i = 0; i < 6; i++){
+        if (i >= count) break;
+        int ni = neighbors[i];
+        if (ni < 0 || ni >= uN) continue;
+        vec4 sn = getCell(ni);
+        if (sn.x > 900.0) continue;
+        vec3 pn = sn.xyz;
+        vec3 d = pn - p;
+        float dist = length(d);
+        if (dist < 0.001) continue;
+        float diff = dist - targetDist;
+        force += normalize(d) * diff * 0.15;
+      }
+
+      p += force * uDt;
+
+      // accumulate nutrient: base rate + crowding penalty
+      float crowdFactor = max(0.0, 1.0 - float(count) / 8.0);
+      nutrient += uGrowth * (0.02 + 0.03 * crowdFactor);
+
+      gl_FragColor = vec4(p, nutrient);
+    }
+  `
+});
+
+const relaxScene = new THREE.Scene();
+relaxScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), relaxMat));
+
+// CPU-side split logic (executed every 30 frames)
+function splitCells(){
+  if (N >= MAX_N - 100) return;
+  renderer.setRenderTarget(rtState);
+  const buf = new Uint8Array(W * H * 4);
+  renderer.readRenderTargetPixels(rtState, 0, 0, W, H, buf);
+  renderer.setRenderTarget(null);
+
+  const cellsFloat = new Float32Array(buf.buffer);
+  const splitList = [];
+  for (let i = 0; i < N; i++){
+    const nutrient = cellsFloat[i*4 + 3];
+    if (nutrient > simUniforms.uSplitThreshold.value){
+      splitList.push(i);
+    }
+  }
+
+  if (splitList.length === 0) return;
+  // split up to 10 cells per cycle
+  const toSplit = splitList.slice(0, Math.min(10, MAX_N - N));
+  toSplit.forEach(i => {
+    if (N >= MAX_N) return;
+    const px = cellsFloat[i*4], py = cellsFloat[i*4+1], pz = cellsFloat[i*4+2];
+    const offset = new THREE.Vector3(
+      (Math.random()-0.5)*0.1,
+      (Math.random()-0.5)*0.1,
+      (Math.random()-0.5)*0.1
+    );
+    // parent cell moves slightly
+    cellsFloat[i*4] = px + offset.x;
+    cellsFloat[i*4+1] = py + offset.y;
+    cellsFloat[i*4+2] = pz + offset.z;
+    cellsFloat[i*4+3] = 0; // reset nutrient
+
+    // new cell
+    cellsFloat[N*4] = px - offset.x;
+    cellsFloat[N*4+1] = py - offset.y;
+    cellsFloat[N*4+2] = pz - offset.z;
+    cellsFloat[N*4+3] = 0;
+
+    // rebuild neighbor graph (simple: find 6 nearest)
+    const pi = new THREE.Vector3(cellsFloat[i*4], cellsFloat[i*4+1], cellsFloat[i*4+2]);
+    const pn = new THREE.Vector3(cellsFloat[N*4], cellsFloat[N*4+1], cellsFloat[N*4+2]);
+
+    function findNeighbors(idx, pos){
+      const dists = [];
+      for (let j = 0; j <= N; j++){
+        if (j === idx) continue;
+        const pj = new THREE.Vector3(cellsFloat[j*4], cellsFloat[j*4+1], cellsFloat[j*4+2]);
+        if (pj.x > 900.0) continue;
+        dists.push({ idx: j, d: pos.distanceTo(pj) });
+      }
+      dists.sort((a,b) => a.d - b.d);
+      linksData[idx*4] = dists[0] ? dists[0].idx : -1;
+      linksData[idx*4+1] = dists[1] ? dists[1].idx : -1;
+      linksData[idx*4+2] = dists[2] ? dists[2].idx : -1;
+      linksData[idx*4+3] = dists[3] ? dists[3].idx : -1;
+      links2Data[idx*4] = dists[4] ? dists[4].idx : -1;
+      links2Data[idx*4+1] = dists[5] ? dists[5].idx : -1;
+      links2Data[idx*4+3] = Math.min(6, dists.length);
+    }
+    findNeighbors(i, pi);
+    findNeighbors(N, pn);
+
+    N++;
+  });
+
+  simUniforms.uN.value = N;
+  const newStateTex = new THREE.DataTexture(cellsFloat, W, H, THREE.RGBAFormat, THREE.FloatType);
+  newStateTex.needsUpdate = true;
+  blitTexture(newStateTex, rtState);
+
+  const newLinksTex = new THREE.DataTexture(linksData, W, H, THREE.RGBAFormat, THREE.FloatType);
+  newLinksTex.needsUpdate = true;
+  blitTexture(newLinksTex, rtLinks);
+
+  const newLinks2Tex = new THREE.DataTexture(links2Data, W, H, THREE.RGBAFormat, THREE.FloatType);
+  newLinks2Tex.needsUpdate = true;
+  blitTexture(newLinks2Tex, rtLinks2);
+}
+
+// render scene
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, innerWidth/innerHeight, 0.1, 50);
+camera.position.set(0, 0.4, 2.8);
+camera.lookAt(0, 0, 0);
+
+const sphereGeom = new THREE.SphereGeometry(0.055, 12, 12);
+const instancedMesh = new THREE.InstancedMesh(sphereGeom, null, MAX_N);
+instancedMesh.count = N;
+
+const cellMat = new THREE.ShaderMaterial({
+  uniforms: {
+    stateTexture: { value: rtState.texture },
+    uN: { value: N }
+  },
+  vertexShader: `
+    uniform sampler2D stateTexture;
+    varying vec3 vNormal;
+    varying vec3 vViewPos;
+    varying float vDepth;
+
+    void main(){
+      int idx = gl_InstanceID;
+      int x = idx - (idx / 128) * 128;
+      int y = idx / 128;
+      vec2 uv = (vec2(float(x), float(y)) + 0.5) / 128.0;
+      vec4 s = texture2D(stateTexture, uv);
+      vec3 cellPos = s.xyz;
+
+      if (cellPos.x > 900.0){
+        gl_Position = vec4(0.0);
+        return;
+      }
+
+      vec3 pos = position + cellPos;
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      vViewPos = mv.xyz;
+      vNormal = normalMatrix * normal;
+      vDepth = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vNormal;
+    varying vec3 vViewPos;
+    varying float vDepth;
+
+    void main(){
+      vec3 N = normalize(vNormal);
+      vec3 L = normalize(vec3(1.5, 2.0, 3.0));
+      float diff = max(0.0, dot(N, L)) * 0.6 + 0.4;
+
+      // cheap AO approximation: darken based on depth derivative
+      float ao = 1.0 - clamp(vDepth * 0.08, 0.0, 0.6);
+
+      // bone-white to pale pink
+      vec3 baseCol = vec3(0.96, 0.94, 0.92);
+      vec3 tintCol = vec3(0.98, 0.88, 0.85);
+      vec3 col = mix(baseCol, tintCol, ao * 0.3);
+
+      col *= diff * ao;
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+
+instancedMesh.material = cellMat;
+scene.add(instancedMesh);
+
+// lighting (rim light for depth)
+const hemiLight = new THREE.HemisphereLight(0x404040, 0x101010, 0.8);
+scene.add(hemiLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let frame = 0;
+const t0 = performance.now();
+
+function loop(){
+  const elapsed = (performance.now() - t0) * 0.001;
+
+  // grow for first 20 seconds
+  if (elapsed < 20.0){
+    simUniforms.uGrowth.value = 1.0;
+  } else {
+    simUniforms.uGrowth.value = 0.0;
+  }
+
+  // relax springs
+  for (let i = 0; i < 3; i++){
+    simUniforms.stateIn.value = rtState.texture;
+    simUniforms.linksIn.value = rtLinks.texture;
+    simUniforms.links2In.value = rtLinks2.texture;
+    renderer.setRenderTarget(rtNext);
+    renderer.render(relaxScene, camOrtho);
+    const tmp = rtState; rtState = rtNext; rtNext = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  // split cells periodically
+  if (frame % 30 === 0 && elapsed < 20.0){
+    splitCells();
+    instancedMesh.count = N;
+    cellMat.uniforms.uN.value = N;
+  }
+
+  cellMat.uniforms.stateTexture.value = rtState.texture;
+
+  // slow camera orbit
+  const ang = elapsed * 0.08;
+  camera.position.x = Math.sin(ang) * 2.8;
+  camera.position.z = Math.cos(ang) * 2.8;
+  camera.position.y = 0.4 + Math.sin(elapsed * 0.05) * 0.3;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  frame++;
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
