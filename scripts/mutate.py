@@ -468,7 +468,8 @@ def main():
         from swarm_debate import debate
         v = debate(new_id)
         if v:
-            print(f"swarm debate: 3 verdicts logged for {new_id}")
+            n = len((v.get("verdicts") or {}))
+            print(f"swarm debate: {n} verdicts logged for {new_id}")
     except Exception as e:
         print(f"swarm debate skipped: {e}")
     return 0
