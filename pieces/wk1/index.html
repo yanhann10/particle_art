@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wk1 · physarum talisman · sage jenson agent field</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#080706; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">wk1</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Talisman morph of 3qt physarum weave. Agents now seeded in concentric ritual rings
+// and radial spoke lines — they weave a protective medallion form, converging into
+// a sacred geometric amulet. Sage Jenson physarum mechanics preserved but guided by
+// attractor geometry into a recognizable talisman silhouette (centered, ~40% of frame).
+// Single gold/amber palette — charged, warm, protective.
+
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+camera.position.z = 1;
+const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(1);
+document.body.appendChild(renderer.domElement);
+
+const W = 1024, H = 1024;
+const N = 80000;
+
+// ────────────────────────── simulation state
+// Seed agents in concentric rings + radial spokes around center (0.5, 0.5)
+const agents = new Float32Array(N * 4); // x, y, angle, ring_layer
+const CX = 0.5, CY = 0.5;
+const NUM_RINGS = 7;
+const RING_RADII = [0.04, 0.08, 0.13, 0.18, 0.24, 0.30, 0.36];
+const SPOKE_COUNT = 12;
+
+for (let i = 0; i < N; i++){
+  const layer = i % (NUM_RINGS + 1); // extra layer for spokes
+  let x, y, a;
+  if (layer < NUM_RINGS) {
+    // ring seeding — agents placed along concentric circles
+    const r = RING_RADII[layer] + (Math.random() - 0.5) * 0.012;
+    const th = Math.random() * Math.PI * 2;
+    x = CX + Math.cos(th) * r;
+    y = CY + Math.sin(th) * r;
+    // tangential heading (weave along ring)
+    a = th + Math.PI * 0.5 + (Math.random() - 0.5) * 0.3;
+  } else {
+    // spoke seeding — radial lines outward
+    const spoke = Math.floor(Math.random() * SPOKE_COUNT);
+    const spokeAngle = (spoke / SPOKE_COUNT) * Math.PI * 2;
+    const dist = 0.03 + Math.random() * 0.34;
+    x = CX + Math.cos(spokeAngle) * dist;
+    y = CY + Math.sin(spokeAngle) * dist;
+    // radial heading
+    a = spokeAngle + (Math.random() - 0.5) * 0.2;
+  }
+  agents[i*4]   = x;
+  agents[i*4+1] = y;
+  agents[i*4+2] = a;
+  agents[i*4+3] = layer / NUM_RINGS; // normalized layer for color variation
+}
+
+// ────────────────────────── pheromone RT ping-pong
+const trailRT = [
+  new THREE.WebGLRenderTarget(W, H, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: THREE.FloatType }),
+  new THREE.WebGLRenderTarget(W, H, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: THREE.FloatType })
+];
+let trailIdx = 0;
+
+// deposit shader
+const depositGeom = new THREE.BufferGeometry();
+const depositPos = new Float32Array(N * 3);
+const depositLayer = new Float32Array(N);
+depositGeom.setAttribute('position', new THREE.BufferAttribute(depositPos, 3));
+depositGeom.setAttribute('layer', new THREE.BufferAttribute(depositLayer, 1));
+const depositMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    attribute float layer;
+    varying float vLayer;
+    void main(){
+      vLayer = layer;
+      gl_Position = vec4(position.xy * 2.0 - 1.0, 0.0, 1.0);
+      gl_PointSize = 2.0;
+    }
+  `,
+  fragmentShader: `
+    varying float vLayer;
+    void main(){
+      float d = length(gl_PointCoord - 0.5);
+      if (d > 0.5) discard;
+      float a = exp(-d * 5.0) * 0.3;
+      // encode intensity in R channel, layer info in G for subtle variation
+      gl_FragColor = vec4(a, a * (0.3 + vLayer * 0.7), 0.0, 1.0);
+    }
+  `,
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthTest: false,
+  depthWrite: false
+});
+const depositPoints = new THREE.Points(depositGeom, depositMat);
+const depositScene = new THREE.Scene();
+depositScene.add(depositPoints);
+
+// diffuse + decay shader
+const diffuseMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tTrail: { value: null },
+    uTexel: { value: new THREE.Vector2(1/W, 1/H) }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTrail;
+    uniform vec2 uTexel;
+    varying vec2 vUv;
+    void main(){
+      vec4 sum = vec4(0.0);
+      for (int dy = -1; dy <= 1; dy++){
+        for (int dx = -1; dx <= 1; dx++){
+          sum += texture2D(tTrail, vUv + vec2(float(dx), float(dy)) * uTexel);
+        }
+      }
+      sum /= 9.0;
+      sum *= 0.982;
+      gl_FragColor = sum;
+    }
+  `
+});
+const diffuseQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), diffuseMat);
+const diffuseScene = new THREE.Scene();
+diffuseScene.add(diffuseQuad);
+
+// ────────────────────────── display shader (gold talisman palette)
+const displayMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tTrail: { value: null },
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTrail;
+    uniform float uTime;
+    varying vec2 vUv;
+    void main(){
+      vec4 trail = texture2D(tTrail, vUv);
+      float intensity = trail.r;
+      float layerMix = trail.g / max(trail.r, 0.001);
+
+      // Gold talisman palette: deep amber core → pale gold edges
+      vec3 colDeep = vec3(0.82, 0.52, 0.12);   // burnished gold
+      vec3 colBright = vec3(1.0, 0.88, 0.62);  // pale gold
+      vec3 colDark = vec3(0.35, 0.18, 0.05);   // dark amber shadow
+
+      vec3 col = mix(colDark, colDeep, smoothstep(0.0, 0.15, intensity));
+      col = mix(col, colBright, smoothstep(0.15, 0.6, intensity));
+
+      // subtle halo glow at center
+      float dist = length(vUv - 0.5);
+      float halo = exp(-dist * 4.0) * 0.06;
+      col += vec3(0.9, 0.7, 0.3) * halo;
+
+      // apply intensity envelope
+      col *= smoothstep(0.0, 0.02, intensity) * (0.7 + 0.8 * pow(intensity, 1.2));
+
+      // subtle grain
+      float grain = fract(sin(dot(vUv * 1234.56 + uTime * 0.05, vec2(12.9898, 78.233))) * 43758.5453);
+      col += (grain - 0.5) * 0.015;
+
+      // dark background
+      vec3 bg = vec3(0.03, 0.025, 0.02);
+      col = max(col, bg * (1.0 - smoothstep(0.0, 0.01, intensity)));
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const displayQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), displayMat);
+const displayScene = new THREE.Scene();
+displayScene.add(displayQuad);
+
+// ────────────────────────── agent CPU step with attractor geometry
+const SENSOR_ANGLE = 0.38;
+const SENSOR_DIST = 0.007;
+const TURN_SPEED = 0.1;
+const MOVE_SPEED = 0.003;
+
+// Attractor: agents are gently pulled toward nearest ring or spoke
+function attractorForce(x, y){
+  const dx = x - CX;
+  const dy = y - CY;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  const angle = Math.atan2(dy, dx);
+
+  // find nearest ring
+  let nearestRingDist = 1.0;
+  for (let r = 0; r < NUM_RINGS; r++){
+    const d = Math.abs(dist - RING_RADII[r]);
+    if (d < nearestRingDist) nearestRingDist = d;
+  }
+
+  // find nearest spoke angle
+  let nearestSpokeDist = 1.0;
+  for (let s = 0; s < SPOKE_COUNT; s++){
+    const sa = (s / SPOKE_COUNT) * Math.PI * 2;
+    let da = angle - sa;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    const sd = Math.abs(da) * dist;
+    if (sd < nearestSpokeDist) nearestSpokeDist = sd;
+  }
+
+  // return pull strength (closer = less pull needed)
+  const ringPull = nearestRingDist < 0.02 ? 0 : nearestRingDist * 0.15;
+  const spokePull = nearestSpokeDist < 0.015 ? 0 : nearestSpokeDist * 0.08;
+  return Math.min(ringPull, spokePull);
+}
+
+// trail readback buffer
+let trailData = new Float32Array(W * H * 4);
+let readbackReady = false;
+
+function readTrail(){
+  const buf = new Float32Array(W * H * 4);
+  renderer.readRenderTargetPixels(trailRT[trailIdx], 0, 0, W, H, buf);
+  trailData = buf;
+  readbackReady = true;
+}
+
+function senseTrail(x, y, angle){
+  const sx = x + Math.cos(angle) * SENSOR_DIST;
+  const sy = y + Math.sin(angle) * SENSOR_DIST;
+  const ix = Math.floor(sx * W) | 0;
+  const iy = Math.floor(sy * H) | 0;
+  if (ix < 0 || ix >= W || iy < 0 || iy >= H) return 0;
+  const idx = (iy * W + ix) * 4;
+  return trailData[idx] + trailData[idx+1];
+}
+
+function stepAgents(){
+  if (!readbackReady) return;
+
+  for (let i = 0; i < N; i++){
+    let x = agents[i*4];
+    let y = agents[i*4+1];
+    let a = agents[i*4+2];
+
+    // physarum sensing
+    const sL = senseTrail(x, y, a - SENSOR_ANGLE);
+    const sC = senseTrail(x, y, a);
+    const sR = senseTrail(x, y, a + SENSOR_ANGLE);
+
+    if (sC > sL && sC > sR){
+      // keep
+    } else if (sL > sR){
+      a -= TURN_SPEED;
+    } else if (sR > sL){
+      a += TURN_SPEED;
+    } else {
+      a += (Math.random() - 0.5) * TURN_SPEED * 2;
+    }
+
+    // gentle attractor toward talisman geometry
+    const dx = x - CX;
+    const dy = y - CY;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    const toCenter = Math.atan2(-dy, -dx);
+
+    // boundary pull: keep agents within medallion radius
+    if (dist > 0.38){
+      a += (toCenter - a) * 0.05;
+    }
+
+    // ring attractor: bias heading tangentially near rings
+    for (let r = 0; r < NUM_RINGS; r++){
+      const ringDelta = Math.abs(dist - RING_RADII[r]);
+      if (ringDelta < 0.015){
+        const tangent = Math.atan2(dy, dx) + Math.PI * 0.5;
+        a += (tangent - a) * 0.02;
+        break;
+      }
+    }
+
+    // move
+    x += Math.cos(a) * MOVE_SPEED;
+    y += Math.sin(a) * MOVE_SPEED;
+
+    // soft boundary (keep within talisman form)
+    const newDist = Math.sqrt((x-CX)*(x-CX) + (y-CY)*(y-CY));
+    if (newDist > 0.42){
+      const na = Math.atan2(y-CY, x-CX);
+      x = CX + Math.cos(na) * 0.42;
+      y = CY + Math.sin(na) * 0.42;
+      a = toCenter + (Math.random() - 0.5) * 1.0;
+    }
+
+    // clamp
+    x = Math.max(0, Math.min(1, x));
+    y = Math.max(0, Math.min(1, y));
+
+    agents[i*4]   = x;
+    agents[i*4+1] = y;
+    agents[i*4+2] = a;
+  }
+}
+
+// ────────────────────────── main loop
+const start = performance.now();
+let frame = 0;
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  frame++;
+
+  // readback every 3 frames for performance
+  if (frame % 3 === 0) readTrail();
+
+  // agent step
+  stepAgents();
+
+  // deposit
+  for (let i = 0; i < N; i++){
+    depositPos[i*3]   = agents[i*4];
+    depositPos[i*3+1] = agents[i*4+1];
+    depositPos[i*3+2] = 0;
+    depositLayer[i] = agents[i*4+3];
+  }
+  depositGeom.attributes.position.needsUpdate = true;
+  depositGeom.attributes.layer.needsUpdate = true;
+
+  // render deposit onto current trail
+  renderer.setRenderTarget(trailRT[trailIdx]);
+  renderer.render(depositScene, camera);
+
+  // diffuse + decay
+  const nextIdx = 1 - trailIdx;
+  diffuseMat.uniforms.tTrail.value = trailRT[trailIdx].texture;
+  renderer.setRenderTarget(trailRT[nextIdx]);
+  renderer.render(diffuseScene, camera);
+  trailIdx = nextIdx;
+
+  // display
+  displayMat.uniforms.tTrail.value = trailRT[trailIdx].texture;
+  displayMat.uniforms.uTime.value = t;
+  renderer.setRenderTarget(null);
+  renderer.render(displayScene, camera);
+
+  requestAnimationFrame(loop);
+}
+loop();
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
