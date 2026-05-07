@@ -67,12 +67,10 @@ def debate(piece_id: str) -> dict | None:
     html_excerpt = html[:6000] + ("\n... [truncated] ..." if len(html) > 6000 else "")
 
     # inline the persona briefs + first chunk of each SKILL.md if available
-    brief_parts = []
-    for label, desc in PERSONAS:
-        skill_name = label.replace("_", "-") + "-skill"
-        skill_text = (_read_skill(skill_name) or "")[:1500]
-        brief_parts.append(f"### {label}\n{desc}\n\n{skill_text}")
-    persona_briefs = "\n\n".join(brief_parts)
+    persona_briefs = "\n\n".join(
+        f"### {label}\n{desc}\n\n{(_read_skill(f'{label.replace(\"_\", \"-\")}-skill') or '')[:1500]}"
+        for label, desc in PERSONAS
+    )
 
     system = (
         "You are facilitating a three-voice swarm debate. Read the piece description and code excerpt. "
