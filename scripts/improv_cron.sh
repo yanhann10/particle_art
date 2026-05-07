@@ -30,8 +30,9 @@ fi
 log "── improv tick start ──"
 cd "$REPO" || { log "FATAL: cannot cd to $REPO"; exit 1; }
 
-# ALWAYS pull first; cron should never advance from a stale local
-if ! git pull --ff-only --quiet 2>>"$LOG"; then
+# ALWAYS pull first; cron should never advance from a stale local. Use the
+# same strategy as parallel_tick.sh — multi-cron contention is real.
+if ! git pull --rebase -X theirs --autostash --quiet 2>>"$LOG"; then
   log "WARN: git pull failed (continuing on local state)"
 fi
 
@@ -41,9 +42,32 @@ if [ ! -x "$VENV/bin/python3" ]; then
   exit 2
 fi
 
-OUTPUT=$("$VENV/bin/python3" "$REPO/scripts/improv_tick.py" 2>&1) || RC=$?
+# improv_tick.py does the gen+commit. We pass --no-push so it commits locally
+# but doesn't push; the retry loop below handles push contention with the
+# */10 parallel_tick + 3h mutate crons that share this repo.
+OUTPUT=$("$VENV/bin/python3" "$REPO/scripts/improv_tick.py" --no-push 2>&1) || RC=$?
 RC="${RC:-0}"
 echo "$OUTPUT" | sed "s/^/  /" >> "$LOG"
+
+# Push with retry. Up to 3 attempts: if rejected, fetch+rebase (theirs),
+# sleep a small random jitter to de-correlate from sibling crons, retry.
+if [ "$RC" -eq 0 ]; then
+  for attempt in 1 2 3; do
+    if git push --quiet 2>>"$LOG"; then
+      log "push OK on attempt $attempt"
+      break
+    fi
+    log "push attempt $attempt failed; rebasing on origin/main"
+    git fetch --quiet origin 2>>"$LOG" || true
+    if ! git rebase -X theirs origin/main --quiet 2>>"$LOG"; then
+      log "rebase failed; aborting and giving up on this tick"
+      git rebase --abort 2>/dev/null || true
+      RC=7
+      break
+    fi
+    sleep $((RANDOM % 5 + 1))
+  done
+fi
 
 if [ "$RC" -eq 0 ]; then
   log "tick OK"
