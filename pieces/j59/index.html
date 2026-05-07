@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>j59 · cyanotype constellation drift</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d2c54; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px; letter-spacing:0.04em; z-index:10; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size:10px; letter-spacing:0.04em; z-index:10; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.45; font-size:10px; letter-spacing:0.04em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">j59</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Lia Halloran · cyanotype star-field · differential growth</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*  Cyanotype constellation drift — Lia Halloran
+    The differential-growth string from 5xv becomes a star-chart:
+    constellation lines drawn in ferric-blue, each vertex a white star.
+    A simplex-noise brushstroke field modulates exposure — where the
+    brush swept, stars brighten against Prussian-blue paper.
+    Leaves are the basic unit: each particle is a tiny leaf-shaped
+    calligraphic mark oriented along its drift vector, like
+    tea-leaves scattered across an astronomer's blueprint.            */
+
+const BG = 0x0d2c54;  // Prussian blue — cyanotype base
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 250);
+camera.position.set(0, 1, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.target.set(0, -1, 0);
+
+// --- differential growth curve (open, draping) ---
+const MAX_VERTS = 2800;
+const ATTRACT   = 0.048;
+const REPEL_R   = 0.50;
+const REPEL_STR = 0.09;
+const NOISE_S   = 0.002;
+const PRESSURE  = 0.0015;
+const GRAVITY   = 0.007;
+const MAX_D     = 0.38;
+const ANCHOR_N  = 5;
+
+const verts = [];
+const NV0 = 36;
+for (let i = 0; i < NV0; i++) {
+  const t = (i / (NV0 - 1)) * 2 - 1;
+  const x = t * 5.5;
+  const y = -Math.abs(t) * 1.0 + Math.sin(t * Math.PI * 2) * 0.25;
+  verts.push({ x, z: 0, y, age: 0, pinY: i < ANCHOR_N || i >= NV0 - ANCHOR_N });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i], k = gridKey(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function nearby(v) {
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function step() {
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? verts[i - 1] : null;
+    const next = i < n - 1 ? verts[i + 1] : null;
+    const v = verts[i];
+    if (prev) { dx[i] += (prev.x - v.x) * ATTRACT; dz[i] += (prev.z - v.z) * ATTRACT; dy[i] += (prev.y - v.y) * ATTRACT; }
+    if (next) { dx[i] += (next.x - v.x) * ATTRACT; dz[i] += (next.z - v.z) * ATTRACT; dy[i] += (next.y - v.y) * ATTRACT; }
+  }
+  let ccx = 0, ccz = 0;
+  for (let i = 0; i < n; i++) { ccx += verts[i].x; ccz += verts[i].z; }
+  ccx /= n; ccz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - ccx, oz = verts[i].z - ccz;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dz[i] += (oz / d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++) {
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE_S;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE_S;
+    const grav = verts[i].pinY ? GRAVITY * 0.04 : GRAVITY;
+    verts[i].y += dy[i] - grav + (Math.random() - 0.5) * NOISE_S * 0.5;
+    verts[i].age += 0.0003;
+  }
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    grown.push(a);
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    if (ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({ x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.02,
+                    z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.02,
+                    y: (a.y + b.y) * 0.5, age: Math.max(a.age, b.age) * 0.7, pinY: false });
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// --- halo field stars: scattered across a galactic band ---
+const N_FIELD = 8000;
+const fieldPos = new Float32Array(N_FIELD * 3);
+const fieldSeed = new Float32Array(N_FIELD);
+for (let i = 0; i < N_FIELD; i++) {
+  // galactic-band distribution: concentrated near y=0, spread in x/z
+  const u = Math.random(), v = Math.random(), w = Math.random();
+  fieldPos[i * 3]     = (u - 0.5) * 40;
+  fieldPos[i * 3 + 1] = (Math.random() - 0.5) * 3.0 * (0.3 + 0.7 * Math.exp(-Math.abs(v - 0.5) * 6));
+  fieldPos[i * 3 + 2] = (w - 0.5) * 20 - 8;
+  fieldSeed[i] = Math.random();
+}
+const fieldGeom = new THREE.BufferGeometry();
+fieldGeom.setAttribute('position', new THREE.BufferAttribute(fieldPos, 3));
+fieldGeom.setAttribute('seed', new THREE.BufferAttribute(fieldSeed, 1));
+
+const fieldMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPixel: { value: renderer.getPixelRatio() } },
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vAlpha;
+    varying float vSeed;
+    void main() {
+      vec3 p = position;
+      // very slow stellar drift
+      p.x += sin(uTime * 0.02 + seed * 30.0) * 0.06;
+      p.y += cos(uTime * 0.015 + seed * 20.0) * 0.03;
+      vSeed = seed;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // tiny points — background dust
+      gl_PointSize = (0.6 + seed * 1.2) * uPixel * (30.0 / max(dist, 1.0));
+      gl_Position = projectionMatrix * mv;
+      // twinkle
+      float twinkle = 0.4 + 0.6 * (0.5 + 0.5 * sin(uTime * (0.8 + seed * 2.0) + seed * 50.0));
+      vAlpha = twinkle * (0.12 + seed * 0.15);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vSeed;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float glow = exp(-r * 18.0);
+      // cyanotype white — slightly warm on paper
+      vec3 col = vec3(0.92, 0.94, 0.98);
+      // some stars slightly blue-white, others warm
+      col = mix(col, vec3(0.85, 0.90, 1.0), vSeed * 0.3);
+      gl_FragColor = vec4(col * glow * vAlpha, glow * vAlpha);
+    }
+  `
+});
+scene.add(new THREE.Points(fieldGeom, fieldMat));
+
+// --- main particles: leaf-shaped marks along the growth curve ---
+const N_RENDER = 32000;
+const rPos   = new Float32Array(N_RENDER * 3);
+const rSeeds = new Float32Array(N_RENDER);
+const rAge   = new Float32Array(N_RENDER);
+const rAngle = new Float32Array(N_RENDER); // orientation of each leaf-mark
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('angle',    new THREE.BufferAttribute(rAngle, 1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float age;
+    attribute float angle;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vAngle;
+    varying float vBrush;
+
+    // simplex-ish noise for brushstroke field
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    float vnoise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      float a = hash(i);
+      float b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0));
+      float d = hash(i + vec2(1.0, 1.0));
+      return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+    float brushField(vec2 p) {
+      float n = 0.0;
+      n += vnoise(p * 0.8 + uTime * 0.012) * 0.5;
+      n += vnoise(p * 1.6 - uTime * 0.008) * 0.25;
+      n += vnoise(p * 3.2 + vec2(uTime * 0.005, -uTime * 0.01)) * 0.125;
+      return n;
+    }
+
+    void main() {
+      vec3 p = position;
+
+      // gentle stellar drift
+      float t = uTime * 0.15 + seed * 6.28;
+      p.x += sin(t) * 0.005;
+      p.y += cos(t * 0.6) * 0.003;
+
+      // brushstroke exposure field
+      float brush = brushField(p.xy * 0.6);
+      brush = smoothstep(0.25, 0.55, brush);
+      vBrush = brush;
+
+      // cyanotype palette: paper white with slight warmth variations
+      vec3 paperWhite = vec3(0.92, 0.93, 0.96);
+      vec3 creamWhite = vec3(0.95, 0.91, 0.85);
+      float k = clamp(age * 1.5, 0.0, 1.0);
+      vCol = mix(paperWhite, creamWhite, k * 0.3 + seed * 0.2);
+
+      // brighter where brush swept — the exposed cyanotype
+      float exposure = 0.3 + brush * 0.7;
+      vAlpha = exposure * (0.35 + 0.2 * sin(uTime * 0.8 + seed * 30.0));
+
+      vAngle = angle;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // leaf-scale point size
+      gl_PointSize = (1.4 + seed * 0.8) * uPixel * (40.0 / max(dist, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vAngle;
+    varying float vBrush;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+
+      // rotate to create leaf-shaped / calligraphic mark
+      float ca = cos(vAngle), sa = sin(vAngle);
+      vec2 rd = vec2(ca * d.x + sa * d.y, -sa * d.x + ca * d.y);
+
+      // leaf SDF: elongated ellipse with pointed tips
+      rd.x *= 1.8; // stretch horizontally → leaf shape
+      float r = dot(rd, rd);
+      if (r > 0.25) discard;
+
+      // soft edge with slight halo — like chemical bleed on cyanotype paper
+      float core = exp(-r * 20.0);
+      float bleed = exp(-r * 6.0) * 0.2;
+      float a = (core + bleed) * vAlpha;
+
+      // paper-grain texture: slight noise in opacity
+      float grain = 0.92 + 0.08 * fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+      a *= grain;
+
+      vec3 col = vCol;
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// constellation wire — thin blue-white line, like pencil on blueprint
+const wireGeom = new THREE.BufferGeometry();
+const wirePos = new Float32Array(MAX_VERTS * 3);
+wireGeom.setAttribute('position', new THREE.BufferAttribute(wirePos, 3));
+const wireMat = new THREE.LineBasicMaterial({
+  color: 0x8aa8cc,
+  transparent: true,
+  opacity: 0.12
+});
+const wireLine = new THREE.Line(wireGeom, wireMat);
+scene.add(wireLine);
+
+// second wire: brighter at vertices — star-chart dots
+const dotGeom = new THREE.BufferGeometry();
+const dotPos = new Float32Array(MAX_VERTS * 3);
+const dotSize = new Float32Array(MAX_VERTS);
+dotGeom.setAttribute('position', new THREE.BufferAttribute(dotPos, 3));
+dotGeom.setAttribute('size', new THREE.BufferAttribute(dotSize, 1));
+
+const dotMat = new THREE.ShaderMaterial({
+  uniforms: { uPixel: { value: renderer.getPixelRatio() }, uTime: { value: 0 } },
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uPixel;
+    uniform float uTime;
+    attribute float size;
+    varying float vA;
+    void main() {
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = size * uPixel * (50.0 / max(dist, 1.0));
+      gl_Position = projectionMatrix * mv;
+      vA = 0.5 + 0.2 * sin(uTime * 0.5 + position.x * 3.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float glow = exp(-r * 12.0);
+      vec3 col = vec3(0.88, 0.92, 1.0);
+      gl_FragColor = vec4(col * glow * vA, glow * vA);
+    }
+  `
+});
+const dotPoints = new THREE.Points(dotGeom, dotMat);
+scene.add(dotPoints);
+
+// film-grain / cyanotype noise overlay — fullscreen quad
+const grainMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthWrite: false, depthTest: false,
+  vertexShader: `
+    void main() {
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    void main() {
+      vec2 uv = gl_FragCoord.xy;
+      float n = fract(sin(dot(uv + uTime * 0.3, vec2(12.9898, 78.233))) * 43758.5453);
+      // very subtle paper grain — cyanotype texture
+      float grain = smoothstep(0.3, 0.7, n) * 0.04;
+      gl_FragColor = vec4(vec3(0.85, 0.88, 0.92), grain);
+    }
+  `
+});
+const grainQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), grainMat);
+grainQuad.frustumCulled = false;
+grainQuad.renderOrder = 999;
+const grainScene = new THREE.Scene();
+const grainCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+grainScene.add(grainQuad);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow the curve
+for (let s = 0; s < 400; s++) step();
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  fieldMat.uniforms.uTime.value = t;
+  dotMat.uniforms.uTime.value = t;
+  grainMat.uniforms.uTime.value = t;
+
+  for (let s = 0; s < 2; s++) step();
+
+  const n = verts.length;
+
+  // update constellation wire
+  for (let i = 0; i < n; i++) {
+    wirePos[i * 3]     = verts[i].x;
+    wirePos[i * 3 + 1] = verts[i].y;
+    wirePos[i * 3 + 2] = verts[i].z;
+    dotPos[i * 3]      = verts[i].x;
+    dotPos[i * 3 + 1]  = verts[i].y;
+    dotPos[i * 3 + 2]  = verts[i].z;
+    // vertex dots: larger at endpoints, smaller along chain
+    const endDist = Math.min(i, n - 1 - i);
+    dotSize[i] = endDist < 3 ? 2.5 : (1.0 + Math.sin(i * 0.7) * 0.4);
+  }
+  wireGeom.setDrawRange(0, n);
+  wireGeom.attributes.position.needsUpdate = true;
+  dotGeom.setDrawRange(0, n);
+  dotGeom.attributes.position.needsUpdate = true;
+  dotGeom.attributes.size.needsUpdate = true;
+
+  // camera tracks centroid — slow, tender drift
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.015);
+
+  // distribute leaf-particles along the growth curve
+  const lengths = [];
+  let total = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    const L = Math.sqrt((b.x - a.x) ** 2 + (b.z - a.z) ** 2 + (b.y - a.y) ** 2);
+    lengths.push(L);
+    total += L;
+  }
+  if (total > 0) {
+    let written = 0;
+    for (let i = 0; i < n - 1 && written < N_RENDER; i++) {
+      const share = (i === n - 2)
+        ? N_RENDER - written
+        : Math.max(1, Math.floor(N_RENDER * lengths[i] / total));
+      const a = verts[i], b = verts[i + 1];
+      // angle of segment for leaf orientation
+      const segAngle = Math.atan2(b.y - a.y, b.x - a.x);
+      for (let k = 0; k < share && written < N_RENDER; k++) {
+        const u = Math.random();
+        const cu = u < 0.5 ? u * u * 2 : 1 - (1 - u) * (1 - u) * 2;
+        const spread = 0.04 + rSeeds[written] * 0.06;
+        rPos[written * 3]     = a.x + (b.x - a.x) * cu + (Math.random() - 0.5) * spread;
+        rPos[written * 3 + 1] = a.y + (b.y - a.y) * cu + (Math.random() - 0.5) * spread * 0.7;
+        rPos[written * 3 + 2] = a.z + (b.z - a.z) * cu + (Math.random() - 0.5) * spread;
+        rAge[written] = Math.max(a.age, b.age);
+        rAngle[written] = segAngle + (Math.random() - 0.5) * 0.6;
+        written++;
+      }
+    }
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.age.needsUpdate = true;
+    geom.attributes.angle.needsUpdate = true;
+  }
+
+  statEl.textContent = `vertices=${n}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  // grain overlay pass
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+  renderer.autoClear = true;
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
