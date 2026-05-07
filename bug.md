@@ -42,7 +42,28 @@ a new piece's HTML, and concrete enough that a generator can avoid it.
 **Pattern:** Perlin/curl-noise driving particle motion in a vague cloud, no underlying field-equation or object — pure random walk in noise.
 **Fix:** shape MUST come from a field, equation, or object. Strange attractors (Lorenz, Aizawa). Differential growth. MeshSurfaceSampler. L-systems. Boids with rules. Never noise as the primary structural source.
 
-## 6. tiny subject in vast empty canvas
+## 6. messy occlusion-move / guts-like visual (geu)
+**Examples:** geu (culled 2026-05-07).
+**Pattern:** the camera moves through dense overlapping geometry that lacks a clear depth-stratification, so the visual reads as a writhing wet mass — viscera, intestines, undefined organic guts. Particle/line layers occlude each other in chaotic non-figurative ways.
+**Why it fails:** user 2026-05-07 — "messy occlusion move or the guts like visual." When you can't tell foreground from background and the camera-motion makes the confusion worse, the piece reads as queasy, not aesthetic.
+**Fix:** ensure depth-stratification — give EACH layer a distinct z-band so layers read as discrete; let camera motion REVEAL form, not stir it. If form has organic-tube geometry, render with shading that distinguishes near/far. No more than 2 overlapping translucent layers at any pixel.
+
+## 7. PowerPoint-2010 motion / cheap animation (6ip)
+**Examples:** 6ip (culled 2026-05-07).
+**Pattern:** point movement that looks like a stock PowerPoint transition or 2010-era After Effects template — tween-y, zooming-in-from-corner, swirl-then-stop, pulsing-on-beat in obvious sync, lazy LERP-to-mouse, "spinning particles" without semantic meaning.
+**Why it fails:** user 2026-05-07 — "looks like 2010 powerpoint motion bad."
+**THE 3-QUESTION MOTION RUBRIC** (now part of the aesthetic gate):
+  1. Would you show this AT MoMA?
+  2. Would you START A HOLLYWOOD FILM with this?
+  3. Would you put it on the LANDING PAGE of a billion-dollar AI startup?
+**If the answer is 3 nos, don't ship it.** The aesthetic gate now asks this question explicitly per piece. Motion must have *intent* — gravity, breathing, signal-propagation, narrative arc — never bare easing.
+
+## 8. barbell / dumbbell render artifact
+**Examples:** 5i1 (the current 5i1 has a small barbell-shape — two pale dots connected by a vertical line — at the end of the structure). User flagged 2026-05-07.
+**Pattern:** unintended render geometry: typically a degenerate L-system terminal, an unconsumed control-point in a CatmullRomCurve3, or a forgotten debug-marker (two endpoint spheres + a line) accidentally left in the scene.
+**Fix:** when descending from 5i1, EXPLICITLY remove or hide any 2-endpoint-sphere-with-connecting-line geometry. Verify by inspecting the rendered thumbnail for unexpected dumbbell shapes. The aesthetic gate should flag this if it persists.
+
+## 9. tiny subject in vast empty canvas
 **Examples:** f36 / k2v (single flamingo too small in frame, culled).
 **Pattern:** the recognizable form occupies <10% of the viewport at default camera; the rest of the frame is empty.
 **Fix:** the form must occupy AT LEAST 30-60% of the frame at the default camera angle. Re-fit the camera if needed.

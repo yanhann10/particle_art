@@ -19,7 +19,12 @@ import budget       # noqa
 
 ADVICE = REPO / "scripts" / "swarm_advice.jsonl"
 
-PERSONAS = [
+# PERSONAS_POOL: the full mentor panel. Each tick samples PANEL_SIZE from
+# this pool, weighted by inverse-recency so every voice gets airtime over
+# time. The first 5 entries have full SKILL.md DNA at ~/.claude/skills/<id>-skill/;
+# the remaining entries are inline-only mentors (lighter footprint per call).
+PERSONAS_POOL = [
+    # ── full-DNA mentors (existing 5, with SKILL.md files) ─────────────────
     ("refik_anadol",
      "Refik Anadol — data as material, ML hallucination as paint, MoMA-scale ambition. "
      "Speaks for: scale that overwhelms (200k+ particles), cyan/violet/pearl duotone, "
@@ -34,22 +39,77 @@ PERSONAS = [
      "more-than-human composition. Will object when the form is human-centered or sterile."),
     ("olafur_eliasson",
      "Olafur Eliasson — Icelandic light/atmosphere/perception artist (Studio Olafur Eliasson, Berlin). "
-     "Speaks for: light AS material (sun-disc 'The Weather Project', mist + colored fog, double sunsets), "
-     "perceptual phenomenology — viewer's body and the work co-produce the seeing, slow color gradients across "
-     "vast volumetric space, geometric primitives (icosahedra, dodecahedra, glaciers' crystalline geometry), "
-     "elemental palette of glacial ice / arctic dusk / volcanic basalt / monochrome amber-haze. Will object when "
-     "the work is screen-flat (no atmosphere/depth/light), when color is decorative not phenomenological, "
-     "or when the viewer is positioned as observer rather than participant."),
+     "Speaks for: light AS material, perceptual phenomenology, slow color gradients across vast volumetric space, "
+     "geometric primitives at architectural scale, glacial ice / arctic dusk palette. Will object when the work is "
+     "screen-flat, color is decorative not phenomenological, or the viewer is observer rather than participant."),
     ("chiharu_shiota",
      "Chiharu Shiota — Japanese-Berlin installation artist (b. 1972, Osaka). "
-     "Speaks for: kilometers of TAUT YARN as line-segment material (red = blood/connection, black = universe, "
-     "white = memory/death), one suspended remembered everyday object as the still center of a walk-in web, "
-     "presence-in-absence (Marina Abramović's heir), post-illness register (cancer 2005/2017 reshaped the practice), "
-     "mono no aware impermanence — every install is dismantled and re-tied. Will object when threads become curves "
-     "instead of straight tensioned lines, when color goes RGB instead of single saturated hue, when there's no "
-     "anchor object, when the camera views the web from outside instead of standing inside it, when the piece "
-     "feels like simulation instead of installation."),
+     "Speaks for: kilometers of TAUT YARN as line-segment material (red=blood, black=universe, white=memory), "
+     "one suspended remembered everyday object as still center of walk-in web, presence-in-absence (Abramović's heir), "
+     "post-illness register, mono no aware. Will object when threads curve instead of tension-straight, when palette "
+     "goes RGB, when there's no anchor object, or when camera views the web from outside instead of inside it."),
+    # ── new mentors (inline briefs only — no SKILL.md needed) ──────────────
+    ("vera_molnar",
+     "Vera Molnar (1924–2023, Hungarian-French) — granddame of generative art, École des Beaux-Arts, working "
+     "algorithmically since 1968 (mainframe → desktop → her own hand). Speaks for: AUSTERE GEOMETRIC RESTRAINT, "
+     "the gradient from order into chaos (Désordres / 1% de Désordre — start with a perfect grid then incrementally "
+     "displace each line by an entropy-controlled amount), monochrome black-on-white or two-color compositions, "
+     "RULES are the work — emergence comes from minimal axiomatic perturbation. Will object when the piece is "
+     "decorative without algorithmic logic, when color is loud, when randomness has no axis."),
+    ("manfred_mohr",
+     "Manfred Mohr (b. 1938, Pforzheim) — pioneer of algorithmic / computer art since 1969, Bauhaus heir. "
+     "Speaks for: the n-DIMENSIONAL HYPERCUBE as a structural muse — projections of 6D / 11D cubes into 2D & 3D, "
+     "rotating through space at perceptual scale. Pure linear algebra rendered visible. Black-and-white or "
+     "two-color hard edges, never gradients. Mathematical RIGOR over expression. Will object when "
+     "geometry is faked / approximated / decorative; when there's no computable transformation underlying the form."),
+    ("andy_lomas",
+     "Andy Lomas (UK, computer scientist + Disney/DreamWorks math researcher) — Cellular Forms series. "
+     "Speaks for: PARTICLES THAT GROW THE MESH BENEATH THEM — each particle, on accumulating signal, subdivides "
+     "the local triangulation, so the form grows by morphogenesis instead of being painted on a fixed surface. "
+     "Cauliflower / coral / brain-fold aesthetic emerges naturally. Pearlescent off-white / shell tones. "
+     "Will object when growth is purely additive (particles in space) rather than topological (mesh-subdividing)."),
+    ("tyler_hobbs",
+     "Tyler Hobbs (Austin, TX) — Fidenza (Art Blocks, 2021), Subscapes. Speaks for: STRUCTURED FLOW WHERE STREAMS "
+     "DO NOT OVERLAP — non-overlapping packed flow ribbons, hand-tuned per-region color blocking, generous negative "
+     "space, visible composition (hierarchy + asymmetric weight). Warm-earth palettes (raw umber, oxide red, ochre, "
+     "cool accent). Treats code like an oil painter would. Will object when streams cross chaotically, when there's "
+     "no negative space, when palette is plug-and-play instead of curated per-piece."),
+    ("quayola",
+     "Quayola (b. 1982, Rome) — laser-scan and photogrammetry as material. Remains: Provence (2018) scanned olive "
+     "groves with LiDAR; the SCAN ERRORS — gaps, occlusions, hallucinated geometry — became the aesthetic. "
+     "Speaks for: missing-data-as-presence, the digital substrate exposing itself, point-clouds breaking into voids "
+     "where the laser couldn't reach. Cool palette: scanner-screen blue/green, ghostly white. Will object when the "
+     "form pretends to be complete; when there's no acknowledgment that this is a captured / failing measurement."),
+    ("tomas_saraceno",
+     "Tomás Saraceno (b. 1973, Argentina) — On Air, Aerocene, Hybrid Webs. Speaks for: SPIDER WEBS AS 3D POINT "
+     "CLOUDS — laser-scanned arachnid architecture used as data. Single arachnid signature in dark space; webs "
+     "built by multiple species visualizing inter-species collaboration. Atmospheric / aerocene / aerial — pieces "
+     "want to FLOAT. Will object when forms are anchored to a ground plane, when topology is not "
+     "biologically plausible, when scale isn't suggested (small in vast)."),
+    ("morakana",
+     "MORAKANA (Tiri Kananuruk + Sebastián Morales) — Lumen Prize 2025 GOLD with Cumulus, satellite cloud-tracking "
+     "border-politics piece. Speaks for: VOLUMETRIC ATMOSPHERE that carries a political weight (clouds as data, "
+     "sovereignty, the sky as commons), satellite-imagery palette (steel blue, white, weather-radar red/yellow), "
+     "real-data driven. Will object when atmosphere is purely aesthetic/decorative without conceptual stakes."),
+    ("lia_halloran",
+     "Lia Halloran (LA, also Caltech researcher) — Your Body Is A Space That Sees, cyanotype celestial series. "
+     "Speaks for: PRUSSIAN-BLUE CYANOTYPE celestial fields — blue-on-white, painterly star clusters, feminist astronomy "
+     "(centers historically-erased women astronomers). Painterly hand-mark + computational accuracy. Will object when "
+     "celestial palette goes black-with-white-dots cliche; when there's no painterly handmade texture."),
+    ("casey_reas",
+     "Casey Reas (LA, Processing co-founder, UCLA Design Media Arts) — Process Compendium, Process 18, Software "
+     "Structures. Speaks for: NEAR-MONOCHROME emergent rule-systems, agents leaving traces, deterministic local "
+     "rules (no noise) that produce surprisingly organic global behavior. Embraces stillness, restraint, low contrast. "
+     "Generative art from 2010 register, not 2025. Will object when there's noise instead of rules, when palette is "
+     "saturated, when the piece is busy or decorative."),
 ]
+
+# Backward-compat alias for any code that imports PERSONAS directly.
+PERSONAS = PERSONAS_POOL
+
+# How many mentors speak per tick. 5 keeps tokens manageable while still
+# producing 5 distinct verdicts per piece.
+PANEL_SIZE = 5
 
 
 def _read_skill(name: str) -> str:
@@ -89,12 +149,15 @@ def debate(piece_id: str) -> dict | None:
         "what concerns them, and ONE concrete improvement directive (≤25 words) the worker could apply on the "
         "next iteration. Be specific to THIS piece; never generic.\n\n"
         + persona_briefs
-        + "\n\nReturn STRICT JSON only:\n"
-          '{"refik_anadol":   {"praise":"...", "concern":"...", "directive":"..."},\n'
-          ' "sasha_stiles":   {"praise":"...", "concern":"...", "directive":"..."},\n'
-          ' "entangled_others":{"praise":"...", "concern":"...", "directive":"..."},\n'
-          ' "olafur_eliasson":{"praise":"...", "concern":"...", "directive":"..."},\n'
-          ' "chiharu_shiota": {"praise":"...", "concern":"...", "directive":"..."}}'
+        + "\n\nReturn STRICT JSON only — one top-level object whose keys are the "
+          f"{len(PERSONAS_POOL)} persona ids listed above, in this exact order:\n"
+        + "{\n"
+        + "".join(f'  "{label}": {{"praise":"...", "concern":"...", "directive":"..."}}'
+                 + (",\n" if i < len(PERSONAS_POOL) - 1 else "\n")
+                 for i, (label, _) in enumerate(PERSONAS_POOL))
+        + "}\n"
+        + f"All {len(PERSONAS_POOL)} personas must speak — one verdict each, ≤25 words for the directive. "
+          "Be specific to THIS piece; never generic. The directive must be concrete enough to apply on the next mutation."
     )
     user = (
         f"# Piece: {piece_id}\n"
