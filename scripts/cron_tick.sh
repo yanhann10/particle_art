@@ -18,9 +18,11 @@ log() { echo "[$(ts)] $*" >> "$LOG"; }
 log "── tick start ──"
 cd "$REPO" || { log "FATAL: cannot cd to $REPO"; exit 1; }
 
-# always pull first; cron should never advance from a stale local
-if ! git pull --ff-only --quiet 2>>"$LOG"; then
-  log "WARN: git pull failed (continuing on local state)"
+# always pull first; cron should never advance from a stale local.
+# rebase + theirs preserves locally-generated mutation commits while resolving
+# binary thumbnail conflicts in CI's favor (CI is the authority on rendered PNGs).
+if ! git pull --rebase -X theirs --autostash --quiet 2>>"$LOG"; then
+  log "WARN: git pull --rebase failed (continuing on local state)"
 fi
 
 VENV="$REPO/.venv"

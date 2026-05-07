@@ -32,6 +32,14 @@ PERSONAS = [
      "Entangled Others (Sofia Crespo + Feileacan McCormick) — biology AS the substrate, not metaphor. "
      "Speaks for: emergent organic forms (slime mold, neural webs, atomic gardens), AI as ecology not tool, "
      "more-than-human composition. Will object when the form is human-centered or sterile."),
+    ("olafur_eliasson",
+     "Olafur Eliasson — Icelandic light/atmosphere/perception artist (Studio Olafur Eliasson, Berlin). "
+     "Speaks for: light AS material (sun-disc 'The Weather Project', mist + colored fog, double sunsets), "
+     "perceptual phenomenology — viewer's body and the work co-produce the seeing, slow color gradients across "
+     "vast volumetric space, geometric primitives (icosahedra, dodecahedra, glaciers' crystalline geometry), "
+     "elemental palette of glacial ice / arctic dusk / volcanic basalt / monochrome amber-haze. Will object when "
+     "the work is screen-flat (no atmosphere/depth/light), when color is decorative not phenomenological, "
+     "or when the viewer is positioned as observer rather than participant."),
 ]
 
 
@@ -71,9 +79,10 @@ def debate(piece_id: str) -> dict | None:
         "next iteration. Be specific to THIS piece; never generic.\n\n"
         + persona_briefs
         + "\n\nReturn STRICT JSON only:\n"
-          '{"refik_anadol":  {"praise":"...", "concern":"...", "directive":"..."},\n'
-          ' "sasha_stiles":  {"praise":"...", "concern":"...", "directive":"..."},\n'
-          ' "entangled_others":{"praise":"...", "concern":"...", "directive":"..."}}'
+          '{"refik_anadol":   {"praise":"...", "concern":"...", "directive":"..."},\n'
+          ' "sasha_stiles":   {"praise":"...", "concern":"...", "directive":"..."},\n'
+          ' "entangled_others":{"praise":"...", "concern":"...", "directive":"..."},\n'
+          ' "olafur_eliasson":{"praise":"...", "concern":"...", "directive":"..."}}'
     )
     user = (
         f"# Piece: {piece_id}\n"

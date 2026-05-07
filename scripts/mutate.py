@@ -229,9 +229,22 @@ def _rejection_block() -> str:
     return "\n".join(lines) if lines else ""
 
 
+def _iterate_when_chosen_block(parent_id: str) -> str:
+    """If the user has left direction notes for this specific parent, surface them."""
+    taste = _read_taste()
+    notes = (taste.get("iterate_when_chosen") or {}).get(parent_id)
+    if not notes:
+        return ""
+    return (
+        f"USER ITERATION DIRECTION FOR PARENT {parent_id} — apply on this descendant:\n"
+        f"  {notes}"
+    )
+
+
 def build_prompt(parent: dict, parent_html: str, directive: str) -> tuple[str, str]:
     rejection = _rejection_block()
     swarm = _swarm_block()
+    iterate_note = _iterate_when_chosen_block(parent["id"])
     system = (
         "You are a creative-coding shader/three.js mutation engine for a particle-art "
         "evolutionary gallery. Each mutation produces ONE self-contained HTML file "
@@ -241,6 +254,7 @@ def build_prompt(parent: dict, parent_html: str, directive: str) -> tuple[str, s
         "id label fixed to the bottom-left corner, font-family ui-monospace, color #cdd2dc, "
         "opacity 0.55, font-size 11px (the 3-char id will be supplied).\n\n"
         + (("USER TASTE GUARDRAILS — read carefully:\n" + rejection + "\n\n") if rejection else "")
+        + ((iterate_note + "\n\n") if iterate_note else "")
         + ((swarm + "\n\n") if swarm else "")
         + "If your output would violate any of the above, redesign before emitting. "
         "Better to produce a structurally simple piece that respects the guardrails "
@@ -296,6 +310,19 @@ def validate(html: str) -> None:
 
 def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True, check=check)
+
+
+def safe_push() -> bool:
+    """Push current branch; if rejected, pull --rebase -X theirs and retry once.
+    Designed for parallel mutation workers + a noisy CI pushing thumbnails."""
+    for attempt in (1, 2, 3):
+        push = run_git("push", check=False)
+        if push.returncode == 0:
+            return True
+        # fetch + rebase, biased toward our own commits, then retry
+        run_git("fetch", "origin", check=False)
+        run_git("pull", "--rebase", "-X", "theirs", "--autostash", check=False)
+    return False
 
 
 def append_log(entry: dict):
@@ -429,9 +456,8 @@ def main():
     msg = f"mutate {parent['id']} → {new_id} · {directive_id}"
     run_git("commit", "-m", msg)
     if not args.no_push:
-        push = run_git("push", check=False)
-        if push.returncode != 0:
-            print(f"push failed: {push.stderr}")
+        if not safe_push():
+            print("push failed after retries")
             return 6
     print(f"committed: {msg}")
 
