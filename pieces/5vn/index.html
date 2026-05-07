@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5vn · Riley phase drift (particulate ↔ liquid)</title>
+<!-- MOTION: gather, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0b1026; overflow:hidden; }
+  canvas { display:block; }
+  .id {
+    position:fixed; left:14px; bottom:12px; font-size:11px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color:#cdd2dc; opacity:0.55; letter-spacing:0.06em;
+    animation: pulse 3s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity:0.35; }
+    50% { opacity:0.7; }
+  }
+</style>
+</head>
+<body>
+<div class="id">5vn</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 30;
+const camera = new THREE.OrthographicCamera(
+  frustumSize * aspect / -2, frustumSize * aspect / 2,
+  frustumSize / 2, frustumSize / -2, 0.1, 100
+);
+camera.position.set(0, 0, 10);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0b1026, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+
+/* Palette: warm coral, pale gold, cool teal — phase-mapped */
+const uniforms = {
+  uTime:    { value: 0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+  uRowFreq: { value: 1.15 },
+  uColFreq: { value: 0.95 },
+  uWaveAmp: { value: 0.55 },
+  uTwist:   { value: 2.4 },
+  uPhase:   { value: 1.7 },
+  /* three zone colors */
+  uColA: { value: new THREE.Color(0xe86c5a) }, /* coral */
+  uColB: { value: new THREE.Color(0xe8d5b0) }, /* pale gold */
+  uColC: { value: new THREE.Color(0x4a8b8c) }, /* teal */
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uPhase;
+    uniform float uRowFreq, uColFreq, uWaveAmp, uTwist;
+
+    attribute vec2 gridPos;
+    attribute float seed;
+
+    varying float vDensity;
+    varying float vZone;
+    varying float vLiquid;
+
+    void main(){
+      vec2 gp = gridPos;
+
+      /* Riley wave displacement */
+      float t = uTime * 0.35;
+      float rowW = sin(gp.y * uRowFreq + t * 2.2 + uPhase) * uWaveAmp;
+      float colW = sin(gp.x * uColFreq + t * 1.4) * uWaveAmp;
+
+      /* slow twist — moiré */
+      float tw = uTwist * length(gp) * 0.04 + sin(t * 0.15) * 0.3;
+      float ct = cos(tw), st = sin(tw);
+      vec2 twisted = vec2(gp.x*ct - gp.y*st, gp.x*st + gp.y*ct);
+
+      /* interference field — drives phase transition */
+      float intA = sin(gp.y * uRowFreq * 2.0 + t * 2.2 + uPhase);
+      float intB = sin(gp.x * uColFreq * 2.0 + t * 1.4);
+      float interference = intA * intB;
+
+      /* phase transition: liquid when interference is high-magnitude */
+      float liquidness = smoothstep(0.25, 0.75, abs(interference));
+
+      /* in liquid phase, particles drift toward local wave troughs (gather) */
+      float gatherX = -cos(gp.x * uColFreq * 2.0 + t * 1.4) * liquidness * 0.6;
+      float gatherY = -cos(gp.y * uRowFreq * 2.0 + t * 2.2 + uPhase) * liquidness * 0.6;
+
+      /* micro-jitter for particle phase — absent in liquid */
+      float jitterScale = (1.0 - liquidness) * 0.12;
+      float jx = sin(seed * 6283.0 + t * 3.0) * jitterScale;
+      float jy = cos(seed * 4517.0 + t * 2.7) * jitterScale;
+
+      vec3 p = vec3(
+        twisted.x + rowW + gatherX + jx,
+        twisted.y + colW + gatherY + jy,
+        0.0
+      );
+
+      vDensity = interference;
+      vLiquid  = liquidness;
+
+      /* zone = angular position around center, gives color phase */
+      float angle = atan(gp.y, gp.x);
+      vZone = sin(angle * 1.5 + t * 0.3) * 0.5 + 0.5;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+
+      /* liquid particles grow, overlap → continuous field */
+      float baseSize = mix(2.0, 4.5, liquidness);
+      gl_PointSize = uPixel * baseSize;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColA, uColB, uColC;
+    uniform float uTime;
+
+    varying float vDensity;
+    varying float vZone;
+    varying float vLiquid;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+
+      /* softer circle in liquid phase, crisp in particle phase */
+      float edgeSoft = mix(0.22, 0.06, vLiquid);
+      float alpha = 1.0 - smoothstep(0.25 - edgeSoft, 0.25, r2);
+      if (alpha < 0.01) discard;
+
+      /* color by zone: coral → gold → teal */
+      vec3 col;
+      if (vZone < 0.5) {
+        col = mix(uColA, uColB, vZone * 2.0);
+      } else {
+        col = mix(uColB, uColC, (vZone - 0.5) * 2.0);
+      }
+
+      /* in liquid phase, colors brighten and saturate; particle phase dims */
+      float brightness = mix(0.55, 0.9, vLiquid);
+
+      /* wave interference modulates brightness subtly */
+      brightness *= 0.85 + 0.15 * vDensity;
+
+      /* additive blending: alpha controls contribution */
+      float finalAlpha = alpha * mix(0.45, 0.7, vLiquid);
+
+      gl_FragColor = vec4(col * brightness, finalAlpha);
+    }
+  `
+});
+
+function buildGrid(seed){
+  const positions    = new Float32Array(N * 3);
+  const gridPositions = new Float32Array(N * 2);
+  const seeds        = new Float32Array(N);
+
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const rows = 110, cols = 110;
+  const width = 26, height = 26;
+  const cellW = width / cols, cellH = height / rows;
+
+  let idx = 0;
+  const ppc = Math.floor(N / (rows * cols));
+  for (let i = 0; i < rows && idx < N; i++){
+    for (let j = 0; j < cols && idx < N; j++){
+      for (let k = 0; k < ppc && idx < N; k++){
+        const x = (j + rng() - 0.5) * cellW - width * 0.5;
+        const y = (i + rng() - 0.5) * cellH - height * 0.5;
+        positions[idx*3]   = x;
+        positions[idx*3+1] = y;
+        positions[idx*3+2] = 0;
+        gridPositions[idx*2]   = x;
+        gridPositions[idx*2+1] = y;
+        seeds[idx] = rng();
+        idx++;
+      }
+    }
+  }
+  while (idx < N){
+    const x = (rng()-0.5)*width, y = (rng()-0.5)*height;
+    positions[idx*3]=x; positions[idx*3+1]=y; positions[idx*3+2]=0;
+    gridPositions[idx*2]=x; gridPositions[idx*2+1]=y;
+    seeds[idx]=rng(); idx++;
+  }
+  return { positions, gridPositions, seeds };
+}
+
+const { positions, gridPositions, seeds } = buildGrid(7741923);
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('gridPos',  new THREE.BufferAttribute(gridPositions, 2));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+geom.computeBoundingSphere();
+
+addEventListener('resize', () => {
+  const a = innerWidth / innerHeight;
+  camera.left   = frustumSize * a / -2;
+  camera.right  = frustumSize * a / 2;
+  camera.top    = frustumSize / 2;
+  camera.bottom = frustumSize / -2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+(function loop(){
+  uniforms.uTime.value = (performance.now() - start) / 1000;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
