@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hix · petal-volley</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#070908; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">hix</div>
+<div class="hint">drag to orbit · scroll to zoom · click to regrow</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const RULES = {
+  'F': [
+    { p: 0.45, s: 'FF[+F-F][-F+F][/F\\F]' },
+    { p: 0.30, s: 'F[+F][-F]F'           },
+    { p: 0.15, s: 'F[/F][\\F]F'          },
+    { p: 0.10, s: 'F[+F-F]F[\\F/F]'      },
+  ],
+};
+const ANGLE = THREE.MathUtils.degToRad(22.5);
+const STEP_BASE = 1.0;
+
+function expand(axiom, depth, rng){
+  let s = axiom;
+  for (let d = 0; d < depth; d++){
+    let out = '';
+    for (const ch of s){
+      if (ch in RULES) {
+        const r = rng();
+        let acc = 0;
+        for (const opt of RULES[ch]){
+          acc += opt.p;
+          if (r <= acc){ out += opt.s; break; }
+        }
+      } else out += ch;
+    }
+    s = out;
+  }
+  return s;
+}
+
+function turtle(str, depthFactor){
+  const H = new THREE.Vector3(0, 1, 0);
+  const L = new THREE.Vector3(-1, 0, 0);
+  const U = new THREE.Vector3(0, 0, 1);
+  const stack = [];
+  const segments = [];
+  let pos = new THREE.Vector3(0, -7, 0);
+  let h = H.clone(), l = L.clone(), u = U.clone();
+  let gen = 0;
+
+  const rotate = (axis, ang) => {
+    const q = new THREE.Quaternion().setFromAxisAngle(axis, ang);
+    h.applyQuaternion(q); l.applyQuaternion(q); u.applyQuaternion(q);
+  };
+
+  for (const ch of str){
+    switch(ch){
+      case 'F': {
+        const step = STEP_BASE * Math.pow(depthFactor, gen);
+        const nextPos = pos.clone().addScaledVector(h, step);
+        segments.push({ from: pos.clone(), to: nextPos.clone(), gen });
+        pos = nextPos;
+        break;
+      }
+      case '+': rotate(u, +ANGLE); break;
+      case '-': rotate(u, -ANGLE); break;
+      case '&': rotate(l, +ANGLE); break;
+      case '^': rotate(l, -ANGLE); break;
+      case '/': rotate(h, +ANGLE); break;
+      case '\\': rotate(h, -ANGLE); break;
+      case '[':
+        stack.push({ pos: pos.clone(), h: h.clone(), l: l.clone(), u: u.clone(), gen });
+        gen += 1;
+        break;
+      case ']': {
+        const f = stack.pop();
+        pos = f.pos; h = f.h; l = f.l; u = f.u; gen = f.gen;
+        break;
+      }
+    }
+  }
+  return segments;
+}
+
+function buildParticles(segments, totalN){
+  const lens = segments.map(s => s.from.distanceTo(s.to));
+  const total = lens.reduce((a,b)=>a+b, 0);
+  const positions = new Float32Array(totalN * 3);
+  const seeds     = new Float32Array(totalN);
+  const gens      = new Float32Array(totalN);
+  const lengths   = new Float32Array(totalN);
+  const v = new THREE.Vector3();
+  let written = 0;
+  for (let i = 0; i < segments.length; i++){
+    const share = i === segments.length - 1
+      ? totalN - written
+      : Math.max(1, Math.floor(totalN * lens[i] / total));
+    for (let k = 0; k < share && written < totalN; k++){
+      const t = Math.random();
+      v.lerpVectors(segments[i].from, segments[i].to, t);
+      const jitter = 0.04 * Math.pow(0.85, segments[i].gen);
+      v.x += (Math.random()-0.5) * jitter;
+      v.y += (Math.random()-0.5) * jitter;
+      v.z += (Math.random()-0.5) * jitter;
+      positions[written*3]   = v.x;
+      positions[written*3+1] = v.y;
+      positions[written*3+2] = v.z;
+      seeds[written]   = Math.random();
+      gens[written]    = segments[i].gen;
+      lengths[written] = t;
+      written++;
+    }
+  }
+  return { positions, seeds, gens, lengths };
+}
+
+// scene
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(5, 3, 15);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x070908, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 2, 0);
+
+const N = 80000;
+let geom, points;
+
+// Volley cycle: every ~8s a burst of petals detaches from tips, floats, then reattaches
+// uVolley ramps 0→1 over ~4s (scatter), then 1→0 over ~4s (return)
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uReady:  { value: 0 },
+  uVolley: { value: 0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform float uVolley;
+    attribute float seed;
+    attribute float gen;
+    attribute float lengthT;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.5 + seed * 6.28;
+
+      // normal sway
+      float sway = 0.06 * gen * (0.5 + 0.5*sin(t * 0.7));
+      p.x += sway * sin(t + p.y * 0.3);
+      p.z += sway * cos(t * 0.9 + p.y * 0.3);
+
+      // petal volley: only tip particles (high gen) participate
+      float tipness = smoothstep(2.5, 5.0, gen);
+      // stagger per-particle so they don't all go at once
+      float stagger = seed * 0.35;
+      float effectiveVolley = clamp((uVolley - stagger) / (1.0 - stagger), 0.0, 1.0);
+      effectiveVolley *= tipness;
+
+      // parabolic hang: rises gently, hangs, then drifts down late
+      // y = ev * (3.5*(1-ev) - ev*1.5) gives a nice arc
+      float volleyY = effectiveVolley * (3.5 * (1.0 - effectiveVolley) - effectiveVolley * 1.5);
+
+      // radial scatter with spiral
+      float angle = seed * 6.2831 + effectiveVolley * 3.0;
+      float radius = effectiveVolley * (2.0 + seed * 3.0);
+      float volleyX = cos(angle) * radius;
+      float volleyZ = sin(angle) * radius;
+
+      // flutter wobble
+      float flutter = effectiveVolley * 0.4 * sin(uTime * 4.0 + seed * 20.0);
+      volleyX += flutter;
+      volleyZ += flutter * 0.7;
+
+      p.x += volleyX;
+      p.y += volleyY;
+      p.z += volleyZ;
+
+      // reveal animation
+      vec3 entry = vec3(seed*4.0 - 2.0, 25.0 + seed*8.0, seed*4.0 - 2.0);
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      // palette: bark → green → sakura pink on volley
+      vec3 bark = vec3(0.45, 0.30, 0.20);
+      vec3 mid  = vec3(0.42, 0.62, 0.35);
+      vec3 tip  = vec3(0.85, 0.95, 0.55);
+      vec3 petal = vec3(1.0, 0.72, 0.78);     // sakura pink
+      vec3 petalBright = vec3(1.0, 0.85, 0.88);
+
+      float k = clamp(gen * 0.18, 0.0, 1.0);
+      vec3 treeCol = mix(bark, mid, k);
+      treeCol = mix(treeCol, tip, smoothstep(0.65, 1.0, k));
+
+      // blend to petal color when volleying
+      vec3 pCol = mix(petal, petalBright, seed);
+      vec3 col = mix(treeCol, pCol, effectiveVolley * 0.92);
+
+      float energy = 0.5 + 0.5 * sin(t * 0.5);
+      // volleying petals glow slightly brighter
+      float extraBright = 1.0 + effectiveVolley * 0.5;
+
+      vCol = col * extraBright;
+      vAlpha = (0.55 + 0.45 * energy) * (1.0 - effectiveVolley * 0.15);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // petals grow slightly larger when detached
+      float sizeMult = 1.0 + effectiveVolley * 0.6;
+      gl_PointSize = (1.0 + 0.7*energy) * sizeMult * uPixel * (40.0/dist) * (0.4 + 0.6*uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 17.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+let revealStart = 0;
+
+function regrow(seed){
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  const str = expand('F', 5, rng);
+  const segs = turtle(str, 0.78);
+  const bb = new THREE.Box3();
+  for (const s of segs) { bb.expandByPoint(s.from); bb.expandByPoint(s.to); }
+  const ctr = bb.getCenter(new THREE.Vector3());
+  const min = bb.min;
+  for (const s of segs){
+    s.from.x -= ctr.x; s.from.z -= ctr.z; s.from.y -= min.y - (-7);
+    s.to.x   -= ctr.x; s.to.z   -= ctr.z; s.to.y   -= min.y - (-7);
+  }
+
+  const { positions, seeds, gens, lengths } = buildParticles(segs, N);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('gen',      new THREE.BufferAttribute(gens, 1));
+    geom.setAttribute('lengthT',  new THREE.BufferAttribute(lengths, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions); geom.attributes.position.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);          geom.attributes.seed.needsUpdate = true;
+    geom.attributes.gen.array.set(gens);            geom.attributes.gen.needsUpdate = true;
+    geom.attributes.lengthT.array.set(lengths);     geom.attributes.lengthT.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+  revealStart = performance.now();
+}
+
+regrow(Math.floor(Math.random() * 1e9));
+addEventListener('click', () => regrow(Math.floor(Math.random() * 1e9)));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+
+// volley timing: 8s cycle — 0-3s scatter, 3-5s hang, 5-8s return
+const CYCLE = 9.0;
+const SCATTER_END = 3.5;
+const RETURN_START = 5.5;
+
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (now - revealStart) / 2200);
+  }
+
+  // volley cycle — only starts after reveal completes
+  if (uniforms.uReady.value >= 1.0) {
+    // delay first volley by 2s after reveal
+    const volleyTime = elapsed - 2.0;
+    if (volleyTime > 0) {
+      const phase = volleyTime % CYCLE;
+      let v = 0;
+      if (phase < SCATTER_END) {
+        // ease-out scatter
+        const t = phase / SCATTER_END;
+        v = 1.0 - Math.pow(1.0 - t, 2.0);
+      } else if (phase < RETURN_START) {
+        // hold at peak
+        v = 1.0;
+      } else {
+        // ease-in return
+        const t = (phase - RETURN_START) / (CYCLE - RETURN_START);
+        v = 1.0 - t * t;
+      }
+      uniforms.uVolley.value = v;
+    }
+  }
+
+  // gently track centroid — bias camera target upward during volley
+  const volleyBias = uniforms.uVolley.value * 1.2;
+  controls.target.y += (2.0 + volleyBias - controls.target.y) * 0.02;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
