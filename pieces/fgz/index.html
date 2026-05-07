@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fgz · cyber-nest · metaball orbit accretion</title>
+<!-- MOTION: gathering, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0712; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">fgz</div>
+<div class="hint">move mouse to shape the nest · sphere velocity determines adhesion</div>
+<div class="src">descended from 5gm · Wang & Söderström (Lumen 2023) · soft-body data-harvest</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Wang & Söderström's 'Nest of You' — a biomorphic accretion system where
+// metaball-like soft spheres orbit a tracked attractor (mouse in 3D space)
+// and stick when slow, forming a glossy cyber-nest around the silhouette.
+// MECHANICS: each sphere has orbital velocity around the attractor; when
+// velocity < threshold they transition to 'adhered' state and join the nest;
+// fast spheres shed and re-orbit. Result: a living nest that grows around
+// the pointer, reading as both organism and data exhaust.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0712, 0.022);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0712, 1);
+document.body.appendChild(renderer.domElement);
+
+// ambient + two colored key lights (pearl from above, lavender from side)
+const amb = new THREE.AmbientLight(0xb8b4c0, 0.35);
+scene.add(amb);
+const key1 = new THREE.DirectionalLight(0xe8e4df, 0.7);
+key1.position.set(4, 8, 6);
+scene.add(key1);
+const key2 = new THREE.DirectionalLight(0xb8a4d8, 0.5);
+key2.position.set(-6, 2, 4);
+scene.add(key2);
+
+// attractor position (mouse-driven in normalized 3D space)
+const attractor = new THREE.Vector3(0, 0, 0);
+const mouse = { x: 0, y: 0 };
+addEventListener('mousemove', e => {
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+});
+
+// sphere state: position, velocity (orbital around attractor), adhesion state
+const N_SPHERES = 240;
+const spheres = [];
+const ORBIT_SPEED = 0.04;
+const ADHERE_THRESH = 0.08; // velocity magnitude below which sphere adheres
+const SHED_PROB = 0.002;    // chance per frame an adhered sphere re-orbits
+
+for (let i = 0; i < N_SPHERES; i++){
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const r = 3 + Math.random() * 4;
+  spheres.push({
+    pos: new THREE.Vector3(
+      r * Math.sin(phi) * Math.cos(theta),
+      r * Math.sin(phi) * Math.sin(theta),
+      r * Math.cos(phi)
+    ),
+    vel: new THREE.Vector3(
+      (Math.random() - 0.5) * 0.1,
+      (Math.random() - 0.5) * 0.1,
+      (Math.random() - 0.5) * 0.1
+    ),
+    adhered: false,
+    targetPos: new THREE.Vector3(),  // locked position when adhered
+    radius: 0.24 + Math.random() * 0.18,
+    hue: Math.random() * 360
+  });
+}
+
+// instanced mesh for all spheres
+const sphereGeom = new THREE.SphereGeometry(1, 16, 16);
+const sphereMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    attribute vec3 iPos;
+    attribute float iRadius;
+    attribute float iHue;
+    attribute float iAdhered;
+    varying vec3 vNormal;
+    varying vec3 vPos;
+    varying float vHue;
+    varying float vAdhered;
+    void main(){
+      vNormal = normalize(normalMatrix * normal);
+      vHue = iHue;
+      vAdhered = iAdhered;
+      vec3 p = position * iRadius + iPos;
+      vPos = p;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec3 vNormal;
+    varying vec3 vPos;
+    varying float vHue;
+    varying float vAdhered;
+    
+    vec3 hsl2rgb(float h, float s, float l){
+      float c = (1.0 - abs(2.0*l - 1.0)) * s;
+      float x = c * (1.0 - abs(mod(h/60.0, 2.0) - 1.0));
+      float m = l - c*0.5;
+      vec3 rgb;
+      if(h < 60.0) rgb = vec3(c,x,0);
+      else if(h < 120.0) rgb = vec3(x,c,0);
+      else if(h < 180.0) rgb = vec3(0,c,x);
+      else if(h < 240.0) rgb = vec3(0,x,c);
+      else if(h < 300.0) rgb = vec3(x,0,c);
+      else rgb = vec3(c,0,x);
+      return rgb + m;
+    }
+    
+    void main(){
+      // pearl base (high-luminance desaturated)
+      vec3 pearl = vec3(0.94, 0.93, 0.89);
+      // lavender tint on adhered spheres
+      vec3 lavender = vec3(0.72, 0.65, 0.82);
+      // mercury accent (silvery blue)
+      vec3 mercury = vec3(0.78, 0.82, 0.88);
+      
+      // fresnel-like glossiness
+      vec3 viewDir = normalize(-vPos);
+      float fresnel = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 2.8);
+      
+      // adhered spheres shift toward lavender with subtle hue variation
+      vec3 base = mix(pearl, lavender, vAdhered * 0.6);
+      base = mix(base, hsl2rgb(vHue, 0.15, 0.82), 0.12);
+      
+      // glossy highlight (mercury accent at grazing angles)
+      vec3 col = mix(base, mercury, fresnel * 0.7);
+      
+      // soft edge falloff (metaball-like)
+      float edgeFade = smoothstep(0.0, 0.3, dot(vNormal, viewDir));
+      float alpha = 0.85 * edgeFade;
+      
+      gl_FragColor = vec4(col, alpha);
+    }
+  `,
+  transparent: true,
+  side: THREE.DoubleSide
+});
+
+const instancedMesh = new THREE.InstancedMesh(sphereGeom, sphereMat, N_SPHERES);
+scene.add(instancedMesh);
+
+// per-instance attributes
+const iPosArray = new Float32Array(N_SPHERES * 3);
+const iRadiusArray = new Float32Array(N_SPHERES);
+const iHueArray = new Float32Array(N_SPHERES);
+const iAdheredArray = new Float32Array(N_SPHERES);
+
+const iGeom = instancedMesh.geometry;
+iGeom.setAttribute('iPos', new THREE.InstancedBufferAttribute(iPosArray, 3));
+iGeom.setAttribute('iRadius', new THREE.InstancedBufferAttribute(iRadiusArray, 1));
+iGeom.setAttribute('iHue', new THREE.InstancedBufferAttribute(iHueArray, 1));
+iGeom.setAttribute('iAdhered', new THREE.InstancedBufferAttribute(iAdheredArray, 1));
+
+// particle system for shed data-exhaust trails
+const TRAIL_COUNT = 8000;
+const trailPos = new Float32Array(TRAIL_COUNT * 3);
+const trailLife = new Float32Array(TRAIL_COUNT);
+let trailIdx = 0;
+
+for (let i = 0; i < TRAIL_COUNT; i++){
+  trailPos[i*3] = (Math.random() - 0.5) * 20;
+  trailPos[i*3+1] = (Math.random() - 0.5) * 20;
+  trailPos[i*3+2] = (Math.random() - 0.5) * 20;
+  trailLife[i] = 0;
+}
+
+const trailGeom = new THREE.BufferGeometry();
+trailGeom.setAttribute('position', new THREE.BufferAttribute(trailPos, 3));
+trailGeom.setAttribute('life', new THREE.BufferAttribute(trailLife, 1));
+
+const trailMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  vertexShader: `
+    uniform float uPixel;
+    attribute float life;
+    varying float vLife;
+    void main(){
+      vLife = life;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = 1.2 * uPixel * (30.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vLife;
+    void main(){
+      if(vLife <= 0.0) discard;
+      vec2 d = gl_PointCoord - 0.5;
+      if(dot(d,d) > 0.25) discard;
+      float a = vLife * 0.5;
+      vec3 col = vec3(0.78, 0.82, 0.88); // mercury trail
+      gl_FragColor = vec4(col * a, a);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const trailPoints = new THREE.Points(trailGeom, trailMat);
+scene.add(trailPoints);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  sphereMat.uniforms.uTime.value = t;
+
+  // update attractor position (mouse in 3D — X/Y from mouse, Z oscillates gently)
+  attractor.x += (mouse.x * 6 - attractor.x) * 0.08;
+  attractor.y += (mouse.y * 6 - attractor.y) * 0.08;
+  attractor.z += (Math.sin(t * 0.4) * 2 - attractor.z) * 0.05;
+
+  // sphere physics: orbital around attractor with adhesion threshold
+  for (let i = 0; i < N_SPHERES; i++){
+    const s = spheres[i];
+    
+    if (s.adhered){
+      // adhered spheres stay locked to their target position (nest structure)
+      // with slight positional drift for organic feel
+      s.pos.lerp(s.targetPos, 0.06);
+      s.pos.x += (Math.random() - 0.5) * 0.002;
+      s.pos.y += (Math.random() - 0.5) * 0.002;
+      s.pos.z += (Math.random() - 0.5) * 0.002;
+      
+      // probabilistic shedding (sphere breaks free and re-orbits)
+      if (Math.random() < SHED_PROB){
+        s.adhered = false;
+        // emit trail particle
+        trailPos[trailIdx*3] = s.pos.x;
+        trailPos[trailIdx*3+1] = s.pos.y;
+        trailPos[trailIdx*3+2] = s.pos.z;
+        trailLife[trailIdx] = 1.0;
+        trailIdx = (trailIdx + 1) % TRAIL_COUNT;
+        // give it initial velocity away from attractor
+        const away = s.pos.clone().sub(attractor).normalize();
+        s.vel.copy(away).multiplyScalar(0.15);
+      }
+    } else {
+      // orbital physics: attract toward attractor with tangential velocity
+      const toAtt = attractor.clone().sub(s.pos);
+      const dist = toAtt.length();
+      
+      // gravitational pull toward attractor
+      const force = toAtt.normalize().multiplyScalar(ORBIT_SPEED * 0.8 / Math.max(dist, 0.5));
+      s.vel.add(force);
+      
+      // tangential drift (orbital motion, not straight infall)
+      const tangent = new THREE.Vector3(-toAtt.z, 0, toAtt.x).normalize();
+      s.vel.add(tangent.multiplyScalar(ORBIT_SPEED * 0.6));
+      
+      // drag
+      s.vel.multiplyScalar(0.96);
+      
+      // update position
+      s.pos.add(s.vel);
+      
+      // check adhesion threshold
+      const speed = s.vel.length();
+      if (speed < ADHERE_THRESH && dist < 4.5){
+        s.adhered = true;
+        s.targetPos.copy(s.pos); // lock current position as target
+        s.vel.set(0, 0, 0);
+      }
+    }
+    
+    // write to instance attributes
+    iPosArray[i*3] = s.pos.x;
+    iPosArray[i*3+1] = s.pos.y;
+    iPosArray[i*3+2] = s.pos.z;
+    iRadiusArray[i] = s.radius;
+    iHueArray[i] = s.hue;
+    iAdheredArray[i] = s.adhered ? 1.0 : 0.0;
+  }
+  
+  iGeom.attributes.iPos.needsUpdate = true;
+  iGeom.attributes.iAdhered.needsUpdate = true;
+  
+  // decay trail particles
+  for (let i = 0; i < TRAIL_COUNT; i++){
+    if (trailLife[i] > 0){
+      trailLife[i] -= 0.012;
+      if (trailLife[i] < 0) trailLife[i] = 0;
+    }
+  }
+  trailGeom.attributes.life.needsUpdate = true;
+  
+  // camera gentle orbit around nest center
+  const camAngle = t * 0.08;
+  const camDist = 18;
+  camera.position.x = Math.sin(camAngle) * camDist * 0.3;
+  camera.position.z = Math.cos(camAngle) * camDist;
+  camera.position.y = Math.sin(t * 0.12) * 2;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
