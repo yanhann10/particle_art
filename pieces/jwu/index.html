@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jwu · the flock that learns to breathe with the water</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a14; overflow:hidden;
+               color:#a8b8d0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background:
+      linear-gradient(to bottom,
+        #0d1520 0%,
+        #162030 18%,
+        #1a2a3a 36%,
+        #253848 52%,
+        #2e4555 68%,
+        #3a5565 82%,
+        #4a6a72 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size: 10px; letter-spacing: 0.06em;
+          color: #7a9db8; }
+</style>
+</head>
+<body>
+<div class="id">jwu · the flock that learns to breathe with the water</div>
+<div class="hint">no input — the tide pulls. the straggler drifts. the flock bends but does not break.</div>
+<div class="src">descended from sav · boids with grief and return · tidal morph</div>
+<div class="arc" id="arc">slack tide · 100%</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// sav → tide morph
+// The flock's emotional arc is now shaped by tidal forces.
+// A slow, gravitational rhythm pulls on all birds — but the straggler,
+// with its weaker perception, gets caught in the current more easily.
+// The flock must time its seeking with the tidal cycle: they can only
+// recover the lost one during slack tide, when the pull relents.
+//
+// Technique reference: Yukio Hasegawa's tidal-flow particle sculptures —
+// biological motion constrained by geophysical rhythm.
+//
+// Visual morph from sav:
+//   - dawn-amber palette → deep coastal blue-green-silver
+//   - background gradient → pre-dawn coastal fog
+//   - tidal force sinusoid modulates boid dynamics
+//   - straggler is carried by the tide, not just by its own drift
+//   - camera tracks flock centroid (fixes sav's fixed-orbit framing)
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0d1520, 0.014);
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+const N = 481;
+const STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const lastEmotional = new Float32Array(N);
+
+for (let i = 0; i < N; i++){
+  const r = Math.random() * 1.6 + 0.4;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI - Math.PI * 0.5;
+  pos[i*3]     = Math.cos(th) * Math.cos(ph) * r;
+  pos[i*3 + 1] = Math.sin(ph) * r;
+  pos[i*3 + 2] = Math.sin(th) * Math.cos(ph) * r;
+  vel[i*3]     = 0.3 + (Math.random() - 0.5) * 0.4;
+  vel[i*3 + 1] = (Math.random() - 0.5) * 0.3;
+  vel[i*3 + 2] = (Math.random() - 0.5) * 0.4;
+}
+pos[STRAGGLER * 3]     = -1.2;
+pos[STRAGGLER * 3 + 1] =  0.6;
+pos[STRAGGLER * 3 + 2] =  0.0;
+
+const PERCEPTION_R   = 4.0;
+const SEPARATION_R   = 0.9;
+const W_COH = 0.018;
+const W_ALI = 0.060;
+const W_SEP = 0.080;
+const MAX_SPEED = 1.4;
+const MAX_FORCE = 0.030;
+
+// tidal state
+let tidalPhase = 0;       // 0..2π cycling
+let tidalStrength = 0;    // -1 (ebb) .. +1 (flood)
+const TIDAL_PERIOD = 28;  // seconds for full cycle
+const TIDAL_AMP = 0.035;  // force magnitude
+
+let cohesion = 1.0;
+let arcStage = 'slack tide';
+const arcEl = document.getElementById('arc');
+
+// smooth centroid for camera tracking
+let camCx = 0, camCy = 0, camCz = 0;
+
+function step(dt, now){
+  // tidal rhythm — slow sinusoid
+  tidalPhase = (now / 1000) * (Math.PI * 2 / TIDAL_PERIOD);
+  tidalStrength = Math.sin(tidalPhase);
+  // secondary harmonic for asymmetry (real tides aren't pure sine)
+  const tidalForceX = tidalStrength * TIDAL_AMP;
+  const tidalForceY = Math.sin(tidalPhase * 0.5 + 0.8) * TIDAL_AMP * 0.3;
+  const tidalForceZ = Math.cos(tidalPhase * 0.7) * TIDAL_AMP * 0.5;
+
+  // is it slack tide? (force near zero)
+  const isSlack = Math.abs(tidalStrength) < 0.2;
+
+  // compute flock centroid (exclude straggler)
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 1; i < N; i++){
+    cx += pos[i*3]; cy += pos[i*3 + 1]; cz += pos[i*3 + 2];
+  }
+  cx /= (N - 1); cy /= (N - 1); cz /= (N - 1);
+
+  // smooth camera target
+  camCx += (cx - camCx) * dt * 1.2;
+  camCy += (cy - camCy) * dt * 1.2;
+  camCz += (cz - camCz) * dt * 1.2;
+
+  // straggler distance → cohesion
+  const sx = pos[STRAGGLER*3] - cx;
+  const sy = pos[STRAGGLER*3+1] - cy;
+  const sz = pos[STRAGGLER*3+2] - cz;
+  const stragDist = Math.sqrt(sx*sx + sy*sy + sz*sz);
+  const targetCohesion = Math.max(0.0, Math.min(1.0, 1.0 - stragDist / 8.0));
+  cohesion += (targetCohesion - cohesion) * dt * 0.45;
+
+  // arc state machine — now tidal-aware
+  if (cohesion > 0.85) arcStage = 'slack tide';
+  else if (cohesion > 0.5 && stragDist > 4.5) arcStage = 'ebb';
+  else if (cohesion < 0.5) arcStage = 'drift';
+  else if (arcStage === 'drift' && cohesion > 0.65) arcStage = 'flood';
+
+  const tideLabel = Math.abs(tidalStrength) < 0.2 ? 'slack'
+                  : tidalStrength > 0 ? 'flooding' : 'ebbing';
+  arcEl.textContent = `${arcStage} · ${tideLabel} · ${Math.round(cohesion * 100)}%`;
+
+  const acc = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++){
+    let cohX = 0, cohY = 0, cohZ = 0, cohN = 0;
+    let aliX = 0, aliY = 0, aliZ = 0, aliN = 0;
+    let sepX = 0, sepY = 0, sepZ = 0;
+    const px = pos[i*3], py = pos[i*3+1], pz = pos[i*3+2];
+
+    const isStrag = (i === STRAGGLER);
+    const perceptionR = isStrag ? PERCEPTION_R * 0.55 : PERCEPTION_R;
+
+    for (let j = 0; j < N; j++){
+      if (i === j) continue;
+      const dx = pos[j*3] - px;
+      const dy = pos[j*3+1] - py;
+      const dz = pos[j*3+2] - pz;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 > perceptionR * perceptionR || d2 < 1e-6) continue;
+      cohX += pos[j*3]; cohY += pos[j*3+1]; cohZ += pos[j*3+2]; cohN++;
+      aliX += vel[j*3]; aliY += vel[j*3+1]; aliZ += vel[j*3+2]; aliN++;
+      if (d2 < SEPARATION_R * SEPARATION_R){
+        const inv = 1.0 / Math.sqrt(d2);
+        sepX -= dx * inv; sepY -= dy * inv; sepZ -= dz * inv;
+      }
+    }
+
+    // TIDAL FORCE — everyone feels it, but the straggler feels it 2.5x stronger
+    // (lighter body, weaker will, caught in the current)
+    const tideMul = isStrag ? 2.5 : 1.0;
+    acc[i*3]     += tidalForceX * tideMul;
+    acc[i*3+1]   += tidalForceY * tideMul;
+    acc[i*3+2]   += tidalForceZ * tideMul;
+
+    // straggler's personal drift — now modulated by tidal phase
+    // during flood tide, the straggler is pushed hardest away
+    // during slack, its own drift dominates (chance to return)
+    if (isStrag){
+      const driftMod = 0.2 + Math.abs(tidalStrength) * 0.5;
+      const drift = Math.sin(now * 0.0003) * driftMod;
+      acc[i*3]     += drift;
+      acc[i*3+1]   += -0.15 + Math.cos(now * 0.0002) * 0.15;
+      acc[i*3+2]   += drift * 0.6;
+
+      // during slack tide, the straggler feels a gentle pull home
+      if (isSlack && stragDist > 2.0){
+        const homeStr = 0.008;
+        acc[i*3]     += (cx - px) * homeStr;
+        acc[i*3+1]   += (cy - py) * homeStr;
+        acc[i*3+2]   += (cz - pz) * homeStr;
+      }
+    }
+
+    // flock seeks straggler during drift/flood — but only effectively at slack
+    if (!isStrag){
+      if (arcStage === 'drift' || arcStage === 'flood'){
+        const tx = pos[STRAGGLER*3] - px;
+        const ty = pos[STRAGGLER*3+1] - py;
+        const tz = pos[STRAGGLER*3+2] - pz;
+        const td = Math.sqrt(tx*tx + ty*ty + tz*tz) + 1e-3;
+        // seeking force is stronger during slack tide (the window of opportunity)
+        const seekBase = arcStage === 'drift' ? 0.020 : 0.012;
+        const slackBoost = isSlack ? 1.8 : 0.6;
+        const seek = seekBase * slackBoost;
+        acc[i*3]     += (tx / td) * seek;
+        acc[i*3+1]   += (ty / td) * seek;
+        acc[i*3+2]   += (tz / td) * seek;
+      }
+    }
+
+    // the flock resists tidal pull slightly when together — collective anchoring
+    // (a single bird drifts; the group holds)
+    if (!isStrag && cohesion > 0.6){
+      const resist = 0.4 * cohesion;
+      acc[i*3]     -= tidalForceX * resist;
+      acc[i*3+1]   -= tidalForceY * resist;
+      acc[i*3+2]   -= tidalForceZ * resist;
+    }
+
+    if (cohN > 0){
+      cohX = cohX/cohN - px;
+      cohY = cohY/cohN - py;
+      cohZ = cohZ/cohN - pz;
+      acc[i*3]     += cohX * W_COH;
+      acc[i*3+1]   += cohY * W_COH;
+      acc[i*3+2]   += cohZ * W_COH;
+    }
+    if (aliN > 0){
+      aliX = aliX/aliN - vel[i*3];
+      aliY = aliY/aliN - vel[i*3+1];
+      aliZ = aliZ/aliN - vel[i*3+2];
+      acc[i*3]     += aliX * W_ALI;
+      acc[i*3+1]   += aliY * W_ALI;
+      acc[i*3+2]   += aliZ * W_ALI;
+    }
+    acc[i*3]   += sepX * W_SEP;
+    acc[i*3+1] += sepY * W_SEP;
+    acc[i*3+2] += sepZ * W_SEP;
+
+    // soft world bounds
+    const d2c = px*px + py*py + pz*pz;
+    if (d2c > 90){
+      const inv = 0.012 / Math.sqrt(d2c);
+      acc[i*3]   += -px * inv;
+      acc[i*3+1] += -py * inv;
+      acc[i*3+2] += -pz * inv;
+    }
+  }
+
+  // integrate
+  const speedMul = (arcStage === 'ebb' || arcStage === 'drift') ? 0.55
+                  : arcStage === 'flood' ? 0.85 : 1.0;
+  for (let i = 0; i < N; i++){
+    let ax = acc[i*3], ay = acc[i*3+1], az = acc[i*3+2];
+    const af = Math.sqrt(ax*ax + ay*ay + az*az);
+    if (af > MAX_FORCE){ ax = ax * MAX_FORCE / af; ay = ay * MAX_FORCE / af; az = az * MAX_FORCE / af; }
+    vel[i*3]     += ax;
+    vel[i*3 + 1] += ay;
+    vel[i*3 + 2] += az;
+    let vx = vel[i*3], vy = vel[i*3+1], vz = vel[i*3+2];
+    const sp = Math.sqrt(vx*vx + vy*vy + vz*vz);
+    if (sp > MAX_SPEED){ vx *= MAX_SPEED/sp; vy *= MAX_SPEED/sp; vz *= MAX_SPEED/sp; vel[i*3]=vx; vel[i*3+1]=vy; vel[i*3+2]=vz; }
+    pos[i*3]     += vel[i*3]   * dt * speedMul;
+    pos[i*3+1]   += vel[i*3+1] * dt * speedMul;
+    pos[i*3+2]   += vel[i*3+2] * dt * speedMul;
+    lastEmotional[i] = (1.0 - cohesion);
+  }
+}
+
+// ────────────── render
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+const seedArr = new Float32Array(N);
+for (let i = 0; i < N; i++) seedArr[i] = Math.random();
+geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+const isStragArr = new Float32Array(N);
+isStragArr[STRAGGLER] = 1.0;
+geom.setAttribute('strag', new THREE.BufferAttribute(isStragArr, 1));
+
+const uniforms = {
+  uTime:      { value: 0 },
+  uPixel:     { value: renderer.getPixelRatio() },
+  uCohesion:  { value: 1.0 },
+  uTidal:     { value: 0.0 }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uCohesion;
+    uniform float uTidal;
+    attribute float seed;
+    attribute float strag;
+    varying vec3  vCol;
+    varying float vFade;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.6 + seed * 6.28;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // size: gentle tidal breathing — particles swell slightly during flood
+      float tidalSwell = 1.0 + uTidal * 0.15;
+      float baseSize = (1.6 + 0.8 * sin(t)) * tidalSwell;
+      float stragSize = strag * 2.4;
+      gl_PointSize = (baseSize + stragSize) * uPixel * (16.0 / dist);
+      vFade = clamp(1.0 - (dist - 24.0) / 28.0, 0.0, 1.0);
+
+      // coastal palette — tidal morph from sav's dawn amber
+      // together: silver-seafoam calm water
+      // lost: deep ocean indigo-violet, cold current
+      // tidal strength shifts the warmth — flood brings warmer undertow
+      vec3 calm   = vec3(0.62, 0.78, 0.76);   // seafoam silver
+      vec3 warm   = vec3(0.75, 0.72, 0.60);   // sand-lit water at dawn
+      vec3 deep   = vec3(0.22, 0.30, 0.52);   // deep ocean blue
+      vec3 cold   = vec3(0.38, 0.28, 0.52);   // cold current violet
+
+      // blend calm/warm by tidal phase
+      float tidalWarmth = uTidal * 0.5 + 0.5;
+      vec3 togetherCol = mix(calm, warm, tidalWarmth * 0.4);
+      vec3 lostCol     = mix(deep, cold, tidalWarmth * 0.3);
+
+      vec3 cohCol = mix(lostCol, togetherCol, smoothstep(0.0, 1.0, uCohesion));
+
+      // straggler: phosphorescent highlight — bioluminescence in disturbed water
+      vec3 phosphor = vec3(0.55, 0.92, 0.82);
+      vCol = mix(cohCol, phosphor, strag * 0.65 + smoothstep(0.6, 1.0, sin(t * 0.4)) * 0.12);
+      vCol *= (1.0 + strag * 0.35);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vFade;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vFade;
+      gl_FragColor = vec4(vCol * a * 0.95, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm
+const fakeNow = performance.now();
+for (let s = 0; s < 250; s++) step(0.05, fakeNow + s * 50);
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = (now / 1000);
+  uniforms.uCohesion.value = cohesion;
+  uniforms.uTidal.value = tidalStrength;
+  step(dt, now);
+  geom.attributes.position.needsUpdate = true;
+
+  // camera tracks flock centroid with slow orbit — fixes sav's static framing
+  const ang = now * 0.00008;
+  const orbitR = 28;
+  camera.position.x = camCx + Math.sin(ang) * orbitR;
+  camera.position.y = camCy + 2.0;
+  camera.position.z = camCz + Math.cos(ang) * orbitR;
+  camera.lookAt(camCx, camCy, camCz);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
