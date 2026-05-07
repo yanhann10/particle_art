@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>rje · oceanic strings</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#060a0f; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px; letter-spacing:0.04em; z-index:10; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size:10px; letter-spacing:0.04em; z-index:10; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.45; font-size:10px; letter-spacing:0.04em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">rje</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Memo Akten · Felix Gonzalez-Torres · oceanic drift · differential growth</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Oceanic light strings — Memo Akten's physics-sublime meets
+   Gonzalez-Torres draped lights. Differential growth curves
+   drift with momentum and inertia through deep teal fog.
+   Camera slowly orbits on a rail. Palette: dusk ocean. */
+
+const BG = 0x060a0f;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(34, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 2, 24);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.03;
+controls.target.set(0, -1, 0);
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.12;
+
+// --- two parallel strings: paired forms (FGT's absent lover) ---
+const MAX_VERTS = 1800;
+const ATTRACT   = 0.04;
+const REPEL_R   = 0.52;
+const REPEL_STR = 0.08;
+const NOISE     = 0.0015;
+const PRESSURE  = 0.0015;
+const GRAVITY   = 0.006;
+const MAX_D     = 0.38;
+const ANCHOR_N  = 5;
+const DAMPING   = 0.92; // momentum damping
+
+function makeString(offsetZ) {
+  const verts = [];
+  const NV0 = 36;
+  for (let i = 0; i < NV0; i++) {
+    const t = (i / (NV0 - 1)) * 2 - 1;
+    const x = t * 5.5;
+    const y = -Math.abs(t) * 1.0 + Math.sin(t * Math.PI * 2) * 0.25;
+    verts.push({
+      x, z: offsetZ, y, age: 0,
+      pinY: i < ANCHOR_N || i >= NV0 - ANCHOR_N,
+      vx: 0, vy: 0, vz: 0 // momentum
+    });
+  }
+  return verts;
+}
+
+const strings = [makeString(-0.8), makeString(0.8)];
+
+// spatial hash
+const CELL = REPEL_R;
+const grid = new Map();
+function gridKey(x, z) { return (Math.floor(x / CELL) * 10007 + Math.floor(z / CELL)) | 0; }
+function rebuildGrid(verts) {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i], k = gridKey(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function nearby(v) {
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const k = ((cx + dx) * 10007 + (cz + dz)) | 0;
+    const arr = grid.get(k);
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', e => {
+  if (e.target.tagName === 'CANVAS') paused = !paused;
+});
+
+// slow current field — oceanic drift
+function current(x, y, z, t) {
+  const s = t * 0.04;
+  return {
+    cx: Math.sin(y * 0.3 + s) * 0.003 + Math.sin(z * 0.2 + s * 0.7) * 0.002,
+    cy: Math.cos(x * 0.2 + s * 0.5) * 0.001,
+    cz: Math.sin(x * 0.15 + s * 0.3) * 0.002
+  };
+}
+
+function stepString(verts, time) {
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid(verts);
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? verts[i - 1] : null;
+    const next = i < n - 1 ? verts[i + 1] : null;
+    const v = verts[i];
+    if (prev) {
+      dx[i] += (prev.x - v.x) * ATTRACT;
+      dz[i] += (prev.z - v.z) * ATTRACT;
+      dy[i] += (prev.y - v.y) * ATTRACT;
+    }
+    if (next) {
+      dx[i] += (next.x - v.x) * ATTRACT;
+      dz[i] += (next.z - v.z) * ATTRACT;
+      dy[i] += (next.y - v.y) * ATTRACT;
+    }
+  }
+  let mx = 0, mz = 0;
+  for (let i = 0; i < n; i++) { mx += verts[i].x; mz += verts[i].z; }
+  mx /= n; mz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - mx, oz = verts[i].z - mz;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dz[i] += (oz / d) * PRESSURE;
+  }
+
+  // apply with momentum (inertia)
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    const c = current(v.x, v.y, v.z, time);
+    const grav = v.pinY ? GRAVITY * 0.04 : GRAVITY;
+    // accumulate forces into velocity
+    v.vx = v.vx * DAMPING + dx[i] + (Math.random() - 0.5) * NOISE + c.cx;
+    v.vz = v.vz * DAMPING + dz[i] + (Math.random() - 0.5) * NOISE + c.cz;
+    v.vy = v.vy * DAMPING + dy[i] - grav + (Math.random() - 0.5) * NOISE * 0.3 + c.cy;
+    v.x += v.vx;
+    v.z += v.vz;
+    v.y += v.vy;
+    v.age += 0.0003;
+  }
+
+  // subdivide
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    grown.push(a);
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    if (ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({
+        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.015,
+        z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.015,
+        y: (a.y + b.y) * 0.5,
+        age: Math.max(a.age, b.age) * 0.6,
+        pinY: false,
+        vx: (a.vx + b.vx) * 0.5,
+        vy: (a.vy + b.vy) * 0.5,
+        vz: (a.vz + b.vz) * 0.5
+      });
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// --- rendering ---
+const N_RENDER = 40000;
+const N_PER_STRING = 16000;
+const N_DUST = N_RENDER - N_PER_STRING * 2; // atmospheric dust motes
+const rPos   = new Float32Array(N_RENDER * 3);
+const rSeeds = new Float32Array(N_RENDER);
+const rAge   = new Float32Array(N_RENDER);
+const rType  = new Float32Array(N_RENDER); // 0=string, 1=dust
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+// init dust motes in a large volume
+for (let i = N_PER_STRING * 2; i < N_RENDER; i++) {
+  rPos[i * 3]     = (Math.random() - 0.5) * 40;
+  rPos[i * 3 + 1] = (Math.random() - 0.5) * 25 - 3;
+  rPos[i * 3 + 2] = (Math.random() - 0.5) * 30;
+  rType[i] = 1.0;
+  rAge[i] = Math.random();
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('ptype',    new THREE.BufferAttribute(rType, 1));
+
+const uniforms = {
+  uTime:       { value: 0 },
+  uPixel:      { value: renderer.getPixelRatio() },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.028 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uFogDensity;
+    attribute float seed;
+    attribute float age;
+    attribute float ptype;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+
+    void main() {
+      vec3 p = position;
+
+      // oceanic sway — slow, deep, like underwater current
+      float t = uTime * 0.15 + seed * 6.2831;
+      float sway = sin(t) * 0.012 * (1.0 + seed * 0.5);
+      float heave = sin(t * 0.37 + p.y * 0.2) * 0.008;
+      p.x += sway;
+      p.y += heave;
+      p.z += cos(t * 0.53) * 0.006;
+
+      // slow pulse
+      float pulse = 0.88 + 0.12 * sin(uTime * 0.4 + seed * 30.0);
+
+      // palette: deep teal → soft blue → pale moonlight
+      // 5 intentional colors:
+      // #0d3b4a deep teal (shadow)
+      // #1a6b7a teal (mid)
+      // #4a9eb0 soft cyan (bright node)
+      // #7ab8c4 pale teal (halo)
+      // #c8dce2 moonlight (highlight)
+      vec3 deepTeal  = vec3(0.051, 0.231, 0.290);
+      vec3 teal      = vec3(0.102, 0.420, 0.478);
+      vec3 softCyan  = vec3(0.290, 0.620, 0.690);
+      vec3 paleTeal  = vec3(0.478, 0.722, 0.769);
+      vec3 moonlight = vec3(0.784, 0.863, 0.886);
+
+      if (ptype > 0.5) {
+        // dust motes: very faint deep teal
+        float dk = seed * 0.3;
+        vCol = mix(deepTeal, teal, dk) * 0.4;
+        vAlpha = 0.06 + 0.04 * sin(uTime * 0.2 + seed * 20.0);
+
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        gl_PointSize = (0.6 + seed * 0.8) * uPixel * (30.0 / max(-mv.z, 1.0));
+        gl_Position = projectionMatrix * mv;
+        float fogDepth = length(mv.xyz);
+        vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+        return;
+      }
+
+      float k = clamp(age * 1.5, 0.0, 1.0);
+      // younger = deeper teal, older = moonlight
+      vCol = mix(deepTeal, teal, smoothstep(0.0, 0.25, k));
+      vCol = mix(vCol, softCyan, smoothstep(0.2, 0.5, k));
+      vCol = mix(vCol, paleTeal, smoothstep(0.5, 0.75, k));
+      vCol = mix(vCol, moonlight, smoothstep(0.75, 1.0, k) * 0.35);
+      vCol *= pulse;
+
+      vAlpha = 0.45 + 0.18 * pulse;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 1.0);
+      gl_PointSize = 1.6 * uPixel * (42.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // soft glow — like bioluminescence
+      float core = exp(-r * 20.0);
+      float halo = exp(-r * 6.0) * 0.3;
+      float a = (core + halo) * vAlpha;
+
+      vec3 col = vCol;
+      col = mix(col, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.85);
+
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// wire for each string
+const wires = strings.map(() => {
+  const wg = new THREE.BufferGeometry();
+  const wp = new Float32Array(MAX_VERTS * 3);
+  wg.setAttribute('position', new THREE.BufferAttribute(wp, 3));
+  const wm = new THREE.LineBasicMaterial({
+    color: 0x0d2a35,
+    transparent: true,
+    opacity: 0.2
+  });
+  const wl = new THREE.Line(wg, wm);
+  scene.add(wl);
+  return { geom: wg, positions: wp, line: wl };
+});
+
+// background gradient plane — dusk horizon
+const gradGeom = new THREE.PlaneGeometry(120, 80);
+const gradMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  uniforms: { uTime: uniforms.uTime },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uTime;
+    void main() {
+      // deep ocean gradient: dark navy at bottom → slightly brighter teal at top
+      vec3 deepNavy = vec3(0.02, 0.04, 0.06);
+      vec3 duskTeal = vec3(0.04, 0.09, 0.12);
+      vec3 midTeal  = vec3(0.05, 0.12, 0.16);
+      float y = vUv.y;
+      vec3 col = mix(deepNavy, duskTeal, smoothstep(0.0, 0.5, y));
+      col = mix(col, midTeal, smoothstep(0.5, 1.0, y) * 0.5);
+      // subtle horizontal variation
+      float h = sin(vUv.x * 3.14159 + uTime * 0.02) * 0.015;
+      col += h;
+      gl_FragColor = vec4(col, 0.6);
+    }
+  `
+});
+const gradPlane = new THREE.Mesh(gradGeom, gradMat);
+gradPlane.position.z = -25;
+scene.add(gradPlane);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow
+for (let s = 0; s < 400; s++) {
+  strings.forEach(v => stepString(v, s * 0.016));
+}
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+// smooth camera target (LERP with very low alpha — Memo Akten style)
+const smoothTarget = new THREE.Vector3(0, -1, 0);
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  for (let s = 0; s < 2; s++) {
+    strings.forEach(v => stepString(v, t));
+  }
+
+  let totalVerts = 0;
+
+  // compute combined centroid
+  let gcx = 0, gcy = 0, gcz = 0, gn = 0;
+  strings.forEach(verts => {
+    for (let i = 0; i < verts.length; i++) {
+      gcx += verts[i].x; gcy += verts[i].y; gcz += verts[i].z;
+    }
+    gn += verts.length;
+  });
+  if (gn > 0) { gcx /= gn; gcy /= gn; gcz /= gn; }
+
+  // very slow LERP — smooth integration over seconds
+  smoothTarget.lerp(new THREE.Vector3(gcx, gcy, gcz), 0.006);
+  controls.target.copy(smoothTarget);
+
+  // distribute particles on each string
+  strings.forEach((verts, si) => {
+    const n = verts.length;
+    const wire = wires[si];
+
+    for (let i = 0; i < n; i++) {
+      wire.positions[i * 3]     = verts[i].x;
+      wire.positions[i * 3 + 1] = verts[i].y;
+      wire.positions[i * 3 + 2] = verts[i].z;
+    }
+    wire.geom.setDrawRange(0, n);
+    wire.geom.attributes.position.needsUpdate = true;
+
+    const lengths = [];
+    let total = 0;
+    for (let i = 0; i < n - 1; i++) {
+      const a = verts[i], b = verts[i + 1];
+      const L = Math.sqrt((b.x-a.x)**2 + (b.z-a.z)**2 + (b.y-a.y)**2);
+      lengths.push(L);
+      total += L;
+    }
+    if (total > 0) {
+      const baseIdx = si * N_PER_STRING;
+      let written = 0;
+      for (let i = 0; i < n - 1; i++) {
+        const share = (i === n - 2)
+          ? N_PER_STRING - written
+          : Math.max(1, Math.floor(N_PER_STRING * lengths[i] / total));
+        const a = verts[i], b = verts[i + 1];
+        for (let k = 0; k < share && written < N_PER_STRING; k++) {
+          const u = Math.random();
+          const cu = u < 0.5 ? u * u * 2 : 1 - (1 - u) * (1 - u) * 2;
+          const spread = 0.018;
+          const idx = (baseIdx + written) * 3;
+          rPos[idx]     = a.x + (b.x - a.x) * cu + (Math.random() - 0.5) * spread;
+          rPos[idx + 1] = a.y + (b.y - a.y) * cu + (Math.random() - 0.5) * spread * 0.4;
+          rPos[idx + 2] = a.z + (b.z - a.z) * cu + (Math.random() - 0.5) * spread;
+          rAge[baseIdx + written] = Math.max(a.age, b.age);
+          written++;
+        }
+      }
+    }
+    totalVerts += n;
+  });
+
+  // slowly drift dust motes
+  const dustBase = N_PER_STRING * 2;
+  for (let i = dustBase; i < N_RENDER; i++) {
+    const idx = i * 3;
+    const s = rSeeds[i];
+    rPos[idx]     += Math.sin(t * 0.05 + s * 10.0) * 0.002;
+    rPos[idx + 1] += Math.sin(t * 0.03 + s * 7.0) * 0.001 - 0.0003;
+    rPos[idx + 2] += Math.cos(t * 0.04 + s * 8.0) * 0.0015;
+    // wrap vertically
+    if (rPos[idx + 1] < -18) rPos[idx + 1] = 12;
+  }
+
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+
+  statEl.textContent = `vertices=${totalVerts}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
