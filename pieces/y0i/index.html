@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>y0i · lucy point-cloud · hand-marked</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a080c; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  #cam { position:fixed; right:14px; bottom:14px; width:240px; height:160px;
+         border:1px solid #2a2025; border-radius:4px; transform:scaleX(-1); opacity:0.85; }
+  #cam.hidden { display:none; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size: 11px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #1a141d; color:#e5dcd2; border:1px solid #4a3a44;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; z-index:5; }
+  button.start:hover { background:#26202a; }
+  .loading { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+             font-size: 13px; opacity: 0.6; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy · stanford 3d scanning repo …</div>
+<button class="start" id="startBtn" style="display:none">grant camera · sculpt with hands</button>
+<video id="cam" class="hidden" autoplay playsinline muted></video>
+<div class="id">y0i</div>
+<div class="hint" id="hint"></div>
+<div class="src">model: stanford 3d scanning repo · public-research</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 30);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a080c, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 60000;
+const positions    = new Float32Array(N * 3);
+const restPositions = new Float32Array(N * 3);
+const seeds        = new Float32Array(N);
+const jitters      = new Float32Array(N * 3); // permanent per-particle offset
+const markFlags    = new Float32Array(N);     // 1.0 for "brushstroke" particles
+
+// seeded random for repeatable imperfection
+let rngSeed = 0x2f6e2b1;
+function rng() {
+  rngSeed = (rngSeed * 9301 + 49297) % 233280;
+  return rngSeed / 233280;
+}
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uPinch: { value: 1.0 },
+  uHand:  { value: new THREE.Vector3(0,0,0) },
+  uActive:{ value: 0.0 },
+  uReady: { value: 0.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPinch;
+    uniform vec3  uHand;
+    uniform float uActive;
+    uniform float uReady;
+    attribute vec3  rest;
+    attribute float seed;
+    attribute vec3  jitter;
+    attribute float markFlag;
+    varying vec3 vCol;
+    varying float vEnergy;
+    varying float vMark;
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.5 + seed * 6.28;
+
+      // apply permanent jitter — the hand-placed irregularity
+      p += jitter;
+
+      // breathing: organic drift with phase variation
+      vec3 dir = normalize(p + vec3(0.001));
+      float breathPhase = sin(t + seed * 3.14) * 0.08;
+      p += dir * breathPhase * (0.8 + 0.4 * sin(seed * 11.0));
+
+      // gesture interaction
+      vec3 fromCenter = p;
+      float disperse = mix(0.0, 1.5, uPinch * 0.5) * uActive;
+      p += fromCenter * disperse;
+
+      vec3 toHand = uHand - p;
+      p += toHand * uActive * 0.04;
+
+      // assembly reveal with off-tempo arrival
+      vec3 entry = vec3(sin(seed*40.0), cos(seed*30.0), sin(seed*22.0)) * 18.0;
+      float arrivalTime = uReady + (seed - 0.5) * 0.3; // staggered reveal
+      p = mix(entry, p, smoothstep(0.0, 1.0, arrivalTime));
+
+      vEnergy = 0.4 + 0.6*sin(t*0.7 + seed * 2.0);
+      vMark = markFlag;
+
+      // hand-mixed palette — slightly muddy transitions, not smooth gradients
+      vec3 ivory = vec3(0.95, 0.92, 0.86);
+      vec3 clay  = vec3(0.88, 0.72, 0.58);
+      vec3 rust  = vec3(0.76, 0.38, 0.26);
+      vec3 shadow= vec3(0.22, 0.18, 0.16);
+      
+      float mixer = fract(vEnergy + seed * 0.5); // breaks smooth interpolation
+      if (mixer < 0.33) {
+        vCol = mix(ivory, clay, mixer * 3.0);
+      } else if (mixer < 0.66) {
+        vCol = mix(clay, rust, (mixer - 0.33) * 3.0);
+      } else {
+        vCol = mix(rust, shadow, (mixer - 0.66) * 3.0);
+      }
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      
+      // brushstroke particles are 3-7x larger, irregular
+      float sizeBase = 1.0 + 1.6*vEnergy;
+      if (vMark > 0.5) {
+        sizeBase *= (3.0 + seed * 4.0);
+      }
+      
+      gl_PointSize = sizeBase * uPixel * (45.0/dist) * (0.4 + 0.6*uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vEnergy;
+    varying float vMark;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      
+      // brushstrokes have softer falloff, more visible
+      float cutoff = (vMark > 0.5) ? 0.28 : 0.25;
+      if (r > cutoff) discard;
+      
+      float falloff = (vMark > 0.5) ? 9.0 : 17.0;
+      float a = exp(-r * falloff) * (0.45 + 0.55*vEnergy);
+      
+      // mark particles are brighter
+      if (vMark > 0.5) a *= 1.6;
+      
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const loadingEl = document.getElementById('loading');
+const startBtn  = document.getElementById('startBtn');
+const hintEl    = document.getElementById('hint');
+const camEl     = document.getElementById('cam');
+
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+const loader = new PLYLoader();
+loader.load(PLY_URL,
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scale = 15 / maxAxis;
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp = new THREE.Vector3();
+    
+    // choose 800-1400 particles to be "brushstrokes"
+    const nMarks = Math.floor(800 + rng() * 600);
+    const markIndices = new Set();
+    while (markIndices.size < nMarks) {
+      markIndices.add(Math.floor(rng() * N));
+    }
+    
+    for (let i = 0; i < N; i++){
+      sampler.sample(tmp);
+      restPositions[i*3]   = tmp.x;
+      restPositions[i*3+1] = tmp.y;
+      restPositions[i*3+2] = tmp.z;
+      seeds[i] = rng();
+      
+      // 8-12% jitter per particle
+      const jitterStrength = 0.08 + rng() * 0.04;
+      const jitterRadius = Math.sqrt(tmp.x*tmp.x + tmp.y*tmp.y + tmp.z*tmp.z) * jitterStrength;
+      jitters[i*3]   = (rng() - 0.5) * jitterRadius * 2.0;
+      jitters[i*3+1] = (rng() - 0.5) * jitterRadius * 2.0;
+      jitters[i*3+2] = (rng() - 0.5) * jitterRadius * 2.0;
+      
+      // asymmetry: left side gets 15% more jitter than right
+      if (tmp.x < 0) {
+        jitters[i*3]   *= 1.15;
+        jitters[i*3+1] *= 1.15;
+        jitters[i*3+2] *= 1.15;
+      }
+      
+      markFlags[i] = markIndices.has(i) ? 1.0 : 0.0;
+    }
+    
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('jitter',   new THREE.BufferAttribute(jitters, 3));
+    geom.setAttribute('markFlag', new THREE.BufferAttribute(markFlags, 1));
+
+    loadingEl.style.display = 'none';
+    startBtn.style.display = 'inline-block';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      loadingEl.textContent = `loading lucy · ${pct}% · stanford 3d scanning repo`;
+    }
+  },
+  (err) => {
+    loadingEl.textContent = 'load failed — check network';
+    console.error(err);
+  });
+
+let revealStart = 0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let handsActive = false;
+async function loadMP(){
+  const load = (src) => new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = src; s.crossOrigin = 'anonymous';
+    s.onload = res; s.onerror = rej; document.head.appendChild(s);
+  });
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js');
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js');
+}
+async function startHands(){
+  startBtn.style.display = 'none';
+  hintEl.textContent = 'requesting camera…';
+  try { await loadMP(); }
+  catch { hintEl.textContent = 'mediapipe load failed — passive mode'; return; }
+  const hands = new window.Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}` });
+  hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+  hands.onResults((res) => {
+    if (!res.multiHandLandmarks || res.multiHandLandmarks.length === 0){
+      uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 0.0, 0.05);
+      return;
+    }
+    uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 1.0, 0.1);
+    const lm = res.multiHandLandmarks[0];
+    const dx = lm[4].x - lm[8].x, dy = lm[4].y - lm[8].y, dz = lm[4].z - lm[8].z;
+    const pinch = Math.min(2.0, Math.sqrt(dx*dx+dy*dy+dz*dz) * 6.0);
+    uniforms.uPinch.value = THREE.MathUtils.lerp(uniforms.uPinch.value, pinch, 0.15);
+    const palm = lm[9];
+    const wx = (0.5 - palm.x) * 22;
+    const wy = (0.5 - palm.y) * 14;
+    uniforms.uHand.value.set(wx, wy, 0.0);
+    hintEl.textContent = `hand · pinch=${pinch.toFixed(2)}`;
+  });
+  camEl.classList.remove('hidden');
+  const cam = new window.Camera(camEl, {
+    onFrame: async () => { await hands.send({ image: camEl }); },
+    width: 320, height: 240
+  });
+  cam.start();
+  handsActive = true;
+}
+startBtn.addEventListener('click', startHands);
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 2500);
+  }
+  
+  // slightly uneven rotation — not perfectly linear
+  points.rotation.y = t * 0.05 + Math.sin(t * 0.17) * 0.02;
+
+  if (!handsActive && uniforms.uReady.value > 0.95) {
+    uniforms.uPinch.value = 1.0 + 0.25 * Math.sin(t * 0.4);
+    uniforms.uActive.value = 0.35;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
