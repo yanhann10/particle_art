@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sav · the flock that loses one and finds it again</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a14; overflow:hidden;
+               color:#a8b8d0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  /* dawn-sky vertical gradient — the flock moves through real atmosphere, not pure black */
+  body {
+    background:
+      linear-gradient(to bottom,
+        #1a1a30 0%,
+        #2a1f3a 22%,
+        #4a2e3a 45%,
+        #7a4538 68%,
+        #b07045 88%,
+        #d09060 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size: 10px; letter-spacing: 0.06em;
+          color: #d09060; }
+</style>
+</head>
+<body>
+<div class="id">sav · the flock that loses one and finds it again</div>
+<div class="hint">no input — watch the flock breathe. one bird strays. the others wait.</div>
+<div class="src">descended from nsz · boids with grief and return · dawn sky</div>
+<div class="arc" id="arc">together · 100%</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// User feedback on nsz: 'has hope but lacks depth of human/life experience'.
+// Reynolds boids alone is just rules — cohesion + alignment + separation produce
+// emergent flocking but no narrative. sav embeds an emotional arc INSIDE the
+// flock dynamics:
+//
+//   - 480 ordinary 'birds' obey standard Reynolds rules
+//   - ONE bird is the STRAGGLER. Its weights are different: it perceives less,
+//     remembers more, drifts. It's the one that gets lost.
+//   - The flock has a 'cohesion memory' — a slow-moving average of how tight
+//     they were together. Ranges 0..1.
+//   - When cohesion drops below 0.5 (the straggler is genuinely alone), the
+//     flock SLOWS, turns, and seeks. It doesn't continue mechanically; it waits.
+//   - When the straggler returns, cohesion climbs back. The flock pulses
+//     brighter (relief).
+//   - 4-stage emotional arc: TOGETHER → LOSS → SEEKING → RETURN, cycling.
+//   - Color shifts with the arc: warm dawn-amber when together, cool steel-blue
+//     when lost, returning to amber as the straggler is reabsorbed.
+//
+// The dawn-sky gradient page background means the flock is moving through real
+// air, at real time-of-day, not in a void.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x1a1a30, 0.018);
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 26);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── boids with embedded narrative
+const N = 481;          // 480 ordinary + 1 straggler at index 0
+const STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const lastEmotional = new Float32Array(N);   // shader feed: per-bird "tension" 0..1
+
+// init: tight cluster
+for (let i = 0; i < N; i++){
+  const r = Math.random() * 1.6 + 0.4;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI - Math.PI * 0.5;
+  pos[i*3]     = Math.cos(th) * Math.cos(ph) * r;
+  pos[i*3 + 1] = Math.sin(ph) * r;
+  pos[i*3 + 2] = Math.sin(th) * Math.cos(ph) * r;
+  // initial velocity: gentle drift along +x
+  vel[i*3]     = 0.3 + (Math.random() - 0.5) * 0.4;
+  vel[i*3 + 1] = (Math.random() - 0.5) * 0.3;
+  vel[i*3 + 2] = (Math.random() - 0.5) * 0.4;
+}
+// straggler starts adjacent to the flock but with weakened sensing
+pos[STRAGGLER * 3]     = -1.2;
+pos[STRAGGLER * 3 + 1] =  0.6;
+pos[STRAGGLER * 3 + 2] =  0.0;
+
+// boid parameters
+const PERCEPTION_R   = 4.0;
+const SEPARATION_R   = 0.9;
+const W_COH = 0.018;
+const W_ALI = 0.060;
+const W_SEP = 0.080;
+const MAX_SPEED = 1.4;
+const MAX_FORCE = 0.030;
+
+// emotional arc state
+let cohesion = 1.0;          // smoothed; ranges 0..1
+let arcStage = 'together';   // together | loss | seeking | return
+const arcEl = document.getElementById('arc');
+
+function step(dt){
+  // compute flock centroid
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 1; i < N; i++){    // exclude straggler from centroid
+    cx += pos[i*3]; cy += pos[i*3 + 1]; cz += pos[i*3 + 2];
+  }
+  cx /= (N - 1); cy /= (N - 1); cz /= (N - 1);
+
+  // straggler distance from flock centroid → measures cohesion
+  const sx = pos[STRAGGLER*3] - cx;
+  const sy = pos[STRAGGLER*3+1] - cy;
+  const sz = pos[STRAGGLER*3+2] - cz;
+  const stragDist = Math.sqrt(sx*sx + sy*sy + sz*sz);
+  // cohesion is high when straggler is close, drops when far
+  const targetCohesion = Math.max(0.0, Math.min(1.0, 1.0 - stragDist / 8.0));
+  cohesion += (targetCohesion - cohesion) * dt * 0.45;
+
+  // arc state machine
+  if (cohesion > 0.85) arcStage = 'together';
+  else if (cohesion > 0.5 && stragDist > 4.5) arcStage = 'loss';
+  else if (cohesion < 0.5) arcStage = 'seeking';
+  else if (arcStage === 'seeking' && cohesion > 0.65) arcStage = 'return';
+
+  arcEl.textContent = `${arcStage} · ${Math.round(cohesion * 100)}%`;
+
+  // boid update
+  const acc = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++){
+    let cohX = 0, cohY = 0, cohZ = 0, cohN = 0;
+    let aliX = 0, aliY = 0, aliZ = 0, aliN = 0;
+    let sepX = 0, sepY = 0, sepZ = 0;
+    const px = pos[i*3], py = pos[i*3+1], pz = pos[i*3+2];
+
+    const isStraggler = (i === STRAGGLER);
+    const perceptionR = isStraggler ? PERCEPTION_R * 0.55 : PERCEPTION_R;
+
+    for (let j = 0; j < N; j++){
+      if (i === j) continue;
+      const dx = pos[j*3] - px;
+      const dy = pos[j*3+1] - py;
+      const dz = pos[j*3+2] - pz;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 > perceptionR * perceptionR || d2 < 1e-6) continue;
+      cohX += pos[j*3]; cohY += pos[j*3+1]; cohZ += pos[j*3+2]; cohN++;
+      aliX += vel[j*3]; aliY += vel[j*3+1]; aliZ += vel[j*3+2]; aliN++;
+      if (d2 < SEPARATION_R * SEPARATION_R){
+        const inv = 1.0 / Math.sqrt(d2);
+        sepX -= dx * inv; sepY -= dy * inv; sepZ -= dz * inv;
+      }
+    }
+
+    // straggler additionally feels a slow PULL away — a remembered direction,
+    // a wandering — that's what makes it the lost one
+    if (isStraggler){
+      const drift = Math.sin(performance.now() * 0.0003) * 0.4;
+      acc[i*3]     += drift;
+      acc[i*3+1]   += -0.25 + Math.cos(performance.now() * 0.0002) * 0.2;
+      acc[i*3+2]   += drift * 0.6;
+    }
+
+    // when arc is 'seeking' or 'return', the flock SLOWS and turns toward the
+    // straggler's last known position. This is the emotional pacing — they
+    // wait for the lost one, they don't continue mechanically.
+    if (!isStraggler){
+      if (arcStage === 'seeking' || arcStage === 'return'){
+        const tx = pos[STRAGGLER*3] - px;
+        const ty = pos[STRAGGLER*3+1] - py;
+        const tz = pos[STRAGGLER*3+2] - pz;
+        const td = Math.sqrt(tx*tx + ty*ty + tz*tz) + 1e-3;
+        const seek = arcStage === 'seeking' ? 0.020 : 0.012;
+        acc[i*3]     += (tx / td) * seek;
+        acc[i*3+1]   += (ty / td) * seek;
+        acc[i*3+2]   += (tz / td) * seek;
+      }
+    }
+
+    if (cohN > 0){
+      cohX = cohX/cohN - px;
+      cohY = cohY/cohN - py;
+      cohZ = cohZ/cohN - pz;
+      acc[i*3]     += cohX * W_COH;
+      acc[i*3+1]   += cohY * W_COH;
+      acc[i*3+2]   += cohZ * W_COH;
+    }
+    if (aliN > 0){
+      aliX = aliX/aliN - vel[i*3];
+      aliY = aliY/aliN - vel[i*3+1];
+      aliZ = aliZ/aliN - vel[i*3+2];
+      acc[i*3]     += aliX * W_ALI;
+      acc[i*3+1]   += aliY * W_ALI;
+      acc[i*3+2]   += aliZ * W_ALI;
+    }
+    acc[i*3]   += sepX * W_SEP;
+    acc[i*3+1] += sepY * W_SEP;
+    acc[i*3+2] += sepZ * W_SEP;
+
+    // soft world bounds — gentle pull toward origin if too far
+    const d2c = px*px + py*py + pz*pz;
+    if (d2c > 90){
+      const inv = 0.012 / Math.sqrt(d2c);
+      acc[i*3]   += -px * inv;
+      acc[i*3+1] += -py * inv;
+      acc[i*3+2] += -pz * inv;
+    }
+  }
+
+  // integrate (clip force, clip speed, slowdown when 'loss' or 'seeking')
+  const speedMul = (arcStage === 'loss' || arcStage === 'seeking') ? 0.55
+                  : arcStage === 'return' ? 0.85 : 1.0;
+  for (let i = 0; i < N; i++){
+    let ax = acc[i*3], ay = acc[i*3+1], az = acc[i*3+2];
+    const af = Math.sqrt(ax*ax + ay*ay + az*az);
+    if (af > MAX_FORCE){ ax = ax * MAX_FORCE / af; ay = ay * MAX_FORCE / af; az = az * MAX_FORCE / af; }
+    vel[i*3]     += ax;
+    vel[i*3 + 1] += ay;
+    vel[i*3 + 2] += az;
+    let vx = vel[i*3], vy = vel[i*3+1], vz = vel[i*3+2];
+    const sp = Math.sqrt(vx*vx + vy*vy + vz*vz);
+    if (sp > MAX_SPEED){ vx *= MAX_SPEED/sp; vy *= MAX_SPEED/sp; vz *= MAX_SPEED/sp; vel[i*3]=vx; vel[i*3+1]=vy; vel[i*3+2]=vz; }
+    pos[i*3]     += vel[i*3]   * dt * speedMul;
+    pos[i*3+1]   += vel[i*3+1] * dt * speedMul;
+    pos[i*3+2]   += vel[i*3+2] * dt * speedMul;
+    // emotional intensity per bird: distance from cohesion target
+    lastEmotional[i] = (1.0 - cohesion);
+  }
+}
+
+// ────────────── render
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+const seedArr = new Float32Array(N);
+for (let i = 0; i < N; i++) seedArr[i] = Math.random();
+geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+const isStraggler = new Float32Array(N);
+isStraggler[STRAGGLER] = 1.0;
+geom.setAttribute('strag', new THREE.BufferAttribute(isStraggler, 1));
+
+const uniforms = {
+  uTime:     { value: 0 },
+  uPixel:    { value: renderer.getPixelRatio() },
+  uCohesion: { value: 1.0 }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uCohesion;
+    attribute float seed;
+    attribute float strag;
+    varying vec3  vCol;
+    varying float vFade;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.6 + seed * 6.28;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // size: straggler is larger + brighter — the eye finds it
+      float baseSize = 1.6 + 0.8 * sin(t);
+      float stragSize = strag * 2.4;
+      gl_PointSize = (baseSize + stragSize) * uPixel * (16.0 / dist);
+      vFade = clamp(1.0 - (dist - 24.0) / 28.0, 0.0, 1.0);
+
+      // color: cohesion-driven palette
+      // together (uCohesion=1): warm dawn-amber cluster with cream highlights
+      // lost (uCohesion=0):     cool steel-blue + violet, isolated
+      vec3 warm  = vec3(0.96, 0.65, 0.32);   // dawn amber
+      vec3 hot   = vec3(1.00, 0.92, 0.78);   // cream highlight
+      vec3 cool  = vec3(0.42, 0.55, 0.78);   // steel blue
+      vec3 lost  = vec3(0.55, 0.32, 0.62);   // violet
+      vec3 cohCol = mix(cool, warm, smoothstep(0.0, 1.0, uCohesion));
+      vec3 highCol = mix(lost, hot, smoothstep(0.0, 1.0, uCohesion));
+      // each bird's per-particle accent — straggler always uses the highlight
+      vCol = mix(cohCol, highCol, strag * 0.7 + smoothstep(0.6, 1.0, sin(t * 0.4)) * 0.18);
+      // straggler glows a little harder
+      vCol *= (1.0 + strag * 0.4);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vFade;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vFade;
+      gl_FragColor = vec4(vCol * a * 0.95, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm so the thumbnail catches a meaningful arc state, not the initial cluster
+for (let s = 0; s < 250; s++) step(0.05);
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = (now / 1000);
+  uniforms.uCohesion.value = cohesion;
+  step(dt);
+  geom.attributes.position.needsUpdate = true;
+
+  // slow auto-orbit
+  const ang = now * 0.00010;
+  camera.position.x = Math.sin(ang) * 26;
+  camera.position.z = Math.cos(ang) * 26;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
