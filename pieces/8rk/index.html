@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8rk · withdrawal · object-oriented ontology</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#060709; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">8rk</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const W = 360, H = 360;
+const N = W * H; // ~130k particles
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x060709, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping, depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// Build a statue-like form from SDF primitives — torso, head, arms, base
+// Particles are initialized ON the surface with slight jitter
+function makeInitTexture(){
+  const data = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++){
+    // Sample a classical torso/figure shape
+    const r = Math.random();
+    let x, y, z;
+    if (r < 0.30) {
+      // Torso — elongated ellipsoid
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      const rx = 0.55, ry = 1.4, rz = 0.4;
+      x = rx * Math.sin(phi) * Math.cos(theta);
+      y = ry * Math.cos(phi) + 0.2;
+      z = rz * Math.sin(phi) * Math.sin(theta);
+    } else if (r < 0.42) {
+      // Head — sphere
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      const rad = 0.32;
+      x = rad * Math.sin(phi) * Math.cos(theta);
+      y = rad * Math.cos(phi) + 1.85;
+      z = rad * Math.sin(phi) * Math.sin(theta);
+    } else if (r < 0.58) {
+      // Left arm
+      const t = Math.random();
+      const theta = Math.random() * Math.PI * 2;
+      const rad = 0.18 * (1 - t * 0.3);
+      x = -0.6 - t * 0.7 + rad * Math.cos(theta) * 0.3;
+      y = 0.8 - t * 0.9 + rad * Math.sin(theta) * 0.3;
+      z = rad * Math.sin(theta);
+    } else if (r < 0.74) {
+      // Right arm — raised, reaching
+      const t = Math.random();
+      const theta = Math.random() * Math.PI * 2;
+      const rad = 0.18 * (1 - t * 0.3);
+      x = 0.5 + t * 0.5 + rad * Math.cos(theta) * 0.3;
+      y = 0.9 + t * 0.8 + rad * Math.sin(theta) * 0.3;
+      z = rad * Math.sin(theta) - t * 0.2;
+    } else if (r < 0.88) {
+      // Base / pedestal
+      const theta = Math.random() * Math.PI * 2;
+      const h = Math.random() * 0.6;
+      const rad = 0.7 - h * 0.1;
+      x = rad * Math.cos(theta) * (0.7 + Math.random() * 0.3);
+      y = -1.6 + h;
+      z = rad * Math.sin(theta) * 0.6;
+    } else {
+      // Draping / cloth suggestion — sheets between torso and arms
+      const t = Math.random();
+      const s = Math.random() * 2 - 1;
+      x = s * 0.8;
+      y = 0.5 - t * 1.2;
+      z = (Math.random() - 0.5) * 0.3 + Math.sin(s * 2) * 0.15;
+    }
+    // Add surface noise
+    x += (Math.random() - 0.5) * 0.06;
+    y += (Math.random() - 0.5) * 0.06;
+    z += (Math.random() - 0.5) * 0.06;
+    data[i*4]   = x;
+    data[i*4+1] = y;
+    data[i*4+2] = z;
+    data[i*4+3] = Math.random(); // age/phase
+  }
+  const t = new THREE.DataTexture(data, W, H, THREE.RGBAFormat, THREE.FloatType);
+  t.needsUpdate = true;
+  return t;
+}
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: makeInitTexture() } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(rtB); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// Simulation: particles drift slowly, breathe, slight orbital motion
+// The form holds shape but particles move on its surface
+const simMat = new THREE.ShaderMaterial({
+  uniforms: { prev: { value: rtA.texture }, uTime: { value: 0 }, uDt: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uTime, uDt;
+    varying vec2 vUv;
+
+    vec3 hash3(vec2 p){
+      vec3 q = vec3(dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)), dot(p,vec2(419.2,371.9)));
+      return fract(sin(q)*43758.5453);
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      vec3 h = hash3(vUv * 137.0 + uTime * 0.001);
+
+      // Slow orbital drift around y-axis (the figure breathes, rotates subtly)
+      float angVel = 0.02 + h.x * 0.01;
+      float ca = cos(angVel * uDt), sa = sin(angVel * uDt);
+      vec3 np = vec3(p.x * ca - p.z * sa, p.y, p.x * sa + p.z * ca);
+
+      // Gentle vertical breathing
+      np.y += sin(uTime * 0.4 + p.x * 2.0) * 0.001;
+
+      // Surface diffusion — tiny random walk
+      np += (h - 0.5) * 0.003 * uDt;
+
+      // Gentle pull back toward original radial distance (form retention)
+      float dist = length(np.xz);
+      float origDist = length(p.xz);
+      np.xz *= mix(1.0, origDist / max(dist, 0.001), 0.02);
+
+      age = fract(age + uDt * 0.03);
+      gl_FragColor = vec4(np, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// Render scene
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.3, 18);
+camera.position.set(0, 0.5, 4.5);
+
+// 4 shy zones — regions where particles withdraw as camera gazes
+// Defined in world space: position + radius
+const shyZones = [
+  new THREE.Vector4(0.0, 1.85, 0.0, 0.5),   // face
+  new THREE.Vector4(-0.9, 0.2, 0.0, 0.6),    // left hand
+  new THREE.Vector4(0.7, 1.5, -0.2, 0.5),    // raised hand
+  new THREE.Vector4(0.0, -0.5, 0.3, 0.7),    // core/heart
+];
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state: { value: rtA.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uCamPos: { value: new THREE.Vector3() },
+    uCamDir: { value: new THREE.Vector3() },
+    uTime: { value: 0 },
+    uShy0: { value: shyZones[0] },
+    uShy1: { value: shyZones[1] },
+    uShy2: { value: shyZones[2] },
+    uShy3: { value: shyZones[3] },
+    uFogDensity: { value: 0.12 },
+    uNearClip: { value: 0.3 },
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel, uTime, uNearClip;
+    uniform vec3 uCamPos, uCamDir;
+    uniform vec4 uShy0, uShy1, uShy2, uShy3;
+    attribute vec2 uvIdx;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vDepth;
+
+    float shyFactor(vec3 p, vec4 zone, vec3 camPos, vec3 camDir){
+      vec3 toZone = zone.xyz - camPos;
+      float alignment = dot(normalize(toZone), camDir);
+      float inZone = 1.0 - smoothstep(0.0, zone.w, length(p - zone.xyz));
+      // Withdraw when camera looks directly at the zone
+      float withdrawal = alignment * alignment * alignment;
+      withdrawal = max(0.0, withdrawal);
+      return inZone * withdrawal;
+    }
+
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+
+      // Shy zone withdrawal — particles fade where camera gazes
+      float shy = 0.0;
+      shy += shyFactor(p, uShy0, uCamPos, uCamDir);
+      shy += shyFactor(p, uShy1, uCamPos, uCamDir);
+      shy += shyFactor(p, uShy2, uCamPos, uCamDir);
+      shy += shyFactor(p, uShy3, uCamPos, uCamDir);
+      shy = clamp(shy, 0.0, 1.0);
+
+      // Near-clip withdrawal — particles near camera dissolve
+      float nearFade = smoothstep(uNearClip, uNearClip + 1.2, vDepth);
+
+      // Variable fog density — some regions are thicker
+      float fogNoise = sin(p.y * 3.0 + uTime * 0.2) * 0.5 + 0.5;
+      float fogDens = 0.08 + fogNoise * 0.10;
+      float fog = 1.0 - exp(-fogDens * vDepth * vDepth);
+
+      // Palette: cold marble with warm undertones — Harman's withdrawn object
+      vec3 colA = vec3(0.72, 0.74, 0.78); // pale stone
+      vec3 colB = vec3(0.45, 0.42, 0.50); // shadow violet
+      vec3 colC = vec3(0.85, 0.75, 0.62); // warm highlight
+      float k = age;
+      vec3 col = mix(colA, colB, smoothstep(0.0, 0.5, k));
+      col = mix(col, colC, smoothstep(0.6, 1.0, k) * 0.4);
+
+      // Apply fog toward background
+      col = mix(col, vec3(0.035, 0.04, 0.055), fog);
+
+      // Height-based atmospheric gradient
+      float heightFog = smoothstep(-2.0, 2.5, p.y);
+      col = mix(col * 0.5, col, heightFog * 0.5 + 0.5);
+
+      vCol = col;
+      vAlpha = (1.0 - shy * 0.92) * nearFade * (1.0 - fog * 0.7);
+
+      float sz = (1.8 + (1.0 - shy) * 0.8) * uPixel * (3.5 / max(vDepth, 0.5));
+      gl_PointSize = sz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      float alpha = a * vAlpha * 0.7;
+      if (alpha < 0.005) discard;
+      gl_FragColor = vec4(vCol * alpha, alpha);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// Ambient dust motes — sparse, large, slow
+const dustCount = 800;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+const dustPhase = new Float32Array(dustCount);
+for (let i = 0; i < dustCount; i++){
+  dustPos[i*3]   = (Math.random() - 0.5) * 10;
+  dustPos[i*3+1] = (Math.random() - 0.5) * 6;
+  dustPos[i*3+2] = (Math.random() - 0.5) * 10;
+  dustPhase[i] = Math.random() * Math.PI * 2;
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('phase', new THREE.BufferAttribute(dustPhase, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float phase;
+    uniform float uTime;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      p.y += sin(uTime * 0.1 + phase) * 0.3;
+      p.x += cos(uTime * 0.07 + phase * 2.0) * 0.2;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float depth = -mv.z;
+      vA = (0.12 + 0.08 * sin(uTime * 0.3 + phase)) * (1.0 - smoothstep(3.0, 10.0, depth));
+      gl_PointSize = 3.0 * (4.0 / max(depth, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 8.0) * vA;
+      gl_FragColor = vec4(vec3(0.6, 0.58, 0.65) * a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  const t = now / 1000;
+
+  simMat.uniforms.uTime.value = t;
+  simMat.uniforms.uDt.value = dt;
+
+  // Sim step
+  for (let i = 0; i < 2; i++){
+    simMat.uniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  // Camera: slow elliptical orbit, never sees all sides equally
+  // Asymmetric — spends more time on one hemisphere, creating permanent occlusion
+  const ang = t * 0.15;
+  const radiusX = 4.2 + Math.sin(t * 0.07) * 0.8;
+  const radiusZ = 3.5 + Math.cos(t * 0.09) * 0.6;
+  camera.position.x = Math.sin(ang) * radiusX;
+  camera.position.z = Math.cos(ang) * radiusZ;
+  camera.position.y = 0.4 + Math.sin(ang * 0.6) * 0.8;
+
+  // Look slightly off-center — never directly at the core
+  const lookOffset = new THREE.Vector3(
+    Math.sin(t * 0.11) * 0.3,
+    0.2 + Math.sin(t * 0.08) * 0.2,
+    Math.cos(t * 0.13) * 0.2
+  );
+  camera.lookAt(lookOffset);
+
+  // Update uniforms
+  const camDir = new THREE.Vector3();
+  camera.getWorldDirection(camDir);
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uCamPos.value.copy(camera.position);
+  pointsMat.uniforms.uCamDir.value.copy(camDir);
+  pointsMat.uniforms.uTime.value = t;
+
+  // Vary near clip subtly — form partially eaten by proximity
+  pointsMat.uniforms.uNearClip.value = 0.3 + Math.sin(t * 0.2) * 0.15;
+
+  dustMat.uniforms.uTime.value = t;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
