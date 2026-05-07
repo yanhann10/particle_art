@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>229 · Sublime void</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background: #000000;
+    color: #cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; z-index:5; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">229</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Sublime void — Burke/Kant/Turrell tradition: overwhelming scale, single luminous form
+// against infinite darkness, viewer feels small. No recognizable references. Aggressive
+// depth (near-clip 0.01, particles extend to z=-800), very low fog density so recession
+// reads as endless. The form: a thin luminous band (horizon/rift) that pulses and breathes.
+// Particles cluster tightly along this band, creating an almost-line of light in vast dark.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000000, 0.00045); // very low density — infinite recession
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.01, 1200);
+camera.position.set(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── THE RIFT — a thin horizontal band of particles, extending deep into space
+const N = 180000;
+const positions = new Float32Array(N * 3);
+const seeds     = new Float32Array(N);
+const phases    = new Float32Array(N);
+
+// The band occupies z: -20 to -800, y: clustered tightly around 0 (±0.8), x: wide spread
+for (let i = 0; i < N; i++){
+  const u = Math.random();
+  const z = -20 - Math.pow(u, 1.5) * 780; // depth distribution: denser near, sparse far
+  const x = (Math.random() - 0.5) * 160 * (1.0 + Math.abs(z) / 200); // wider at far end
+  // y: very tight Gaussian around 0 — the 'horizon line'
+  const y = (Math.random() + Math.random() + Math.random() + Math.random() - 2) * 0.3;
+  positions[i*3]     = x;
+  positions[i*3 + 1] = y;
+  positions[i*3 + 2] = z;
+  seeds[i]   = Math.random();
+  phases[i]  = Math.random() * Math.PI * 2;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('phase',    new THREE.BufferAttribute(phases, 1));
+
+const uniforms = {
+  uTime:      { value: 0 },
+  uPixel:     { value: renderer.getPixelRatio() },
+  uAudioLow:  { value: 0.0 }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uAudioLow;
+    attribute float seed;
+    attribute float phase;
+    varying float vDepth;
+    varying float vGlow;
+    void main(){
+      vec3 p = position;
+      // slow breathing along the band — y offset pulses, modulated by low-freq audio
+      float breath = sin(uTime * 0.08 + phase) * 0.5 + sin(uTime * 0.12 + seed * 6.28) * 0.3;
+      breath *= (1.0 + uAudioLow * 2.5);
+      p.y += breath * 0.8;
+      // slight ripple along x
+      p.x += sin(uTime * 0.06 + seed * 10.0) * 0.6;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      // glow stronger for near particles, fades with depth
+      vGlow = clamp(1.0 - (vDepth - 20.0) / 600.0, 0.05, 1.0);
+      // size inversely proportional to depth, but still visible at far end
+      float baseSize = 2.2 + sin(uTime * 0.5 + phase) * 0.8;
+      gl_PointSize = baseSize * uPixel * (80.0 / vDepth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDepth;
+    varying float vGlow;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0);
+      // cool luminous white-blue, almost colorless — like starlight
+      vec3 col = mix(vec3(0.85, 0.90, 1.00), vec3(1.00, 0.98, 0.95), vGlow * 0.4);
+      col *= vGlow;
+      gl_FragColor = vec4(col, a * vGlow * 0.75);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── AUDIO — low-frequency visualization (if mic available)
+let audioContext, analyser, dataArray;
+let micRequested = false;
+function initAudio(){
+  if (micRequested) return;
+  micRequested = true;
+  navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+    .then(stream => {
+      audioContext = new AudioContext();
+      const source = audioContext.createMediaStreamSource(stream);
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      dataArray = new Uint8Array(analyser.frequencyBinCount);
+    })
+    .catch(err => {
+      console.log('Mic not available — proceeding without audio:', err);
+    });
+}
+// request mic on first user gesture
+addEventListener('pointerdown', initAudio, { once: true });
+addEventListener('keydown', initAudio, { once: true });
+
+function updateAudio(){
+  if (!analyser || !dataArray) return;
+  analyser.getByteFrequencyData(dataArray);
+  // sum first 8 bins (low frequencies: ~0-680 Hz at 44.1kHz sample rate, fftSize 256)
+  let sum = 0;
+  for (let i = 0; i < 8; i++) sum += dataArray[i];
+  uniforms.uAudioLow.value = (sum / (8 * 255)) * 0.6 + uniforms.uAudioLow.value * 0.4;
+}
+
+// ────────────── CAMERA DRIFT — slow journey through the void
+let cameraPhase = Math.random() * Math.PI * 2;
+function updateCamera(t){
+  // drift forward slowly through the band (z becomes more negative)
+  camera.position.z = -t * 2.0;
+  // gentle lateral sway
+  camera.position.x = Math.sin(t * 0.03 + cameraPhase) * 3.0;
+  camera.position.y = Math.sin(t * 0.025 + cameraPhase + 1.5) * 1.5;
+  // look slightly ahead into the void
+  const lookZ = camera.position.z - 50;
+  camera.lookAt(0, 0, lookZ);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  updateAudio();
+  updateCamera(t);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
