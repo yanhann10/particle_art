@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>578 · process: cohesion/separation with trace</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0f0f11; overflow:hidden;
+               color:#888; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+  .state { position:fixed; right:14px; bottom:12px; opacity:0.5; font-size: 10px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">578</div>
+<div class="hint">Casey Reas · Process Compendium · agent-based traces</div>
+<div class="src">descended from sav · monochrome rule-structure · no glow</div>
+<div class="state" id="state">process running</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Casey Reas: "form from process" — agents leaving traces, not particles glowing
+// sav's emotional arc is preserved but expressed through PROCESS not color:
+//   - 480 agents move by cohesion/separation rules (Process 11 style)
+//   - ONE agent is the straggler (different steering weights)
+//   - agents leave TRAILS behind them (line segments accumulated over time)
+//   - cohesion state controls trail DENSITY: when the flock is together, trails
+//     are sparse (confidence). when the straggler is lost, trails multiply (searching).
+//   - monochrome: cool gray background, agents + trails in light gray, ONE accent
+//     color (pale gold) marks only the straggler's trail — used sparingly.
+//   - no sparkle, no glow, no additive blending — just geometry on flat background.
+//   - deterministic steering law + trace-rule = generative art 2010 aesthetic.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0f0f11);  // dark charcoal, not pure black
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 38);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── agent state
+const N = 481;
+const STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const trails = [];  // array of line-segment arrays per agent
+const MAX_TRAIL_LEN = 80;
+
+// init: loose grid with slight offset
+for (let i = 0; i < N; i++){
+  const row = Math.floor(i / 20);
+  const col = i % 20;
+  pos[i*3]     = (col - 10) * 1.8 + (Math.random() - 0.5) * 0.6;
+  pos[i*3 + 1] = (row - 12) * 1.8 + (Math.random() - 0.5) * 0.6;
+  pos[i*3 + 2] = (Math.random() - 0.5) * 0.8;
+  vel[i*3]     = (Math.random() - 0.5) * 0.5;
+  vel[i*3 + 1] = (Math.random() - 0.5) * 0.5;
+  vel[i*3 + 2] = (Math.random() - 0.5) * 0.3;
+  trails[i] = [];
+}
+pos[STRAGGLER * 3]     = 0;
+pos[STRAGGLER * 3 + 1] = 0;
+pos[STRAGGLER * 3 + 2] = 0;
+
+// steering parameters (Reas-style: simple local rules, deterministic)
+const PERCEPTION_R   = 6.0;
+const SEPARATION_R   = 1.2;
+const W_COH = 0.012;
+const W_ALI = 0.045;
+const W_SEP = 0.070;
+const MAX_SPEED = 0.9;
+const MAX_FORCE = 0.020;
+
+let cohesion = 1.0;
+let arcStage = 'together';
+const stateEl = document.getElementById('state');
+
+function step(dt){
+  // centroid (excluding straggler)
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 1; i < N; i++){
+    cx += pos[i*3]; cy += pos[i*3 + 1]; cz += pos[i*3 + 2];
+  }
+  cx /= (N - 1); cy /= (N - 1); cz /= (N - 1);
+
+  // straggler distance → cohesion measure
+  const sx = pos[STRAGGLER*3] - cx;
+  const sy = pos[STRAGGLER*3+1] - cy;
+  const sz = pos[STRAGGLER*3+2] - cz;
+  const stragDist = Math.sqrt(sx*sx + sy*sy + sz*sz);
+  const targetCohesion = Math.max(0.0, Math.min(1.0, 1.0 - stragDist / 9.0));
+  cohesion += (targetCohesion - cohesion) * dt * 0.4;
+
+  // arc state
+  if (cohesion > 0.85) arcStage = 'together';
+  else if (cohesion > 0.5 && stragDist > 5.0) arcStage = 'loss';
+  else if (cohesion < 0.5) arcStage = 'seeking';
+  else if (arcStage === 'seeking' && cohesion > 0.65) arcStage = 'return';
+  stateEl.textContent = `${arcStage} · ${Math.round(cohesion * 100)}%`;
+
+  // steering
+  const acc = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++){
+    let cohX = 0, cohY = 0, cohZ = 0, cohN = 0;
+    let aliX = 0, aliY = 0, aliZ = 0, aliN = 0;
+    let sepX = 0, sepY = 0, sepZ = 0;
+    const px = pos[i*3], py = pos[i*3+1], pz = pos[i*3+2];
+    const isStraggler = (i === STRAGGLER);
+    const perceptionR = isStraggler ? PERCEPTION_R * 0.6 : PERCEPTION_R;
+
+    for (let j = 0; j < N; j++){
+      if (i === j) continue;
+      const dx = pos[j*3] - px;
+      const dy = pos[j*3+1] - py;
+      const dz = pos[j*3+2] - pz;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 > perceptionR * perceptionR || d2 < 1e-6) continue;
+      cohX += pos[j*3]; cohY += pos[j*3+1]; cohZ += pos[j*3+2]; cohN++;
+      aliX += vel[j*3]; aliY += vel[j*3+1]; aliZ += vel[j*3+2]; aliN++;
+      if (d2 < SEPARATION_R * SEPARATION_R){
+        const inv = 1.0 / Math.sqrt(d2);
+        sepX -= dx * inv; sepY -= dy * inv; sepZ -= dz * inv;
+      }
+    }
+
+    // straggler drift (deterministic oscillation, not random)
+    if (isStraggler){
+      const t = performance.now() * 0.0004;
+      acc[i*3]     += Math.sin(t * 1.3) * 0.3;
+      acc[i*3+1]   += -0.2 + Math.cos(t * 0.9) * 0.15;
+      acc[i*3+2]   += Math.sin(t * 1.7) * 0.2;
+    }
+
+    // when seeking/return, flock steers toward straggler
+    if (!isStraggler){
+      if (arcStage === 'seeking' || arcStage === 'return'){
+        const tx = pos[STRAGGLER*3] - px;
+        const ty = pos[STRAGGLER*3+1] - py;
+        const tz = pos[STRAGGLER*3+2] - pz;
+        const td = Math.sqrt(tx*tx + ty*ty + tz*tz) + 1e-3;
+        const seek = arcStage === 'seeking' ? 0.018 : 0.010;
+        acc[i*3]     += (tx / td) * seek;
+        acc[i*3+1]   += (ty / td) * seek;
+        acc[i*3+2]   += (tz / td) * seek;
+      }
+    }
+
+    if (cohN > 0){
+      cohX = cohX/cohN - px; cohY = cohY/cohN - py; cohZ = cohZ/cohN - pz;
+      acc[i*3] += cohX * W_COH; acc[i*3+1] += cohY * W_COH; acc[i*3+2] += cohZ * W_COH;
+    }
+    if (aliN > 0){
+      aliX = aliX/aliN - vel[i*3]; aliY = aliY/aliN - vel[i*3+1]; aliZ = aliZ/aliN - vel[i*3+2];
+      acc[i*3] += aliX * W_ALI; acc[i*3+1] += aliY * W_ALI; acc[i*3+2] += aliZ * W_ALI;
+    }
+    acc[i*3] += sepX * W_SEP; acc[i*3+1] += sepY * W_SEP; acc[i*3+2] += sepZ * W_SEP;
+
+    // bounds (soft pull toward origin)
+    const d2c = px*px + py*py + pz*pz;
+    if (d2c > 120){
+      const inv = 0.010 / Math.sqrt(d2c);
+      acc[i*3] += -px * inv; acc[i*3+1] += -py * inv; acc[i*3+2] += -pz * inv;
+    }
+  }
+
+  // integrate
+  const speedMul = (arcStage === 'loss' || arcStage === 'seeking') ? 0.6
+                  : arcStage === 'return' ? 0.8 : 1.0;
+  for (let i = 0; i < N; i++){
+    let ax = acc[i*3], ay = acc[i*3+1], az = acc[i*3+2];
+    const af = Math.sqrt(ax*ax + ay*ay + az*az);
+    if (af > MAX_FORCE){ ax *= MAX_FORCE/af; ay *= MAX_FORCE/af; az *= MAX_FORCE/af; }
+    vel[i*3] += ax; vel[i*3+1] += ay; vel[i*3+2] += az;
+    let vx = vel[i*3], vy = vel[i*3+1], vz = vel[i*3+2];
+    const sp = Math.sqrt(vx*vx + vy*vy + vz*vz);
+    if (sp > MAX_SPEED){ vx *= MAX_SPEED/sp; vy *= MAX_SPEED/sp; vz *= MAX_SPEED/sp;
+      vel[i*3] = vx; vel[i*3+1] = vy; vel[i*3+2] = vz; }
+    pos[i*3] += vel[i*3] * dt * speedMul;
+    pos[i*3+1] += vel[i*3+1] * dt * speedMul;
+    pos[i*3+2] += vel[i*3+2] * dt * speedMul;
+  }
+}
+
+// ────────────── trace accumulation (Reas Process 11: agents leave trails)
+// trail density rule: when cohesion is LOW (flock searching), trails accumulate
+// faster. when cohesion is HIGH (flock together), trails decay/sparse.
+let frameCount = 0;
+function recordTrails(){
+  frameCount++;
+  // trail record interval: inversely proportional to cohesion
+  // low cohesion → every frame, high cohesion → every 6 frames
+  const interval = Math.floor(1 + cohesion * 5);
+  if (frameCount % interval !== 0) return;
+
+  for (let i = 0; i < N; i++){
+    const px = pos[i*3], py = pos[i*3+1], pz = pos[i*3+2];
+    trails[i].push(px, py, pz);
+    // cap trail length
+    if (trails[i].length > MAX_TRAIL_LEN * 3){
+      trails[i].splice(0, 3);
+    }
+  }
+}
+
+// ────────────── render (geometry, no glow)
+// agents: small circles (CircleGeometry disks)
+const agentGroup = new THREE.Group();
+const agentGeom = new THREE.CircleGeometry(0.18, 8);
+const agentMatNormal = new THREE.MeshBasicMaterial({ color: 0x888888, side: THREE.DoubleSide });
+const agentMatStraggler = new THREE.MeshBasicMaterial({ color: 0xb8a070, side: THREE.DoubleSide });
+const agentMeshes = [];
+for (let i = 0; i < N; i++){
+  const mesh = new THREE.Mesh(agentGeom, i === STRAGGLER ? agentMatStraggler : agentMatNormal);
+  agentMeshes.push(mesh);
+  agentGroup.add(mesh);
+}
+scene.add(agentGroup);
+
+// trails: line segments (one LineSegments per agent)
+const trailGroup = new THREE.Group();
+const trailMatNormal = new THREE.LineBasicMaterial({ color: 0x666666, opacity: 0.3, transparent: true });
+const trailMatStraggler = new THREE.LineBasicMaterial({ color: 0xb8a070, opacity: 0.5, transparent: true });
+const trailLines = [];
+for (let i = 0; i < N; i++){
+  const geom = new THREE.BufferGeometry();
+  const mat = i === STRAGGLER ? trailMatStraggler : trailMatNormal;
+  const line = new THREE.LineSegments(geom, mat);
+  trailLines.push(line);
+  trailGroup.add(line);
+}
+scene.add(trailGroup);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm
+for (let s = 0; s < 200; s++){
+  step(0.05);
+  if (s % 5 === 0) recordTrails();
+}
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  step(dt);
+  recordTrails();
+
+  // update agent positions
+  for (let i = 0; i < N; i++){
+    agentMeshes[i].position.set(pos[i*3], pos[i*3+1], pos[i*3+2]);
+  }
+
+  // update trail geometry
+  for (let i = 0; i < N; i++){
+    if (trails[i].length > 3){
+      const geom = trailLines[i].geometry;
+      geom.setAttribute('position', new THREE.Float32BufferAttribute(trails[i], 3));
+      geom.computeBoundingSphere();
+    }
+  }
+
+  // slow camera drift (Reas: minimal motion, let the process be visible)
+  const ang = now * 0.00008;
+  camera.position.x = Math.sin(ang) * 38;
+  camera.position.z = Math.cos(ang) * 38;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
