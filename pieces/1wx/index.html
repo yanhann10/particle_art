@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1wx · cursive binary</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">1wx</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Sasha Stiles — Cursive Binary / WORDS BEYOND WORDS
+// Glyphs stream along an Aizawa attractor field, periodically collapsing
+// into binary digits then re-coalescing into language. Typography as particle.
+// Each point is a character — language dissolving into code and back.
+
+const W = 256, H = 256;
+const N = W * H; // ~65k glyphs
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- Glyph texture atlas: 16x8 grid of characters ---
+const ATLAS_COLS = 16, ATLAS_ROWS = 8;
+const CELL = 64;
+const atlasCanvas = document.createElement('canvas');
+atlasCanvas.width = ATLAS_COLS * CELL;
+atlasCanvas.height = ATLAS_ROWS * CELL;
+const ctx = atlasCanvas.getContext('2d');
+ctx.fillStyle = '#0a0908';
+ctx.fillRect(0, 0, atlasCanvas.width, atlasCanvas.height);
+
+// Characters: English fragments, binary, transitional marks
+const glyphs = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0101010110101010ᚠᚢᚦᚨᚱᚲᛁᛃᛇᛈᛉᛊᛋᛏᛒᛗᛚᛜᛝᛞᛟ᛭ᛮᛯᛰ∅∞∂∫≈≡∝∑∏√';
+const poem = 'WORDSBEYO NDWORDS01';
+
+ctx.textAlign = 'center';
+ctx.textBaseline = 'middle';
+
+for (let row = 0; row < ATLAS_ROWS; row++) {
+  for (let col = 0; col < ATLAS_COLS; col++) {
+    const idx = row * ATLAS_COLS + col;
+    const ch = glyphs[idx % glyphs.length];
+    const x = col * CELL + CELL / 2;
+    const y = row * CELL + CELL / 2;
+    // Vary font weight/style
+    const sz = 32 + Math.sin(idx * 0.7) * 8;
+    ctx.font = `${idx % 3 === 0 ? '300' : '400'} ${sz}px "Georgia", serif`;
+    ctx.fillStyle = `rgba(245, 240, 230, ${0.85 + Math.sin(idx) * 0.15})`;
+    ctx.fillText(ch, x, y);
+  }
+}
+
+const atlasTex = new THREE.CanvasTexture(atlasCanvas);
+atlasTex.minFilter = THREE.LinearFilter;
+atlasTex.magFilter = THREE.LinearFilter;
+
+// --- GPGPU setup ---
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// Init: scatter along a ribbon seed
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  const t = (i / N) * Math.PI * 6;
+  init[i*4]   = Math.sin(t) * 0.4 + (Math.random() - 0.5) * 0.3;
+  init[i*4+1] = (Math.random() - 0.5) * 0.5;
+  init[i*4+2] = Math.cos(t) * 0.4 + (Math.random() - 0.5) * 0.3;
+  init[i*4+3] = Math.random(); // age/phase
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+})));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// Simulation: modified Aizawa with slower dt for smoother text streaming
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.008 },
+  uTime: { value: 0.0 },
+  uA: { value: 0.95 }, uB: { value: 0.7 }, uC: { value: 0.6 },
+  uD: { value: 3.5 }, uE: { value: 0.25 }, uF: { value: 0.1 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF, uTime;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      // Aizawa attractor
+      vec3 dp = vec3(
+        (p.z - uB) * p.x - uD * p.y,
+        uD * p.x + (p.z - uB) * p.y,
+        uC + uA * p.z - (p.z*p.z*p.z)/3.0
+          - (p.x*p.x + p.y*p.y)*(1.0 + uE*p.z)
+          + uF * p.z * p.x*p.x*p.x
+      );
+      p += dp * uDt;
+      // respawn if diverged
+      float d = length(p);
+      if(d > 5.0){
+        p = vec3(sin(age*6.28)*0.3, cos(age*4.1)*0.3, sin(age*2.7)*0.3);
+      }
+      age = mod(age + uDt * 0.04, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// --- Render: instanced quads with glyph textures ---
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.05, 60);
+camera.position.set(0, 0, 5);
+
+// Use Points for performance with custom glyph rendering
+const geom = new THREE.BufferGeometry();
+const uvIdx = new Float32Array(N * 2);
+const glyphIdx = new Float32Array(N);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  uvIdx[i*2]   = (x + 0.5) / W;
+  uvIdx[i*2+1] = (y + 0.5) / H;
+  glyphIdx[i] = Math.floor(Math.random() * ATLAS_COLS * ATLAS_ROWS);
+}
+geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+geom.setAttribute('uvIdx', new THREE.BufferAttribute(uvIdx, 2));
+geom.setAttribute('glyphId', new THREE.BufferAttribute(glyphIdx, 1));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state: { value: rtA.texture },
+    atlas: { value: atlasTex },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime: { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel, uTime;
+    attribute vec2 uvIdx;
+    attribute float glyphId;
+    varying float vAge;
+    varying float vGlyph;
+    varying float vBinary;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      // Binary collapse: each glyph periodically becomes 0 or 1
+      float phase = fract(vAge * 2.0 + glyphId * 0.0073);
+      vBinary = smoothstep(0.35, 0.45, phase) * (1.0 - smoothstep(0.55, 0.65, phase));
+      // Choose glyph from atlas (shift to binary zone when collapsing)
+      float binaryGlyph = mod(glyphId, 2.0) < 1.0 ? 52.0 : 53.0; // '0' and '1' positions
+      vGlyph = mix(glyphId, binaryGlyph, vBinary);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (3.5 + vBinary * 1.5) * uPixel * (6.0 / max(dist, 0.5));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D atlas;
+    uniform float uTime;
+    varying float vAge;
+    varying float vGlyph;
+    varying float vBinary;
+    void main(){
+      // Map point coord to atlas cell
+      float col = mod(floor(vGlyph), 16.0);
+      float row = floor(vGlyph / 16.0);
+      vec2 cellUv = gl_PointCoord;
+      // Shrink slightly to avoid bleeding
+      cellUv = cellUv * 0.85 + 0.075;
+      vec2 atlasUv = (vec2(col, row) + cellUv) / vec2(16.0, 8.0);
+      // Flip Y for atlas
+      atlasUv.y = 1.0 - atlasUv.y;
+      vec4 g = texture2D(atlas, atlasUv);
+      float alpha = g.r * 0.9;
+      // Palette: warm cream for letters, cool ice-white for binary
+      vec3 inkColor = vec3(0.94, 0.91, 0.84); // cream/parchment
+      vec3 binColor = vec3(0.75, 0.85, 0.95); // cold digital blue-white
+      vec3 col3 = mix(inkColor, binColor, vBinary);
+      // Fade by age cycle for depth
+      float fade = 0.5 + 0.5 * sin(vAge * 6.2832);
+      alpha *= fade * 0.7;
+      if(alpha < 0.01) discard;
+      gl_FragColor = vec4(col3 * alpha, alpha);
+    }
+  `
+});
+const points = new THREE.Points(geom, pointsMat);
+scene.add(points);
+
+// Subtle volumetric fog plane
+const fogGeo = new THREE.PlaneGeometry(12, 12);
+const fogMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uTime;
+    void main(){
+      float d = length(vUv - 0.5);
+      float fog = exp(-d*d*4.0) * 0.035;
+      // Warm amber tint from above concept
+      vec3 c = mix(vec3(0.12,0.10,0.08), vec3(0.15,0.12,0.09), vUv.y);
+      gl_FragColor = vec4(c, fog);
+    }
+  `
+});
+const fogPlane = new THREE.Mesh(fogGeo, fogMat);
+fogPlane.position.z = -2;
+scene.add(fogPlane);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Pointer: nudge attractor params gently
+const target = { a: 0.95, c: 0.60 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth) - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.a = 0.95 + nx * 0.05;
+  target.c = 0.60 + ny * 0.06;
+});
+
+const t0 = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  simUniforms.uA.value += (target.a - simUniforms.uA.value) * 0.03;
+  simUniforms.uC.value += (target.c - simUniforms.uC.value) * 0.03;
+  simUniforms.uTime.value = elapsed;
+
+  // 3 integration steps per frame
+  for (let i = 0; i < 3; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = elapsed;
+
+  // Gentle drift camera — not rotation, drift
+  const ang = elapsed * 0.08;
+  camera.position.x = Math.sin(ang) * 4.2;
+  camera.position.z = Math.cos(ang) * 4.2;
+  camera.position.y = Math.sin(ang * 0.6) * 0.8 + 0.3;
+  camera.lookAt(0, 0.2, 0.8);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
