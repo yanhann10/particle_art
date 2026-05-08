@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: expand, intensity: gentle -->
+<title>jqs · calligraphic ink · mic-reactive brushstroke</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08080d; overflow:hidden;
+               color:#d8c895; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+           letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .mic  { position:fixed; right:14px; bottom:12px; opacity:0.4; font-size:10px; letter-spacing:0.04em;
+          cursor:pointer; border:1px solid #d8c89544; padding:4px 10px; border-radius:3px;
+          background:transparent; color:#d8c895; font-family:inherit; }
+  .mic:hover { opacity:0.7; }
+  .mic.live { border-color:#7a9e7a88; color:#9ebc9e; }
+</style>
+</head>
+<body>
+<div class="id">jqs</div>
+<div class="hint">drag to orbit · mic drives ink pressure</div>
+<button class="mic" id="micBtn">enable mic</button>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── audio: 5-band FFT from microphone ── */
+const bands = new Float32Array(5); // sub-bass, bass, mid, hi-mid, hi — all [0,1]
+let audioReady = false;
+const BAND_EDGES = [0, 4, 12, 40, 120, 256]; // bin boundaries for 512-fft
+
+async function initAudio(){
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    const ctx = new AudioContext();
+    const src = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.82;
+    src.connect(analyser);
+    const freq = new Uint8Array(analyser.frequencyBinCount);
+    audioReady = true;
+    document.getElementById('micBtn').classList.add('live');
+    document.getElementById('micBtn').textContent = 'mic live';
+    (function pump(){
+      analyser.getByteFrequencyData(freq);
+      for (let b = 0; b < 5; b++){
+        let sum = 0, count = 0;
+        for (let i = BAND_EDGES[b]; i < BAND_EDGES[b+1]; i++){ sum += freq[i]; count++; }
+        bands[b] = count > 0 ? (sum / count) / 255 : 0;
+      }
+      requestAnimationFrame(pump);
+    })();
+  } catch(e){
+    console.warn('mic denied', e);
+  }
+}
+document.getElementById('micBtn').addEventListener('click', initAudio);
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x08080d, 0.012);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080d, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+/* ── differential growth (3D) ── */
+const MAX_VERTS = 2200;
+const BASE_ATTRACT   = 0.06;
+const BASE_REPEL_R   = 0.46;
+const BASE_REPEL_STR = 0.13;
+const BASE_NOISE     = 0.003;
+const BASE_PRESSURE  = 0.0028;
+const BASE_RISE      = 0.0042;
+const MAX_D          = 0.36;
+
+const verts = [];
+for (let i = 0; i < 18; i++){
+  const th = i / 18 * Math.PI * 2;
+  const r = 1.4 + (Math.random()-0.5)*0.1;
+  verts.push({ x:Math.cos(th)*r, y:0, z:Math.sin(th)*r, age:0 });
+}
+
+const CELL = BASE_REPEL_R, grid = new Map();
+function key3(x,y,z){ return Math.floor(x/CELL)+','+Math.floor(y/CELL)+','+Math.floor(z/CELL); }
+function rebuildGrid(){
+  grid.clear();
+  for (let i=0; i<verts.length; i++){
+    const v=verts[i]; const k=key3(v.x,v.y,v.z);
+    if(!grid.has(k)) grid.set(k,[]);
+    grid.get(k).push(i);
+  }
+}
+function gridNeighbors(v){
+  const cx=Math.floor(v.x/CELL),cy=Math.floor(v.y/CELL),cz=Math.floor(v.z/CELL);
+  const out=[];
+  for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++) for(let dz=-1;dz<=1;dz++){
+    const arr=grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if(arr) for(const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+/* FFT-modulated growth parameters */
+function getParams(){
+  // bands: [sub-bass, bass, mid, hi-mid, hi]
+  // sub-bass → expansion pressure, bass → rise speed,
+  // mid → repel strength (thickens stroke), hi-mid → noise/jitter, hi → nothing visual (reserved)
+  const sb = bands[0], ba = bands[1], mi = bands[2], hm = bands[3];
+  return {
+    pressure: BASE_PRESSURE * (1 + sb * 3.5),
+    rise:     BASE_RISE     * (1 + ba * 2.8),
+    repel:    BASE_REPEL_STR* (1 + mi * 1.6),
+    noise:    BASE_NOISE    * (1 + hm * 6),
+    attract:  BASE_ATTRACT
+  };
+}
+
+function step(){
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  const P = getParams();
+  rebuildGrid();
+  const dx=new Float32Array(n), dy=new Float32Array(n), dz=new Float32Array(n);
+  for(let i=0;i<n;i++){
+    const v=verts[i];
+    for(const j of gridNeighbors(v)){
+      if(j===i) continue;
+      const u=verts[j];
+      const ex=v.x-u.x, ey=v.y-u.y, ez=v.z-u.z;
+      const d2=ex*ex+ey*ey+ez*ez;
+      if(d2>BASE_REPEL_R*BASE_REPEL_R||d2<1e-6) continue;
+      const d=Math.sqrt(d2);
+      const f=P.repel*(1-d/BASE_REPEL_R)/d;
+      dx[i]+=ex*f; dy[i]+=ey*f; dz[i]+=ez*f;
+    }
+  }
+  for(let i=0;i<n;i++){
+    const a=verts[(i-1+n)%n], b=verts[(i+1)%n], v=verts[i];
+    dx[i]+=(a.x+b.x-2*v.x)*P.attract;
+    dy[i]+=(a.y+b.y-2*v.y)*P.attract;
+    dz[i]+=(a.z+b.z-2*v.z)*P.attract;
+  }
+  let cx=0,cy=0,cz=0;
+  for(let i=0;i<n;i++){cx+=verts[i].x;cy+=verts[i].y;cz+=verts[i].z;}
+  cx/=n; cy/=n; cz/=n;
+  for(let i=0;i<n;i++){
+    const ox=verts[i].x-cx, oy=verts[i].y-cy, oz=verts[i].z-cz;
+    const d=Math.hypot(ox,oy,oz)+1e-6;
+    dx[i]+=(ox/d)*P.pressure;
+    dy[i]+=(oy/d)*P.pressure*0.4;
+    dz[i]+=(oz/d)*P.pressure;
+  }
+  for(let i=0;i<n;i++){
+    const a=verts[i].age;
+    const upward=P.rise*(0.3+1.2*Math.min(a*1.5,1.0));
+    verts[i].x+=dx[i]+(Math.random()-0.5)*P.noise;
+    verts[i].y+=dy[i]+(Math.random()-0.5)*P.noise*0.5+upward;
+    verts[i].z+=dz[i]+(Math.random()-0.5)*P.noise;
+    verts[i].age+=0.0014;
+  }
+  const grown=[];
+  for(let i=0;i<n;i++){
+    const a=verts[i], b=verts[(i+1)%n];
+    grown.push(a);
+    const ex=b.x-a.x,ey=b.y-a.y,ez=b.z-a.z;
+    if(ex*ex+ey*ey+ez*ez>MAX_D*MAX_D && verts.length+grown.length<MAX_VERTS){
+      grown.push({x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5-0.05, z:(a.z+b.z)*0.5,
+        age:Math.max(a.age,b.age)*0.5});
+    }
+  }
+  verts.length=0;
+  for(const v of grown) verts.push(v);
+}
+// pre-grow so the piece is immediately visible
+for(let s=0; s<700; s++) step();
+
+/* ── ink tube renderer ── */
+let tubeMesh = null;
+
+/* palette: ink warmth shifts with bass energy */
+const INK_COOL = new THREE.Color(0xd4cbb5);  // dry parchment
+const INK_WARM = new THREE.Color(0xf0c870);  // amber sumi-e wash
+const tubeMat = new THREE.MeshBasicMaterial({
+  color: INK_COOL.clone(),
+  transparent: true,
+  opacity: 0.88,
+});
+
+function buildTube(){
+  if(verts.length < 10) return;
+  const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+  const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+
+  const N = Math.min(800, verts.length*2);
+  const RADIAL = 6;
+  const radii = new Array(N);
+
+  /* mid-band drives thickness swell */
+  const thickMul = 1 + (audioReady ? bands[2]*2.2 : 0);
+
+  for(let i=0; i<N; i++){
+    const t = i/N, dt = 1/N;
+    const t1 = curve.getTangent((t-dt+1)%1);
+    const t2 = curve.getTangent(t);
+    const t3 = curve.getTangent((t+dt)%1);
+    const curvature = (2 - t1.dot(t2) - t2.dot(t3))*0.5;
+    const pressure = Math.min(1.0, curvature*8);
+    radii[i] = (0.018 + 0.10*pressure) * thickMul;
+  }
+
+  const positions = new Float32Array(N*RADIAL*3);
+  const indices = [];
+  const up = new THREE.Vector3(0,1,0);
+  for(let i=0; i<N; i++){
+    const t = i/N;
+    const p = curve.getPointAt(t);
+    const tangent = curve.getTangentAt(t).normalize();
+    const normal = new THREE.Vector3().crossVectors(tangent,up).normalize();
+    if(normal.lengthSq()<0.001) normal.set(1,0,0);
+    const binormal = new THREE.Vector3().crossVectors(tangent,normal).normalize();
+    const r = radii[i];
+    for(let j=0; j<RADIAL; j++){
+      const ang = (j/RADIAL)*Math.PI*2;
+      const v = new THREE.Vector3()
+        .copy(normal).multiplyScalar(Math.cos(ang)*r)
+        .add(binormal.clone().multiplyScalar(Math.sin(ang)*r))
+        .add(p);
+      const idx = (i*RADIAL+j)*3;
+      positions[idx]=v.x; positions[idx+1]=v.y; positions[idx+2]=v.z;
+    }
+  }
+  for(let i=0; i<N; i++){
+    const ni=(i+1)%N;
+    for(let j=0; j<RADIAL; j++){
+      const nj=(j+1)%RADIAL;
+      const a=i*RADIAL+j, b=i*RADIAL+nj, c=ni*RADIAL+j, d=ni*RADIAL+nj;
+      indices.push(a,b,c, b,d,c);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(positions,3));
+  g.setIndex(indices);
+  g.computeVertexNormals();
+
+  if(tubeMesh){ scene.remove(tubeMesh); tubeMesh.geometry.dispose(); }
+  tubeMesh = new THREE.Mesh(g, tubeMat);
+  scene.add(tubeMesh);
+}
+
+/* ── resize ── */
+addEventListener('resize', ()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+/* ── main loop ── */
+let frame = 0;
+function loop(){
+  frame++;
+  /* grow 2 steps per frame; audio modulates growth params via getParams() */
+  for(let s=0; s<2; s++) step();
+
+  /* rebuild tube every 2nd frame for perf */
+  if(frame%2===0) buildTube();
+
+  /* color: lerp toward warm amber with bass energy */
+  if(audioReady){
+    const warmth = bands[1]*0.7 + bands[0]*0.3;
+    tubeMat.color.copy(INK_COOL).lerp(INK_WARM, warmth);
+    tubeMat.opacity = 0.82 + bands[0]*0.16;
+  }
+
+  /* camera follow centroid */
+  let yMean=0; for(const v of verts) yMean+=v.y;
+  yMean /= Math.max(verts.length,1);
+  const targetY = Math.max(yMean, 2.0);
+  controls.target.y += (targetY - controls.target.y)*0.04;
+  camera.position.y += (targetY+4 - camera.position.y)*0.04;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
