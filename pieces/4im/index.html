@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4im · non-newtonian aizawa</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080a; overflow:hidden;
+               color:#cce4d8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">4im</div>
+<div class="hint">move pointer fast to trigger shear-thickening</div>
+<div class="src">aizawa attractor · non-newtonian viscosity</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080a, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 0.6;
+  init[i*4+1] = (Math.random()*2-1) * 0.6;
+  init[i*4+2] = (Math.random()*2-1) * 0.6;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.012 },
+  uA:  { value: 0.95 },
+  uB:  { value: 0.70 },
+  uC:  { value: 0.60 },
+  uD:  { value: 3.50 },
+  uE:  { value: 0.25 },
+  uF:  { value: 0.10 },
+  uViscosity: { value: 1.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF, uViscosity;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vec3 dp = vec3(
+        (p.z - uB) * p.x - uD * p.y,
+        uD * p.x + (p.z - uB) * p.y,
+        uC + uA * p.z - (p.z * p.z * p.z) / 3.0
+              - (p.x * p.x + p.y * p.y) * (1.0 + uE * p.z)
+              + uF * p.z * p.x * p.x * p.x
+      );
+      // non-Newtonian damping — higher viscosity = slower motion
+      p += dp * uDt / uViscosity;
+      age = mod(age + uDt * 0.06, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.05, 50);
+camera.position.set(0, 0, 4);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uPhase: { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vSpeed;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float speed = length(p) * 0.5;
+      vSpeed = clamp(speed, 0.0, 1.0);
+      vAge = s.w;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.1 + 1.5 * vSpeed) * uPixel * (8.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uPhase;
+    varying float vAge;
+    varying float vSpeed;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0);
+      
+      // fluid palette: emerald → violet → silver
+      vec3 f0 = vec3(0.20, 0.62, 0.45);
+      vec3 f1 = vec3(0.55, 0.30, 0.78);
+      vec3 f2 = vec3(0.92, 0.95, 0.98);
+      // solid palette: amber → copper → bronze
+      vec3 s0 = vec3(0.95, 0.70, 0.20);
+      vec3 s1 = vec3(0.80, 0.45, 0.30);
+      vec3 s2 = vec3(0.72, 0.52, 0.32);
+      
+      float k = mod(vAge + vSpeed * 0.4, 1.0);
+      vec3 fluid = mix(f0, f1, smoothstep(0.0, 0.5, k));
+      fluid = mix(fluid, f2, smoothstep(0.5, 1.0, k));
+      
+      vec3 solid = mix(s0, s1, smoothstep(0.0, 0.5, k));
+      solid = mix(solid, s2, smoothstep(0.5, 1.0, k));
+      
+      vec3 col = mix(fluid, solid, uPhase);
+      gl_FragColor = vec4(col * a * (0.45 + vSpeed * 0.9), a);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const target = { a: 0.95, c: 0.60 };
+let pointerVel = 0;
+let lastPointer = { x: 0, y: 0 };
+let shearAccum = 0;
+
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth)  - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.a = 0.95 + nx * 0.08;
+  target.c = 0.60 + ny * 0.10;
+  
+  const dx = e.clientX - lastPointer.x;
+  const dy = e.clientY - lastPointer.y;
+  pointerVel = Math.sqrt(dx*dx + dy*dy);
+  lastPointer = { x: e.clientX, y: e.clientY };
+});
+
+let t0 = performance.now();
+let centroid = new THREE.Vector3(0, 0, 1);
+
+function loop(){
+  const now = performance.now();
+  simUniforms.uA.value += (target.a - simUniforms.uA.value) * 0.04;
+  simUniforms.uC.value += (target.c - simUniforms.uC.value) * 0.04;
+
+  // shear-thickening: pointer velocity increases viscosity
+  const shearRate = pointerVel * 0.08;
+  shearAccum += shearRate;
+  shearAccum *= 0.94; // decay
+  pointerVel *= 0.85; // decay velocity
+  
+  // phase: 0=fluid, 1=solid, triggered by accumulated shear
+  const phase = Math.min(shearAccum * 0.25, 1.0);
+  const viscosity = 1.0 + phase * 8.0; // up to 9× slower when solid
+  
+  simUniforms.uViscosity.value = viscosity;
+  pointsMat.uniforms.uPhase.value = phase;
+
+  for (let i = 0; i < 4; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  
+  // estimate centroid from attractor phase
+  const t = (now - t0) * 0.001;
+  centroid.x = Math.sin(t * 0.3) * 0.5;
+  centroid.y = Math.cos(t * 0.4) * 0.5;
+  centroid.z = 1.0 + Math.sin(t * 0.2) * 0.3;
+  
+  // slow orbit with auto-framing
+  const dist = 4.0 + phase * 1.5; // pull back when solid
+  const ang = t * 0.15;
+  camera.position.x = Math.sin(ang) * dist;
+  camera.position.z = Math.cos(ang) * dist;
+  camera.position.y = Math.sin(ang * 0.7) * 1.2;
+  camera.lookAt(centroid);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
