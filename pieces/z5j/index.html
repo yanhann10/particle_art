@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>z5j · mythic kiefer field</title>
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#0a0908; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; color:#cdd2dc; font-family:ui-monospace,monospace; }
+</style>
+</head>
+<body>
+<div class="id">z5j</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 3, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+
+// ── SEEDED RNG ──
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6d2b79f5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ── BURNT STALK L-SYSTEM — Kiefer's scorched fields ──
+const N = 80000;
+const positions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const stalkDepth = new Float32Array(N); // 0=ground, 1=tip
+const particleType = new Float32Array(N); // 0=stalk, 1=ground ash, 2=falling ash
+
+function buildField(seed) {
+  const rng = mulberry32(seed >>> 0);
+  const stalks = [];
+
+  // Generate stalks rising from ground plane — like Kiefer's sunflower/straw fields
+  const nStalks = 30 + Math.floor(rng() * 20);
+  for (let s = 0; s < nStalks; s++) {
+    const baseX = (rng() - 0.5) * 16;
+    const baseZ = (rng() - 0.5) * 10;
+    const height = 2.5 + rng() * 5.5;
+    const lean = (rng() - 0.5) * 0.3;
+    const leanZ = (rng() - 0.5) * 0.2;
+    const pts = [];
+    const segs = 16;
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const bend = t * t * 0.8 * (rng() - 0.3); // stalks bend under weight at top
+      pts.push({
+        x: baseX + lean * t * height + bend,
+        y: t * height - 0.5,
+        z: baseZ + leanZ * t * height + Math.sin(t * 4 + s) * 0.05,
+        t
+      });
+    }
+    stalks.push({ pts, thickness: 0.04 + rng() * 0.08, height });
+
+    // Sub-branches near top (seed heads, leaves)
+    if (rng() > 0.3) {
+      const topPt = pts[pts.length - 1];
+      const nBranch = 1 + Math.floor(rng() * 3);
+      for (let b = 0; b < nBranch; b++) {
+        const bPts = [];
+        const bLen = 0.5 + rng() * 1.2;
+        const bAngle = rng() * Math.PI * 2;
+        const bSegs = 6;
+        for (let i = 0; i <= bSegs; i++) {
+          const bt = i / bSegs;
+          bPts.push({
+            x: topPt.x + Math.cos(bAngle) * bt * bLen + (rng()-0.5)*0.1,
+            y: topPt.y + bt * bLen * 0.3 - bt*bt*0.4, // drooping
+            z: topPt.z + Math.sin(bAngle) * bt * bLen * 0.6,
+            t: 0.8 + bt * 0.2
+          });
+        }
+        stalks.push({ pts: bPts, thickness: 0.02 + rng()*0.03, height: bLen });
+      }
+    }
+  }
+
+  let written = 0;
+
+  // Ground ash plane — 30% of particles
+  const nGround = Math.floor(N * 0.30);
+  for (let i = 0; i < nGround && written < N; i++) {
+    const i3 = written * 3;
+    positions[i3]   = (rng() - 0.5) * 22;
+    positions[i3+1] = -0.5 + (rng() - 0.5) * 0.4;
+    positions[i3+2] = (rng() - 0.5) * 14;
+    seeds[written] = rng();
+    stalkDepth[written] = 0.0;
+    particleType[written] = 1.0;
+    written++;
+  }
+
+  // Falling ash / embers — 8% of particles
+  const nAsh = Math.floor(N * 0.08);
+  for (let i = 0; i < nAsh && written < N; i++) {
+    const i3 = written * 3;
+    positions[i3]   = (rng() - 0.5) * 18;
+    positions[i3+1] = rng() * 8;
+    positions[i3+2] = (rng() - 0.5) * 12;
+    seeds[written] = rng();
+    stalkDepth[written] = rng();
+    particleType[written] = 2.0;
+    written++;
+  }
+
+  // Stalk particles — remainder
+  const totalStalks = stalks.length;
+  while (written < N) {
+    const si = Math.floor(rng() * totalStalks);
+    const stalk = stalks[si];
+    const pts = stalk.pts;
+    const pi = Math.floor(rng() * (pts.length - 1));
+    const t = rng();
+    const p0 = pts[pi], p1 = pts[Math.min(pi + 1, pts.length - 1)];
+    const thick = stalk.thickness;
+    const scatter = (rng() - 0.5) * 2 * thick;
+    const scatter2 = (rng() - 0.5) * 2 * thick;
+
+    const i3 = written * 3;
+    positions[i3]   = p0.x + (p1.x - p0.x) * t + scatter;
+    positions[i3+1] = p0.y + (p1.y - p0.y) * t + scatter2;
+    positions[i3+2] = p0.z + (p1.z - p0.z) * t + (rng()-0.5) * thick;
+    seeds[written] = rng();
+    stalkDepth[written] = p0.t + (p1.t - p0.t) * t;
+    particleType[written] = 0.0;
+    written++;
+  }
+}
+
+let fieldSeed = 91827364;
+buildField(fieldSeed);
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('depth', new THREE.BufferAttribute(stalkDepth, 1));
+geom.setAttribute('pType', new THREE.BufferAttribute(particleType, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float depth;
+    attribute float pType;
+    varying float vSeed;
+    varying float vDepth;
+    varying float vType;
+    varying float vFog;
+
+    void main() {
+      vec3 p = position;
+
+      if (pType < 0.5) {
+        // STALK particles — slow sway like heavy stalks in wind
+        float swayAmt = depth * depth * 0.12;
+        float windPhase = uTime * 0.4 + p.x * 0.3 + p.z * 0.2;
+        p.x += sin(windPhase) * swayAmt;
+        p.z += cos(windPhase * 0.7) * swayAmt * 0.4;
+        // Subtle breathing — Kiefer's fields feel alive beneath the ash
+        p.y += sin(uTime * 0.2 + seed * 6.28) * 0.02 * depth;
+      } else if (pType < 1.5) {
+        // GROUND particles — slight shimmer
+        p.y += sin(uTime * 0.5 + seed * 20.0) * 0.01;
+      } else {
+        // FALLING ASH — slow descent, drift
+        float fallSpeed = 0.15 + seed * 0.1;
+        float cycle = mod(uTime * fallSpeed + seed * 100.0, 10.0);
+        p.y = 8.0 - cycle * 0.9;
+        p.x += sin(uTime * 0.3 + seed * 50.0) * 1.5;
+        p.z += cos(uTime * 0.2 + seed * 30.0) * 0.8;
+      }
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      vFog = clamp((dist - 8.0) / 25.0, 0.0, 0.85);
+      vSeed = seed;
+      vDepth = depth;
+      vType = pType;
+
+      float sz;
+      if (pType < 0.5) {
+        sz = (1.6 + depth * 0.6) * uPixel * (5.0 / max(dist, 1.0));
+      } else if (pType < 1.5) {
+        sz = 1.4 * uPixel * (4.0 / max(dist, 1.0));
+      } else {
+        sz = (0.8 + seed * 1.0) * uPixel * (5.0 / max(dist, 1.0));
+      }
+      gl_PointSize = sz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vSeed;
+    varying float vDepth;
+    varying float vType;
+    varying float vFog;
+    uniform float uTime;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+      if (r2 > 0.22) discard;
+
+      // Kiefer palette: lead, ash, burnt sienna, gold
+      vec3 lead     = vec3(0.35, 0.33, 0.31);
+      vec3 ash      = vec3(0.55, 0.52, 0.48);
+      vec3 burnt    = vec3(0.45, 0.25, 0.10);
+      vec3 gold     = vec3(0.72, 0.58, 0.22);
+      vec3 charcoal = vec3(0.12, 0.11, 0.10);
+      vec3 bgColor  = vec3(0.04, 0.035, 0.03);
+
+      vec3 col;
+      float alpha;
+
+      if (vType < 0.5) {
+        // Stalks: burnt sienna base, gold highlights near tips
+        float goldMix = smoothstep(0.6, 0.95, vDepth) * (0.3 + 0.7 * step(0.85, vSeed));
+        col = mix(burnt, charcoal, vSeed * 0.4);
+        col = mix(col, gold, goldMix);
+        col = mix(col, lead, (1.0 - vDepth) * 0.3);
+        alpha = 0.7 + 0.2 * vDepth;
+      } else if (vType < 1.5) {
+        // Ground: lead and ash tones
+        col = mix(lead, ash, vSeed * 0.5);
+        col = mix(col, charcoal, 0.3);
+        // Occasional warm glint in the ash (like embedded embers)
+        if (vSeed > 0.92) {
+          col = mix(col, gold, 0.4);
+        }
+        alpha = 0.5 + vSeed * 0.2;
+      } else {
+        // Falling ash: pale ash with occasional ember glow
+        float isEmber = step(0.88, vSeed);
+        col = mix(ash * 0.7, vec3(0.8, 0.35, 0.08), isEmber * 0.8);
+        float flicker = sin(uTime * 3.0 + vSeed * 40.0) * 0.5 + 0.5;
+        col += vec3(0.2, 0.05, 0.0) * isEmber * flicker;
+        alpha = 0.25 + isEmber * 0.4;
+      }
+
+      // Distance fog into dark umber background
+      col = mix(col, bgColor, vFog);
+      alpha *= (1.0 - vFog * 0.6);
+
+      // Subtle edge softness
+      float edge = smoothstep(0.22, 0.12, r2);
+      alpha *= edge;
+
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ── INTERACTION ──
+addEventListener('click', () => {
+  fieldSeed = Math.floor(Math.random() * 1e9);
+  buildField(fieldSeed);
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.seed.needsUpdate = true;
+  geom.attributes.depth.needsUpdate = true;
+  geom.attributes.pType.needsUpdate = true;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── CENTROID TRACKING ──
+function computeCentroid() {
+  let cx = 0, cy = 0, cz = 0;
+  const pos = geom.attributes.position.array;
+  const step = Math.max(1, Math.floor(N / 2000));
+  let count = 0;
+  for (let i = 0; i < N; i += step) {
+    cx += pos[i*3]; cy += pos[i*3+1]; cz += pos[i*3+2];
+    count++;
+  }
+  return new THREE.Vector3(cx/count, cy/count, cz/count);
+}
+
+// ── RENDER LOOP ──
+const start = performance.now();
+const lookTarget = new THREE.Vector3(0, 2, 0);
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Camera — slow, heavy orbit. Kiefer views his fields from a contemplative distance.
+  const centroid = computeCentroid();
+  lookTarget.lerp(centroid, 0.02);
+
+  const orbitSpeed = 0.06; // deliberate, weighty
+  const camR = 16 + Math.sin(t * 0.15) * 2;
+  const camY = 3.5 + Math.sin(t * 0.08) * 1.5;
+  camera.position.x = Math.sin(t * orbitSpeed) * camR;
+  camera.position.y = camY;
+  camera.position.z = Math.cos(t * orbitSpeed) * camR;
+  camera.lookAt(lookTarget);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
