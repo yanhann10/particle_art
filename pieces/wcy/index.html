@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wcy · lorenz × differential growth</title>
+<!-- CROSS-POLLINATE: zs4 Lorenz attractor × 7ea differential growth -->
+<!-- Borrows the expansive/retractive breathing law and organic edge-avoidance from 7ea differential growth, -->
+<!-- applies it to segments of the Lorenz orbit — the attractor's wings pulsate like living tissue. -->
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0c12; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">wcy</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Lorenz attractor integrated in CPU, then treated as a differential-growth substrate:
+// Sample 800 points from the orbit, then run repulsion + edge-length rules per frame.
+// Each point pushes neighbors away but stays tethered to its orbit-neighbors.
+// The orbit breathes — expanding when crowded, contracting when sparse — like living tissue.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0c12, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 85);
+camera.lookAt(0, 0, 0);
+
+// ---- generate Lorenz orbit as substrate ----
+const N = 800;
+const sigma = 10.0, rho = 28.0, beta = 8.0/3.0;
+const dt = 0.006;
+let p = { x: 1.0, y: 1.0, z: 1.0 };
+const orbit = [];
+for (let i = 0; i < N; i++){
+  // integrate 8 steps between samples so the path is smooth
+  for (let s = 0; s < 8; s++){
+    const dx = sigma * (p.y - p.x);
+    const dy = p.x * (rho - p.z) - p.y;
+    const dz = p.x * p.y - beta * p.z;
+    p.x += dx * dt; p.y += dy * dt; p.z += dz * dt;
+  }
+  orbit.push({ x: p.x, y: p.y, z: p.z - 25.0, vx:0, vy:0, vz:0 });
+}
+
+// ---- growth parameters (borrowed from 7ea differential growth) ----
+const minDist = 1.2;    // repulsion radius
+const maxDist = 3.5;    // max edge length before subdivision (disabled for closed orbit)
+const repelForce = 0.08;
+const edgeSpringK = 0.12;
+const damping = 0.88;
+
+// ---- geometry: line-loop + points ----
+const lineGeom = new THREE.BufferGeometry();
+const linePosArr = new Float32Array(N * 3);
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePosArr, 3));
+const lineMat = new THREE.LineBasicMaterial({ color: 0x4a5f82, opacity: 0.22, transparent: true, depthWrite: false });
+const lineLoop = new THREE.LineLoop(lineGeom, lineMat);
+scene.add(lineLoop);
+
+const pointsGeom = new THREE.BufferGeometry();
+const pointsPosArr = new Float32Array(N * 3);
+const pointsColorArr = new Float32Array(N * 3);
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(pointsPosArr, 3));
+pointsGeom.setAttribute('color', new THREE.BufferAttribute(pointsColorArr, 3));
+const pointsMat = new THREE.PointsMaterial({ size: 1.8, vertexColors: true, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending });
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// palette: muted organic greens, pale coral, soft amber — tissue-like
+const palA = new THREE.Color(0x8ca88e);
+const palB = new THREE.Color(0xd4a59a);
+const palC = new THREE.Color(0xe8c89a);
+
+function updateGeometry(){
+  for (let i = 0; i < N; i++){
+    const pt = orbit[i];
+    linePosArr[i*3]   = pointsPosArr[i*3]   = pt.x;
+    linePosArr[i*3+1] = pointsPosArr[i*3+1] = pt.y;
+    linePosArr[i*3+2] = pointsPosArr[i*3+2] = pt.z;
+    // color by z-coordinate for depth cue
+    const k = (pt.z + 15.0) / 30.0;
+    const col = new THREE.Color().lerpColors(palA, palB, Math.min(1, k * 2));
+    if (k > 0.5) col.lerp(palC, (k - 0.5) * 2);
+    pointsColorArr[i*3]   = col.r;
+    pointsColorArr[i*3+1] = col.g;
+    pointsColorArr[i*3+2] = col.b;
+  }
+  lineGeom.attributes.position.needsUpdate = true;
+  pointsGeom.attributes.position.needsUpdate = true;
+  pointsGeom.attributes.color.needsUpdate = true;
+}
+updateGeometry();
+
+// ---- differential growth step ----
+function growthStep(){
+  // 1. repulsion between nearby points
+  for (let i = 0; i < N; i++){
+    const a = orbit[i];
+    for (let j = i + 1; j < N; j++){
+      const b = orbit[j];
+      const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 < minDist * minDist && d2 > 0.01){
+        const d = Math.sqrt(d2);
+        const push = repelForce * (minDist - d) / d;
+        const fx = dx * push, fy = dy * push, fz = dz * push;
+        a.vx -= fx; a.vy -= fy; a.vz -= fz;
+        b.vx += fx; b.vy += fy; b.vz += fz;
+      }
+    }
+  }
+  // 2. edge springs (keep orbit-neighbors connected)
+  for (let i = 0; i < N; i++){
+    const a = orbit[i];
+    const b = orbit[(i + 1) % N];
+    const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+    const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (d > 0.01){
+      const pull = edgeSpringK * (d - 2.0) / d;
+      const fx = dx * pull, fy = dy * pull, fz = dz * pull;
+      a.vx += fx; a.vy += fy; a.vz += fz;
+      b.vx -= fx; b.vy -= fy; b.vz -= fz;
+    }
+  }
+  // 3. integrate + damp
+  for (let i = 0; i < N; i++){
+    const pt = orbit[i];
+    pt.x += pt.vx; pt.y += pt.vy; pt.z += pt.vz;
+    pt.vx *= damping; pt.vy *= damping; pt.vz *= damping;
+  }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = (now - lastTime) / 1000; lastTime = now;
+
+  // run growth 2 steps per frame
+  growthStep();
+  growthStep();
+  updateGeometry();
+
+  // gentle camera orbit
+  const ang = now * 0.00009;
+  camera.position.x = Math.sin(ang) * 85;
+  camera.position.z = Math.cos(ang) * 85;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
