@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>70w · tender scaffolds</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0b0908; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">70w</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Gonzalez-Torres × CNDSD/Abreu · tender scaffolds · drift</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*
+  Tender Scaffolds — Felix Gonzalez-Torres intimacy meets
+  CNDSD & Ivan Abreu's speculative informal architecture.
+
+  Leaf-shaped bricks drift gently into place, assembling a small
+  shelter that breathes — rooms form, hold, then release their walls
+  as floating leaves. Warm light glows from within completed rooms.
+  The building is always becoming, never finished — like a home
+  remembered, not occupied. Gravity is gentle. Dissolution is tender.
+*/
+
+const BG = 0x0b0908;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(8, 5, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.target.set(0, 2, 0);
+
+// palette: rebar warmth, cinder softened, amber glow
+const PAL = [
+  new THREE.Color(0.62, 0.48, 0.38), // warm concrete
+  new THREE.Color(0.50, 0.40, 0.34), // cinder muted
+  new THREE.Color(0.72, 0.55, 0.35), // terracotta
+  new THREE.Color(0.85, 0.65, 0.30), // amber
+  new THREE.Color(0.40, 0.35, 0.32), // rebar gray warm
+];
+
+// leaf-shaped geometry as brick unit
+function makeLeafGeom() {
+  const shape = new THREE.Shape();
+  const s = 0.22;
+  shape.moveTo(0, -s);
+  shape.quadraticCurveTo(s * 0.8, -s * 0.3, s * 0.6, s * 0.4);
+  shape.quadraticCurveTo(0, s * 1.1, 0, s);
+  shape.quadraticCurveTo(0, s * 1.1, 0, s);
+  shape.quadraticCurveTo(-s * 0.0, s * 0.6, -s * 0.6, s * 0.4);
+  shape.quadraticCurveTo(-s * 0.8, -s * 0.3, 0, -s);
+  const geom = new THREE.ShapeGeometry(shape, 4);
+  return geom;
+}
+
+const leafGeom = makeLeafGeom();
+const MAX_LEAVES = 1200;
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uFogColor: { value: new THREE.Color(BG) },
+    uFogDensity: { value: 0.025 }
+  },
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    attribute vec3 instanceOffset;
+    attribute vec4 instanceRotation;
+    attribute vec3 instanceColor;
+    attribute float instancePhase;
+    attribute float instanceAlpha;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform float uFogDensity;
+
+    vec3 applyQuat(vec4 q, vec3 v) {
+      vec3 t = 2.0 * cross(q.xyz, v);
+      return v + q.w * t + cross(q.xyz, t);
+    }
+
+    void main() {
+      vec3 p = applyQuat(instanceRotation, position) + instanceOffset;
+
+      // gentle breathing sway
+      float t = uTime * 0.4 + instancePhase * 6.28;
+      p.x += sin(t) * 0.003;
+      p.y += cos(t * 0.7) * 0.002;
+
+      vCol = instanceColor;
+      vAlpha = instanceAlpha;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_Position = projectionMatrix * mv;
+
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec3 col = mix(vCol, uFogColor, vFogFactor);
+      float a = vAlpha * (1.0 - vFogFactor * 0.7);
+      gl_FragColor = vec4(col, a);
+    }
+  `
+});
+
+// instanced mesh setup
+const iGeom = new THREE.InstancedBufferGeometry();
+iGeom.index = leafGeom.index;
+iGeom.attributes.position = leafGeom.attributes.position;
+
+const offsets = new Float32Array(MAX_LEAVES * 3);
+const rotations = new Float32Array(MAX_LEAVES * 4);
+const colors = new Float32Array(MAX_LEAVES * 3);
+const phases = new Float32Array(MAX_LEAVES);
+const alphas = new Float32Array(MAX_LEAVES);
+
+iGeom.setAttribute('instanceOffset', new THREE.InstancedBufferAttribute(offsets, 3));
+iGeom.setAttribute('instanceRotation', new THREE.InstancedBufferAttribute(rotations, 4));
+iGeom.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(colors, 3));
+iGeom.setAttribute('instancePhase', new THREE.InstancedBufferAttribute(phases, 1));
+iGeom.setAttribute('instanceAlpha', new THREE.InstancedBufferAttribute(alphas, 1));
+
+const mesh = new THREE.Mesh(iGeom, mat);
+scene.add(mesh);
+
+// warm point lights inside the structure
+const light1 = new THREE.PointLight(0xffaa44, 0.6, 12);
+light1.position.set(0, 2, 0);
+scene.add(light1);
+const light2 = new THREE.PointLight(0xff8833, 0.3, 8);
+light2.position.set(-2, 3, 1);
+scene.add(light2);
+const ambient = new THREE.AmbientLight(0x1a1412, 0.4);
+scene.add(ambient);
+
+// particle glow system for interior warmth
+const glowN = 8000;
+const glowPos = new Float32Array(glowN * 3);
+const glowGeom = new THREE.BufferGeometry();
+glowGeom.setAttribute('position', new THREE.BufferAttribute(glowPos, 3));
+const glowMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: mat.uniforms.uTime, uFogColor: mat.uniforms.uFogColor },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    varying float vA;
+    void main() {
+      vec3 p = position;
+      p.x += sin(uTime * 0.2 + p.y * 2.0) * 0.01;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 1.6 * (30.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+      float dist = length(mv.xyz);
+      vA = 0.25 * exp(-dist * 0.06);
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float glow = exp(-r * 16.0);
+      vec3 col = vec3(1.0, 0.75, 0.35) * glow;
+      gl_FragColor = vec4(col, glow * vA);
+    }
+  `
+});
+const glowPts = new THREE.Points(glowGeom, glowMat);
+scene.add(glowPts);
+
+// Architecture grammar — stochastic L-system for informal housing
+// Grid-based placement: leaves assemble on grid cells
+const GRID = 0.5;
+const leaves = [];
+
+// State per leaf: target position, current position, phase, settled
+function addLeaf(tx, ty, tz, rx, ry, rz) {
+  if (leaves.length >= MAX_LEAVES) return;
+  const col = PAL[Math.floor(Math.random() * PAL.length)];
+  // start floating above target
+  const startY = ty + 4 + Math.random() * 3;
+  const startX = tx + (Math.random() - 0.5) * 2;
+  const startZ = tz + (Math.random() - 0.5) * 2;
+  leaves.push({
+    tx, ty, tz,
+    cx: startX, cy: startY, cz: startZ,
+    rx, ry, rz,
+    col,
+    phase: Math.random(),
+    settled: 0,
+    life: 0,
+    maxLife: 300 + Math.random() * 600, // leaves eventually release
+    dissolving: false
+  });
+}
+
+// grow rooms using simple stochastic grammar
+let growTimer = 0;
+const GROW_INTERVAL = 8; // frames between new leaves
+let currentFloor = 0;
+let roomStack = [{ x: 0, z: 0, w: 3, d: 3 }]; // rooms to build
+let wallProgress = 0;
+
+function quatFromEuler(rx, ry, rz) {
+  const cx = Math.cos(rx/2), sx = Math.sin(rx/2);
+  const cy = Math.cos(ry/2), sy = Math.sin(ry/2);
+  const cz = Math.cos(rz/2), sz = Math.sin(rz/2);
+  return [
+    sx*cy*cz - cx*sy*sz,
+    cx*sy*cz + sx*cy*sz,
+    cx*cy*sz - sx*sy*cz,
+    cx*cy*cz + sx*sy*sz
+  ];
+}
+
+function growArchitecture() {
+  growTimer++;
+  if (growTimer < GROW_INTERVAL) return;
+  growTimer = 0;
+
+  if (roomStack.length === 0 || currentFloor > 5) {
+    // spawn new room adjacent to existing
+    const base = roomStack.length > 0 ? roomStack[0] : { x: 0, z: 0, w: 3, d: 3 };
+    const nx = base.x + (Math.random() > 0.5 ? 1 : -1) * (2 + Math.floor(Math.random() * 2));
+    const nz = base.z + (Math.random() > 0.5 ? 1 : -1) * (1 + Math.floor(Math.random() * 2));
+    roomStack.push({ x: nx, z: nz, w: 2 + Math.floor(Math.random() * 2), d: 2 + Math.floor(Math.random() * 2) });
+    if (roomStack.length > 4) roomStack.shift();
+    currentFloor = 0;
+    wallProgress = 0;
+  }
+
+  const room = roomStack[Math.floor(Math.random() * roomStack.length)];
+  const y = currentFloor * GRID;
+
+  // place 2-4 leaves per growth step along walls
+  for (let k = 0; k < 3; k++) {
+    const side = Math.floor(Math.random() * 4);
+    let lx, lz, ry;
+    const t = Math.random();
+    if (side === 0) { lx = room.x + t * room.w; lz = room.z; ry = 0; }
+    else if (side === 1) { lx = room.x + t * room.w; lz = room.z + room.d; ry = Math.PI; }
+    else if (side === 2) { lx = room.x; lz = room.z + t * room.d; ry = Math.PI/2; }
+    else { lx = room.x + room.w; lz = room.z + t * room.d; ry = -Math.PI/2; }
+
+    const rx = (Math.random() - 0.5) * 0.15;
+    const rz = (Math.random() - 0.5) * 0.1;
+    addLeaf(lx * GRID, y, lz * GRID, rx, ry + (Math.random()-0.5)*0.2, rz);
+  }
+
+  wallProgress++;
+  if (wallProgress > 12) {
+    currentFloor++;
+    wallProgress = 0;
+  }
+}
+
+// pre-grow some structure
+for (let i = 0; i < 200; i++) growArchitecture();
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function updateLeaves(dt) {
+  const damp = 0.03;
+  let cx = 0, cy = 0, cz = 0, count = 0;
+
+  for (let i = leaves.length - 1; i >= 0; i--) {
+    const L = leaves[i];
+    L.life++;
+
+    if (L.life > L.maxLife && !L.dissolving) {
+      L.dissolving = true;
+    }
+
+    if (L.dissolving) {
+      // drift upward gently
+      L.cy += 0.003;
+      L.cx += (Math.random() - 0.5) * 0.004;
+      L.cz += (Math.random() - 0.5) * 0.004;
+      L.settled = Math.max(0, L.settled - 0.008);
+      if (L.settled <= 0 && L.cy > L.ty + 5) {
+        leaves.splice(i, 1);
+        continue;
+      }
+    } else {
+      // drift toward target
+      L.cx += (L.tx - L.cx) * damp;
+      L.cy += (L.ty - L.cy) * damp;
+      L.cz += (L.tz - L.cz) * damp;
+      const dist = Math.abs(L.cx - L.tx) + Math.abs(L.cy - L.ty) + Math.abs(L.cz - L.tz);
+      L.settled = Math.min(1, L.settled + (dist < 0.05 ? 0.02 : 0));
+    }
+
+    cx += L.cx; cy += L.cy; cz += L.cz; count++;
+  }
+
+  if (count > 0) {
+    cx /= count; cy /= count; cz /= count;
+    controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.01);
+    light1.position.set(cx, cy + 0.5, cz);
+    light2.position.set(cx - 1, cy + 1, cz + 0.5);
+  }
+
+  // update instance buffers
+  const n = leaves.length;
+  for (let i = 0; i < n; i++) {
+    const L = leaves[i];
+    offsets[i*3] = L.cx;
+    offsets[i*3+1] = L.cy;
+    offsets[i*3+2] = L.cz;
+
+    const q = quatFromEuler(L.rx, L.ry, L.rz);
+    rotations[i*4] = q[0];
+    rotations[i*4+1] = q[1];
+    rotations[i*4+2] = q[2];
+    rotations[i*4+3] = q[3];
+
+    colors[i*3] = L.col.r;
+    colors[i*3+1] = L.col.g;
+    colors[i*3+2] = L.col.b;
+
+    phases[i] = L.phase;
+    alphas[i] = L.dissolving ? L.settled * 0.7 : 0.6 + L.settled * 0.3;
+  }
+
+  iGeom.instanceCount = n;
+  iGeom.attributes.instanceOffset.needsUpdate = true;
+  iGeom.attributes.instanceRotation.needsUpdate = true;
+  iGeom.attributes.instanceColor.needsUpdate = true;
+  iGeom.attributes.instancePhase.needsUpdate = true;
+  iGeom.attributes.instanceAlpha.needsUpdate = true;
+
+  // update glow particles inside settled structure
+  let gi = 0;
+  for (let i = 0; i < n && gi < glowN; i++) {
+    if (leaves[i].settled > 0.5 && !leaves[i].dissolving) {
+      for (let k = 0; k < 8 && gi < glowN; k++) {
+        glowPos[gi*3] = leaves[i].cx + (Math.random()-0.5)*0.3;
+        glowPos[gi*3+1] = leaves[i].cy + (Math.random()-0.5)*0.2;
+        glowPos[gi*3+2] = leaves[i].cz + (Math.random()-0.5)*0.3;
+        gi++;
+      }
+    }
+  }
+  // fill rest with hidden positions
+  for (; gi < glowN; gi++) {
+    glowPos[gi*3] = 0; glowPos[gi*3+1] = -100; glowPos[gi*3+2] = 0;
+  }
+  glowGeom.attributes.position.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  mat.uniforms.uTime.value = t;
+
+  if (!paused) {
+    growArchitecture();
+    updateLeaves(1/60);
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
