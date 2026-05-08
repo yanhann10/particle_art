@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>z7k · Physarum zigzag — momentary crystallization</title>
+<!-- MOTION: drift + periodic zigzag snap, intensity: gentle with surprise -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.3; font-size: 10px; letter-spacing: 0.04em; color:#8a7a6a; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.3; font-size: 10px; letter-spacing: 0.04em; color:#8a7a6a; }
+</style>
+</head>
+<body>
+<div class="id">z7k</div>
+<div class="hint">chemotaxis · trail reinforcement · periodic crystallization</div>
+<div class="src">Physarum zigzag · 80k particles · Manfred Schroeder lattice snap</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 40;
+const camera = new THREE.OrthographicCamera(
+  frustumSize * aspect / -2, frustumSize * aspect / 2,
+  frustumSize / 2, frustumSize / -2,
+  0.1, 100
+);
+camera.position.set(8, -5, 18);
+camera.lookAt(2, -1, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+const trailMapSize = 512;
+const sensorAngle = 0.41;
+const sensorDist = 1.8;
+const rotationAngle = 0.35;
+const stepSize = 0.12;
+const depositAmount = 0.08;
+const decayRate = 0.92;
+
+// Zigzag surprise state
+const zigzagCycleLength = 12.0;  // seconds between zigzag events
+const zigzagDuration = 1.8;      // how long the snap lasts
+const zigzagAngleSnap = Math.PI / 4; // 45° lattice
+let zigzagPhase = 0; // 0 = organic, 0→1 = entering zigzag, 1 = full zigzag
+
+const positions = new Float32Array(N * 3);
+const angles = new Float32Array(N);
+const species = new Float32Array(N);
+
+const trailData = new Float32Array(trailMapSize * trailMapSize * 4);
+const trailTexture = new THREE.DataTexture(
+  trailData,
+  trailMapSize,
+  trailMapSize,
+  THREE.RGBAFormat,
+  THREE.FloatType
+);
+trailTexture.magFilter = THREE.LinearFilter;
+trailTexture.minFilter = THREE.LinearFilter;
+
+let seed = Math.floor(Math.random() * 1e9);
+function rng(){
+  seed = (seed * 1664525 + 1013904223) | 0;
+  return ((seed >>> 0) / 4294967296);
+}
+
+// Initialize agents from food sources
+const numSources = 3 + Math.floor(rng() * 3);
+const sources = [];
+for(let i = 0; i < numSources; i++){
+  sources.push({
+    x: (rng() - 0.5) * 30,
+    y: (rng() - 0.5) * 30,
+    radius: 1.5 + rng() * 2.5
+  });
+}
+
+for(let i = 0; i < N; i++){
+  const sourceIdx = Math.floor(rng() * sources.length);
+  const src = sources[sourceIdx];
+  const r = rng() * src.radius;
+  const theta = rng() * Math.PI * 2;
+  positions[i * 3] = src.x + r * Math.cos(theta);
+  positions[i * 3 + 1] = src.y + r * Math.sin(theta);
+  positions[i * 3 + 2] = 0;
+  angles[i] = rng() * Math.PI * 2;
+  species[i] = sourceIdx / numSources;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('species', new THREE.BufferAttribute(species, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uTrailMap: { value: trailTexture },
+  uZigzag: { value: 0.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float species;
+    varying float vSpecies;
+    uniform float uPixel;
+    uniform float uZigzag;
+
+    void main(){
+      vSpecies = species;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = uPixel * mix(1.4, 1.8, uZigzag);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vSpecies;
+    uniform float uZigzag;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // Organic warm tones
+      vec3 colOrganic;
+      if(vSpecies < 0.33){
+        colOrganic = vec3(0.92, 0.78, 0.42);
+      } else if(vSpecies < 0.66){
+        colOrganic = vec3(0.88, 0.92, 0.46);
+      } else {
+        colOrganic = vec3(0.95, 0.85, 0.72);
+      }
+
+      // Zigzag surprise: cool electric blue-white flash
+      vec3 colZig = vec3(0.62, 0.78, 0.95);
+
+      vec3 col = mix(colOrganic, colZig, uZigzag * 0.7);
+      float alpha = mix(0.08, 0.14, uZigzag) * (1.0 - r * 4.0);
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Trail rendering plane
+const trailPlaneGeom = new THREE.PlaneGeometry(50, 50);
+const trailPlaneMat = new THREE.MeshBasicMaterial({
+  map: trailTexture,
+  transparent: true,
+  opacity: 0.4,
+  side: THREE.DoubleSide,
+  blending: THREE.AdditiveBlending
+});
+const trailPlane = new THREE.Mesh(trailPlaneGeom, trailPlaneMat);
+trailPlane.position.z = -0.5;
+scene.add(trailPlane);
+
+// Snap angle to nearest zigzag lattice direction
+function snapAngle(a, strength){
+  const snapped = Math.round(a / zigzagAngleSnap) * zigzagAngleSnap;
+  return a + (snapped - a) * strength;
+}
+
+function updateAgents(time){
+  const scale = trailMapSize / 50;
+
+  // Compute zigzag phase: smooth ramp up and down
+  const cyclePos = (time % zigzagCycleLength) / zigzagCycleLength;
+  const zigStart = 0.7; // zigzag starts at 70% of cycle
+  const zigEnd = zigStart + zigzagDuration / zigzagCycleLength;
+
+  if(cyclePos >= zigStart && cyclePos <= zigEnd){
+    const localT = (cyclePos - zigStart) / (zigEnd - zigStart);
+    // Smooth bell curve: quick in, hold, quick out
+    zigzagPhase = Math.sin(localT * Math.PI);
+    zigzagPhase = zigzagPhase * zigzagPhase; // sharper peak
+  } else {
+    zigzagPhase *= 0.92; // gentle tail-off
+  }
+
+  uniforms.uZigzag.value = zigzagPhase;
+
+  // Zigzag mode: agents step in sharp 45° lattice directions
+  const zigStrength = zigzagPhase;
+  const currentStep = stepSize * (1.0 + zigStrength * 0.4); // slightly faster during snap
+
+  for(let i = 0; i < N; i++){
+    const x = positions[i * 3];
+    const y = positions[i * 3 + 1];
+    let angle = angles[i];
+    const sp = species[i];
+
+    // Sense forward, left, right
+    const sensors = [
+      { a: angle, w: 1.0 },
+      { a: angle - sensorAngle, w: 1.0 },
+      { a: angle + sensorAngle, w: 1.0 }
+    ];
+
+    let maxVal = -1;
+    let bestAngle = angle;
+
+    for(const s of sensors){
+      const sx = x + Math.cos(s.a) * sensorDist;
+      const sy = y + Math.sin(s.a) * sensorDist;
+      const u = Math.floor((sx + 25) * scale);
+      const v = Math.floor((sy + 25) * scale);
+
+      if(u >= 0 && u < trailMapSize && v >= 0 && v < trailMapSize){
+        const idx = (v * trailMapSize + u) * 4;
+        const channelIdx = Math.floor(sp * 3);
+        const val = trailData[idx + channelIdx];
+        if(val > maxVal){
+          maxVal = val;
+          bestAngle = s.a;
+        }
+      }
+    }
+
+    if(maxVal < 0.01){
+      bestAngle = angle + (rng() - 0.5) * rotationAngle * 2;
+    } else {
+      bestAngle = angle + (bestAngle - angle) * 0.7;
+    }
+
+    // THE SURPRISE: snap angles to 45° lattice during zigzag phase
+    if(zigStrength > 0.01){
+      bestAngle = snapAngle(bestAngle, zigStrength);
+    }
+
+    const nx = x + Math.cos(bestAngle) * currentStep;
+    const ny = y + Math.sin(bestAngle) * currentStep;
+
+    if(Math.abs(nx) > 25){
+      angles[i] = Math.PI - bestAngle;
+    } else if(Math.abs(ny) > 25){
+      angles[i] = -bestAngle;
+    } else {
+      positions[i * 3] = nx;
+      positions[i * 3 + 1] = ny;
+      angles[i] = bestAngle;
+
+      const u = Math.floor((nx + 25) * scale);
+      const v = Math.floor((ny + 25) * scale);
+      if(u >= 0 && u < trailMapSize && v >= 0 && v < trailMapSize){
+        const idx = (v * trailMapSize + u) * 4;
+        const channelIdx = Math.floor(sp * 3);
+        const dep = depositAmount * (1.0 + zigStrength * 0.6);
+        trailData[idx + channelIdx] = Math.min(1, trailData[idx + channelIdx] + dep);
+      }
+    }
+  }
+
+  // Diffuse and decay trail
+  const temp = new Float32Array(trailMapSize * trailMapSize * 4);
+  // During zigzag: slightly less diffusion → sharper trails
+  const centerWeight = 0.4 + zigStrength * 0.15;
+  const neighborWeight = (1.0 - centerWeight) / 4;
+
+  for(let y = 1; y < trailMapSize - 1; y++){
+    for(let x = 1; x < trailMapSize - 1; x++){
+      const idx = (y * trailMapSize + x) * 4;
+      for(let c = 0; c < 3; c++){
+        let sum = trailData[idx + c] * centerWeight;
+        sum += trailData[((y - 1) * trailMapSize + x) * 4 + c] * neighborWeight;
+        sum += trailData[((y + 1) * trailMapSize + x) * 4 + c] * neighborWeight;
+        sum += trailData[(y * trailMapSize + (x - 1)) * 4 + c] * neighborWeight;
+        sum += trailData[(y * trailMapSize + (x + 1)) * 4 + c] * neighborWeight;
+        temp[idx + c] = sum * decayRate;
+      }
+      temp[idx + 3] = 1.0;
+    }
+  }
+  trailData.set(temp);
+  trailTexture.needsUpdate = true;
+
+  geom.attributes.position.needsUpdate = true;
+}
+
+// Background color shifts subtly during zigzag
+const baseClearR = 0x1a / 255, baseClearG = 0x16 / 255, baseClearB = 0x12 / 255;
+const zigClearR = 0x12 / 255, zigClearG = 0x16 / 255, zigClearB = 0x1e / 255;
+
+addEventListener('resize', () => {
+  const newAspect = innerWidth / innerHeight;
+  camera.left = frustumSize * newAspect / -2;
+  camera.right = frustumSize * newAspect / 2;
+  camera.top = frustumSize / 2;
+  camera.bottom = frustumSize / -2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+let lastUpdate = 0;
+const start = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if(now - lastUpdate > 33){
+    updateAgents(t);
+    lastUpdate = now;
+  }
+
+  // Shift background during zigzag
+  const z = zigzagPhase;
+  const cr = baseClearR + (zigClearR - baseClearR) * z;
+  const cg = baseClearG + (zigClearG - baseClearG) * z;
+  const cb = baseClearB + (zigClearB - baseClearB) * z;
+  renderer.setClearColor(new THREE.Color(cr, cg, cb), 1);
+
+  // Trail plane opacity pulses during zigzag
+  trailPlaneMat.opacity = 0.4 + z * 0.15;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
