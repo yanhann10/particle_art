@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>z1y · Data river — Anadol flow</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#0a0a14; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">z1y</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a14);
+
+const camera = new THREE.PerspectiveCamera(65, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 8, 35);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ── GPGPU flow field simulation using ping-pong FBO technique
+const PARTICLE_COUNT = 256 * 1024; // 262144 particles
+const WIDTH = 512;
+const HEIGHT = 512;
+
+// Position texture data init — fill volume with scattered initial positions
+const posArray = new Float32Array(WIDTH * HEIGHT * 4);
+for (let i = 0; i < WIDTH * HEIGHT; i++){
+  const i4 = i * 4;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const r = 8 + Math.random() * 18;
+  posArray[i4 + 0] = r * Math.sin(phi) * Math.cos(theta);
+  posArray[i4 + 1] = r * Math.sin(phi) * Math.sin(theta) - 10;
+  posArray[i4 + 2] = r * Math.cos(phi);
+  posArray[i4 + 3] = Math.random(); // phase offset for variation
+}
+const posTexture = new THREE.DataTexture(posArray, WIDTH, HEIGHT, THREE.RGBAFormat, THREE.FloatType);
+posTexture.needsUpdate = true;
+
+// Create ping-pong render targets for GPGPU
+const rtOptions = {
+  minFilter: THREE.NearestFilter,
+  magFilter: THREE.NearestFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.FloatType,
+  depthBuffer: false,
+  stencilBuffer: false
+};
+let rtPosition1 = new THREE.WebGLRenderTarget(WIDTH, HEIGHT, rtOptions);
+let rtPosition2 = new THREE.WebGLRenderTarget(WIDTH, HEIGHT, rtOptions);
+
+// Simulation shader — smooth architectural flow field
+const simVertShader = `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const simFragShader = `
+uniform sampler2D tPosition;
+uniform float time;
+uniform float delta;
+varying vec2 vUv;
+
+vec3 curl(vec3 p, float t){
+  float k = 0.15;
+  float c = cos(k * (p.x + t * 0.3));
+  float s = sin(k * (p.y + t * 0.2));
+  float c2 = cos(k * (p.z * 0.6 + t * 0.25));
+  return vec3(
+    sin(p.y * k + t * 0.18) * 0.4 + c2 * 0.3,
+    -cos(p.x * k + t * 0.15) * 0.35 + s * 0.25,
+    sin(p.x * k * 0.7 + p.y * k * 0.5 + t * 0.12) * 0.3
+  );
+}
+
+void main() {
+  vec4 pos = texture2D(tPosition, vUv);
+  vec3 p = pos.xyz;
+  float phase = pos.w;
+  
+  // Smooth flow field — data river aesthetic
+  vec3 flow = curl(p * 0.08, time + phase * 6.28);
+  
+  // Gravity-like downward drift
+  flow.y -= 0.4;
+  
+  // Attractor toward center column
+  vec3 toCenter = vec3(0.0, p.y, 0.0) - p;
+  float distCenter = length(toCenter.xz);
+  if (distCenter > 1.0){
+    flow += normalize(toCenter) * 0.15;
+  }
+  
+  // Apply flow
+  p += flow * delta * 12.0;
+  
+  // Boundaries — wrap-around when particles fall below or drift too far
+  if (p.y < -25.0){
+    p.y += 50.0;
+    p.x = (fract(phase * 7.123) - 0.5) * 20.0;
+    p.z = (fract(phase * 3.891) - 0.5) * 20.0;
+  }
+  if (length(p.xz) > 30.0){
+    float a = atan(p.z, p.x);
+    p.x = cos(a) * 10.0;
+    p.z = sin(a) * 10.0;
+  }
+  
+  gl_FragColor = vec4(p, phase);
+}
+`;
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tPosition: { value: null },
+    time: { value: 0 },
+    delta: { value: 0 }
+  },
+  vertexShader: simVertShader,
+  fragmentShader: simFragShader
+});
+
+const simScene = new THREE.Scene();
+const simCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const simQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), simMat);
+simScene.add(simQuad);
+
+// Initialize first RT with initial positions
+const initScene = new THREE.Scene();
+const initMat = new THREE.MeshBasicMaterial({ map: posTexture });
+const initQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), initMat);
+initScene.add(initQuad);
+renderer.setRenderTarget(rtPosition1);
+renderer.render(initScene, simCamera);
+renderer.setRenderTarget(null);
+
+// ── Particle render system — point cloud with custom shader
+const particleGeo = new THREE.BufferGeometry();
+const particlePositions = new Float32Array(PARTICLE_COUNT * 3);
+const particleUVs = new Float32Array(PARTICLE_COUNT * 2);
+for (let i = 0; i < PARTICLE_COUNT; i++){
+  const i3 = i * 3;
+  particlePositions[i3] = 0;
+  particlePositions[i3 + 1] = 0;
+  particlePositions[i3 + 2] = 0;
+  const i2 = i * 2;
+  particleUVs[i2] = (i % WIDTH) / WIDTH;
+  particleUVs[i2 + 1] = Math.floor(i / WIDTH) / HEIGHT;
+}
+particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+particleGeo.setAttribute('uv', new THREE.BufferAttribute(particleUVs, 2));
+
+const particleVertShader = `
+uniform sampler2D tPosition;
+attribute vec2 uv;
+varying float vDepth;
+varying float vPhase;
+
+void main(){
+  vec4 pos = texture2D(tPosition, uv);
+  vec3 p = pos.xyz;
+  vPhase = pos.w;
+  
+  vec4 mvPos = modelViewMatrix * vec4(p, 1.0);
+  vDepth = -mvPos.z;
+  gl_Position = projectionMatrix * mvPos;
+  
+  // Size based on depth for atmospheric perspective
+  float pSize = 2.5 + vDepth * 0.08;
+  gl_PointSize = pSize * (1000.0 / vDepth);
+}
+`;
+
+const particleFragShader = `
+varying float vDepth;
+varying float vPhase;
+
+void main(){
+  // Soft round particle
+  vec2 xy = gl_PointCoord.xy - 0.5;
+  float r = length(xy);
+  if (r > 0.5) discard;
+  float alpha = (1.0 - r * 2.0) * 0.35;
+  
+  // Pearlescent cyan-violet duotone based on depth
+  float depthMix = clamp((vDepth - 15.0) / 25.0, 0.0, 1.0);
+  vec3 nearColor = vec3(0.95, 0.98, 1.0); // white-hot core
+  vec3 farColor = vec3(0.3, 0.5, 0.85); // cool cyan
+  vec3 deepColor = vec3(0.5, 0.3, 0.7); // violet
+  
+  vec3 col = mix(nearColor, farColor, depthMix);
+  col = mix(col, deepColor, smoothstep(0.6, 1.0, depthMix));
+  
+  // Highlight hotspots based on phase
+  float hot = pow(sin(vPhase * 6.28), 12.0);
+  col = mix(col, vec3(1.0, 1.0, 1.0), hot * 0.6);
+  
+  gl_FragColor = vec4(col, alpha);
+}
+`;
+
+const particleMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tPosition: { value: null }
+  },
+  vertexShader: particleVertShader,
+  fragmentShader: particleFragShader,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const particles = new THREE.Points(particleGeo, particleMat);
+scene.add(particles);
+
+// ── Volumetric fog planes for depth
+const fogPlanes = [];
+for (let i = 0; i < 5; i++){
+  const fogGeo = new THREE.PlaneGeometry(80, 80);
+  const fogMat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(0.05, 0.08, 0.15),
+    transparent: true,
+    opacity: 0.03,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+  const fogMesh = new THREE.Mesh(fogGeo, fogMat);
+  fogMesh.position.z = -10 - i * 12;
+  fogMesh.rotation.x = Math.PI * 0.1;
+  scene.add(fogMesh);
+  fogPlanes.push(fogMesh);
+}
+
+// ── Ambient light structure — architectural glow
+const ambientGlow = new THREE.AmbientLight(0x1a1a2a, 0.4);
+scene.add(ambientGlow);
+
+// ── Camera motion — slow drift downward through the data river
+let cameraY = 8;
+let cameraTime = 0;
+
+// ── Resize
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Animate
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const delta = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  cameraTime += delta;
+  
+  // Update simulation
+  simMat.uniforms.tPosition.value = rtPosition1.texture;
+  simMat.uniforms.time.value = cameraTime;
+  simMat.uniforms.delta.value = delta;
+  renderer.setRenderTarget(rtPosition2);
+  renderer.render(simScene, simCamera);
+  renderer.setRenderTarget(null);
+  
+  // Swap buffers
+  const tmp = rtPosition1;
+  rtPosition1 = rtPosition2;
+  rtPosition2 = tmp;
+  
+  // Update particle material
+  particleMat.uniforms.tPosition.value = rtPosition1.texture;
+  
+  // Camera gentle drift — descending through the flow
+  cameraY -= delta * 1.2;
+  if (cameraY < -20) cameraY = 15;
+  camera.position.y = cameraY;
+  camera.position.x = Math.sin(cameraTime * 0.08) * 3;
+  camera.position.z = 35 + Math.cos(cameraTime * 0.05) * 5;
+  camera.lookAt(0, cameraY - 8, 0);
+  
+  // Fog planes drift
+  fogPlanes.forEach((p, i) => {
+    p.position.y = cameraY - 5 + i * 3;
+    p.material.opacity = 0.02 + Math.sin(cameraTime * 0.3 + i) * 0.01;
+  });
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
