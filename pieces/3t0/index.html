@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rbn · genealogical rebound</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.50; font-size: 10px; letter-spacing: 0.04em; }
+  .label { position:fixed; right:14px; bottom:12px; opacity:0.60; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">rbn</div>
+<div class="hint">drag to orbit · click to pause · face rebounds on collision</div>
+<div class="label" id="genLabel">ancestor</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ────────────── scene
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x1a1612, 0.035);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 12);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+controls.enablePan = false;
+controls.minDistance = 6;
+controls.maxDistance = 20;
+
+// volumetric fog plane
+const fogPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(50, 50),
+  new THREE.MeshBasicMaterial({
+    color: 0x1a1612,
+    transparent: true,
+    opacity: 0.15,
+    depthWrite: false
+  })
+);
+fogPlane.position.z = -8;
+scene.add(fogPlane);
+
+// lighting
+const ambientLight = new THREE.AmbientLight(0x3a2f28, 0.4);
+scene.add(ambientLight);
+const sideLight = new THREE.DirectionalLight(0xd4a574, 1.2);
+sideLight.position.set(-6, 8, 4);
+scene.add(sideLight);
+const rimLight = new THREE.DirectionalLight(0x4a3a32, 0.6);
+rimLight.position.set(4, -2, -6);
+scene.add(rimLight);
+
+// invisible wall (sphere) for rebound
+const wallGeom = new THREE.SphereGeometry(6, 32, 32);
+const wallMat = new THREE.MeshBasicMaterial({ 
+  color: 0xff0000, 
+  transparent: true, 
+  opacity: 0.0,
+  side: THREE.BackSide
+});
+const wall = new THREE.Mesh(wallGeom, wallMat);
+scene.add(wall);
+
+// ────────────── facial geometry
+function sampleFace(seed, N){
+  const rng = (() => { let s = seed; return () => { s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296; }; })();
+  
+  const out = new Float32Array(N * 3);
+  let i = 0;
+
+  const faceW = 1.8 + (rng() - 0.5) * 0.4;
+  const faceH = 2.6 + (rng() - 0.5) * 0.5;
+  const jawW = faceW * (0.85 + (rng() - 0.5) * 0.15);
+  const foreheadH = faceH * (0.35 + (rng() - 0.5) * 0.08);
+  const noseL = 0.6 + (rng() - 0.5) * 0.15;
+  const eyeGap = 0.5 + (rng() - 0.5) * 0.1;
+  const cheekH = faceH * 0.15;
+
+  const nForehead = Math.floor(N * 0.18);
+  const nEyes = Math.floor(N * 0.22);
+  const nNose = Math.floor(N * 0.14);
+  const nCheeks = Math.floor(N * 0.16);
+  const nJaw = Math.floor(N * 0.20);
+  const nChin = N - nForehead - nEyes - nNose - nCheeks - nJaw;
+
+  // forehead
+  for (let k = 0; k < nForehead && i < N; k++){
+    const u = rng();
+    const x = (u - 0.5) * faceW;
+    const y = foreheadH * (0.6 + rng() * 0.4);
+    const z = -0.3 + rng() * 0.2;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  // eyes
+  for (let k = 0; k < nEyes && i < N; k++){
+    const side = rng() < 0.5 ? -1 : 1;
+    const cx = side * eyeGap;
+    const cy = foreheadH * 0.6;
+    const r = 0.25;
+    const th = rng() * Math.PI * 2;
+    const rad = rng() * r;
+    const x = cx + Math.cos(th) * rad;
+    const y = cy + Math.sin(th) * rad * 0.7;
+    const z = -0.2 + rng() * 0.15;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  // nose
+  for (let k = 0; k < nNose && i < N; k++){
+    const t = rng();
+    const y = foreheadH * 0.55 - t * noseL;
+    const x = (rng() - 0.5) * 0.15;
+    const z = -0.15 + t * 0.3;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  // cheekbones
+  for (let k = 0; k < nCheeks && i < N; k++){
+    const side = rng() < 0.5 ? -1 : 1;
+    const cx = side * faceW * 0.5;
+    const cy = cheekH;
+    const x = cx + (rng() - 0.5) * 0.3;
+    const y = cy + (rng() - 0.5) * 0.4;
+    const z = -0.1 + rng() * 0.2;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  // jawline
+  for (let k = 0; k < nJaw && i < N; k++){
+    const u = rng();
+    const side = u < 0.5 ? -1 : 1;
+    const along = rng();
+    const x = side * (jawW * 0.5 - along * 0.2);
+    const y = cheekH - along * (cheekH + 0.8);
+    const z = -0.2 + rng() * 0.15;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  // chin
+  for (let k = 0; k < nChin && i < N; k++){
+    const x = (rng() - 0.5) * 0.5;
+    const y = -faceH * 0.42 + rng() * 0.3;
+    const z = -0.25 + rng() * 0.15;
+    out[i*3] = x; out[i*3+1] = y; out[i*3+2] = z; i++;
+  }
+
+  while (i < N) { out[i*3] = 0; out[i*3+1] = 0; out[i*3+2] = 0; i++; }
+  return out;
+}
+
+const N = 45000;
+const faceA = sampleFace(0xAABBCC, N);
+const faceB = sampleFace(0xDDEEFF, N);
+const faceC = sampleFace(0x112233, N);
+
+const seeds = new Float32Array(N);
+for (let i = 0; i < N; i++) seeds[i] = Math.random();
+
+// ────────────── shader with physics
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uPhase:  { value: 0 },
+  uVelX:   { value: 0.8 },
+  uVelY:   { value: 0.3 },
+  uVelZ:   { value: 0.5 },
+  uPosX:   { value: 0 },
+  uPosY:   { value: 0 },
+  uPosZ:   { value: 0 },
+  uRebound: { value: 0 }
+};
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(faceA.slice(), 3));
+geom.setAttribute('faceA',  new THREE.BufferAttribute(faceA, 3));
+geom.setAttribute('faceB',  new THREE.BufferAttribute(faceB, 3));
+geom.setAttribute('faceC',  new THREE.BufferAttribute(faceC, 3));
+geom.setAttribute('seed',   new THREE.BufferAttribute(seeds, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPhase;
+    uniform float uVelX, uVelY, uVelZ;
+    uniform float uPosX, uPosY, uPosZ;
+    uniform float uRebound;
+    attribute vec3 faceA;
+    attribute vec3 faceB;
+    attribute vec3 faceC;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      float cycle = mod(uPhase, 3.0);
+      vec3 p;
+      float mixAmt;
+      
+      if (cycle < 1.0){
+        mixAmt = cycle;
+        p = mix(faceA, faceB, smoothstep(0.0, 1.0, mixAmt));
+      } else if (cycle < 2.0){
+        mixAmt = cycle - 1.0;
+        p = mix(faceB, faceC, smoothstep(0.0, 1.0, mixAmt));
+      } else {
+        mixAmt = cycle - 2.0;
+        p = mix(faceC, faceA, smoothstep(0.0, 1.0, mixAmt));
+      }
+
+      float lag = seed * 0.4;
+      float effectiveMix = clamp(mixAmt - lag, 0.0, 1.0);
+      float jitter = (1.0 - effectiveMix) * effectiveMix * 0.08;
+      p.x += sin(uTime * 2.0 + seed * 6.28) * jitter;
+      p.y += cos(uTime * 1.8 + seed * 3.14) * jitter;
+      p.z += sin(uTime * 1.5 + seed * 9.42) * jitter * 0.5;
+
+      // apply physics offset
+      p.x += uPosX;
+      p.y += uPosY;
+      p.z += uPosZ;
+
+      // rebound squash-stretch
+      float squash = 1.0 - uRebound * 0.3;
+      float stretch = 1.0 + uRebound * 0.5;
+      p.x *= squash;
+      p.y *= squash;
+      p.z *= stretch;
+
+      // palette: sepia → rose → ink with rebound flash
+      vec3 sepia = vec3(0.72, 0.58, 0.42);
+      vec3 rose  = vec3(0.82, 0.52, 0.48);
+      vec3 ink   = vec3(0.18, 0.14, 0.12);
+      vec3 flash = vec3(0.95, 0.82, 0.65);
+      
+      float t = fract(uPhase / 3.0);
+      vec3 col1 = mix(sepia, rose, t);
+      vec3 col2 = mix(rose, ink, t);
+      vec3 baseCol = mix(col1, col2, seed);
+      vCol = mix(baseCol, flash, uRebound);
+
+      float inBetween = 1.0 - abs(effectiveMix - 0.5) * 2.0;
+      vAlpha = (0.4 + 0.6 * inBetween) * (1.0 + uRebound * 0.5);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + 0.6 * inBetween + uRebound * 1.5) * uPixel * (40.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── physics simulation
+let velX = 0.8, velY = 0.3, velZ = 0.5;
+let posX = 0, posY = 0, posZ = 0;
+const wallRadius = 6.0;
+const damping = 0.85;
+let reboundFlash = 0;
+
+// ────────────── interaction
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const genLabel = document.getElementById('genLabel');
+let accumulatedTime = 0;
+
+function loop(){
+  const dt = 1/60;
+  if (!paused) {
+    accumulatedTime += dt;
+    
+    // physics step
+    posX += velX * dt;
+    posY += velY * dt;
+    posZ += velZ * dt;
+
+    // collision detection with wall
+    const distFromCenter = Math.sqrt(posX*posX + posY*posY + posZ*posZ);
+    if (distFromCenter > wallRadius){
+      // normalize and reflect velocity
+      const nx = posX / distFromCenter;
+      const ny = posY / distFromCenter;
+      const nz = posZ / distFromCenter;
+      
+      const dot = velX * nx + velY * ny + velZ * nz;
+      velX = (velX - 2 * dot * nx) * damping;
+      velY = (velY - 2 * dot * ny) * damping;
+      velZ = (velZ - 2 * dot * nz) * damping;
+      
+      // push back inside
+      posX = nx * wallRadius;
+      posY = ny * wallRadius;
+      posZ = nz * wallRadius;
+      
+      // trigger rebound flash
+      reboundFlash = 1.0;
+    }
+  }
+  
+  // decay rebound flash
+  reboundFlash *= 0.92;
+
+  const t = accumulatedTime;
+  uniforms.uTime.value = t;
+  const phase = (t / 8.0);
+  uniforms.uPhase.value = phase;
+  
+  uniforms.uVelX.value = velX;
+  uniforms.uVelY.value = velY;
+  uniforms.uVelZ.value = velZ;
+  uniforms.uPosX.value = posX;
+  uniforms.uPosY.value = posY;
+  uniforms.uPosZ.value = posZ;
+  uniforms.uRebound.value = reboundFlash;
+
+  const cycle = Math.floor(phase) % 3;
+  const frac = phase % 1.0;
+  let label = '';
+  if (cycle === 0){
+    label = frac < 0.5 ? 'great-grandparent' : 'becoming grandparent';
+  } else if (cycle === 1){
+    label = frac < 0.5 ? 'grandparent' : 'becoming self';
+  } else {
+    label = frac < 0.5 ? 'self' : 'becoming ancestor';
+  }
+  genLabel.textContent = label;
+
+  // camera follows centroid
+  camera.position.x = posX * 0.6;
+  camera.position.y = posY * 0.6;
+  camera.position.z = 12 + posZ * 0.6;
+  camera.lookAt(posX, posY, posZ);
+
+  controls.target.set(posX, posY, posZ);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
