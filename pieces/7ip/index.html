@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7ip · the house that builds itself and forgets</title>
+<!-- MOTION: assembly, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background: #0a0a0e;
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size: 10px; letter-spacing: 0.06em;
+          color: #8a9ba8; }
+</style>
+</head>
+<body>
+<div class="id">7ip · the house that builds itself and forgets</div>
+<div class="hint">no input — one room assembles, another collapses. informal architecture.</div>
+<div class="src">descended from sav · AUTO{}Construccion (CNDSD+Abreu) · voxel grammar</div>
+<div class="arc" id="arc">foundation · 0 blocks</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// CNDSD & Abreu: informal housing as speculative architecture. Rooms self-assemble
+// from voxel primitives following stochastic L-system rules, then dissolve when
+// the structure reaches capacity — one room always building, one always falling.
+//
+// NARRATIVE ARC: FOUNDATION → WALLS → ROOF → COLLAPSE (cycling per room unit)
+// Each room is a 4×3×3 grid of cubes. The L-system decides which cubes to place
+// (walls, floor, ceiling) and which to leave as void (windows, doorways). Assembly
+// happens bottom-up; collapse happens gravity-driven top-down.
+//
+// PALETTE: rebar gray (#4a4a52), cinder block (#6a6a72), concrete dust (#8a8a92),
+// neon code-flash accent (#00ffaa) on newly-placed blocks that fades over 0.8s.
+//
+// ATMOSPHERIC TEXTURE: volumetric dust motes (50 tiny particles drifting through
+// the scene), slight paper-grain noise overlay in fragment shader, horizontal
+// ground plane with subtle grid to anchor the floating architecture.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0a0a0e, 8, 42);
+const camera = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(12, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0e, 1);
+document.body.appendChild(renderer.domElement);
+
+// Ground plane — dim grid
+const groundGeom = new THREE.PlaneGeometry(60, 60, 30, 30);
+groundGeom.rotateX(-Math.PI / 2);
+const groundMat = new THREE.MeshBasicMaterial({
+  color: 0x1a1a1e, wireframe: true, transparent: true, opacity: 0.08
+});
+const ground = new THREE.Mesh(groundGeom, groundMat);
+scene.add(ground);
+
+// Dust motes — atmospheric texture
+const dustCount = 50;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+const dustVel = new Float32Array(dustCount * 3);
+for (let i = 0; i < dustCount; i++){
+  dustPos[i*3]     = (Math.random() - 0.5) * 28;
+  dustPos[i*3 + 1] = Math.random() * 12;
+  dustPos[i*3 + 2] = (Math.random() - 0.5) * 28;
+  dustVel[i*3]     = (Math.random() - 0.5) * 0.04;
+  dustVel[i*3 + 1] = -Math.random() * 0.02;
+  dustVel[i*3 + 2] = (Math.random() - 0.5) * 0.04;
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({
+  color: 0x8a8a92, size: 0.15, transparent: true, opacity: 0.12, fog: true
+});
+const dustPoints = new THREE.Points(dustGeom, dustMat);
+scene.add(dustPoints);
+
+// Lighting — single point light at construction site, ambient low
+const ambient = new THREE.AmbientLight(0x3a3a42, 0.35);
+scene.add(ambient);
+const buildLight = new THREE.PointLight(0x00ffaa, 1.2, 18);
+buildLight.position.set(0, 5, 0);
+scene.add(buildLight);
+
+// ────────────── voxel grammar state
+const BLOCK_SIZE = 0.8;
+const ROOM_W = 4, ROOM_H = 3, ROOM_D = 3;
+const MAX_ROOMS = 3;
+const rooms = [];
+
+class Room {
+  constructor(id, originX, originZ){
+    this.id = id;
+    this.originX = originX;
+    this.originZ = originZ;
+    this.blocks = [];  // {x,y,z, cube, state:'building'|'built'|'falling', age, fallVel}
+    this.stage = 'foundation';  // foundation | walls | roof | collapse
+    this.buildIndex = 0;
+    this.rule = this.generateRule();
+    this.lastBuildT = 0;
+    this.collapseStarted = false;
+  }
+  generateRule(){
+    // L-system-like rule: decide which voxels to place.
+    // floor: full, walls: sparse (60% fill), roof: partial (40% fill)
+    const rule = [];
+    for (let y = 0; y < ROOM_H; y++){
+      for (let z = 0; z < ROOM_D; z++){
+        for (let x = 0; x < ROOM_W; x++){
+          let place = false;
+          if (y === 0) place = true;  // floor always full
+          else if (y === ROOM_H - 1){  // roof: 40% sparse
+            place = Math.random() < 0.4;
+          } else {  // walls: edges mostly, interior rarely
+            const isEdge = (x === 0 || x === ROOM_W - 1 || z === 0 || z === ROOM_D - 1);
+            if (isEdge) place = Math.random() < 0.6;
+            else place = Math.random() < 0.05;
+          }
+          if (place) rule.push({x, y, z});
+        }
+      }
+    }
+    // sort bottom-up for assembly
+    rule.sort((a,b) => a.y - b.y);
+    return rule;
+  }
+  update(dt, now){
+    if (this.stage === 'collapse'){
+      // gravity-driven fall
+      this.blocks.forEach(b => {
+        if (b.state === 'falling'){
+          b.fallVel += -9.8 * dt;
+          b.cube.position.y += b.fallVel * dt;
+          if (b.cube.position.y < -2){
+            scene.remove(b.cube);
+            b.state = 'removed';
+          }
+        }
+      });
+      if (this.blocks.every(b => b.state === 'removed')){
+        this.remove();
+        return true;  // signal removal
+      }
+      return false;
+    }
+
+    // building phase
+    if (this.buildIndex < this.rule.length && now - this.lastBuildT > 0.12){
+      const v = this.rule[this.buildIndex];
+      const wx = this.originX + v.x * BLOCK_SIZE;
+      const wy = v.y * BLOCK_SIZE + BLOCK_SIZE * 0.5;
+      const wz = this.originZ + v.z * BLOCK_SIZE;
+      const geom = new THREE.BoxGeometry(BLOCK_SIZE * 0.92, BLOCK_SIZE * 0.92, BLOCK_SIZE * 0.92);
+      const mat = new THREE.MeshLambertMaterial({ color: 0x6a6a72, fog: true });
+      const cube = new THREE.Mesh(geom, mat);
+      cube.position.set(wx, wy, wz);
+      scene.add(cube);
+      this.blocks.push({
+        x: v.x, y: v.y, z: v.z, cube, state: 'building', age: 0, fallVel: 0
+      });
+      this.buildIndex++;
+      this.lastBuildT = now;
+      buildLight.position.set(wx, wy + 1.5, wz);
+      // stage tracking
+      if (v.y === 0 && this.stage === 'foundation') this.stage = 'foundation';
+      else if (v.y > 0 && v.y < ROOM_H - 1 && this.stage !== 'roof') this.stage = 'walls';
+      else if (v.y === ROOM_H - 1) this.stage = 'roof';
+    }
+    if (this.buildIndex >= this.rule.length && this.stage !== 'collapse'){
+      this.stage = 'collapse';
+      // start collapse — top-down
+      const sorted = this.blocks.slice().sort((a,b) => b.y - a.y);
+      sorted.forEach((b, i) => {
+        setTimeout(() => { b.state = 'falling'; b.fallVel = 0; }, i * 60);
+      });
+      this.collapseStarted = true;
+    }
+    // age & color fade
+    this.blocks.forEach(b => {
+      if (b.state === 'building'){
+        b.age += dt;
+        const flash = Math.max(0, 1.0 - b.age / 0.8);
+        const base = new THREE.Color(0x6a6a72);
+        const accent = new THREE.Color(0x00ffaa);
+        b.cube.material.color.lerpColors(accent, base, 1.0 - flash);
+        if (b.age > 0.8) b.state = 'built';
+      }
+    });
+    return false;
+  }
+  remove(){
+    this.blocks.forEach(b => {
+      if (b.cube && b.cube.parent) scene.remove(b.cube);
+    });
+  }
+}
+
+let nextRoomId = 0;
+function spawnRoom(){
+  const offset = (rooms.length % 3) * (ROOM_W * BLOCK_SIZE + 1.5);
+  const originX = -5 + offset;
+  const originZ = 0;
+  const room = new Room(nextRoomId++, originX, originZ);
+  rooms.push(room);
+}
+
+// Initial rooms
+spawnRoom();
+
+const arcEl = document.getElementById('arc');
+let lastSpawnCheck = 0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now() / 1000;
+  const dt = Math.min(0.05, (now * 1000 - lastT) / 1000);
+  lastT = now * 1000;
+
+  // dust drift
+  for (let i = 0; i < dustCount; i++){
+    dustPos[i*3]     += dustVel[i*3];
+    dustPos[i*3 + 1] += dustVel[i*3 + 1];
+    dustPos[i*3 + 2] += dustVel[i*3 + 2];
+    if (dustPos[i*3 + 1] < 0){
+      dustPos[i*3 + 1] = 12;
+      dustPos[i*3] = (Math.random() - 0.5) * 28;
+      dustPos[i*3 + 2] = (Math.random() - 0.5) * 28;
+    }
+  }
+  dustGeom.attributes.position.needsUpdate = true;
+
+  // room updates
+  for (let i = rooms.length - 1; i >= 0; i--){
+    const removed = rooms[i].update(dt, now);
+    if (removed) rooms.splice(i, 1);
+  }
+
+  // spawn new room when under capacity
+  if (rooms.length < MAX_ROOMS && now - lastSpawnCheck > 2.5){
+    spawnRoom();
+    lastSpawnCheck = now;
+  }
+
+  // arc display
+  const totalBlocks = rooms.reduce((sum, r) => sum + r.blocks.length, 0);
+  const activeStage = rooms.length > 0 ? rooms[rooms.length - 1].stage : 'idle';
+  arcEl.textContent = `${activeStage} · ${totalBlocks} blocks`;
+
+  // camera slow orbit around construction site
+  const ang = now * 0.08;
+  const rad = 14 + Math.sin(now * 0.3) * 2;
+  camera.position.x = Math.sin(ang) * rad;
+  camera.position.z = Math.cos(ang) * rad;
+  camera.position.y = 8 + Math.sin(now * 0.2) * 1.5;
+  camera.lookAt(0, 2, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
