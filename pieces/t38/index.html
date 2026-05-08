@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>t38 · collective attractor · shared orbit field</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0c12; overflow:hidden;
+               color:#cfe1d4; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .peers { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size: 11px; letter-spacing: 0.08em; }
+  .src   { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">t38 · collective attractor</div>
+<div class="hint">shared orbit field · each viewer warps the basin</div>
+<div class="peers" id="peers">1 peer online</div>
+<div class="src">100k GPGPU · relational substrate</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Bourriaud RELATIONAL AESTHETICS implementation:
+// Each browser tab is a peer in a shared attractor basin. Tabs communicate via
+// BroadcastChannel API (same-origin, same-machine). Each peer broadcasts its
+// camera orbit angle every 200ms. All peers receive all angles and use them to
+// perturb the Lorenz attractor parameters — the system is COLLECTIVELY shaped.
+// When alone, the attractor is stable; as more peers join, their angles create
+// interference patterns in the parameter space. The work IS the social field.
+
+const W = 320, H = 320, N = W * H;
+
+const channel = new BroadcastChannel('attractor_collective');
+const sessionId = Math.random().toString(36).slice(2, 8);
+const peerAngles = new Map(); // map sessionId -> angle
+peerAngles.set(sessionId, 0);
+
+let lastBroadcast = 0;
+const BROADCAST_INTERVAL = 200;
+
+channel.onmessage = (e) => {
+  if (e.data.type === 'orbit' && e.data.id !== sessionId) {
+    peerAngles.set(e.data.id, e.data.angle);
+    peerAngles.set(e.data.id + '_t', Date.now());
+  }
+};
+
+// clean stale peers (no message in 3s)
+setInterval(() => {
+  const now = Date.now();
+  for (let [k, v] of peerAngles.entries()) {
+    if (k.endsWith('_t') && now - v > 3000) {
+      const id = k.replace('_t', '');
+      peerAngles.delete(id);
+      peerAngles.delete(k);
+    }
+  }
+  updatePeerCount();
+}, 1000);
+
+const peersEl = document.getElementById('peers');
+function updatePeerCount() {
+  const count = Array.from(peerAngles.keys()).filter(k => !k.endsWith('_t')).length;
+  peersEl.textContent = `${count} peer${count !== 1 ? 's' : ''} online`;
+}
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0c12, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+function makeInitTexture() {
+  const init = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++) {
+    init[i*4]   = (Math.random() - 0.5) * 8;
+    init[i*4+1] = (Math.random() - 0.5) * 8;
+    init[i*4+2] = 20 + (Math.random() - 0.5) * 8;
+    init[i*4+3] = Math.random();
+  }
+  const t = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+  t.needsUpdate = true;
+  return t;
+}
+
+const camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: makeInitTexture() } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), blitMat));
+
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(rtB); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// Lorenz with peer-modulated parameters
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.0 },
+  uSigma: { value: 10.0 },
+  uRho: { value: 28.0 },
+  uBeta: { value: 8.0 / 3.0 }
+};
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uSigma, uRho, uBeta;
+    varying vec2 vUv;
+
+    vec3 lorenz(vec3 p) {
+      return vec3(
+        uSigma * (p.y - p.x),
+        p.x * (uRho - p.z) - p.y,
+        p.x * p.y - uBeta * p.z
+      );
+    }
+
+    void main() {
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      vec3 dp = lorenz(p);
+      p += dp * uDt * 0.15;
+      age = mod(age + uDt * 0.06, 1.0);
+
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), simMat));
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0c12, 0.045);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 50);
+camera.position.set(0, 0.6, 5);
+camera.lookAt(0, 0, 0);
+
+// connection lines between peer-influenced parameter points
+const lineMat = new THREE.LineBasicMaterial({ 
+  color: 0x3a4f5a, 
+  transparent: true, 
+  opacity: 0.15,
+  blending: THREE.AdditiveBlending
+});
+const lineGeom = new THREE.BufferGeometry();
+const maxLines = 20;
+const linePositions = new Float32Array(maxLines * 6);
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+lineGeom.setDrawRange(0, 0);
+const connectionLines = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(connectionLines);
+
+// points
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) {
+  for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    idxArr[i*2] = (x + 0.5) / W;
+    idxArr[i*2+1] = (y + 0.5) / H;
+  }
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state: { value: rtA.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uPalA: { value: new THREE.Vector3(0.15, 0.28, 0.62) },
+    uPalB: { value: new THREE.Vector3(0.68, 0.35, 0.58) },
+    uPalC: { value: new THREE.Vector3(0.92, 0.88, 0.95) },
+    uPeerInfluence: { value: 0.0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform vec3 uPalA, uPalB, uPalC;
+    uniform float uPeerInfluence;
+    attribute vec2 uvIdx;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogDepth;
+    
+    void main() {
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      vec3 disp = p / 25.0;
+      
+      float k = mod(age, 1.0);
+      vec3 col = mix(uPalA, uPalB, smoothstep(0.0, 0.5, k));
+      col = mix(col, uPalC, smoothstep(0.5, 1.0, k));
+      
+      float influence = smoothstep(0.0, 5.0, uPeerInfluence);
+      col = mix(col, col * 1.3 + vec3(0.1, 0.05, 0.15), influence * 0.4);
+      vCol = col;
+      vAlpha = 1.0;
+
+      vec4 mv = modelViewMatrix * vec4(disp, 1.0);
+      vFogDepth = -mv.z;
+      gl_PointSize = (2.0 + influence * 1.2) * uPixel * (3.0 / vFogDepth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogDepth;
+    
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0);
+      
+      float fogF = 1.0 - exp(-0.003 * vFogDepth * vFogDepth);
+      vec3 col = mix(vCol, vec3(0.039, 0.047, 0.071), fogF);
+      
+      gl_FragColor = vec4(col * a * vAlpha, a * vAlpha);
+    }
+  `
+});
+
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// ambient light markers for each peer influence point
+const markerGeom = new THREE.SphereGeometry(0.08, 12, 8);
+const markerMat = new THREE.MeshBasicMaterial({ 
+  color: 0x5a7f92, 
+  transparent: true, 
+  opacity: 0.4,
+  blending: THREE.AdditiveBlending
+});
+const markers = [];
+for (let i = 0; i < 8; i++) {
+  const m = new THREE.Mesh(markerGeom, markerMat.clone());
+  m.visible = false;
+  scene.add(m);
+  markers.push(m);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+let myAngle = 0;
+
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+
+  myAngle += dt * 0.18;
+  peerAngles.set(sessionId, myAngle);
+
+  if (now - lastBroadcast > BROADCAST_INTERVAL) {
+    channel.postMessage({ type: 'orbit', id: sessionId, angle: myAngle });
+    lastBroadcast = now;
+  }
+
+  // compute peer-influenced Lorenz parameters
+  const angles = Array.from(peerAngles.entries())
+    .filter(([k]) => !k.endsWith('_t'))
+    .map(([_, a]) => a);
+  
+  let sigmaSum = 0, rhoSum = 0, betaSum = 0;
+  angles.forEach((a, i) => {
+    sigmaSum += Math.sin(a * 1.3 + i * 0.7) * 2.0;
+    rhoSum += Math.cos(a * 0.9 + i * 1.1) * 4.0;
+    betaSum += Math.sin(a * 1.7 + i * 0.5) * 0.6;
+  });
+
+  const peerCount = angles.length;
+  const influence = Math.max(0, peerCount - 1);
+  
+  simUniforms.uSigma.value = 10.0 + sigmaSum / peerCount;
+  simUniforms.uRho.value = 28.0 + rhoSum / peerCount;
+  simUniforms.uBeta.value = 8.0 / 3.0 + betaSum / peerCount;
+  simUniforms.uDt.value = dt;
+  
+  pointsMat.uniforms.uPeerInfluence.value = influence;
+
+  // update connection lines between parameter influence points
+  const positions = lineGeom.attributes.position.array;
+  let lineIdx = 0;
+  
+  for (let i = 0; i < Math.min(angles.length, 8); i++) {
+    const a = angles[i];
+    const x = Math.sin(a * 1.3) * 2.5;
+    const y = Math.cos(a * 0.9) * 1.8;
+    const z = Math.sin(a * 1.7) * 2.0;
+    
+    markers[i].visible = true;
+    markers[i].position.set(x, y, z);
+    markers[i].material.opacity = 0.3 + Math.sin(now * 0.002 + i) * 0.1;
+    
+    for (let j = i + 1; j < Math.min(angles.length, 8); j++) {
+      if (lineIdx >= maxLines) break;
+      const b = angles[j];
+      const x2 = Math.sin(b * 1.3) * 2.5;
+      const y2 = Math.cos(b * 0.9) * 1.8;
+      const z2 = Math.sin(b * 1.7) * 2.0;
+      
+      positions[lineIdx * 6] = x;
+      positions[lineIdx * 6 + 1] = y;
+      positions[lineIdx * 6 + 2] = z;
+      positions[lineIdx * 6 + 3] = x2;
+      positions[lineIdx * 6 + 4] = y2;
+      positions[lineIdx * 6 + 5] = z2;
+      lineIdx++;
+    }
+  }
+  
+  for (let i = angles.length; i < 8; i++) {
+    markers[i].visible = false;
+  }
+  
+  lineGeom.attributes.position.needsUpdate = true;
+  lineGeom.setDrawRange(0, lineIdx * 2);
+
+  // sim 4 substeps
+  for (let i = 0; i < 4; i++) {
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+
+  camera.position.x = Math.sin(myAngle) * 5;
+  camera.position.z = Math.cos(myAngle) * 5;
+  camera.position.y = Math.sin(myAngle * 0.7) * 1.0;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
