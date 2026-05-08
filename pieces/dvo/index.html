@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dvo · ocean graphite field</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0c0e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">dvo</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Vija Celmins: obsessive graphite ocean surfaces, each mark deliberate.
+// Take the aizawa attractor field but collapse it into a horizontal plane,
+// render as monochrome graphite marks, slowly tumbling like studying a drawing.
+// No color, just density gradients — watery surface mapped as if hand-drawn.
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0c0e, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// init: scatter particles in ocean-like plane
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 0.6;
+  init[i*4+1] = (Math.random()*2-1) * 0.6;
+  init[i*4+2] = (Math.random()*2-1) * 0.6;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.008 },
+  uA:  { value: 0.95 },
+  uB:  { value: 0.70 },
+  uC:  { value: 0.60 },
+  uD:  { value: 3.50 },
+  uE:  { value: 0.25 },
+  uF:  { value: 0.10 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vec3 dp = vec3(
+        (p.z - uB) * p.x - uD * p.y,
+        uD * p.x + (p.z - uB) * p.y,
+        uC + uA * p.z - (p.z * p.z * p.z) / 3.0
+              - (p.x * p.x + p.y * p.y) * (1.0 + uE * p.z)
+              + uF * p.z * p.x * p.x * p.x
+      );
+      p += dp * uDt;
+      // collapse z toward plane, keep x-y flow
+      p.z *= 0.96;
+      age = mod(age + uDt * 0.04, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// render points
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, innerWidth/innerHeight, 0.1, 50);
+camera.position.set(0, 3.5, 0);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uTime;
+    attribute vec2 uvIdx;
+    varying float vDensity;
+    varying float vAge;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      
+      // density from local clustering — sample neighbors
+      float d = 0.0;
+      for(float dy = -1.0; dy <= 1.0; dy += 1.0){
+        for(float dx = -1.0; dx <= 1.0; dx += 1.0){
+          vec2 off = vec2(dx, dy) / vec2(320.0, 320.0);
+          vec4 ns = texture2D(state, uvIdx + off);
+          d += length(ns.xyz - p) < 0.3 ? 1.0 : 0.0;
+        }
+      }
+      vDensity = d / 9.0;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (0.8 + vDensity * 1.2) * uPixel * (12.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDensity;
+    varying float vAge;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      
+      // graphite mark: dense core, soft falloff
+      float core = exp(-r * 20.0);
+      float halo = exp(-r * 6.0);
+      float mark = core * 0.7 + halo * 0.3;
+      
+      // luminance from density — dark where dense (graphite accumulation)
+      float lum = 0.15 + (1.0 - vDensity) * 0.25;
+      vec3 graphite = vec3(lum);
+      
+      float alpha = mark * (0.25 + vDensity * 0.4);
+      gl_FragColor = vec4(graphite, alpha);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// add subtle fog
+scene.fog = new THREE.Fog(0x0a0c0e, 4, 12);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// track centroid for camera
+let centroid = new THREE.Vector3(0,0,0);
+
+let t0 = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  for (let i = 0; i < 3; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = elapsed;
+
+  // very slow orbit — Celmins studies one surface for months
+  const ang = elapsed * 0.06;
+  camera.position.x = Math.sin(ang) * 4.5;
+  camera.position.z = Math.cos(ang) * 4.5;
+  camera.position.y = 3.5 + Math.sin(ang * 0.3) * 0.8;
+  
+  // track centroid
+  centroid.lerp(new THREE.Vector3(0, 0, 0), 0.02);
+  camera.lookAt(centroid);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
