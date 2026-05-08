@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: pulse, intensity: gentle -->
+<title>tk5 · Fidenza vascular leaves on parchment</title>
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+body {
+  background:
+    radial-gradient(ellipse at 32% 38%, #faf2dd 0%, #ecdcb6 38%, #c5a571 78%, #6e4926 100%),
+    #6e4926;
+  background-blend-mode: normal;
+  color: #2a1a08; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.18  0 0 0 0 0.10  0 0 0 0 0.04  0 0 0 0.32 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/></svg>");
+  mix-blend-mode: multiply; opacity: 0.50;
+}
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+  background: radial-gradient(ellipse 90% 80% at 18% 20%, rgba(255,238,195,0.32), rgba(255,238,195,0) 55%);
+  mix-blend-mode: screen;
+}
+canvas { display:block; position: relative; z-index: 0; }
+.id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; font-family:ui-monospace,monospace; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">tk5</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Tyler Hobbs — Fidenza: non-overlapping flow curves rendered as leaf-particles
+// on the inherited parchment/grain/dust atmosphere from ere.
+// Biomorphic motion: peristaltic pulse along each curve, slow tidal breathing.
+// Leaf-as-unit: each particle is a leaf-shaped mark oriented along flow.
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0.3, 12);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+/* ── noise for flow field ── */
+function hash2(x, y) {
+  let h = (x * 374761393 + y * 668265263) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function smooth(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = x - ix, fy = y - iy;
+  const sx = fx*fx*(3-2*fx), sy = fy*fy*(3-2*fy);
+  const a = hash2(ix,iy), b = hash2(ix+1,iy);
+  const c = hash2(ix,iy+1), d = hash2(ix+1,iy+1);
+  return a+(b-a)*sx+(c-a)*sy+(a-b-c+d)*sx*sy;
+}
+function fbm(x, y) {
+  return smooth(x,y)*0.5 + smooth(x*2.03,y*2.03)*0.25
+       + smooth(x*4.01,y*4.01)*0.125 + smooth(x*8.02,y*8.02)*0.0625;
+}
+function flowAngle(x, y, off) {
+  return fbm(x*0.32 + off, y*0.32 + off*0.7 + 3.1) * Math.PI * 4.5;
+}
+
+/* ── collision grid ── */
+const GR = 240, FM = -5, FS = 10, CELL = FS/GR;
+let grid;
+function resetGrid() { grid = new Uint8Array(GR*GR); }
+function mark(x, y, rad) {
+  const r = Math.ceil(rad/CELL)+1;
+  const gx = ((x-FM)/CELL)|0, gy = ((y-FM)/CELL)|0;
+  for (let dy=-r; dy<=r; dy++) for (let dx=-r; dx<=r; dx++) {
+    const cx=gx+dx, cy=gy+dy;
+    if (cx>=0&&cx<GR&&cy>=0&&cy<GR) grid[cy*GR+cx]=1;
+  }
+}
+function blocked(x, y, rad) {
+  const r = Math.ceil(rad/CELL)+1;
+  const gx = ((x-FM)/CELL)|0, gy = ((y-FM)/CELL)|0;
+  for (let dy=-r; dy<=r; dy++) for (let dx=-r; dx<=r; dx++) {
+    const cx=gx+dx, cy=gy+dy;
+    if (cx>=0&&cx<GR&&cy>=0&&cy<GR && grid[cy*GR+cx]) return true;
+  }
+  return false;
+}
+
+/* ── palette: Fidenza Luxe + inherited warm earth ── */
+const PAL = [
+  [0.11,0.06,0.03], // deep umber
+  [0.38,0.19,0.08], // burnt sienna
+  [0.55,0.38,0.22], // ochre
+  [0.68,0.54,0.34], // raw sienna
+  [0.32,0.29,0.22], // warm gray-olive
+  [0.48,0.34,0.28], // dusty mauve
+  [0.24,0.26,0.18], // sage
+];
+
+/* ── rng ── */
+let rSeed;
+function rng() {
+  rSeed = (rSeed * 16807 + 0) % 2147483647;
+  return rSeed / 2147483647;
+}
+
+/* ── generate streamlines ── */
+let allPts, curveCount;
+function generate(seed) {
+  rSeed = seed;
+  resetGrid();
+  allPts = [];
+  curveCount = 0;
+  const foff = rng() * 100;
+  const STEP = 0.028;
+  const attempts = 900;
+
+  for (let a = 0; a < attempts; a++) {
+    const sx = FM + rng()*FS, sy = FM + rng()*FS;
+    const ci = (rng()*PAL.length)|0;
+    const bw = 0.10 + rng()*0.22; // base half-width
+
+    if (blocked(sx, sy, bw*0.6)) continue;
+
+    // trace both directions
+    const fwd = [], bwd = [];
+    for (const dir of [1, -1]) {
+      const seg = dir===1 ? fwd : bwd;
+      let x=sx, y=sy;
+      for (let i=0; i<220; i++) {
+        if (x<FM||x>FM+FS||y<FM||y>FM+FS) break;
+        if (i>0 && blocked(x,y,bw*0.5)) break;
+        const ang = flowAngle(x, y, foff);
+        const tx = Math.cos(ang)*dir, ty = Math.sin(ang)*dir;
+        seg.push({x,y,tx,ty});
+        mark(x, y, bw*0.55);
+        x += tx*STEP; y += ty*STEP;
+      }
+    }
+    bwd.reverse();
+    const full = bwd.concat(fwd);
+    if (full.length < 18) continue;
+
+    const L = full.length;
+    for (let i=0; i<L; i++) {
+      const t01 = i/L;
+      // pressure: taper at ends, slight scallop mid-stroke
+      const env = Math.sin(t01*Math.PI);
+      const scallop = 0.7 + 0.3*Math.sin(t01*Math.PI*2.5 + rng()*2);
+      const w = bw * env * scallop;
+      allPts.push({
+        x: full[i].x, y: full[i].y,
+        tx: full[i].tx, ty: full[i].ty,
+        w, ci, t01, cid: curveCount, s: rng()
+      });
+    }
+    curveCount++;
+  }
+}
+generate(7654321);
+
+/* ── build geometry ── */
+let geom, points;
+function buildGeometry() {
+  if (geom) geom.dispose();
+  const N = allPts.length;
+  const pos = new Float32Array(N*3);
+  const tan = new Float32Array(N*2);
+  const col = new Float32Array(N*3);
+  const prm = new Float32Array(N*4);
+
+  for (let i=0; i<N; i++) {
+    const p = allPts[i];
+    pos[i*3]=p.x; pos[i*3+1]=0; pos[i*3+2]=p.y;
+    tan[i*2]=p.tx; tan[i*2+1]=p.ty;
+    const c=PAL[p.ci];
+    col[i*3]=c[0]; col[i*3+1]=c[1]; col[i*3+2]=c[2];
+    prm[i*4]=p.w; prm[i*4+1]=p.t01;
+    prm[i*4+2]=p.cid/(curveCount||1); prm[i*4+3]=p.s;
+  }
+  geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  geom.setAttribute('tan2', new THREE.BufferAttribute(tan,2));
+  geom.setAttribute('color', new THREE.BufferAttribute(col,3));
+  geom.setAttribute('prm', new THREE.BufferAttribute(prm,4));
+  if (points) { scene.remove(points); points.material.dispose(); }
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: ufs,
+    transparent: true, depthWrite: false,
+    blending: THREE.NormalBlending,
+    vertexShader: `
+      uniform float uTime, uPx;
+      uniform vec2 uPtr;
+      attribute vec2 tan2;
+      attribute vec4 prm;
+      varying vec3 vCol;
+      varying float vA;
+      varying vec2 vT;
+      void main(){
+        vec3 p = position;
+        float w = prm.x, ct = prm.y, cid = prm.z, sd = prm.w;
+        // biomorphic peristaltic wave — travels along each curve
+        float wave = sin(ct*18.0 - uTime*0.7 + cid*23.0)*0.25;
+        // slow tidal breathing per curve
+        float breath = sin(uTime*0.25 + cid*7.3)*0.12;
+        float wMod = w * (1.0 + wave*0.35 + breath);
+        // gentle pointer tilt
+        float tx = uPtr.y*0.12, tz = -uPtr.x*0.12;
+        float ca=cos(tx),sa=sin(tx),cb=cos(tz),sb=sin(tz);
+        vec3 q = vec3(p.x, p.y*ca - p.z*sa, p.y*sa + p.z*ca);
+        q = vec3(q.x*cb - q.y*sb, q.x*sb + q.y*cb, q.z);
+        // subtle relief — thicker strokes rise
+        q.y += wMod*0.25 + wave*0.04;
+        vec4 mv = modelViewMatrix * vec4(q,1.0);
+        float depth = -mv.z;
+        gl_PointSize = max(wMod * uPx * (550.0/depth), 1.0);
+        gl_Position = projectionMatrix * mv;
+        vCol = color;
+        float fade = smoothstep(0.0,0.06,ct)*smoothstep(1.0,0.94,ct);
+        vA = fade * 0.88;
+        vT = tan2;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vCol;
+      varying float vA;
+      varying vec2 vT;
+      void main(){
+        vec2 d = gl_PointCoord - 0.5;
+        // leaf-shaped: elongate along flow tangent
+        vec2 t = normalize(vT);
+        vec2 n = vec2(-t.y, t.x);
+        float al = dot(d,t);
+        float ac = dot(d,n);
+        // leaf profile: long along flow, narrow across, slight asymmetry
+        float lr = al*al*1.8 + ac*ac*9.0 + al*ac*0.4;
+        if (lr > 0.22) discard;
+        float a = exp(-lr*14.0);
+        // warm haze toward parchment
+        vec3 c = mix(vCol, vec3(0.82,0.75,0.58), 0.06);
+        gl_FragColor = vec4(c, a * vA);
+      }
+    `
+  });
+  points = new THREE.Points(geom, mat);
+  scene.add(points);
+}
+
+const ufs = {
+  uTime: {value:0}, uPx: {value: renderer.getPixelRatio()},
+  uPtr: {value: new THREE.Vector2(0,0)}
+};
+buildGeometry();
+
+/* ── dust motes (inherited) ── */
+const ND = 200;
+const dg = new THREE.BufferGeometry();
+const dp = new Float32Array(ND*3), ds = new Float32Array(ND);
+for (let i=0;i<ND;i++){
+  dp[i*3]=(Math.random()-0.5)*14;
+  dp[i*3+1]=(Math.random()-0.5)*8;
+  dp[i*3+2]=(Math.random()-0.5)*8;
+  ds[i]=Math.random();
+}
+dg.setAttribute('position',new THREE.BufferAttribute(dp,3));
+dg.setAttribute('seed',new THREE.BufferAttribute(ds,1));
+scene.add(new THREE.Points(dg, new THREE.ShaderMaterial({
+  uniforms:{uTime:ufs.uTime, uPx:ufs.uPx},
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime, uPx;
+    attribute float seed;
+    varying float vG;
+    void main(){
+      vec3 p=position;
+      float t=uTime*0.10+seed*6.28;
+      p.x+=sin(t*1.3+seed*30.0)*0.4;
+      p.y-=mod(uTime*0.08+seed*7.0,4.0)-2.0;
+      p.z+=cos(t*1.1+seed*22.0)*0.3;
+      vG=clamp(0.30+0.55*smoothstep(-0.2,0.6,-p.x/7.0+p.y/4.0),0.0,1.0);
+      vec4 mv=modelViewMatrix*vec4(p,1.0);
+      gl_PointSize=(1.0+1.4*vG)*uPx*(4.0/-mv.z);
+      gl_Position=projectionMatrix*mv;
+    }`,
+  fragmentShader:`
+    varying float vG;
+    void main(){
+      vec2 d=gl_PointCoord-0.5;
+      float r=dot(d,d);
+      if(r>0.25)discard;
+      gl_FragColor=vec4(vec3(1.0,0.94,0.78)*vG, exp(-r*24.0)*0.7*vG);
+    }`
+})));
+
+/* ── interaction ── */
+addEventListener('pointermove', e => {
+  ufs.uPtr.value.set((e.clientX/innerWidth)*2-1,(e.clientY/innerHeight)*2-1);
+});
+addEventListener('click', () => {
+  generate((Math.random()*2147483647)|0);
+  buildGeometry();
+});
+addEventListener('resize', () => {
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+/* ── render loop ── */
+const t0 = performance.now();
+(function loop(){
+  const t = (performance.now()-t0)/1000;
+  ufs.uTime.value = t;
+  camera.position.x = Math.sin(t*0.04)*0.3;
+  camera.position.y = 0.3 + Math.sin(t*0.03+1.0)*0.2;
+  camera.position.z = 12 + Math.sin(t*0.025)*0.3;
+  camera.lookAt(0,0,0);
+  renderer.render(scene,camera);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
