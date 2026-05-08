@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: morph, intensity: gentle -->
+<title>2hf · living archive · coral latent drift</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#041a1a; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">2hf</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x04191a);
+scene.fog = new THREE.FogExp2(0x062a2c, 0.045);
+
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 6, 18);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 3, 0);
+controls.minDistance = 6;
+controls.maxDistance = 30;
+
+// Lighting — warm from above, cold teal from below
+const keyLight = new THREE.DirectionalLight(0xffe4c4, 0.7);
+keyLight.position.set(4, 12, 3);
+scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0x1a8a8a, 0.4);
+fillLight.position.set(-3, -2, -4);
+scene.add(fillLight);
+scene.add(new THREE.AmbientLight(0x1a3535, 0.5));
+const rimLight = new THREE.PointLight(0xff7766, 0.3, 30);
+rimLight.position.set(-6, 8, -5);
+scene.add(rimLight);
+
+// ── Perlin-like noise (simplex 3D hash)
+function hash3(x,y,z){
+  let h = x*127.1+y*311.7+z*74.7;
+  h = Math.sin(h)*43758.5453;
+  return h - Math.floor(h);
+}
+function smoothNoise(x,y,z){
+  const ix=Math.floor(x), iy=Math.floor(y), iz=Math.floor(z);
+  const fx=x-ix, fy=y-iy, fz=z-iz;
+  const sx=fx*fx*(3-2*fx), sy=fy*fy*(3-2*fy), sz=fz*fz*(3-2*fz);
+  const a=hash3(ix,iy,iz), b=hash3(ix+1,iy,iz);
+  const c=hash3(ix,iy+1,iz), d=hash3(ix+1,iy+1,iz);
+  const e=hash3(ix,iy,iz+1), f=hash3(ix+1,iy,iz+1);
+  const g=hash3(ix,iy+1,iz+1), h=hash3(ix+1,iy+1,iz+1);
+  return a+(b-a)*sx + (c-a+(a-b-c+d)*sx)*sy +
+    ((e-a+(a-b-e+f)*sx) + (g-e-c+a+(c-a-g+e+b-a+d-c-f+e+h-g)*sx)*sy)*sz;
+}
+function fbm(x,y,z,oct=4){
+  let v=0, a=0.5, f=1;
+  for(let i=0;i<oct;i++){ v+=a*smoothNoise(x*f,y*f,z*f); a*=0.5; f*=2; }
+  return v;
+}
+
+// ── Coral species archetypes
+// 0: branching (cylinder tree)  1: brain (wrinkled sphere)
+// 2: plate (flattened disc)     3: tube/finger (tall thin cylinder)
+// Each colony has a 4D latent position that drifts through species-space
+
+const COLONY_COUNT = 42;
+const colonies = [];
+
+// Palette: coral pink, turquoise, lime kelp, warm sand
+const PALETTE = [
+  new THREE.Color(0xe8736a), // coral pink
+  new THREE.Color(0xf4a27a), // peach
+  new THREE.Color(0x22b8a0), // turquoise
+  new THREE.Color(0x8bc44a), // lime kelp
+  new THREE.Color(0xd4a574), // sand
+];
+
+// Coral SSS material
+const coralVert = `
+varying vec3 vNormal;
+varying vec3 vWorldPos;
+varying float vAO;
+void main(){
+  vNormal = normalize(normalMatrix * normal);
+  vec4 wp = modelMatrix * instanceMatrix * vec4(position, 1.0);
+  vWorldPos = wp.xyz;
+  vAO = position.y;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}`;
+const coralFrag = `
+uniform vec3 uColor;
+uniform vec3 uColor2;
+uniform float uTime;
+uniform vec3 uLightDir;
+varying vec3 vNormal;
+varying vec3 vWorldPos;
+varying float vAO;
+void main(){
+  vec3 N = normalize(vNormal);
+  vec3 L = normalize(uLightDir);
+  float NdotL = max(dot(N, L), 0.0);
+  // SSS approximation: wrap lighting + translucency
+  float wrap = max(0.0, (dot(N, L) + 0.5) / 1.5);
+  float sss = pow(max(0.0, dot(-normalize(vWorldPos - cameraPosition), L)), 3.0) * 0.3;
+  // Color mix based on height
+  float hFrac = clamp((vWorldPos.y + 1.0) / 8.0, 0.0, 1.0);
+  vec3 baseCol = mix(uColor, uColor2, hFrac * 0.6 + 0.2);
+  // Wet specular
+  vec3 V = normalize(cameraPosition - vWorldPos);
+  vec3 H = normalize(L + V);
+  float spec = pow(max(dot(N, H), 0.0), 40.0) * 0.35;
+  vec3 ambient = baseCol * 0.18;
+  vec3 diffuse = baseCol * wrap * 0.7;
+  vec3 subsurface = vec3(0.9, 0.35, 0.25) * sss;
+  vec3 col = ambient + diffuse + subsurface + vec3(spec);
+  // Depth fog tint
+  float dist = length(vWorldPos - cameraPosition);
+  vec3 fogCol = vec3(0.02, 0.10, 0.11);
+  float fogF = 1.0 - exp(-dist * 0.045);
+  col = mix(col, fogCol, fogF);
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+// Build coral geometry archetypes
+function buildBranchGeo(){
+  // Trunk + 2-3 branches
+  const g = new THREE.CylinderGeometry(0.08, 0.15, 1.6, 6, 4);
+  const merged = g;
+  for(let i=0;i<3;i++){
+    const bg = new THREE.CylinderGeometry(0.04, 0.08, 0.8, 5, 3);
+    const a = (i/3)*Math.PI*2 + 0.3;
+    const m = new THREE.Matrix4().makeTranslation(Math.cos(a)*0.2, 0.6, Math.sin(a)*0.2)
+      .multiply(new THREE.Matrix4().makeRotationZ((Math.random()-0.5)*0.6))
+      .multiply(new THREE.Matrix4().makeRotationX((Math.random()-0.5)*0.6));
+    bg.applyMatrix4(m);
+    merged.merge ? null : null; // three.js 0.160 uses mergeGeometries
+  }
+  return g;
+}
+function buildBrainGeo(){
+  const g = new THREE.SphereGeometry(0.5, 16, 12);
+  const pos = g.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    const x=pos.getX(i), y=pos.getY(i), z=pos.getZ(i);
+    const wrinkle = Math.sin(x*8)*Math.cos(z*8)*0.06 + Math.sin(y*12)*0.03;
+    const r = Math.sqrt(x*x+y*y+z*z);
+    const s = 1 + wrinkle/Math.max(r,0.01);
+    pos.setXYZ(i, x*s, y*0.7*s, z*s);
+  }
+  pos.needsUpdate = true;
+  g.computeVertexNormals();
+  return g;
+}
+function buildPlateGeo(){
+  const g = new THREE.CylinderGeometry(0.6, 0.55, 0.12, 16, 2);
+  const pos = g.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    const x=pos.getX(i), z=pos.getZ(i), y=pos.getY(i);
+    const r = Math.sqrt(x*x+z*z);
+    const ruffle = Math.sin(Math.atan2(z,x)*6)*0.05*r;
+    pos.setY(i, y + ruffle);
+  }
+  pos.needsUpdate = true;
+  g.computeVertexNormals();
+  return g;
+}
+function buildTubeGeo(){
+  const g = new THREE.CylinderGeometry(0.06, 0.1, 1.8, 6, 6);
+  const pos = g.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    const y = pos.getY(i);
+    const sway = Math.sin(y*3)*0.08;
+    pos.setX(i, pos.getX(i)+sway);
+  }
+  pos.needsUpdate = true;
+  g.computeVertexNormals();
+  return g;
+}
+
+const geos = [buildBranchGeo(), buildBrainGeo(), buildPlateGeo(), buildTubeGeo()];
+
+// Place colonies in 3-4 density clusters with negative space (Tyler Hobbs directive)
+const CLUSTERS = [
+  {cx: -3.5, cz: -1.5, r: 3.0, count: 14},
+  {cx: 2.5, cz: 2.0, r: 2.5, count: 12},
+  {cx: 0.5, cz: -3.5, r: 2.2, count: 9},
+  {cx: -1.0, cz: 3.5, r: 1.8, count: 7},
+];
+
+// Hex grid with Perlin displacement (Vera Molnar directive)
+let colIdx = 0;
+for(const cluster of CLUSTERS){
+  for(let ci=0; ci<cluster.count && colIdx<COLONY_COUNT; ci++){
+    // Hex placement within cluster
+    const angle = (ci/cluster.count)*Math.PI*2 + Math.random()*0.5;
+    const rad = Math.sqrt(Math.random())*cluster.r;
+    const bx = cluster.cx + Math.cos(angle)*rad;
+    const bz = cluster.cz + Math.sin(angle)*rad;
+    // Perlin displacement
+    const px = bx + (fbm(bx*0.3, 0, bz*0.3)-0.5)*1.2;
+    const pz = bz + (fbm(bx*0.3+7, 0, bz*0.3+7)-0.5)*1.2;
+
+    const species = Math.floor(Math.random()*4);
+    const palIdx = Math.floor(Math.random()*PALETTE.length);
+    const palIdx2 = (palIdx + 1 + Math.floor(Math.random()*(PALETTE.length-1))) % PALETTE.length;
+    const scale = 0.6 + Math.random()*1.2;
+    colonies.push({
+      x: px, z: pz,
+      species,
+      latent: [Math.random()*10, Math.random()*10, Math.random()*10, Math.random()*10],
+      latentSpeed: [0.02+Math.random()*0.03, 0.015+Math.random()*0.02,
+                    0.018+Math.random()*0.025, 0.01+Math.random()*0.02],
+      scale,
+      rotY: Math.random()*Math.PI*2,
+      color: PALETTE[palIdx].clone(),
+      color2: PALETTE[palIdx2].clone(),
+      clusterIdx: CLUSTERS.indexOf(cluster),
+    });
+    colIdx++;
+  }
+}
+
+// InstancedMesh per species archetype
+const instancedMeshes = [];
+for(let sp=0; sp<4; sp++){
+  const count = colonies.filter(c=>c.species===sp).length;
+  if(count===0){ instancedMeshes.push(null); continue; }
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: {value: new THREE.Color(0xe8736a)},
+      uColor2: {value: new THREE.Color(0x22b8a0)},
+      uTime: {value: 0},
+      uLightDir: {value: new THREE.Vector3(0.4, 0.8, 0.3).normalize()},
+    },
+    vertexShader: coralVert,
+    fragmentShader: coralFrag,
+  });
+  const im = new THREE.InstancedMesh(geos[sp], mat, count);
+  im.userData = {speciesIdx: sp, mat};
+  scene.add(im);
+  instancedMeshes.push(im);
+}
+
+// Substrate plane
+const substGeo = new THREE.PlaneGeometry(24, 24, 48, 48);
+substGeo.rotateX(-Math.PI/2);
+const sPos = substGeo.attributes.position;
+for(let i=0;i<sPos.count;i++){
+  const x=sPos.getX(i), z=sPos.getZ(i);
+  sPos.setY(i, (fbm(x*0.15, 0, z*0.15, 3)-0.5)*0.8 - 0.3);
+}
+substGeo.computeVertexNormals();
+const substMat = new THREE.MeshStandardMaterial({
+  color: 0x1a3830, roughness: 0.9, metalness: 0.0,
+});
+scene.add(new THREE.Mesh(substGeo, substMat));
+
+// ── Plankton particles
+const PLANKTON = 800;
+const plankGeo = new THREE.BufferGeometry();
+const plankPos = new Float32Array(PLANKTON*3);
+const plankAlpha = new Float32Array(PLANKTON);
+for(let i=0;i<PLANKTON;i++){
+  plankPos[i*3]   = (Math.random()-0.5)*20;
+  plankPos[i*3+1] = Math.random()*10 - 0.5;
+  plankPos[i*3+2] = (Math.random()-0.5)*20;
+  plankAlpha[i] = 0.3+Math.random()*0.7;
+}
+plankGeo.setAttribute('position', new THREE.BufferAttribute(plankPos, 3));
+plankGeo.setAttribute('alpha', new THREE.BufferAttribute(plankAlpha, 1));
+
+const plankMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: {value:0} },
+  vertexShader: `
+    attribute float alpha;
+    varying float vAlpha;
+    uniform float uTime;
+    void main(){
+      vAlpha = alpha;
+      vec3 p = position;
+      p.x += sin(uTime*0.3 + position.y*0.5)*0.4;
+      p.y += sin(uTime*0.2 + position.x*0.3)*0.15;
+      p.z += cos(uTime*0.25 + position.z*0.4)*0.3;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p,1.0);
+      gl_PointSize = (2.0 + alpha*2.0) * (300.0 / length(gl_Position.xyz));
+    }`,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      float d = length(gl_PointCoord - 0.5)*2.0;
+      if(d>1.0) discard;
+      float a = (1.0 - d*d) * vAlpha * 0.45;
+      gl_FragColor = vec4(0.7, 0.95, 0.85, a);
+    }`,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+scene.add(new THREE.Points(plankGeo, plankMat));
+
+// ── Caustic light plane (subtle underwater dapple)
+const causticGeo = new THREE.PlaneGeometry(30, 30);
+causticGeo.rotateX(-Math.PI/2);
+causticGeo.translate(0, 9.5, 0);
+const causticMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: {value:0} },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    void main(){
+      vec2 p = (vUv - 0.5)*8.0;
+      float c = sin(p.x*2.3+uTime*0.4)*sin(p.y*2.7+uTime*0.35);
+      c = c*0.5+0.5;
+      c = pow(c, 3.0)*0.12;
+      gl_FragColor = vec4(0.2, 0.8, 0.7, c);
+    }`,
+  transparent: true, side: THREE.DoubleSide, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+scene.add(new THREE.Mesh(causticGeo, causticMat));
+
+// ── Film grain overlay (Lia Halloran directive)
+const grainCanvas = document.createElement('canvas');
+grainCanvas.width = 256; grainCanvas.height = 256;
+const gctx = grainCanvas.getContext('2d');
+const grainTex = new THREE.CanvasTexture(grainCanvas);
+function updateGrain(){
+  const id = gctx.createImageData(256,256);
+  for(let i=0;i<id.data.length;i+=4){
+    const v = Math.random()*25;
+    id.data[i]=id.data[i+1]=id.data[i+2]=v;
+    id.data[i+3]=18;
+  }
+  gctx.putImageData(id,0,0);
+  grainTex.needsUpdate = true;
+}
+updateGrain();
+const grainMat = new THREE.MeshBasicMaterial({map:grainTex, transparent:true, opacity:0.15, depthTest:false});
+const grainQuad = new THREE.Mesh(new THREE.PlaneGeometry(2,2), grainMat);
+const grainScene = new THREE.Scene();
+grainScene.add(grainQuad);
+const grainCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+
+// ── Update loop
+const dummy = new THREE.Object3D();
+const t0 = performance.now();
+let grainFrame = 0;
+
+function animate(){
+  requestAnimationFrame(animate);
+  const t = (performance.now() - t0) / 1000;
+
+  // Update colony morphing + instance transforms
+  for(let sp=0; sp<4; sp++){
+    const im = instancedMeshes[sp];
+    if(!im) continue;
+    im.userData.mat.uniforms.uTime.value = t;
+    let idx = 0;
+    for(const col of colonies){
+      if(col.species !== sp) continue;
+      // Drift latent position
+      for(let d=0;d<4;d++) col.latent[d] += col.latentSpeed[d]*0.016;
+      // Species morph via latent → scale distortion
+      const morphX = fbm(col.latent[0], col.latent[1], t*0.1)*0.3 + 0.85;
+      const morphY = fbm(col.latent[2], col.latent[3], t*0.08)*0.4 + 0.8;
+      const morphZ = fbm(col.latent[1], col.latent[3], t*0.12)*0.3 + 0.85;
+      // Gentle breathing
+      const breath = 1.0 + Math.sin(t*0.8 + col.x*2)*0.03;
+      const s = col.scale * breath;
+
+      dummy.position.set(col.x, 0, col.z);
+      dummy.rotation.set(0, col.rotY + t*0.02, 0);
+      dummy.scale.set(s*morphX, s*morphY, s*morphZ);
+      dummy.updateMatrix();
+      im.setMatrixAt(idx, dummy.matrix);
+      // Per-instance color via cluster palette
+      im.userData.mat.uniforms.uColor.value.copy(col.color);
+      im.userData.mat.uniforms.uColor2.value.copy(col.color2);
+      idx++;
+    }
+    im.instanceMatrix.needsUpdate = true;
+  }
+
+  plankMat.uniforms.uTime.value = t;
+  causticMat.uniforms.uTime.value = t;
+
+  // Grain refresh every 3 frames
+  if(++grainFrame % 3 === 0) updateGrain();
+
+  // Camera gentle sway
+  const camSwayX = Math.sin(t*0.1)*0.3;
+  const camSwayY = Math.cos(t*0.08)*0.2;
+  controls.target.x += (camSwayX - controls.target.x)*0.01;
+  controls.target.y += (3 + camSwayY - controls.target.y)*0.01;
+  controls.update();
+
+  renderer.render(scene, camera);
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+  renderer.autoClear = true;
+}
+animate();
+
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
