@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>s6s · Streamline Fields (Tyler Hobbs)</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">s6s</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Tyler Hobbs-inspired streamline field composition.
+// - 5–8 distinct color regions (warm earth palette + cool accent)
+// - Non-overlapping flow streams via domain partitioning
+// - Significant negative space
+// - Oil-painting aesthetic: visible brush-stroke trails, textured edges
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+camera.position.z = 5;
+
+// Palette: raw umber, terracotta, ochre, oxide red, + Prussian blue accent
+const regions = [
+  { color: new THREE.Color(0.38, 0.25, 0.15), name: 'umber' },      // raw umber
+  { color: new THREE.Color(0.72, 0.38, 0.26), name: 'terracotta' }, // terracotta
+  { color: new THREE.Color(0.80, 0.62, 0.28), name: 'ochre' },      // ochre
+  { color: new THREE.Color(0.58, 0.22, 0.18), name: 'oxide' },      // oxide red
+  { color: new THREE.Color(0.68, 0.48, 0.32), name: 'sienna' },     // burnt sienna
+  { color: new THREE.Color(0.12, 0.20, 0.28), name: 'prussian' },   // Prussian blue (cool accent)
+  { color: new THREE.Color(0.48, 0.36, 0.22), name: 'umber2' },     // dark umber variant
+  { color: new THREE.Color(0.85, 0.55, 0.38), name: 'peach' }       // peachy terracotta
+];
+
+// Domain partitioning: divide canvas into 8 non-overlapping zones
+// Each zone gets its own flow field + color region
+const zones = [
+  { x: -0.75, y:  0.55, w: 0.40, h: 0.35, angle: 0.2,  curve: 0.8,  regionIdx: 0 },
+  { x:  0.15, y:  0.60, w: 0.50, h: 0.30, angle: -0.3, curve: 1.2,  regionIdx: 1 },
+  { x: -0.80, y:  0.05, w: 0.35, h: 0.40, angle: 1.0,  curve: 0.6,  regionIdx: 2 },
+  { x: -0.20, y:  0.10, w: 0.45, h: 0.35, angle: 0.5,  curve: 0.9,  regionIdx: 3 },
+  { x:  0.40, y:  0.00, w: 0.38, h: 0.42, angle: -0.7, curve: 1.1,  regionIdx: 4 },
+  { x: -0.65, y: -0.55, w: 0.42, h: 0.32, angle: 0.8,  curve: 0.7,  regionIdx: 5 }, // Prussian accent
+  { x:  0.05, y: -0.50, w: 0.48, h: 0.38, angle: -0.4, curve: 1.0,  regionIdx: 6 },
+  { x:  0.55, y: -0.60, w: 0.32, h: 0.28, angle: 0.6,  curve: 0.85, regionIdx: 7 }
+];
+
+// Generate particles per zone
+const particlesPerZone = 800;
+const particles = [];
+
+zones.forEach((zone, zi) => {
+  const col = regions[zone.regionIdx].color;
+  for (let i = 0; i < particlesPerZone; i++) {
+    // Spawn particles within zone bounds
+    const localX = (Math.random() - 0.5) * zone.w;
+    const localY = (Math.random() - 0.5) * zone.h;
+    const px = zone.x + localX;
+    const py = zone.y + localY;
+    
+    particles.push({
+      pos: new THREE.Vector2(px, py),
+      zone: zi,
+      trail: [new THREE.Vector2(px, py)],
+      color: col.clone(),
+      age: Math.random() * 6.28,
+      speed: 0.0008 + Math.random() * 0.0004
+    });
+  }
+});
+
+// Flow field per zone: direction + curvature
+function flowVelocity(p, zone) {
+  const z = zones[zone];
+  const dx = p.x - z.x;
+  const dy = p.y - z.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  
+  // Base angle with perpendicular curvature
+  const baseAngle = z.angle;
+  const perpAngle = baseAngle + Math.PI * 0.5;
+  
+  // Curve intensity increases toward zone edges
+  const edgeDist = Math.min(
+    Math.abs(dx) / (z.w * 0.5),
+    Math.abs(dy) / (z.h * 0.5)
+  );
+  const curveFactor = z.curve * edgeDist * 0.6;
+  
+  const angle = baseAngle + perpAngle * curveFactor * Math.sin(dist * 8.0);
+  
+  return new THREE.Vector2(
+    Math.cos(angle),
+    Math.sin(angle)
+  );
+}
+
+// Trail line geometry
+const trailMaterial = new THREE.LineBasicMaterial({ 
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.85,
+  linewidth: 1.5
+});
+
+const trailGeometry = new THREE.BufferGeometry();
+const maxTrailLength = 120;
+const maxVerts = particles.length * maxTrailLength;
+const positions = new Float32Array(maxVerts * 3);
+const colors = new Float32Array(maxVerts * 3);
+
+trailGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+trailGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+trailGeometry.setDrawRange(0, 0);
+
+const trailLines = new THREE.LineSegments(trailGeometry, trailMaterial);
+scene.add(trailLines);
+
+// Update loop
+let frameCount = 0;
+
+function updateParticles() {
+  particles.forEach(p => {
+    const vel = flowVelocity(p.pos, p.zone);
+    p.pos.x += vel.x * p.speed;
+    p.pos.y += vel.y * p.speed;
+    
+    const z = zones[p.zone];
+    
+    // Wrap within zone bounds with small margin
+    const margin = 0.02;
+    if (p.pos.x < z.x - z.w * 0.5 - margin || p.pos.x > z.x + z.w * 0.5 + margin ||
+        p.pos.y < z.y - z.h * 0.5 - margin || p.pos.y > z.y + z.h * 0.5 + margin) {
+      // Reset to zone center with small offset
+      p.pos.x = z.x + (Math.random() - 0.5) * z.w * 0.6;
+      p.pos.y = z.y + (Math.random() - 0.5) * z.h * 0.6;
+      p.trail = [p.pos.clone()];
+    } else {
+      p.trail.push(p.pos.clone());
+      if (p.trail.length > maxTrailLength) {
+        p.trail.shift();
+      }
+    }
+    
+    p.age += 0.02;
+  });
+  
+  // Update trail geometry every 2 frames (performance)
+  if (frameCount % 2 === 0) {
+    let vertIdx = 0;
+    
+    particles.forEach(p => {
+      if (p.trail.length < 2) return;
+      
+      for (let i = 0; i < p.trail.length - 1; i++) {
+        const t0 = p.trail[i];
+        const t1 = p.trail[i + 1];
+        
+        const fadeStart = i / p.trail.length;
+        const fadeEnd = (i + 1) / p.trail.length;
+        
+        // Oil-painting stroke: thicker/brighter at recent end
+        const alpha0 = Math.pow(fadeStart, 1.5) * 0.7;
+        const alpha1 = Math.pow(fadeEnd, 1.5) * 0.9;
+        
+        positions[vertIdx * 3] = t0.x;
+        positions[vertIdx * 3 + 1] = t0.y;
+        positions[vertIdx * 3 + 2] = 0;
+        colors[vertIdx * 3] = p.color.r * alpha0;
+        colors[vertIdx * 3 + 1] = p.color.g * alpha0;
+        colors[vertIdx * 3 + 2] = p.color.b * alpha0;
+        vertIdx++;
+        
+        positions[vertIdx * 3] = t1.x;
+        positions[vertIdx * 3 + 1] = t1.y;
+        positions[vertIdx * 3 + 2] = 0;
+        colors[vertIdx * 3] = p.color.r * alpha1;
+        colors[vertIdx * 3 + 1] = p.color.g * alpha1;
+        colors[vertIdx * 3 + 2] = p.color.b * alpha1;
+        vertIdx++;
+      }
+    });
+    
+    trailGeometry.attributes.position.needsUpdate = true;
+    trailGeometry.attributes.color.needsUpdate = true;
+    trailGeometry.setDrawRange(0, vertIdx);
+  }
+  
+  frameCount++;
+}
+
+// Render loop
+function animate() {
+  requestAnimationFrame(animate);
+  updateParticles();
+  renderer.render(scene, camera);
+}
+
+animate();
+
+// Responsive
+addEventListener('resize', () => {
+  const aspect = innerWidth / innerHeight;
+  camera.left = -aspect;
+  camera.right = aspect;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Trigger initial resize
+dispatchEvent(new Event('resize'));
+</script>
+</body>
+</html>
