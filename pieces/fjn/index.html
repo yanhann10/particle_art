@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<!-- MOTION: propagate, intensity: gentle -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fjn · cyber-nest · biomorphic accretion</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a10; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">fjn</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Wang & Söderström "Nest of You" (Lumen 2023 Nordic) mutation —
+// Differential-growth backbone from 2iy re-rendered as glossy biomorphic
+// spheres that accrete into a twisting cyber-nest. Each node is a leaf-scale
+// ellipsoid oriented along its tangent. Fast-growing nodes shed smaller
+// residue spheres — harvested-data exhaust drifting away from the form.
+// Palette: pearl #e0d8e8, lavender #c0a8d8, mercury #c8ccd4, warm pearl #e8dcd0.
+// Trefoil-knot seed gives the nest its characteristic twist.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a10, 0.016);
+
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(9, 7, 13);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a10, 1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.3;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.target.set(0, 3, 0);
+
+/* ─── Lighting: pearl / lavender / mercury ─── */
+scene.add(new THREE.AmbientLight(0x1a1520, 0.35));
+
+const keyLight = new THREE.DirectionalLight(0xf0e8ff, 2.0);
+keyLight.position.set(5, 14, 8);
+scene.add(keyLight);
+
+const fillLight = new THREE.DirectionalLight(0xc8b0e8, 0.55);
+fillLight.position.set(-7, 3, -5);
+scene.add(fillLight);
+
+const rimLight = new THREE.PointLight(0xd0d8e8, 1.0, 35);
+rimLight.position.set(-4, 10, 7);
+scene.add(rimLight);
+
+const underLight = new THREE.PointLight(0x806898, 0.4, 20);
+underLight.position.set(0, -2, 0);
+scene.add(underLight);
+
+/* ─── Differential growth (3D, from 2iy, trefoil seed) ─── */
+const MAX_VERTS = 1400;
+const ATTRACT   = 0.052;
+const REPEL_R   = 0.50;
+const REPEL_STR = 0.11;
+const NOISE_S   = 0.003;
+const PRESSURE  = 0.0028;
+const RISE      = 0.0028;
+const MAX_D     = 0.36;
+
+const verts = [];
+// Trefoil-knot seed — gives the nest its twisted topology
+for (let i = 0; i < 28; i++) {
+  const t = (i / 28) * Math.PI * 2;
+  const x = Math.sin(t) + 2 * Math.sin(2 * t);
+  const y = Math.cos(t) - 2 * Math.cos(2 * t);
+  const z = -Math.sin(3 * t);
+  verts.push({ x: x * 0.5, y: y * 0.5 + 2, z: z * 0.5, age: 0, vel: 0 });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function key3(x, y, z) {
+  return (Math.floor(x / CELL)) + ',' + (Math.floor(y / CELL)) + ',' + (Math.floor(z / CELL));
+}
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i], k = key3(v.x, v.y, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function getNeighbors(v) {
+  const cx = Math.floor(v.x / CELL), cy = Math.floor(v.y / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++)
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dz = -1; dz <= 1; dz++) {
+        const arr = grid.get((cx + dx) + ',' + (cy + dy) + ',' + (cz + dz));
+        if (arr) for (const idx of arr) out.push(idx);
+      }
+  return out;
+}
+
+/* shed particles — data-residue exhaust */
+const shedParticles = [];
+const MAX_SHED = 500;
+
+let paused = false;
+
+function step() {
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of getNeighbors(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex * ex + ey * ey + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f; dy[i] += ey * f; dz[i] += ez * f;
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    const a = verts[(i - 1 + n) % n], b = verts[(i + 1) % n], v = verts[i];
+    dx[i] += (a.x + b.x - 2 * v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2 * v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2 * v.z) * ATTRACT;
+  }
+
+  let gcx = 0, gcy = 0, gcz = 0;
+  for (let i = 0; i < n; i++) { gcx += verts[i].x; gcy += verts[i].y; gcz += verts[i].z; }
+  gcx /= n; gcy /= n; gcz /= n;
+
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - gcx, oy = verts[i].y - gcy, oz = verts[i].z - gcz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dy[i] += (oy / d) * PRESSURE * 0.45;
+    dz[i] += (oz / d) * PRESSURE;
+  }
+
+  for (let i = 0; i < n; i++) {
+    const ag = verts[i].age;
+    const upward = RISE * (0.3 + Math.min(ag * 1.4, 1.0));
+    const px = verts[i].x, py = verts[i].y, pz = verts[i].z;
+
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE_S;
+    verts[i].y += dy[i] + (Math.random() - 0.5) * NOISE_S * 0.4 + upward;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE_S;
+    verts[i].age += 0.0013;
+
+    const vx = verts[i].x - px, vy = verts[i].y - py, vz = verts[i].z - pz;
+    verts[i].vel = Math.hypot(vx, vy, vz);
+
+    // shed residue from fast-moving nodes
+    if (verts[i].vel > 0.011 && shedParticles.length < MAX_SHED && Math.random() < 0.06) {
+      shedParticles.push({
+        x: px, y: py, z: pz,
+        vx: vx * 0.25 + (Math.random() - 0.5) * 0.004,
+        vy: vy * 0.25 + (Math.random() - 0.5) * 0.004 - 0.001,
+        vz: vz * 0.25 + (Math.random() - 0.5) * 0.004,
+        life: 1.0,
+        size: 0.03 + Math.random() * 0.05
+      });
+    }
+  }
+
+  const grown = [];
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    grown.push(a);
+    const ex = b.x - a.x, ey = b.y - a.y, ez = b.z - a.z;
+    if (ex * ex + ey * ey + ez * ez > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({
+        x: (a.x + b.x) * 0.5,
+        y: (a.y + b.y) * 0.5 - 0.03,
+        z: (a.z + b.z) * 0.5,
+        age: Math.max(a.age, b.age) * 0.45, vel: 0
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+
+  // update shed
+  for (let i = shedParticles.length - 1; i >= 0; i--) {
+    const p = shedParticles[i];
+    p.x += p.vx; p.y += p.vy; p.z += p.vz;
+    p.vy -= 0.00008;
+    p.vx *= 0.996; p.vy *= 0.996; p.vz *= 0.996;
+    p.life -= 0.0025;
+    if (p.life <= 0) shedParticles.splice(i, 1);
+  }
+}
+
+// pre-grow to visible state
+for (let s = 0; s < 550; s++) step();
+addEventListener('click', () => { paused = !paused; });
+
+/* ─── Instanced rendering: glossy biomorphic spheres ─── */
+const sphereGeo = new THREE.SphereGeometry(1, 14, 10);
+const nestMat = new THREE.MeshPhysicalMaterial({
+  color: 0xd8d0e0,
+  metalness: 0.32,
+  roughness: 0.12,
+  clearcoat: 1.0,
+  clearcoatRoughness: 0.04,
+  iridescence: 0.75,
+  iridescenceIOR: 1.45,
+  iridescenceThicknessRange: [180, 550],
+  transparent: true,
+  opacity: 0.93,
+  envMapIntensity: 1.2,
+});
+
+const nestMesh = new THREE.InstancedMesh(sphereGeo, nestMat, MAX_VERTS);
+nestMesh.count = 0;
+scene.add(nestMesh);
+
+const shedGeo = new THREE.SphereGeometry(1, 6, 4);
+const shedMat = new THREE.MeshPhysicalMaterial({
+  color: 0xb0a8c0,
+  metalness: 0.45,
+  roughness: 0.28,
+  clearcoat: 0.5,
+  transparent: true,
+  opacity: 0.35,
+});
+const shedMesh = new THREE.InstancedMesh(shedGeo, shedMat, MAX_SHED);
+shedMesh.count = 0;
+scene.add(shedMesh);
+
+const dummy = new THREE.Object3D();
+const tmpColor = new THREE.Color();
+
+// Hand-picked palette: pearl → lavender → mercury → warm pearl → cool silver
+const palette = [
+  new THREE.Color(0xe0d8e8),  // pearl
+  new THREE.Color(0xc0a8d8),  // lavender
+  new THREE.Color(0xc8ccd4),  // mercury
+  new THREE.Color(0xe8dcd0),  // warm pearl
+  new THREE.Color(0xb0b8c8),  // cool silver
+];
+
+function updateInstances() {
+  const n = verts.length;
+  nestMesh.count = n;
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    const prev = verts[(i - 1 + n) % n], next = verts[(i + 1) % n];
+    const tx = next.x - prev.x, ty = next.y - prev.y, tz = next.z - prev.z;
+    const segLen = Math.hypot(tx, ty, tz) + 1e-6;
+
+    // size: older nodes grow larger; tight packing inflates slightly
+    const sizeAge = 0.07 + 0.12 * Math.min(v.age * 2.2, 1.0);
+    const sizeDensity = 0.02 / (segLen * 2 + 0.08);
+    const size = Math.min(sizeAge + sizeDensity, 0.20);
+
+    // leaf-scale elongation along tangent (1.5× stretch)
+    const tnx = tx / segLen, tny = ty / segLen, tnz = tz / segLen;
+    const stretch = 1.45;
+    dummy.position.set(v.x, v.y, v.z);
+    dummy.scale.set(
+      size * (1 + (stretch - 1) * Math.abs(tnx)),
+      size * (1 + (stretch - 1) * Math.abs(tny)),
+      size * (1 + (stretch - 1) * Math.abs(tnz))
+    );
+    dummy.updateMatrix();
+    nestMesh.setMatrixAt(i, dummy.matrix);
+
+    // color: blend through palette based on height + age
+    const param = (v.y * 0.25 + v.age * 2.5 + i * 0.003) % palette.length;
+    const ci = Math.floor(param);
+    const frac = param - ci;
+    tmpColor.copy(palette[ci]).lerp(palette[(ci + 1) % palette.length], frac);
+    nestMesh.setColorAt(i, tmpColor);
+  }
+  nestMesh.instanceMatrix.needsUpdate = true;
+  if (nestMesh.instanceColor) nestMesh.instanceColor.needsUpdate = true;
+
+  // shed residue
+  shedMesh.count = shedParticles.length;
+  for (let i = 0; i < shedParticles.length; i++) {
+    const p = shedParticles[i];
+    const s = p.size * p.life;
+    dummy.position.set(p.x, p.y, p.z);
+    dummy.scale.setScalar(s);
+    dummy.updateMatrix();
+    shedMesh.setMatrixAt(i, dummy.matrix);
+    tmpColor.setRGB(0.70, 0.66, 0.76).multiplyScalar(0.35 + 0.65 * p.life);
+    shedMesh.setColorAt(i, tmpColor);
+  }
+  if (shedParticles.length > 0) {
+    shedMesh.instanceMatrix.needsUpdate = true;
+    if (shedMesh.instanceColor) shedMesh.instanceColor.needsUpdate = true;
+  }
+}
+
+/* ─── Background: warm-to-cold vertical gradient (Olafur-style) ─── */
+const bgGeo = new THREE.PlaneGeometry(100, 100);
+const bgMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main() {
+      vec3 top = vec3(0.065, 0.048, 0.038);
+      vec3 bot = vec3(0.028, 0.034, 0.055);
+      vec3 col = mix(bot, top, vUv.y);
+      // subtle film grain
+      float grain = fract(sin(dot(vUv * 1200.0, vec2(12.9898, 78.233))) * 43758.5453);
+      col += (grain - 0.5) * 0.012;
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+  side: THREE.DoubleSide,
+  depthWrite: false,
+});
+const bgPlane = new THREE.Mesh(bgGeo, bgMat);
+bgPlane.position.set(0, 5, -25);
+scene.add(bgPlane);
+
+/* ─── Connective threads: thin lines between nearby nodes (Chiharu-inflected) ─── */
+const threadMat = new THREE.LineBasicMaterial({
+  color: 0xc0b8d0,
+  transparent: true,
+  opacity: 0.06,
+});
+let threadLines = null;
+
+function updateThreads() {
+  if (threadLines) { scene.remove(threadLines); threadLines.geometry.dispose(); }
+  const n = verts.length;
+  if (n < 20) return;
+
+  const positions = [];
+  const threadR = REPEL_R * 1.8;
+  // sample subset to keep line count manageable
+  const step = Math.max(1, Math.floor(n / 300));
+  for (let i = 0; i < n; i += step) {
+    const v = verts[i];
+    for (let j = i + step; j < n; j += step) {
+      const u = verts[j];
+      const dx = v.x - u.x, dy = v.y - u.y, dz = v.z - u.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < threadR * threadR && d2 > 0.04) {
+        positions.push(v.x, v.y, v.z, u.x, u.y, u.z);
+      }
+      if (positions.length > 4800) break; // cap at 800 segments
+    }
+    if (positions.length > 4800) break;
+  }
+
+  if (positions.length > 0) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    threadLines = new THREE.LineSegments(geo, threadMat);
+    scene.add(threadLines);
+  }
+}
+
+/* ─── Resize ─── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ─── Animation loop ─── */
+let frameCount = 0;
+
+function loop() {
+  for (let s = 0; s < 2; s++) step();
+
+  updateInstances();
+
+  // update threads every 30 frames (expensive)
+  if (frameCount % 30 === 0) updateThreads();
+
+  // camera tracks centroid
+  let gcx = 0, gcy = 0, gcz = 0;
+  for (const v of verts) { gcx += v.x; gcy += v.y; gcz += v.z; }
+  const n = Math.max(verts.length, 1);
+  gcx /= n; gcy /= n; gcz /= n;
+
+  controls.target.x += (gcx - controls.target.x) * 0.025;
+  controls.target.y += (gcy - controls.target.y) * 0.025;
+  controls.target.z += (gcz - controls.target.z) * 0.025;
+
+  camera.position.y += (gcy + 3 - camera.position.y) * 0.025;
+
+  // gentle rim light orbit for specular variation
+  const t = frameCount * 0.003;
+  rimLight.position.x = Math.cos(t) * 8;
+  rimLight.position.z = Math.sin(t) * 8;
+  rimLight.position.y = gcy + 5;
+
+  controls.update();
+  renderer.render(scene, camera);
+  frameCount++;
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
