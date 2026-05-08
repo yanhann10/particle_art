@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai7 · blind camera (audio-driven hallucination)</title>
+<!-- MOTION: pulse, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#d8d0c2; overflow:hidden;
+               color:#5a5248; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">ai7 · blind camera</div>
+<div class="hint">sound → silhouette · speak or play audio</div>
+<div class="src">after diego trujillo pisanty · lumen prize 2024</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// CONCEPT: An audio-FFT-driven particle field where spectral magnitude becomes local attractor strength,
+// pulling particles into emergent silhouettes (building profiles, vendor stalls, traffic flow) before
+// dispersing as sound fades. The city remembered through its noise, granular and dreamlike.
+// Palette: sun-bleached concrete #d8d0c2, smog ochre #b89968, shadow umber #5a5248.
+
+const W = 240, H = 240;
+const N = W * H;  // ~57k particles
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xd8d0c2, 1);
+document.body.appendChild(renderer.domElement);
+
+// ---- audio setup ----
+let audioCtx, analyser, dataArray, bufferLength;
+let micStream = null;
+const FFT_SIZE = 128;
+let hasAudio = false;
+
+// try mic, fall back to synthetic noise if permission denied
+(async () => {
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = FFT_SIZE;
+    bufferLength = analyser.frequencyBinCount;
+    dataArray = new Uint8Array(bufferLength);
+    
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    micStream = audioCtx.createMediaStreamSource(stream);
+    micStream.connect(analyser);
+    hasAudio = true;
+  } catch (e) {
+    // silent fallback: generate synthetic ambient signal
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = FFT_SIZE;
+    bufferLength = analyser.frequencyBinCount;
+    dataArray = new Uint8Array(bufferLength);
+    
+    const osc1 = audioCtx.createOscillator();
+    osc1.type = 'sawtooth';
+    osc1.frequency.value = 80 + Math.random() * 40;
+    const osc2 = audioCtx.createOscillator();
+    osc2.type = 'sine';
+    osc2.frequency.value = 200 + Math.random() * 100;
+    const gain = audioCtx.createGain();
+    gain.gain.value = 0.02;
+    osc1.connect(gain);
+    osc2.connect(gain);
+    gain.connect(analyser);
+    osc1.start();
+    osc2.start();
+    hasAudio = true;
+  }
+})();
+
+// ---- GPGPU state RTs ----
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// init: particles in a 2D plane with slight depth variation (like paper grain)
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  const px = (Math.random() - 0.5) * 30;
+  const py = (Math.random() - 0.5) * 30;
+  const pz = (Math.random() - 0.5) * 2.0;
+  init[i*4]   = px;
+  init[i*4+1] = py;
+  init[i*4+2] = pz;
+  init[i*4+3] = Math.random();  // phase
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// ---- simulation: FFT bins become local attractors ----
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt:  { value: 0.016 },
+  uFFT: { value: new THREE.DataTexture(new Uint8Array(64*4), 64, 1, THREE.RGBAFormat, THREE.UnsignedByteType) },
+  uTime: { value: 0 }
+};
+simUniforms.uFFT.value.needsUpdate = true;
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform sampler2D uFFT;
+    uniform float uDt;
+    uniform float uTime;
+    varying vec2 vUv;
+    
+    // hash for seeded spatial variation
+    float hash(vec2 p){
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float phase = s.w;
+      
+      // sample FFT: divide space into 8×8 grid of attractor zones
+      float gx = floor((p.x + 15.0) / 30.0 * 8.0);
+      float gy = floor((p.y + 15.0) / 30.0 * 8.0);
+      gx = clamp(gx, 0.0, 7.0);
+      gy = clamp(gy, 0.0, 7.0);
+      float binIdx = gy * 8.0 + gx;
+      float u = (binIdx + 0.5) / 64.0;
+      vec4 fftSample = texture2D(uFFT, vec2(u, 0.5));
+      float mag = (fftSample.r + fftSample.g + fftSample.b) / 3.0;  // 0..255 in shader space
+      float strength = mag / 255.0;
+      
+      // attractor center for this grid cell
+      float cx = (gx + 0.5) / 8.0 * 30.0 - 15.0;
+      float cy = (gy + 0.5) / 8.0 * 30.0 - 15.0;
+      vec3 center = vec3(cx, cy, 0.0);
+      
+      // pull toward center with force proportional to FFT magnitude
+      vec3 toCenter = center - p;
+      float dist = length(toCenter);
+      vec3 force = toCenter * strength * 0.8;
+      
+      // damping & drift: when sound fades, particles disperse
+      vec3 drift = vec3(
+        sin(uTime * 0.3 + phase * 6.28) * 0.15,
+        cos(uTime * 0.4 + phase * 6.28) * 0.15,
+        sin(uTime * 0.5 + phase * 3.14) * 0.05
+      );
+      force += drift * (1.0 - strength * 0.6);
+      
+      // integrate
+      p += force * uDt * 8.0;
+      
+      // clamp to canvas bounds with soft reflect
+      if (abs(p.x) > 15.0) p.x *= 0.95;
+      if (abs(p.y) > 15.0) p.y *= 0.95;
+      if (abs(p.z) > 3.0)  p.z *= 0.9;
+      
+      phase = mod(phase + uDt * 0.02, 1.0);
+      gl_FragColor = vec4(p, phase);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// ---- render pass ----
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 45);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uTime;
+    attribute vec2 uvIdx;
+    varying float vPhase;
+    varying float vDepth;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vPhase = s.w;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      float dist = vDepth;
+      gl_PointSize = 1.4 * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vPhase;
+    varying float vDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      
+      // palette: sun-bleached concrete → smog ochre → shadow umber
+      vec3 c1 = vec3(0.847, 0.816, 0.761);  // #d8d0c2 concrete
+      vec3 c2 = vec3(0.722, 0.600, 0.408);  // #b89968 ochre
+      vec3 c3 = vec3(0.353, 0.322, 0.282);  // #5a5248 umber
+      
+      float k = mod(vPhase + vDepth * 0.02, 1.0);
+      vec3 col = mix(c1, c2, smoothstep(0.3, 0.6, k));
+      col = mix(col, c3, smoothstep(0.6, 1.0, k));
+      
+      // depth fog: fade to background
+      float fog = smoothstep(40.0, 50.0, vDepth);
+      col = mix(col, vec3(0.847, 0.816, 0.761), fog);
+      
+      gl_FragColor = vec4(col, a * (1.0 - fog * 0.5));
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = (now - lastTime) / 1000; lastTime = now;
+  
+  // read FFT
+  if (hasAudio && analyser) {
+    analyser.getByteFrequencyData(dataArray);
+    // pack first 64 bins into texture (8×8 grid)
+    const fftData = new Uint8Array(64 * 4);
+    for (let i = 0; i < 64; i++){
+      const val = i < bufferLength ? dataArray[i] : 0;
+      fftData[i*4]   = val;
+      fftData[i*4+1] = val;
+      fftData[i*4+2] = val;
+      fftData[i*4+3] = 255;
+    }
+    simUniforms.uFFT.value.image.data = fftData;
+    simUniforms.uFFT.value.needsUpdate = true;
+  }
+  
+  simUniforms.uTime.value = now / 1000;
+  
+  // step sim 2 substeps
+  for (let i = 0; i < 2; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+  
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = now / 1000;
+  
+  // slow camera breathing
+  const breathe = Math.sin(now * 0.0004) * 3.0;
+  camera.position.z = 45 + breathe;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
