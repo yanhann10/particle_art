@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ry8 · folded leaves riding water · barcarolle</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0806; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">ry8</div>
+<div class="hint">drag to orbit · scroll to zoom · click to regrow</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Folded Leaf Geometry Builder ── */
+function buildLeafTwirl(seed, width, length, curvature, foldDepth, segments){
+  const rng = mulberry32(seed);
+  const positions = [];
+  const colors = [];
+  
+  // calligraphic mid-vein with curling edges
+  for (let i = 0; i <= segments; i++){
+    const t = i / segments;
+    const s = t * length;
+    
+    // parametric curve: helical twist + fold
+    const twist = curvature * Math.sin(t * Math.PI * 2.5);
+    const fold = foldDepth * Math.sin(t * Math.PI);
+    
+    // left edge
+    const xL = -width * 0.5 * (1.0 - t * 0.3) + twist;
+    const yL = s;
+    const zL = fold * Math.cos(t * Math.PI - Math.PI * 0.5);
+    
+    // mid-vein
+    const xM = twist * 0.3;
+    const yM = s;
+    const zM = fold * 0.5;
+    
+    // right edge
+    const xR = width * 0.5 * (1.0 - t * 0.3) + twist;
+    const yR = s;
+    const zR = fold * Math.cos(t * Math.PI - Math.PI * 0.5);
+    
+    // jitter for organic feel
+    const jitter = 0.02 * (rng() - 0.5);
+    
+    positions.push(xL + jitter, yL, zL);
+    positions.push(xM, yM, zM);
+    positions.push(xR + jitter, yR, zR);
+    
+    // color varies along length
+    const warmth = 0.6 + 0.4 * t;
+    for (let j = 0; j < 3; j++){
+      colors.push(warmth, warmth * 0.7, warmth * 0.4);
+    }
+  }
+  
+  return { positions: new Float32Array(positions), colors: new Float32Array(colors) };
+}
+
+function mulberry32(seed){
+  return function(){
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  }
+}
+
+/* ── Build Leaf Arrangement + Water Wake ── */
+function buildLeafArrangement(baseSeed, particleCount){
+  const rng = mulberry32(baseSeed);
+  const leafCount = 7;
+  const allPositions = [];
+  const allSeeds = [];
+  const allLeafIds = [];
+  
+  for (let leafIdx = 0; leafIdx < leafCount; leafIdx++){
+    const leafSeed = (baseSeed + leafIdx * 1e6) >>> 0;
+    const leafRng = mulberry32(leafSeed);
+    
+    // each leaf has unique size and curve
+    const width = 1.2 + leafRng() * 1.8;
+    const length = 3.5 + leafRng() * 3.0;
+    const curvature = 0.8 + leafRng() * 1.4;
+    const foldDepth = 0.6 + leafRng() * 0.9;
+    const segments = 28 + Math.floor(leafRng() * 12);
+    
+    const { positions } = buildLeafTwirl(leafSeed, width, length, curvature, foldDepth, segments);
+    
+    // arrange leaves in flowing procession (barcarolle: linear progression, not bouquet)
+    const processionT = leafIdx / (leafCount - 1);
+    const offsetX = (processionT - 0.5) * 6.0; // line along x
+    const offsetY = -length * 0.5 + Math.sin(processionT * Math.PI) * 0.4; // gentle wave
+    const offsetZ = Math.sin(processionT * Math.PI * 2) * 0.6; // sinuous z
+    
+    // rotation: leaves tilt toward flow direction
+    const rotY = (leafRng() - 0.5) * 0.3;
+    const rotZ = (leafRng() - 0.5) * 0.25;
+    
+    const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+    const cosZ = Math.cos(rotZ), sinZ = Math.sin(rotZ);
+    
+    // distribute particles along leaf strip
+    const ptsPerLeaf = Math.floor(particleCount * 0.65 / leafCount);
+    for (let i = 0; i < ptsPerLeaf; i++){
+      const idx = Math.floor(leafRng() * (positions.length / 3));
+      let x = positions[idx * 3];
+      let y = positions[idx * 3 + 1];
+      let z = positions[idx * 3 + 2];
+      
+      // surface jitter
+      x += (leafRng() - 0.5) * 0.08;
+      y += (leafRng() - 0.5) * 0.08;
+      z += (leafRng() - 0.5) * 0.15;
+      
+      // rotate
+      const x1 = x * cosY - z * sinY;
+      const z1 = x * sinY + z * cosY;
+      const y1 = y * cosZ - z1 * sinZ;
+      const z2 = y * sinZ + z1 * cosZ;
+      
+      // translate
+      allPositions.push(x1 + offsetX, y1 + offsetY, z2 + offsetZ);
+      allSeeds.push(leafRng());
+      allLeafIds.push(leafIdx / leafCount);
+    }
+  }
+  
+  // add water wake trailing behind the leaf procession (barcarolle: leaves floating on water)
+  const wakePts = Math.floor(particleCount * 0.35);
+  const wakeRng = mulberry32(baseSeed + 999);
+  for (let i = 0; i < wakePts; i++){
+    const t = wakeRng();
+    const wakeX = (t - 0.5) * 7.0; // spread along x
+    const wakeY = -5.0 - wakeRng() * 2.5; // below leaves
+    const wakeZ = Math.sin(t * Math.PI * 3) * 1.2 + (wakeRng() - 0.5) * 0.4; // wake ripple pattern
+    
+    allPositions.push(wakeX, wakeY, wakeZ);
+    allSeeds.push(wakeRng());
+    allLeafIds.push(1.0 + wakeRng() * 0.1); // flag as wake (>1.0)
+  }
+  
+  return {
+    positions: new Float32Array(allPositions),
+    seeds: new Float32Array(allSeeds),
+    leafIds: new Float32Array(allLeafIds)
+  };
+}
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 4, 10);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0c10, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 0, 0);
+
+const N = 80000;
+let geom, points;
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0 },
+  uFlow:  { value: 0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform float uFlow;
+    attribute float seed;
+    attribute float leafId;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vIsWake;
+
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.4 + seed * 6.28;
+      vIsWake = step(1.0, leafId);
+
+      /* reveal animation: leaves float in from upstream */
+      vec3 entry = vec3(-10.0, p.y, p.z);
+      float uncurl = smoothstep(0.0, 1.0, uReady);
+      p = mix(entry, p, uncurl);
+
+      /* barcarolle flow: gentle downstream drift */
+      float drift = uFlow * (0.8 + seed * 0.4);
+      p.x += drift * 2.0;
+      
+      /* water surface undulation (leaves bob) */
+      if (vIsWake < 0.5){
+        float bob = sin(t * 1.2 + p.x * 0.5) * 0.12;
+        p.y += bob * uFlow;
+      }
+      
+      /* wake ripple animation */
+      if (vIsWake > 0.5){
+        float ripple = sin(p.x * 0.8 - uTime * 2.0) * 0.15;
+        p.z += ripple * uFlow;
+      }
+
+      /* Venetian nocturne palette: moonlit ochre on indigo water */
+      vec3 ochre  = vec3(0.72, 0.54, 0.30); // leaf lit by lamplight
+      vec3 sienna = vec3(0.48, 0.34, 0.22); // leaf shadow
+      vec3 indigo = vec3(0.18, 0.22, 0.38); // deep water
+      vec3 silver = vec3(0.52, 0.58, 0.64); // moonlit wake
+      
+      vec3 baseCol;
+      if (vIsWake > 0.5){
+        /* wake: indigo water with silver highlights */
+        float shimmer = 0.5 + 0.5 * sin(seed * 30.0 + uTime * 3.0);
+        baseCol = mix(indigo, silver, shimmer * 0.6);
+      } else {
+        /* leaves: warm ochre with shadow variation */
+        float leafBlend = fract(leafId * 7.13);
+        baseCol = mix(sienna, ochre, leafBlend);
+        /* lamplight glint */
+        float glint = 0.04 * sin(seed * 25.0 + uTime * 0.9);
+        baseCol += vec3(glint * 1.3, glint * 0.9, glint * 0.4);
+      }
+      
+      vCol = baseCol;
+
+      /* alpha: leaves opaque, wake translucent */
+      float energy = 0.5 + 0.5 * sin(t * 0.5);
+      if (vIsWake > 0.5){
+        vAlpha = (0.28 + 0.22 * energy) * uncurl * uFlow;
+      } else {
+        vAlpha = (0.52 + 0.38 * energy) * uncurl;
+      }
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sizeBase = vIsWake > 0.5 ? 28.0 : 40.0;
+      gl_PointSize = (0.9 + 0.4 * energy) * uPixel * (sizeBase/dist) * (0.4 + 0.6*uncurl);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vIsWake;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float falloff = vIsWake > 0.5 ? 10.0 : 16.0;
+      float a = exp(-r * falloff) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+let revealStart = 0;
+
+function regrow(seed){
+  const { positions, seeds, leafIds } = buildLeafArrangement(seed, N);
+  
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('leafId',   new THREE.BufferAttribute(leafIds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions); geom.attributes.position.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);          geom.attributes.seed.needsUpdate = true;
+    geom.attributes.leafId.array.set(leafIds);      geom.attributes.leafId.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+  revealStart = performance.now();
+}
+
+regrow(Math.floor(Math.random() * 1e9));
+addEventListener('click', () => regrow(Math.floor(Math.random() * 1e9)));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function smoothstep(a, b, x){
+  const t = Math.max(0, Math.min(1, (x-a)/(b-a)));
+  return t*t*(3-2*t);
+}
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  if (revealStart > 0){
+    uniforms.uReady.value = Math.min(1.0, (now - revealStart) / 2400);
+  }
+
+  /* barcarolle rhythm: 6/8 time signature wave (two beats per measure) */
+  const measure = elapsed * 0.35; // moderate tempo
+  const barcarolleFlow = Math.pow(Math.sin(measure * Math.PI) * 0.5 + 0.5, 1.4);
+  const accent = 0.12 * Math.sin(measure * Math.PI * 2.0);
+  uniforms.uFlow.value = Math.max(0, Math.min(1, barcarolleFlow + accent));
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
