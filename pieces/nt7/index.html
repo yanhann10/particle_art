@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: breathe, intensity: gentle -->
+<title>nt7 · luminous strata · James Turrell</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#080610; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size:11px; letter-spacing:0.04em; z-index:10; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size:10px; letter-spacing:0.04em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">nt7 · luminous strata · James Turrell</div>
+<div class="hint">Aten Reign 2013 · we eat light, drink it through our skins</div>
+<div class="src">James Turrell · Roden Crater · Ganzfeld</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 0, 35);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x080610, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- Turrell palette: 5 hand-picked colors ---
+// Deep indigo base → cyan aperture → warm magenta → soft amber → pale rose
+const PALETTE = [
+  new THREE.Color(0.08, 0.06, 0.22),  // deep indigo-violet
+  new THREE.Color(0.15, 0.55, 0.72),  // Turrell cyan (Aten Reign upper ring)
+  new THREE.Color(0.72, 0.18, 0.45),  // magenta-rose (Ganzfeld transition)
+  new THREE.Color(0.88, 0.62, 0.28),  // warm amber (Roden Crater sunset)
+  new THREE.Color(0.82, 0.72, 0.78),  // pale rose-white (the innermost glow)
+];
+
+// --- Instanced planes ---
+const LAYERS = 12;         // horizontal strata
+const PER_LAYER = 280;     // planes per layer
+const COUNT = LAYERS * PER_LAYER;
+
+const planeGeo = new THREE.PlaneGeometry(1, 1);
+const dummy = new THREE.Object3D();
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    attribute vec3 aColor;
+    attribute float aLayer;
+    attribute float aSeed;
+    attribute float aSize;
+    uniform float uTime;
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying vec2 vUv;
+
+    void main(){
+      vUv = uv;
+      vColor = aColor;
+
+      // breathing: gentle sinusoidal expansion per layer
+      float layerPhase = aLayer * 0.52 + uTime * 0.18;
+      float breathe = 1.0 + 0.12 * sin(layerPhase);
+      float personalPhase = aSeed * 6.2832 + uTime * 0.25;
+      float personalBreath = 1.0 + 0.06 * sin(personalPhase);
+
+      // scale the instance matrix position by breathing
+      vec4 worldPos = instanceMatrix * vec4(position * aSize * personalBreath, 1.0);
+      // expand radially from center based on layer breathe
+      vec3 wp = worldPos.xyz;
+      float radialDist = length(wp.xz);
+      vec2 radialDir = radialDist > 0.01 ? wp.xz / radialDist : vec2(0.0);
+      wp.xz += radialDir * (breathe - 1.0) * radialDist;
+
+      vec4 mv = viewMatrix * vec4(wp, 1.0);
+      gl_Position = projectionMatrix * mv;
+
+      // opacity: low base, varies with depth and seed
+      float depthFade = smoothstep(120.0, 10.0, -mv.z);
+      vAlpha = (0.04 + 0.04 * sin(personalPhase * 0.7)) * depthFade;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying vec2 vUv;
+    void main(){
+      // soft rectangular falloff — not a hard quad
+      vec2 c = vUv - 0.5;
+      float edge = 1.0 - smoothstep(0.3, 0.5, abs(c.x)) - smoothstep(0.3, 0.5, abs(c.y));
+      edge = max(edge, 0.0);
+      float a = vAlpha * edge;
+      gl_FragColor = vec4(vColor * a * 1.8, a);
+    }
+  `
+});
+
+const mesh = new THREE.InstancedMesh(planeGeo, mat, COUNT);
+mesh.frustumCulled = false;
+
+// Per-instance attributes
+const colorAttr = new Float32Array(COUNT * 3);
+const layerAttr = new Float32Array(COUNT);
+const seedAttr = new Float32Array(COUNT);
+const sizeAttr = new Float32Array(COUNT);
+
+// Build strata: concentric elliptical rings (like Aten Reign viewed from below)
+// Each layer is a horizontal band at a different Y, with planes arranged in elliptical patterns
+const layerSpacing = 2.8;
+const baseY = -((LAYERS - 1) * layerSpacing) / 2;
+
+for (let L = 0; L < LAYERS; L++){
+  const t = L / (LAYERS - 1); // 0..1 from bottom to top
+  const y = baseY + L * layerSpacing;
+
+  // Color: interpolate through palette based on layer
+  const palIdx = t * (PALETTE.length - 1);
+  const pi0 = Math.floor(palIdx);
+  const pi1 = Math.min(pi0 + 1, PALETTE.length - 1);
+  const pf = palIdx - pi0;
+  const layerColor = new THREE.Color().lerpColors(PALETTE[pi0], PALETTE[pi1], pf);
+
+  // Ring radius varies: wider at edges, narrow at center (funnel shape like Aten Reign)
+  const ringRadius = 6 + 10 * Math.pow(Math.abs(t - 0.5) * 2, 0.7);
+
+  for (let p = 0; p < PER_LAYER; p++){
+    const idx = L * PER_LAYER + p;
+    const angle = (p / PER_LAYER) * Math.PI * 2 + (L * 0.3);
+    const rVar = ringRadius * (0.6 + Math.random() * 0.8);
+    const angleVar = angle + (Math.random() - 0.5) * 0.4;
+
+    const x = Math.cos(angleVar) * rVar;
+    const z = Math.sin(angleVar) * rVar;
+    const yOff = (Math.random() - 0.5) * layerSpacing * 0.6;
+
+    dummy.position.set(x, y + yOff, z);
+    // Planes face roughly toward center-up, with variation
+    dummy.lookAt(0, y, 0);
+    dummy.rotateX((Math.random() - 0.5) * 0.5);
+    dummy.rotateY((Math.random() - 0.5) * 0.5);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(idx, dummy.matrix);
+
+    // Slight per-instance color variation
+    const hueShift = (Math.random() - 0.5) * 0.08;
+    colorAttr[idx * 3]     = Math.max(0, layerColor.r + hueShift);
+    colorAttr[idx * 3 + 1] = Math.max(0, layerColor.g + hueShift * 0.5);
+    colorAttr[idx * 3 + 2] = Math.max(0, layerColor.b - hueShift * 0.3);
+
+    layerAttr[idx] = L;
+    seedAttr[idx] = Math.random();
+    sizeAttr[idx] = 2.5 + Math.random() * 3.5; // plane size
+  }
+}
+
+mesh.instanceMatrix.needsUpdate = true;
+planeGeo.setAttribute('aColor', new THREE.InstancedBufferAttribute(colorAttr, 3));
+planeGeo.setAttribute('aLayer', new THREE.InstancedBufferAttribute(layerAttr, 1));
+planeGeo.setAttribute('aSeed', new THREE.InstancedBufferAttribute(seedAttr, 1));
+planeGeo.setAttribute('aSize', new THREE.InstancedBufferAttribute(sizeAttr, 1));
+
+scene.add(mesh);
+
+// --- Ambient atmospheric fog planes: large translucent sheets filling the volume ---
+const fogCount = 40;
+const fogGeo = new THREE.PlaneGeometry(1, 1);
+const fogMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    attribute vec3 aFogColor;
+    attribute float aFogSeed;
+    uniform float uTime;
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      vColor = aFogColor;
+      float breathe = 1.0 + 0.05 * sin(aFogSeed * 6.28 + uTime * 0.12);
+      vec4 worldPos = instanceMatrix * vec4(position * breathe, 1.0);
+      vec4 mv = viewMatrix * vec4(worldPos.xyz, 1.0);
+      gl_Position = projectionMatrix * mv;
+      float depthFade = smoothstep(150.0, 20.0, -mv.z);
+      vAlpha = 0.015 * depthFade;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying vec2 vUv;
+    void main(){
+      vec2 c = vUv - 0.5;
+      float r = length(c);
+      float a = vAlpha * smoothstep(0.5, 0.15, r);
+      gl_FragColor = vec4(vColor * a * 2.0, a);
+    }
+  `
+});
+
+const fogMesh = new THREE.InstancedMesh(fogGeo, fogMat, fogCount);
+fogMesh.frustumCulled = false;
+const fogColorAttr = new Float32Array(fogCount * 3);
+const fogSeedAttr = new Float32Array(fogCount);
+for (let i = 0; i < fogCount; i++){
+  const t = i / fogCount;
+  const y = (t - 0.5) * LAYERS * layerSpacing * 1.2;
+  dummy.position.set(
+    (Math.random() - 0.5) * 8,
+    y,
+    (Math.random() - 0.5) * 8
+  );
+  dummy.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, 0);
+  dummy.scale.setScalar(20 + Math.random() * 25);
+  dummy.updateMatrix();
+  fogMesh.setMatrixAt(i, dummy.matrix);
+  const ci = Math.floor(t * (PALETTE.length - 1));
+  const cf = t * (PALETTE.length - 1) - ci;
+  const fc = new THREE.Color().lerpColors(PALETTE[ci], PALETTE[Math.min(ci+1, PALETTE.length-1)], cf);
+  fogColorAttr[i*3] = fc.r;
+  fogColorAttr[i*3+1] = fc.g;
+  fogColorAttr[i*3+2] = fc.b;
+  fogSeedAttr[i] = Math.random();
+}
+fogMesh.instanceMatrix.needsUpdate = true;
+fogGeo.setAttribute('aFogColor', new THREE.InstancedBufferAttribute(fogColorAttr, 3));
+fogGeo.setAttribute('aFogSeed', new THREE.InstancedBufferAttribute(fogSeedAttr, 1));
+scene.add(fogMesh);
+
+// --- Camera: slow vertical drift through the strata (inhabitable) ---
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const startTime = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const t = (now - startTime) / 1000;
+
+  mat.uniforms.uTime.value = t;
+  fogMat.uniforms.uTime.value = t;
+
+  // Camera: slow ascending spiral inside the funnel
+  const camCycleY = 80; // seconds for full vertical traverse
+  const camCycleOrbit = 120;
+  const yRange = LAYERS * layerSpacing * 0.4;
+  const yCenter = 0;
+  const camY = yCenter + Math.sin(t * Math.PI * 2 / camCycleY) * yRange;
+  const camAngle = t * Math.PI * 2 / camCycleOrbit;
+  const camRadius = 22 + 6 * Math.sin(t * 0.07);
+  camera.position.set(
+    Math.cos(camAngle) * camRadius,
+    camY,
+    Math.sin(camAngle) * camRadius
+  );
+  // Look slightly above center to emphasize the funnel
+  camera.lookAt(0, camY * 0.3, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
