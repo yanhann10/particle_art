@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: bloom, intensity: gentle -->
+<title>3rr · turing skin · gray-scott leaf sphere</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#080604;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;
+    font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;letter-spacing:0.06em}
+</style>
+</head>
+<body>
+<div class="id">3rr</div>
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+
+/* ── Gray-Scott reaction-diffusion on a sphere, rendered as instanced leaves.
+   Technique: Alan Turing's morphogenesis (1952), Gray-Scott model (1984).
+   F/k tuned near coral-growth regime with spatial perturbation for asymmetry.
+   Each cell = one leaf; V concentration → color + protrusion + scale.        */
+
+const W=128, H=128, TOTAL=W*H;
+
+// Slightly randomized parameters — no two sessions identical
+const F0 = 0.037 + (Math.random()-0.5)*0.006;
+const K0 = 0.06  + (Math.random()-0.5)*0.003;
+const DU = 0.16, DV = 0.08;
+
+let U  = new Float32Array(TOTAL), V  = new Float32Array(TOTAL);
+let U2 = new Float32Array(TOTAL), V2 = new Float32Array(TOTAL);
+U.fill(1); V.fill(0);
+
+// Seed 6-12 spots at random
+const NS = 6 + Math.floor(Math.random()*7);
+for(let s=0;s<NS;s++){
+  const cx=Math.floor(Math.random()*W), cy=Math.floor(Math.random()*H);
+  const r=2+Math.floor(Math.random()*3);
+  for(let dy=-r;dy<=r;dy++) for(let dx=-r;dx<=r;dx++){
+    if(dx*dx+dy*dy>r*r) continue;
+    const i=((cy+dy+H)%H)*W+((cx+dx+W)%W);
+    U[i]=0.5+Math.random()*0.1; V[i]=0.25+Math.random()*0.1;
+  }
+}
+
+function stepRD(n){
+  for(let s=0;s<n;s++){
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+      const i=y*W+x;
+      const xl=y*W+((x-1+W)%W), xr=y*W+((x+1)%W);
+      const yu=((y-1+H)%H)*W+x,  yd=((y+1)%H)*W+x;
+      const lapU=U[xl]+U[xr]+U[yu]+U[yd]-4*U[i];
+      const lapV=V[xl]+V[xr]+V[yu]+V[yd]-4*V[i];
+      const uvv=U[i]*V[i]*V[i];
+      // Spatial F variation for organic asymmetry
+      const fx=x/W-0.5, fy=y/H-0.5;
+      const lF=F0+0.004*Math.sin(fx*6.28+fy*4.7);
+      U2[i]=Math.max(0,Math.min(1, U[i]+DU*lapU - uvv + lF*(1-U[i])));
+      V2[i]=Math.max(0,Math.min(1, V[i]+DV*lapV + uvv - (lF+K0)*V[i]));
+    }
+    [U,U2]=[U2,U]; [V,V2]=[V2,V];
+  }
+}
+// Pre-run so patterns are visible on load
+stepRD(900);
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x080604, 0.06);
+const camera = new THREE.PerspectiveCamera(42,innerWidth/innerHeight,0.1,200);
+camera.position.set(0,3,13);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.setClearColor(0x080604,1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+document.body.appendChild(renderer.domElement);
+
+const ctrl = new OrbitControls(camera,renderer.domElement);
+ctrl.enableDamping=true; ctrl.dampingFactor=0.04;
+ctrl.autoRotate=true; ctrl.autoRotateSpeed=0.25;
+
+/* ── Lighting: warm key, cool rim, subtle fill ── */
+const key = new THREE.DirectionalLight(0xffe0c8,1.0);
+key.position.set(5,9,4); scene.add(key);
+scene.add(new THREE.AmbientLight(0x181010,0.45));
+const rim = new THREE.DirectionalLight(0x5577aa,0.3);
+rim.position.set(-5,-2,-6); scene.add(rim);
+const fill = new THREE.PointLight(0xbb7744,0.35,25);
+fill.position.set(-4,6,3); scene.add(fill);
+
+/* ── Leaf geometry ── */
+function mkLeaf(){
+  const s = new THREE.Shape();
+  const L=0.11, Lw=0.038;
+  s.moveTo(0,-L);
+  s.quadraticCurveTo( Lw*1.4,-L*0.15, Lw*0.7, L*0.35);
+  s.quadraticCurveTo( Lw*0.25,L*0.88, 0, L);
+  s.quadraticCurveTo(-Lw*0.25,L*0.88,-Lw*0.7, L*0.35);
+  s.quadraticCurveTo(-Lw*1.4,-L*0.15, 0,-L);
+  return new THREE.ShapeGeometry(s,4);
+}
+const leafGeo = mkLeaf();
+
+/* ── Subsample grid → instanced leaves ── */
+const MAX_INST = 4800;
+const stride = Math.max(1,Math.floor(TOTAL/MAX_INST));
+const sIdx=[]; for(let i=0;i<TOTAL;i+=stride) sIdx.push(i);
+const IC = sIdx.length;
+
+const leafMat = new THREE.MeshStandardMaterial({
+  color:0xffffff, roughness:0.6, metalness:0.04, side:THREE.DoubleSide
+});
+const mesh = new THREE.InstancedMesh(leafGeo, leafMat, IC);
+scene.add(mesh);
+
+/* ── Hand-tuned 5-color palette ──
+   Justification: deep forest floor → bark → burnt earth → ochre → coral tip
+   Maps V concentration 0→1 across this range                               */
+const pal=[
+  new THREE.Color(0x14241a), // deep forest
+  new THREE.Color(0x3a3222), // mossy bark
+  new THREE.Color(0x7e4428), // burnt sienna
+  new THREE.Color(0xc08534), // warm ochre
+  new THREE.Color(0xd06e52), // coral-pink tip
+];
+function palLerp(t){
+  t=Math.max(0,Math.min(1,t));
+  const idx=t*(pal.length-1), lo=Math.floor(idx), hi=Math.min(lo+1,pal.length-1);
+  return new THREE.Color().copy(pal[lo]).lerp(pal[hi],idx-lo);
+}
+
+/* ── Atmosphere: sparse dust motes ── */
+const dustCount = 220;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount*3);
+for(let i=0;i<dustCount;i++){
+  dustPos[i*3]  =(Math.random()-0.5)*18;
+  dustPos[i*3+1]=(Math.random()-0.5)*14;
+  dustPos[i*3+2]=(Math.random()-0.5)*18;
+}
+dustGeo.setAttribute('position',new THREE.BufferAttribute(dustPos,3));
+const dustMat = new THREE.PointsMaterial({color:0xaa9070,size:0.03,transparent:true,opacity:0.35});
+const dust = new THREE.Points(dustGeo,dustMat);
+scene.add(dust);
+
+/* ── Sphere mapping + instance update ── */
+const SR = 4.0;
+const dum = new THREE.Object3D();
+const col = new THREE.Color();
+// Pre-compute per-instance hash for variation
+const varHash = new Float32Array(IC);
+for(let i=0;i<IC;i++) varHash[i]=0.82+0.36*Math.sin(sIdx[i]*7.13+2.9);
+
+function updateLeaves(t){
+  for(let s=0;s<IC;s++){
+    const idx=sIdx[s];
+    const gx=idx%W, gy=(idx/W)|0;
+    const vv=V[idx];
+    // Spherical coords
+    const theta=(gx/W)*Math.PI*2;
+    const phi=(gy/H)*Math.PI;
+    // V drives protrusion
+    const r=SR+vv*0.9;
+    const sp=Math.sin(phi);
+    const px=r*sp*Math.cos(theta);
+    const py=r*Math.cos(phi);
+    const pz=r*sp*Math.sin(theta);
+    dum.position.set(px,py,pz);
+    // Face outward
+    dum.lookAt(px*2,py*2,pz*2);
+    // Scale: active (high V) leaves are larger, with per-leaf variation
+    const sc=(0.55+vv*2.4)*varHash[s];
+    dum.scale.setScalar(sc);
+    // Gentle individual breathing
+    dum.rotateZ(Math.sin(t*0.35+idx*0.021)*0.12);
+    dum.updateMatrix();
+    mesh.setMatrixAt(s,dum.matrix);
+    col.copy(palLerp(vv*2.8));
+    mesh.setColorAt(s,col);
+  }
+  mesh.instanceMatrix.needsUpdate=true;
+  mesh.instanceColor.needsUpdate=true;
+}
+updateLeaves(0);
+
+/* ── Subtle ground glow (warm pool of light below sphere) ── */
+const glowGeo = new THREE.PlaneGeometry(12,12);
+const glowMat = new THREE.MeshBasicMaterial({
+  color:0x1a0e08, transparent:true, opacity:0.2, side:THREE.DoubleSide
+});
+const glow = new THREE.Mesh(glowGeo,glowMat);
+glow.rotation.x=-Math.PI/2; glow.position.y=-5.5;
+scene.add(glow);
+
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+/* ── Animation loop ── */
+const t0=performance.now();
+let fc=0;
+function loop(){
+  const t=(performance.now()-t0)/1000;
+  // Run RD steps — slow, organic pace (every other frame, 2 steps)
+  if(fc%2===0) stepRD(2);
+
+  updateLeaves(t);
+
+  // Drift dust motes slowly upward
+  const dp=dust.geometry.attributes.position.array;
+  for(let i=0;i<dustCount;i++){
+    dp[i*3+1]+=0.002+0.001*Math.sin(i*3.7+t*0.2);
+    if(dp[i*3+1]>7) dp[i*3+1]=-7;
+  }
+  dust.geometry.attributes.position.needsUpdate=true;
+
+  ctrl.update();
+  renderer.render(scene,camera);
+  fc++;
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
