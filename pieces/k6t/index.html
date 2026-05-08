@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>k6t · calligraphic ink · volumetric beam</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08080d; overflow:hidden;
+               color:#d8c895; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; color:#cdd2dc; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">k6t</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const BG = 0x08080d;
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(BG, 0.032);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+// ─── volumetric light beam (top-right, vertical cone) ───
+const BEAM_POS = new THREE.Vector3(4.5, 0, -2.8);
+const BEAM_HEIGHT = 42;
+const BEAM_RADIUS = 2.8;
+
+const beamGeo = new THREE.ConeGeometry(BEAM_RADIUS, BEAM_HEIGHT, 48, 1, true);
+const beamMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  uniforms: {
+    uColor: { value: new THREE.Color(0.95, 0.88, 0.65) },
+    uOpacity: { value: 0.065 },
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    varying vec3 vPos;
+    void main(){
+      vUv = uv;
+      vPos = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    uniform float uOpacity;
+    uniform float uTime;
+    varying vec2 vUv;
+    varying vec3 vPos;
+    void main(){
+      // radial falloff from cone center axis
+      float r = length(vPos.xz) / (${BEAM_RADIUS.toFixed(1)} * (1.0 - vUv.y));
+      float radial = 1.0 - smoothstep(0.0, 1.0, r);
+      radial = radial * radial;
+      // vertical falloff — brighter at top (source)
+      float vert = smoothstep(0.0, 0.6, vUv.y);
+      // subtle flicker
+      float flicker = 0.92 + 0.08 * sin(uTime * 0.7 + vUv.y * 3.0);
+      float a = radial * vert * uOpacity * flicker;
+      gl_FragColor = vec4(uColor, a);
+    }
+  `
+});
+const beamMesh = new THREE.Mesh(beamGeo, beamMat);
+beamMesh.position.copy(BEAM_POS);
+beamMesh.position.y = BEAM_HEIGHT * 0.5;
+beamMesh.renderOrder = 1;
+scene.add(beamMesh);
+
+// dust motes in the beam
+const DUST_N = 120;
+const dustPos = new Float32Array(DUST_N * 3);
+const dustAlpha = new Float32Array(DUST_N);
+for (let i = 0; i < DUST_N; i++){
+  const y = Math.random() * BEAM_HEIGHT * 0.85;
+  const frac = y / BEAM_HEIGHT;
+  const localR = BEAM_RADIUS * (1.0 - frac) * Math.sqrt(Math.random()) * 0.7;
+  const ang = Math.random() * Math.PI * 2;
+  dustPos[i*3]   = BEAM_POS.x + Math.cos(ang) * localR;
+  dustPos[i*3+1] = y;
+  dustPos[i*3+2] = BEAM_POS.z + Math.sin(ang) * localR;
+  dustAlpha[i] = 0.15 + Math.random() * 0.35;
+}
+const dustGeo = new THREE.BufferGeometry();
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeo.setAttribute('alpha', new THREE.BufferAttribute(dustAlpha, 1));
+const dustMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    attribute float alpha;
+    varying float vAlpha;
+    void main(){
+      vAlpha = alpha;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = 2.0 * (8.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      float d = length(gl_PointCoord - 0.5) * 2.0;
+      if (d > 1.0) discard;
+      float a = (1.0 - d*d) * vAlpha;
+      gl_FragColor = vec4(0.95, 0.88, 0.7, a);
+    }
+  `
+});
+const dustPts = new THREE.Points(dustGeo, dustMat);
+scene.add(dustPts);
+
+// ─── differential growth (from parent 2iy) ───
+const MAX_VERTS = 1800;
+const ATTRACT = 0.06, REPEL_R = 0.46, REPEL_STR = 0.13;
+const NOISE = 0.003, PRESSURE = 0.0028, RISE = 0.0042, MAX_D = 0.36;
+
+const verts = [];
+for (let i = 0; i < 18; i++){
+  const th = i / 18 * Math.PI * 2;
+  const r = 1.4 + (Math.random()-0.5)*0.1;
+  verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+}
+
+const CELL = REPEL_R, grid = new Map();
+function key3(x,y,z){ return Math.floor(x/CELL)+','+Math.floor(y/CELL)+','+Math.floor(z/CELL); }
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i]; const k = key3(v.x,v.y,v.z);
+    if (!grid.has(k)) grid.set(k,[]);
+    grid.get(k).push(i);
+  }
+}
+function getNeighbors(v){
+  const cx=Math.floor(v.x/CELL), cy=Math.floor(v.y/CELL), cz=Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1;dx<=1;dx++) for (let dy=-1;dy<=1;dy++) for (let dz=-1;dz<=1;dz++){
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+function step(){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx=new Float32Array(n), dy=new Float32Array(n), dz=new Float32Array(n);
+  for (let i=0;i<n;i++){
+    const v = verts[i];
+    for (const j of getNeighbors(v)){
+      if (j===i) continue;
+      const u=verts[j];
+      const ex=v.x-u.x, ey=v.y-u.y, ez=v.z-u.z;
+      const d2=ex*ex+ey*ey+ez*ez;
+      if (d2>REPEL_R*REPEL_R||d2<1e-6) continue;
+      const d=Math.sqrt(d2);
+      const f=REPEL_STR*(1-d/REPEL_R)/d;
+      dx[i]+=ex*f; dy[i]+=ey*f; dz[i]+=ez*f;
+    }
+  }
+  for (let i=0;i<n;i++){
+    const a=verts[(i-1+n)%n], b=verts[(i+1)%n], v=verts[i];
+    dx[i]+=(a.x+b.x-2*v.x)*ATTRACT;
+    dy[i]+=(a.y+b.y-2*v.y)*ATTRACT;
+    dz[i]+=(a.z+b.z-2*v.z)*ATTRACT;
+  }
+  let cx2=0,cy2=0,cz2=0;
+  for (let i=0;i<n;i++){cx2+=verts[i].x;cy2+=verts[i].y;cz2+=verts[i].z;}
+  cx2/=n;cy2/=n;cz2/=n;
+  for (let i=0;i<n;i++){
+    const ox=verts[i].x-cx2, oy=verts[i].y-cy2, oz=verts[i].z-cz2;
+    const d=Math.hypot(ox,oy,oz)+1e-6;
+    dx[i]+=(ox/d)*PRESSURE;
+    dy[i]+=(oy/d)*PRESSURE*0.4;
+    dz[i]+=(oz/d)*PRESSURE;
+  }
+  for (let i=0;i<n;i++){
+    const a=verts[i].age;
+    const upward=RISE*(0.3+1.2*Math.min(a*1.5,1.0));
+    verts[i].x+=dx[i]+(Math.random()-0.5)*NOISE;
+    verts[i].y+=dy[i]+(Math.random()-0.5)*NOISE*0.5+upward;
+    verts[i].z+=dz[i]+(Math.random()-0.5)*NOISE;
+    verts[i].age+=0.0014;
+  }
+  const grown=[];
+  for (let i=0;i<n;i++){
+    const a=verts[i], b=verts[(i+1)%n];
+    grown.push(a);
+    const ex=b.x-a.x, ey=b.y-a.y, ez=b.z-a.z;
+    if (ex*ex+ey*ey+ez*ez>MAX_D*MAX_D && verts.length+grown.length<MAX_VERTS){
+      grown.push({ x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5-0.05, z:(a.z+b.z)*0.5, age:Math.max(a.age,b.age)*0.5 });
+    }
+  }
+  verts.length=0;
+  for (const v of grown) verts.push(v);
+}
+for (let s=0;s<700;s++) step();
+addEventListener('click', () => { paused = !paused; });
+
+// ─── ink tube with beam-aware shader ───
+const tubeMat = new THREE.ShaderMaterial({
+  transparent: true,
+  uniforms: {
+    uBeamPos: { value: new THREE.Vector2(BEAM_POS.x, BEAM_POS.z) },
+    uBeamRadius: { value: BEAM_RADIUS },
+    uBeamHeight: { value: BEAM_HEIGHT },
+    uBaseColor: { value: new THREE.Color(0.91, 0.86, 0.75) },
+    uBeamColor: { value: new THREE.Color(1.0, 0.95, 0.82) },
+    uFogColor: { value: new THREE.Color(BG) },
+    uFogDensity: { value: 0.032 },
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    varying vec3 vWorldPos;
+    varying vec3 vNormal;
+    void main(){
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorldPos = wp.xyz;
+      vNormal = normalize(normalMatrix * normal);
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    uniform vec2 uBeamPos;
+    uniform float uBeamRadius;
+    uniform float uBeamHeight;
+    uniform vec3 uBaseColor;
+    uniform vec3 uBeamColor;
+    uniform vec3 uFogColor;
+    uniform float uFogDensity;
+    uniform float uTime;
+    varying vec3 vWorldPos;
+    varying vec3 vNormal;
+
+    void main(){
+      // beam proximity — cylindrical distance to beam axis
+      vec2 delta = vWorldPos.xz - uBeamPos;
+      float dist = length(delta);
+      float yFrac = clamp(vWorldPos.y / uBeamHeight, 0.0, 1.0);
+      float localR = uBeamRadius * (1.0 - yFrac);
+      float inBeam = 1.0 - smoothstep(0.0, localR, dist);
+      inBeam *= smoothstep(0.0, 2.0, vWorldPos.y); // fade near ground
+      inBeam *= inBeam;
+
+      // mix base ink color with beam brightening
+      vec3 col = mix(uBaseColor, uBeamColor, inBeam * 0.55);
+
+      // simple hemisphere lighting for form
+      float ndl = dot(vNormal, normalize(vec3(0.3, 1.0, 0.2))) * 0.5 + 0.5;
+      col *= 0.55 + 0.45 * ndl;
+
+      // beam adds slight emissive glow
+      col += uBeamColor * inBeam * 0.18;
+
+      // manual fog (matching scene fog)
+      float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * dot(vWorldPos, vWorldPos));
+      col = mix(col, uFogColor, clamp(fogFactor, 0.0, 1.0));
+
+      gl_FragColor = vec4(col, 0.88);
+    }
+  `
+});
+
+let tubeMesh = null;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const clock = new THREE.Clock();
+
+function loop(){
+  const elapsed = clock.getElapsedTime();
+  for (let s=0;s<2;s++) step();
+
+  beamMat.uniforms.uTime.value = elapsed;
+  dustMat.uniforms.uTime.value = elapsed;
+  tubeMat.uniforms.uTime.value = elapsed;
+
+  // animate dust motes — slow drift
+  const dp = dustGeo.attributes.position.array;
+  for (let i=0;i<DUST_N;i++){
+    dp[i*3+1] += 0.003 + Math.sin(elapsed*0.3 + i)*0.001;
+    if (dp[i*3+1] > BEAM_HEIGHT * 0.85){
+      dp[i*3+1] = 0.5;
+    }
+    dp[i*3] += Math.sin(elapsed*0.2 + i*1.3)*0.002;
+    dp[i*3+2] += Math.cos(elapsed*0.15 + i*0.7)*0.002;
+  }
+  dustGeo.attributes.position.needsUpdate = true;
+
+  if (verts.length > 8){
+    const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+    const N_SAMPLES = Math.min(800, verts.length * 2);
+    const RADIAL = 6;
+    const positions = new Float32Array(N_SAMPLES * RADIAL * 3);
+    const normals = new Float32Array(N_SAMPLES * RADIAL * 3);
+    const indices = [];
+    const up = new THREE.Vector3(0, 1, 0);
+
+    for (let i=0;i<N_SAMPLES;i++){
+      const t = i/N_SAMPLES;
+      const dt = 1/N_SAMPLES;
+      const t1 = curve.getTangent((t-dt+1)%1);
+      const t2 = curve.getTangent(t);
+      const t3 = curve.getTangent((t+dt)%1);
+      const curvature = (2 - t1.dot(t2) - t2.dot(t3))*0.5;
+      const pressure = Math.min(1.0, curvature*8);
+      const r = 0.018 + 0.10*pressure;
+
+      const p = curve.getPointAt(t);
+      const tangent = curve.getTangentAt(t).normalize();
+      const normal = new THREE.Vector3().crossVectors(tangent, up).normalize();
+      if (normal.lengthSq()<0.001) normal.set(1,0,0);
+      const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+
+      for (let j=0;j<RADIAL;j++){
+        const ang = (j/RADIAL)*Math.PI*2;
+        const nx = Math.cos(ang), ny = Math.sin(ang);
+        const off = normal.clone().multiplyScalar(nx*r).add(binormal.clone().multiplyScalar(ny*r));
+        const idx3 = (i*RADIAL+j)*3;
+        positions[idx3]   = p.x + off.x;
+        positions[idx3+1] = p.y + off.y;
+        positions[idx3+2] = p.z + off.z;
+        // store ring normal for lighting
+        const n = normal.clone().multiplyScalar(nx).add(binormal.clone().multiplyScalar(ny)).normalize();
+        normals[idx3]   = n.x;
+        normals[idx3+1] = n.y;
+        normals[idx3+2] = n.z;
+      }
+    }
+    for (let i=0;i<N_SAMPLES;i++){
+      const ni=(i+1)%N_SAMPLES;
+      for (let j=0;j<RADIAL;j++){
+        const nj=(j+1)%RADIAL;
+        const a=i*RADIAL+j, b=i*RADIAL+nj, c=ni*RADIAL+j, d=ni*RADIAL+nj;
+        indices.push(a,b,c); indices.push(b,d,c);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    g.setIndex(indices);
+
+    if (tubeMesh){ scene.remove(tubeMesh); tubeMesh.geometry.dispose(); }
+    tubeMesh = new THREE.Mesh(g, tubeMat);
+    scene.add(tubeMesh);
+  }
+
+  // camera follow
+  let yMean=0; for (const v of verts) yMean+=v.y; yMean/=Math.max(verts.length,1);
+  const targetY = Math.max(yMean, 2.0);
+  controls.target.y += (targetY - controls.target.y)*0.04;
+  camera.position.y += (targetY + 4 - camera.position.y)*0.04;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
