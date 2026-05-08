@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11l · gastrulation</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0806; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">11l</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Gastrulation: folding leaf-twirl sheets into embryonic layers ── */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 2, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0806, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, 0, 0);
+controls.minDistance = 6;
+controls.maxDistance = 25;
+
+const N = 80000;
+
+/* ── Cell field: each cell has position, tension, signaling state ── */
+const GRID = 180;
+const GRID_HALF = GRID / 2;
+const cells = [];
+const cellLookup = new Map();
+
+function idx(i, j) { return i * GRID + j; }
+function key(i, j) { return `${i},${j}`; }
+
+for (let i = 0; i < GRID; i++) {
+  for (let j = 0; j < GRID; j++) {
+    const x = (i - GRID_HALF) * 0.11;
+    const z = (j - GRID_HALF) * 0.11;
+    const r = Math.sqrt(x*x + z*z);
+    const noise = Math.sin(i * 0.17) * Math.cos(j * 0.23) * 0.3;
+    const y = 0.0;
+    cells.push({
+      x, y, z,
+      vx: 0, vy: 0, vz: 0,
+      signal: Math.random() * 0.2,
+      tension: 0.0,
+      fold: 0.0,
+      invaginate: r < 3.5 ? 1.0 : 0.0,
+      mass: 1.0,
+      anchor: r > 8.0 ? 1.0 : 0.0,
+      age: Math.random() * 10,
+    });
+    cellLookup.set(key(i, j), { i, j });
+  }
+}
+
+/* ── Neighbor connectivity ── */
+function getNeighbors(i, j) {
+  const n = [];
+  for (let di = -1; di <= 1; di++) {
+    for (let dj = -1; dj <= 1; dj++) {
+      if (di === 0 && dj === 0) continue;
+      const ni = i + di, nj = j + dj;
+      if (ni >= 0 && ni < GRID && nj >= 0 && nj < GRID) {
+        n.push(idx(ni, nj));
+      }
+    }
+  }
+  return n;
+}
+
+const neighbors = [];
+for (let i = 0; i < GRID; i++) {
+  for (let j = 0; j < GRID; j++) {
+    neighbors.push(getNeighbors(i, j));
+  }
+}
+
+/* ── Feedback loop: signal diffusion + tension response ── */
+function step(dt) {
+  const newSignal = cells.map(c => c.signal);
+  
+  for (let i = 0; i < GRID; i++) {
+    for (let j = 0; j < GRID; j++) {
+      const ci = idx(i, j);
+      const c = cells[ci];
+      const nb = neighbors[ci];
+      
+      // signal diffusion with decay
+      let avg = 0;
+      for (const ni of nb) avg += cells[ni].signal;
+      avg /= nb.length;
+      const diffuse = 0.08;
+      const decay = 0.995;
+      newSignal[ci] = (c.signal * (1 - diffuse) + avg * diffuse) * decay;
+      
+      // spontaneous activation in center zone
+      const r = Math.sqrt(c.x*c.x + c.z*c.z);
+      if (r < 2.5 && Math.random() < 0.002) {
+        newSignal[ci] += 0.4;
+      }
+      
+      // invagination: cells with high signal fold inward
+      if (c.signal > 0.5 && c.invaginate > 0.5) {
+        c.fold += dt * 0.3 * (c.signal - 0.5);
+        c.fold = Math.min(c.fold, 1.5);
+      }
+      
+      // tension propagates from folding cells to neighbors
+      let tensionSum = 0;
+      for (const ni of nb) {
+        tensionSum += cells[ni].fold;
+      }
+      c.tension = tensionSum / nb.length;
+    }
+  }
+  
+  for (let i = 0; i < cells.length; i++) {
+    cells[i].signal = newSignal[i];
+  }
+  
+  // physics: tension pulls cells toward folding center
+  for (let i = 0; i < GRID; i++) {
+    for (let j = 0; j < GRID; j++) {
+      const ci = idx(i, j);
+      const c = cells[ci];
+      const nb = neighbors[ci];
+      
+      if (c.anchor > 0.5) {
+        c.vx *= 0.9;
+        c.vy *= 0.9;
+        c.vz *= 0.9;
+        continue;
+      }
+      
+      // attraction to high-fold neighbors
+      let fx = 0, fy = 0, fz = 0;
+      for (const ni of nb) {
+        const n = cells[ni];
+        const dx = n.x - c.x, dy = n.y - c.y, dz = n.z - c.z;
+        const d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.01;
+        const pull = (n.fold - c.fold) * 0.2;
+        fx += (dx / d) * pull;
+        fy += (dy / d) * pull;
+        fz += (dz / d) * pull;
+      }
+      
+      // invaginating cells pull downward
+      if (c.invaginate > 0.5 && c.fold > 0.3) {
+        fy -= 0.8 * c.fold * dt;
+      }
+      
+      c.vx += fx * dt;
+      c.vy += fy * dt;
+      c.vz += fz * dt;
+      
+      const damp = 0.92;
+      c.vx *= damp;
+      c.vy *= damp;
+      c.vz *= damp;
+      
+      c.x += c.vx * dt;
+      c.y += c.vy * dt;
+      c.z += c.vz * dt;
+      
+      c.age += dt;
+    }
+  }
+}
+
+/* ── Particle rendering ── */
+const positions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const signals = new Float32Array(N);
+const folds = new Float32Array(N);
+
+function distributeParticles() {
+  let written = 0;
+  for (let i = 0; i < cells.length && written < N; i++) {
+    const c = cells[i];
+    const density = Math.max(1, Math.floor(2 + c.fold * 8 + c.signal * 4));
+    for (let k = 0; k < density && written < N; k++) {
+      const jitter = 0.05 * (1 + c.fold * 0.5);
+      positions[written*3]   = c.x + (Math.random()-0.5)*jitter;
+      positions[written*3+1] = c.y + (Math.random()-0.5)*jitter;
+      positions[written*3+2] = c.z + (Math.random()-0.5)*jitter;
+      seeds[written] = Math.random();
+      signals[written] = c.signal;
+      folds[written] = c.fold;
+      written++;
+    }
+  }
+  while (written < N) {
+    positions[written*3] = 0;
+    positions[written*3+1] = -20;
+    positions[written*3+2] = 0;
+    seeds[written] = 0;
+    signals[written] = 0;
+    folds[written] = 0;
+    written++;
+  }
+}
+
+distributeParticles();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('signal', new THREE.BufferAttribute(signals, 1));
+geom.setAttribute('fold', new THREE.BufferAttribute(folds, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float signal;
+    attribute float fold;
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    void main() {
+      vec3 p = position;
+      float t = uTime * 0.4 + seed * 6.28;
+      
+      // breathing motion on folded cells
+      float breathe = fold * 0.08 * sin(t * 0.6 + p.y * 2.0);
+      p.y += breathe;
+      
+      // palette: embryonic — ochre primordial cells, deep sienna invagination
+      vec3 ochre = vec3(0.82, 0.64, 0.38);
+      vec3 sienna = vec3(0.58, 0.32, 0.18);
+      vec3 amber = vec3(0.92, 0.72, 0.42);
+      vec3 rust = vec3(0.68, 0.38, 0.22);
+      
+      float energy = 0.5 + 0.5 * sin(t * 0.5);
+      vec3 baseCol = mix(ochre, sienna, fold * 0.8);
+      baseCol = mix(baseCol, amber, signal * 0.6);
+      baseCol = mix(baseCol, rust, smoothstep(0.7, 1.2, fold) * 0.5);
+      
+      vCol = baseCol;
+      vAlpha = (0.5 + 0.3 * energy) * (0.6 + 0.4 * signal + 0.3 * fold);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + 0.4 * energy + 0.6 * fold) * uPixel * (38.0/dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── Ambient light + volumetric fog ── */
+const ambient = new THREE.AmbientLight(0x1a1410, 0.4);
+scene.add(ambient);
+const warm = new THREE.PointLight(0xffa060, 0.8, 30);
+warm.position.set(3, 6, 4);
+scene.add(warm);
+
+scene.fog = new THREE.FogExp2(0x0a0806, 0.012);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let lastUpdate = start;
+let frameCount = 0;
+
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  const dt = Math.min((now - lastUpdate) / 1000, 0.05);
+  lastUpdate = now;
+  
+  uniforms.uTime.value = elapsed;
+  
+  // step simulation at 20Hz
+  frameCount++;
+  if (frameCount % 3 === 0) {
+    step(dt * 3);
+    distributeParticles();
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.signal.needsUpdate = true;
+    geom.attributes.fold.needsUpdate = true;
+  }
+  
+  // camera tracks centroid of folding cells
+  let cx = 0, cy = 0, cz = 0, count = 0;
+  for (const c of cells) {
+    if (c.fold > 0.3) {
+      cx += c.x;
+      cy += c.y;
+      cz += c.z;
+      count++;
+    }
+  }
+  if (count > 0) {
+    cx /= count; cy /= count; cz /= count;
+    controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.02);
+  }
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
