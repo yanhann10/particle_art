@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: flocking, intensity: gentle -->
+<title>wfg · the flock that loses one and finds it again (instrument)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a14; overflow:hidden;
+               color:#a8b8d0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background:
+      linear-gradient(to bottom,
+        #12121e 0%,
+        #1a1528 22%,
+        #2a1e2a 45%,
+        #3a2a28 68%,
+        #4a3528 88%,
+        #5a4030 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:10; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size:10px; letter-spacing:0.06em;
+          color:#d09060; z-index:10; }
+  .panel {
+    position:fixed; top:14px; right:14px; z-index:100;
+    background: rgba(10,10,20,0.72);
+    border: 1px solid rgba(160,140,120,0.15);
+    border-radius: 6px;
+    padding: 12px 14px;
+    width: 190px;
+    backdrop-filter: blur(6px);
+  }
+  .panel h3 {
+    margin:0 0 8px 0; font-size:9px; letter-spacing:0.12em;
+    text-transform:uppercase; color:#8090a0; opacity:0.7;
+  }
+  .param {
+    margin-bottom:7px;
+  }
+  .param label {
+    display:flex; justify-content:space-between; align-items:center;
+    font-size:9px; letter-spacing:0.04em; color:#8899aa; margin-bottom:2px;
+  }
+  .param label span { color:#b0a090; font-variant-numeric:tabular-nums; }
+  .param input[type=range] {
+    width:100%; height:3px; -webkit-appearance:none; appearance:none;
+    background: rgba(120,100,80,0.25); border-radius:2px; outline:none;
+    cursor:pointer;
+  }
+  .param input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance:none; width:8px; height:8px; border-radius:50%;
+    background:#c09060; border:none;
+  }
+  .param input[type=range]::-moz-range-thumb {
+    width:8px; height:8px; border-radius:50%;
+    background:#c09060; border:none;
+  }
+</style>
+</head>
+<body>
+<div class="id">wfg</div>
+<div class="arc" id="arc">together · 100%</div>
+
+<div class="panel">
+  <h3>parameters</h3>
+  <div class="param">
+    <label>cohesion force <span id="v_coh">1.00</span></label>
+    <input type="range" id="s_coh" min="0" max="200" value="100">
+  </div>
+  <div class="param">
+    <label>drift intensity <span id="v_drift">1.00</span></label>
+    <input type="range" id="s_drift" min="0" max="300" value="100">
+  </div>
+  <div class="param">
+    <label>palette warmth <span id="v_warm">0.50</span></label>
+    <input type="range" id="s_warm" min="0" max="100" value="50">
+  </div>
+  <div class="param">
+    <label>fog density <span id="v_fog">0.018</span></label>
+    <input type="range" id="s_fog" min="2" max="60" value="18">
+  </div>
+  <div class="param">
+    <label>particle scale <span id="v_size">1.00</span></label>
+    <input type="range" id="s_size" min="30" max="250" value="100">
+  </div>
+  <div class="param">
+    <label>orbit speed <span id="v_orb">1.00</span></label>
+    <input type="range" id="s_orb" min="0" max="400" value="100">
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Parameters object — sliders write here, simulation reads
+const params = {
+  cohesionMul: 1.0,
+  driftMul: 1.0,
+  paletteWarmth: 0.5,
+  fogDensity: 0.018,
+  particleScale: 1.0,
+  orbitSpeed: 1.0
+};
+
+// Wire sliders
+function wire(id, key, fmt, scale){
+  const s = document.getElementById('s_'+id);
+  const v = document.getElementById('v_'+id);
+  s.addEventListener('input', ()=>{
+    const val = parseFloat(s.value) * scale;
+    params[key] = val;
+    v.textContent = fmt(val);
+  });
+}
+wire('coh','cohesionMul', v=>v.toFixed(2), 0.01);
+wire('drift','driftMul', v=>v.toFixed(2), 0.01);
+wire('warm','paletteWarmth', v=>v.toFixed(2), 0.01);
+wire('fog','fogDensity', v=>v.toFixed(3), 0.001);
+wire('size','particleScale', v=>v.toFixed(2), 0.01);
+wire('orb','orbitSpeed', v=>v.toFixed(2), 0.01);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x12121e, 0.018);
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 26);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// Starfield specks — subtle texture in the background
+const starCount = 220;
+const starGeo = new THREE.BufferGeometry();
+const starPos = new Float32Array(starCount * 3);
+for(let i = 0; i < starCount; i++){
+  starPos[i*3]   = (Math.random()-0.5) * 80;
+  starPos[i*3+1] = (Math.random()-0.5) * 60;
+  starPos[i*3+2] = -30 - Math.random() * 40;
+}
+starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+const starMat = new THREE.PointsMaterial({
+  size: 1.2, color: 0x8899aa, transparent: true, opacity: 0.25,
+  blending: THREE.AdditiveBlending, depthWrite: false
+});
+scene.add(new THREE.Points(starGeo, starMat));
+
+// Ground horizon hint — thin atmospheric scatter plane
+const horizGeo = new THREE.PlaneGeometry(120, 8);
+const horizMat = new THREE.MeshBasicMaterial({
+  color: 0x4a3520, transparent: true, opacity: 0.06,
+  blending: THREE.AdditiveBlending, depthWrite: false
+});
+const horizMesh = new THREE.Mesh(horizGeo, horizMat);
+horizMesh.position.set(0, -14, -20);
+scene.add(horizMesh);
+
+// Boids
+const N = 481;
+const STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+
+for (let i = 0; i < N; i++){
+  const r = Math.random() * 1.6 + 0.4;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI - Math.PI * 0.5;
+  pos[i*3]     = Math.cos(th) * Math.cos(ph) * r;
+  pos[i*3+1]   = Math.sin(ph) * r;
+  pos[i*3+2]   = Math.sin(th) * Math.cos(ph) * r;
+  vel[i*3]     = 0.3 + (Math.random() - 0.5) * 0.4;
+  vel[i*3+1]   = (Math.random() - 0.5) * 0.3;
+  vel[i*3+2]   = (Math.random() - 0.5) * 0.4;
+}
+pos[0] = -1.2; pos[1] = 0.6; pos[2] = 0.0;
+
+const PERCEPTION_R = 4.0;
+const SEPARATION_R = 0.9;
+const W_COH = 0.018;
+const W_ALI = 0.060;
+const W_SEP = 0.080;
+const MAX_SPEED = 1.4;
+const MAX_FORCE = 0.030;
+
+let cohesion = 1.0;
+let arcStage = 'together';
+const arcEl = document.getElementById('arc');
+
+function step(dt){
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 1; i < N; i++){
+    cx += pos[i*3]; cy += pos[i*3+1]; cz += pos[i*3+2];
+  }
+  cx /= (N-1); cy /= (N-1); cz /= (N-1);
+
+  const sx = pos[0] - cx, sy = pos[1] - cy, sz = pos[2] - cz;
+  const stragDist = Math.sqrt(sx*sx + sy*sy + sz*sz);
+  const targetCohesion = Math.max(0, Math.min(1, 1 - stragDist / 8));
+  cohesion += (targetCohesion - cohesion) * dt * 0.45;
+
+  if (cohesion > 0.85) arcStage = 'together';
+  else if (cohesion > 0.5 && stragDist > 4.5) arcStage = 'loss';
+  else if (cohesion < 0.5) arcStage = 'seeking';
+  else if (arcStage === 'seeking' && cohesion > 0.65) arcStage = 'return';
+  arcEl.textContent = `${arcStage} · ${Math.round(cohesion*100)}%`;
+
+  const acc = new Float32Array(N * 3);
+  const cohMul = params.cohesionMul;
+
+  for (let i = 0; i < N; i++){
+    let cohX=0,cohY=0,cohZ=0,cohN=0;
+    let aliX=0,aliY=0,aliZ=0,aliN=0;
+    let sepX=0,sepY=0,sepZ=0;
+    const px=pos[i*3], py=pos[i*3+1], pz=pos[i*3+2];
+    const isStrag = (i === STRAGGLER);
+    const percR = isStrag ? PERCEPTION_R * 0.55 : PERCEPTION_R;
+
+    for (let j = 0; j < N; j++){
+      if (i===j) continue;
+      const dx=pos[j*3]-px, dy=pos[j*3+1]-py, dz=pos[j*3+2]-pz;
+      const d2=dx*dx+dy*dy+dz*dz;
+      if (d2 > percR*percR || d2 < 1e-6) continue;
+      cohX+=pos[j*3]; cohY+=pos[j*3+1]; cohZ+=pos[j*3+2]; cohN++;
+      aliX+=vel[j*3]; aliY+=vel[j*3+1]; aliZ+=vel[j*3+2]; aliN++;
+      if (d2 < SEPARATION_R*SEPARATION_R){
+        const inv=1/Math.sqrt(d2);
+        sepX-=dx*inv; sepY-=dy*inv; sepZ-=dz*inv;
+      }
+    }
+
+    if (isStrag){
+      const dMul = params.driftMul;
+      const drift = Math.sin(performance.now()*0.0003)*0.4*dMul;
+      acc[i*3]   += drift;
+      acc[i*3+1] += (-0.25 + Math.cos(performance.now()*0.0002)*0.2)*dMul;
+      acc[i*3+2] += drift*0.6;
+    }
+
+    if (!isStrag && (arcStage==='seeking'||arcStage==='return')){
+      const tx=pos[0]-px, ty=pos[1]-py, tz=pos[2]-pz;
+      const td=Math.sqrt(tx*tx+ty*ty+tz*tz)+1e-3;
+      const seek = (arcStage==='seeking'?0.020:0.012)*cohMul;
+      acc[i*3]+=tx/td*seek; acc[i*3+1]+=ty/td*seek; acc[i*3+2]+=tz/td*seek;
+    }
+
+    if (cohN>0){
+      acc[i*3]   += (cohX/cohN-px)*W_COH*cohMul;
+      acc[i*3+1] += (cohY/cohN-py)*W_COH*cohMul;
+      acc[i*3+2] += (cohZ/cohN-pz)*W_COH*cohMul;
+    }
+    if (aliN>0){
+      acc[i*3]   += (aliX/aliN-vel[i*3])*W_ALI;
+      acc[i*3+1] += (aliY/aliN-vel[i*3+1])*W_ALI;
+      acc[i*3+2] += (aliZ/aliN-vel[i*3+2])*W_ALI;
+    }
+    acc[i*3]+=sepX*W_SEP; acc[i*3+1]+=sepY*W_SEP; acc[i*3+2]+=sepZ*W_SEP;
+
+    const d2c=px*px+py*py+pz*pz;
+    if (d2c>90){
+      const inv=0.012/Math.sqrt(d2c);
+      acc[i*3]+=-px*inv; acc[i*3+1]+=-py*inv; acc[i*3+2]+=-pz*inv;
+    }
+  }
+
+  const speedMul = (arcStage==='loss'||arcStage==='seeking')?0.55
+                  : arcStage==='return'?0.85:1.0;
+  for (let i=0; i<N; i++){
+    let ax=acc[i*3],ay=acc[i*3+1],az=acc[i*3+2];
+    const af=Math.sqrt(ax*ax+ay*ay+az*az);
+    if(af>MAX_FORCE){ax*=MAX_FORCE/af;ay*=MAX_FORCE/af;az*=MAX_FORCE/af;}
+    vel[i*3]+=ax; vel[i*3+1]+=ay; vel[i*3+2]+=az;
+    let vx=vel[i*3],vy=vel[i*3+1],vz=vel[i*3+2];
+    const sp=Math.sqrt(vx*vx+vy*vy+vz*vz);
+    if(sp>MAX_SPEED){vx*=MAX_SPEED/sp;vy*=MAX_SPEED/sp;vz*=MAX_SPEED/sp;vel[i*3]=vx;vel[i*3+1]=vy;vel[i*3+2]=vz;}
+    pos[i*3]+=vel[i*3]*dt*speedMul;
+    pos[i*3+1]+=vel[i*3+1]*dt*speedMul;
+    pos[i*3+2]+=vel[i*3+2]*dt*speedMul;
+  }
+}
+
+// Render
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+const seedArr = new Float32Array(N);
+for (let i=0;i<N;i++) seedArr[i]=Math.random();
+geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+const isStragArr = new Float32Array(N);
+isStragArr[STRAGGLER] = 1.0;
+geom.setAttribute('strag', new THREE.BufferAttribute(isStragArr, 1));
+
+const uniforms = {
+  uTime:     {value:0},
+  uPixel:    {value:renderer.getPixelRatio()},
+  uCohesion: {value:1.0},
+  uWarmth:   {value:0.5},
+  uScale:    {value:1.0}
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, fog:false,
+  vertexShader:`
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uCohesion;
+    uniform float uWarmth;
+    uniform float uScale;
+    attribute float seed;
+    attribute float strag;
+    varying vec3  vCol;
+    varying float vFade;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.6 + seed * 6.28;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float baseSize = (1.6 + 0.8 * sin(t)) * uScale;
+      float stragSize = strag * 2.4 * uScale;
+      gl_PointSize = (baseSize + stragSize) * uPixel * (16.0 / dist);
+      vFade = clamp(1.0 - (dist - 24.0) / 28.0, 0.0, 1.0);
+
+      // palette warmth driven by slider AND cohesion
+      float w = uCohesion * uWarmth * 2.0;
+      w = clamp(w, 0.0, 1.0);
+      vec3 warm  = vec3(0.96, 0.65, 0.32);
+      vec3 hot   = vec3(1.00, 0.92, 0.78);
+      vec3 cool  = vec3(0.42, 0.55, 0.78);
+      vec3 lost  = vec3(0.55, 0.32, 0.62);
+      vec3 cohCol = mix(cool, warm, smoothstep(0.0, 1.0, w));
+      vec3 highCol = mix(lost, hot, smoothstep(0.0, 1.0, w));
+      vCol = mix(cohCol, highCol, strag * 0.7 + smoothstep(0.6, 1.0, sin(t * 0.4)) * 0.18);
+      vCol *= (1.0 + strag * 0.4);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader:`
+    varying vec3 vCol;
+    varying float vFade;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vFade;
+      gl_FragColor = vec4(vCol * a * 0.95, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Pre-warm
+for (let s=0; s<250; s++) step(0.05);
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now-lastT)/1000);
+  lastT = now;
+
+  // Update fog from slider
+  scene.fog.density = params.fogDensity;
+
+  uniforms.uTime.value = now/1000;
+  uniforms.uCohesion.value = cohesion;
+  uniforms.uWarmth.value = params.paletteWarmth;
+  uniforms.uScale.value = params.particleScale;
+
+  step(dt);
+  geom.attributes.position.needsUpdate = true;
+
+  const ang = now * 0.00010 * params.orbitSpeed;
+  camera.position.x = Math.sin(ang) * 26;
+  camera.position.z = Math.cos(ang) * 26;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
