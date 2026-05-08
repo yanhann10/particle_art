@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>ec6 · sublime leaf-scale drift</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#03030a; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">ec6</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ═══════════════════════════════════════════════════════════════════
+   SUBLIME LEAF-SCALE DRIFT
+   ───────────────────────────────────────────────────────────────────
+   Technique: Differential growth (from parent ajo/5gm) generates a
+   monumental 3D arabesque.  Instead of a ribbon mesh, the curve is
+   tiled with hundreds of overlapping LEAF instances — scales on a
+   serpent dissolving into infinite fog.  Camera drifts slowly along
+   the curve surface, very close, so the viewer is engulfed.
+   Reference: James Turrell's Roden Crater (light receding into
+   geological depth) + Olafur Eliasson's fog works + the Burke/Kant
+   mathematical sublime — boundlessness apprehended through a single
+   luminous band.
+   Palette (hand-picked, 4 colors):
+     #d4a244  warm amber gold (leaf face, lit side)
+     #1a0e04  burnt umber shadow (leaf back)
+     #06081a  abyssal blue-black (void / fog)
+     #2a1510  deep sienna (rim / emissive)
+   ═══════════════════════════════════════════════════════════════════ */
+
+const BG = 0x03030a;
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(BG, 0.012);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.05, 400);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+// ── lighting: single dominant warm key, faint cool fill ──
+const keyLight = new THREE.PointLight(0xffecc0, 45, 80, 1.6);
+scene.add(keyLight);
+scene.add(new THREE.AmbientLight(0x080812, 0.3));
+const rimLight = new THREE.DirectionalLight(0x3a2818, 0.35);
+rimLight.position.set(-4, 2, -6);
+scene.add(rimLight);
+
+// ── differential growth (inherited from ajo) ──
+const MAX_VERTS = 1800;
+const ATTRACT   = 0.055;
+const REPEL_R   = 0.52;
+const REPEL_STR = 0.13;
+const NOISE_S   = 0.003;
+const PRESSURE  = 0.0028;
+const RISE      = 0.0050;
+const MAX_D     = 0.40;
+
+const verts = [];
+for (let i = 0; i < 16; i++) {
+  const th = i / 16 * Math.PI * 2;
+  const r = 1.8 + (Math.random() - 0.5) * 0.15;
+  verts.push({ x: Math.cos(th) * r, y: 0, z: Math.sin(th) * r, age: 0 });
+}
+
+const CELL = REPEL_R, grid = new Map();
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i];
+    const k = Math.floor(v.x / CELL) + ',' + Math.floor(v.y / CELL) + ',' + Math.floor(v.z / CELL);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function gridNeighbors(v) {
+  const cx = Math.floor(v.x / CELL), cy = Math.floor(v.y / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cy + dy) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+function step() {
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of gridNeighbors(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex * ex + ey * ey + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f; dy[i] += ey * f; dz[i] += ez * f;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const a = verts[(i - 1 + n) % n], b = verts[(i + 1) % n], v = verts[i];
+    dx[i] += (a.x + b.x - 2 * v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2 * v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2 * v.z) * ATTRACT;
+  }
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - cx, oy = verts[i].y - cy, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dy[i] += (oy / d) * PRESSURE * 0.4;
+    dz[i] += (oz / d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++) {
+    const a = verts[i].age;
+    const upward = RISE * (0.3 + 1.2 * Math.min(a * 1.5, 1.0));
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE_S;
+    verts[i].y += dy[i] + (Math.random() - 0.5) * NOISE_S * 0.5 + upward;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE_S;
+    verts[i].age += 0.0014;
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    grown.push(a);
+    const ex = b.x - a.x, ey = b.y - a.y, ez = b.z - a.z;
+    if (ex * ex + ey * ey + ez * ez > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({ x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 - 0.04, z: (a.z + b.z) * 0.5, age: Math.max(a.age, b.age) * 0.5 });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// Pre-simulate
+for (let s = 0; s < 1600; s++) step();
+
+// ── leaf geometry: pointed oval, ~12 verts ──
+function makeLeafGeo() {
+  const segs = 8;
+  const vt = [], idx = [];
+  vt.push(0, 0, 0); // center
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs;
+    const angle = t * Math.PI * 2;
+    // leaf shape: wider at middle, pointed at tip and base
+    const r = 0.5 * Math.sin(t * Math.PI);
+    const leafW = r * 0.42;
+    const leafL = (t - 0.5) * 1.0;
+    vt.push(leafL, 0, leafW * Math.sin(angle) * 0.5 + (Math.cos(angle) > 0 ? 0.02 : -0.02));
+  }
+  // simple: leaf as elongated diamond
+  const positions = [];
+  const normals = [];
+  const uvs = [];
+  // 4-point leaf: tip, left, base, right
+  const pts = [
+    [0, 0, 0.5],   // tip
+    [-0.22, 0.02, 0],  // left
+    [0, 0, -0.5],  // base
+    [0.22, 0.02, 0],   // right
+    [0, 0.04, 0],  // slight center lift for curvature
+  ];
+  // Two triangles per half, with center lift
+  const faces = [
+    [0, 4, 1], [0, 3, 4], // top half
+    [2, 1, 4], [2, 4, 3], // bottom half
+  ];
+  const geo = new THREE.BufferGeometry();
+  const pos = [], nrm = [], uv = [];
+  for (const [a, b, c] of faces) {
+    const va = pts[a], vb = pts[b], vc = pts[c];
+    pos.push(...va, ...vb, ...vc);
+    // compute face normal
+    const e1 = [vb[0] - va[0], vb[1] - va[1], vb[2] - va[2]];
+    const e2 = [vc[0] - va[0], vc[1] - va[1], vc[2] - va[2]];
+    const nx = e1[1] * e2[2] - e1[2] * e2[1];
+    const ny = e1[2] * e2[0] - e1[0] * e2[2];
+    const nz = e1[0] * e2[1] - e1[1] * e2[0];
+    const nl = Math.hypot(nx, ny, nz) || 1;
+    nrm.push(nx/nl, ny/nl, nz/nl, nx/nl, ny/nl, nz/nl, nx/nl, ny/nl, nz/nl);
+    uv.push(va[2] + 0.5, va[0] + 0.5, vb[2] + 0.5, vb[0] + 0.5, vc[2] + 0.5, vc[0] + 0.5);
+  }
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  return geo;
+}
+
+const leafGeo = makeLeafGeo();
+
+// ── leaf material: custom with vein hint via shader ──
+const leafMat = new THREE.MeshStandardMaterial({
+  color: 0xd4a244,
+  emissive: 0x2a1510,
+  emissiveIntensity: 0.3,
+  roughness: 0.38,
+  metalness: 0.55,
+  side: THREE.DoubleSide,
+});
+
+// ── place leaves along growth curve ──
+const LEAF_COUNT = 1400;
+const leafMesh = new THREE.InstancedMesh(leafGeo, leafMat, LEAF_COUNT);
+leafMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(leafMesh);
+
+const _m = new THREE.Matrix4();
+const _q = new THREE.Quaternion();
+const _up = new THREE.Vector3(0, 1, 0);
+const _tmpV = new THREE.Vector3();
+const _lookM = new THREE.Matrix4();
+
+let curve = null;
+let curveLen = 0;
+
+function rebuildLeaves(time) {
+  if (verts.length < 10) return;
+  const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+  curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.0);
+  curveLen = verts.length;
+
+  const count = Math.min(LEAF_COUNT, verts.length * 2);
+  leafMesh.count = count;
+
+  for (let i = 0; i < count; i++) {
+    const t = i / count;
+    const p = curve.getPointAt(t);
+    const tan = curve.getTangentAt(t).normalize();
+
+    // lateral: perpendicular to tangent and up
+    let lat = new THREE.Vector3().crossVectors(tan, _up);
+    if (lat.lengthSq() < 0.001) lat.set(1, 0, 0);
+    lat.normalize();
+    const norm = new THREE.Vector3().crossVectors(lat, tan).normalize();
+
+    // offset leaves alternating left/right with slight randomness
+    const side = (i % 2 === 0) ? 1 : -1;
+    const offsetAmt = 0.08 + 0.06 * Math.sin(i * 2.3 + time * 0.15);
+    p.addScaledVector(lat, side * offsetAmt);
+    // slight vertical undulation
+    p.y += 0.03 * Math.sin(i * 1.7 + time * 0.2);
+
+    // scale varies: larger near base, deliberate variation
+    const baseScale = 0.28 + 0.14 * Math.sin(i * 0.37 + 1.2);
+    const scaleX = baseScale * (0.85 + 0.3 * Math.sin(i * 1.13));
+    const scaleZ = baseScale;
+
+    // orient leaf: z-axis along tangent, y-axis along normal, slight random tilt
+    const tiltAngle = 0.15 * Math.sin(i * 3.1 + time * 0.1);
+    const rotAxis = tan.clone();
+    const tiltQ = new THREE.Quaternion().setFromAxisAngle(rotAxis, tiltAngle);
+
+    _lookM.lookAt(p, p.clone().add(tan), norm);
+    _q.setFromRotationMatrix(_lookM);
+    _q.multiply(tiltQ);
+
+    _m.compose(p, _q, new THREE.Vector3(scaleX, 1, scaleZ));
+    leafMesh.setMatrixAt(i, _m);
+  }
+  leafMesh.instanceMatrix.needsUpdate = true;
+}
+
+// ── faint dust motes for atmosphere ──
+const dustCount = 600;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+const dustAlpha = new Float32Array(dustCount);
+for (let i = 0; i < dustCount; i++) {
+  dustPos[i * 3]     = (Math.random() - 0.5) * 40;
+  dustPos[i * 3 + 1] = Math.random() * 30;
+  dustPos[i * 3 + 2] = (Math.random() - 0.5) * 40;
+  dustAlpha[i] = 0.15 + Math.random() * 0.25;
+}
+dustGeo.setAttribute('position', new THREE.Float32BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({
+  color: 0x8a7a5a,
+  size: 0.04,
+  transparent: true,
+  opacity: 0.18,
+  sizeAttenuation: true,
+  depthWrite: false,
+});
+const dustPts = new THREE.Points(dustGeo, dustMat);
+scene.add(dustPts);
+
+// ── subtle background gradient plane (deep below) ──
+const bgGeo = new THREE.PlaneGeometry(200, 200);
+const bgMat = new THREE.MeshBasicMaterial({
+  color: 0x060818,
+  transparent: true,
+  opacity: 0.3,
+  side: THREE.DoubleSide,
+});
+const bgPlane = new THREE.Mesh(bgGeo, bgMat);
+bgPlane.position.set(0, -3, 0);
+bgPlane.rotation.x = -Math.PI / 2;
+scene.add(bgPlane);
+
+// ── camera: slow drift along curve ──
+let camT = 0.0;
+let camDriftSpeed = 0.003; // very slow
+let paused = false;
+
+addEventListener('click', () => { paused = !paused; });
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let lastRebuild = 0;
+
+function animate() {
+  const t = (performance.now() - start) / 1000;
+
+  // continue growth slowly
+  if (!paused && verts.length < MAX_VERTS) {
+    for (let s = 0; s < 2; s++) step();
+  }
+
+  // rebuild leaves periodically
+  if (t - lastRebuild > 0.25) {
+    rebuildLeaves(t);
+    lastRebuild = t;
+  }
+
+  // drift dust
+  const dArr = dustGeo.attributes.position.array;
+  for (let i = 0; i < dustCount; i++) {
+    dArr[i * 3 + 1] += 0.002 * Math.sin(t * 0.3 + i * 0.5);
+    dArr[i * 3]     += 0.001 * Math.cos(t * 0.2 + i * 0.7);
+  }
+  dustGeo.attributes.position.needsUpdate = true;
+
+  // camera drift along curve
+  if (curve && !paused) {
+    camT += camDriftSpeed * 0.016; // ~per frame at 60fps
+    if (camT > 1) camT -= 1;
+
+    const lookAheadT = (camT + 0.04) % 1;
+    const camPos = curve.getPointAt(camT);
+    const lookAt = curve.getPointAt(lookAheadT);
+    const tan = curve.getTangentAt(camT).normalize();
+
+    // offset camera to the side and above the ribbon
+    let lat = new THREE.Vector3().crossVectors(tan, _up);
+    if (lat.lengthSq() < 0.001) lat.set(1, 0, 0);
+    lat.normalize();
+
+    const camOffset = new THREE.Vector3();
+    camOffset.addScaledVector(lat, 1.2 * Math.sin(t * 0.07));
+    camOffset.y += 0.8 + 0.4 * Math.sin(t * 0.05);
+    camOffset.addScaledVector(tan, -0.3);
+
+    const targetPos = camPos.clone().add(camOffset);
+    camera.position.lerp(targetPos, 0.025);
+
+    const targetLook = lookAt.clone();
+    targetLook.y += 0.15;
+    _tmpV.copy(targetLook);
+    // smooth look-at
+    const currentLook = new THREE.Vector3();
+    camera.getWorldDirection(currentLook);
+    currentLook.multiplyScalar(5).add(camera.position);
+    currentLook.lerp(_tmpV, 0.03);
+    camera.lookAt(currentLook);
+  }
+
+  // position key light near camera for dramatic local illumination
+  keyLight.position.copy(camera.position);
+  keyLight.position.y += 1.5;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+
+// initial camera placement
+if (verts.length > 10) {
+  const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+  curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.0);
+  const startP = curve.getPointAt(0);
+  camera.position.set(startP.x + 2, startP.y + 1.5, startP.z + 2);
+  camera.lookAt(startP);
+  rebuildLeaves(0);
+}
+
+animate();
+</script>
+</body>
+</html>
