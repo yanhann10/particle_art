@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ud5 · the flock that finds each other across windows</title>
+<!-- MOTION: murmuration, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background:
+      radial-gradient(ellipse at 50% 30%, #1a1620 0%, #0f0d14 60%, #06050a 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; max-width: 420px; line-height: 1.4; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+  .peers { position:fixed; right:14px; bottom:12px; opacity:0.85; font-size: 11px; letter-spacing: 0.06em;
+          color: #9ab; background: rgba(20,18,26,0.7); padding: 4px 8px; border-radius: 3px; }
+  .starfield {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 0;
+    background-image:
+      radial-gradient(1px 1px at 12% 22%, #888, transparent),
+      radial-gradient(1px 1px at 88% 16%, #aaa, transparent),
+      radial-gradient(1px 1px at 45% 71%, #777, transparent),
+      radial-gradient(1px 1px at 73% 33%, #999, transparent),
+      radial-gradient(1px 1px at 31% 88%, #666, transparent),
+      radial-gradient(1px 1px at 62% 9%, #888, transparent),
+      radial-gradient(1px 1px at 19% 54%, #777, transparent),
+      radial-gradient(1px 1px at 91% 67%, #aaa, transparent),
+      radial-gradient(1px 1px at 8% 41%, #999, transparent),
+      radial-gradient(1px 1px at 54% 92%, #666, transparent);
+    background-size: 100% 100%;
+    background-repeat: no-repeat;
+    opacity: 0.12;
+  }
+</style>
+</head>
+<body>
+<div class="starfield"></div>
+<div class="id">ud5 · the flock that finds each other across windows</div>
+<div class="hint">Open this page in multiple browser tabs or windows — each instance is one bird. The flock coheres across your machine. Bourriaud: the work is the social field it creates.</div>
+<div class="src">descended from sav · relational aesthetics · BroadcastChannel sync</div>
+<div class="peers" id="peers">alone · seeking</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Nicolas Bourriaud, Relational Aesthetics (1998):
+// "Art is a state of encounter... the artist's practice consists in inventing
+// relations between subjects."
+//
+// Translation: each browser tab/window running this piece is ONE bird in a
+// shared flock. They communicate via BroadcastChannel API (same-origin, same
+// machine, different windows). Each bird broadcasts its position/velocity 20x/sec.
+// The more tabs open, the denser the flock. Close a tab, the flock thins. The
+// work is not the pixels; it's the SOCIAL FIELD of active presences.
+//
+// Fallback: if alone (no other tabs), the bird drifts solo — a single point,
+// remembering the possibility of others. The status display updates to show
+// peer count + arc state.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0812, 0.022);
+const camera = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── broadcast channel setup
+const channel = new BroadcastChannel('flock_channel');
+const myId = Math.random().toString(36).slice(2, 10);
+const peers = new Map(); // id → { pos, vel, lastSeen }
+let lastBroadcast = 0;
+const BROADCAST_INTERVAL = 50; // ms
+const PEER_TIMEOUT = 2000;     // ms — if no message, assume peer closed
+
+// my bird state
+const myPos = new THREE.Vector3(
+  (Math.random() - 0.5) * 8,
+  (Math.random() - 0.5) * 8,
+  (Math.random() - 0.5) * 8
+);
+const myVel = new THREE.Vector3(
+  (Math.random() - 0.5) * 0.6,
+  (Math.random() - 0.5) * 0.6,
+  (Math.random() - 0.5) * 0.6
+);
+
+// receive peer state
+channel.onmessage = (evt) => {
+  const { id, pos, vel } = evt.data;
+  if (id === myId) return;
+  peers.set(id, {
+    pos: new THREE.Vector3(pos.x, pos.y, pos.z),
+    vel: new THREE.Vector3(vel.x, vel.y, vel.z),
+    lastSeen: performance.now()
+  });
+};
+
+// broadcast my state
+function broadcast(){
+  channel.postMessage({
+    id: myId,
+    pos: { x: myPos.x, y: myPos.y, z: myPos.z },
+    vel: { x: myVel.x, y: myVel.y, z: myVel.z }
+  });
+}
+
+// cull stale peers
+function cullPeers(now){
+  for (const [id, peer] of peers){
+    if (now - peer.lastSeen > PEER_TIMEOUT){
+      peers.delete(id);
+    }
+  }
+}
+
+// boid parameters
+const PERCEPTION_R = 6.0;
+const SEPARATION_R = 1.2;
+const W_COH = 0.022;
+const W_ALI = 0.065;
+const W_SEP = 0.090;
+const MAX_SPEED = 1.2;
+const MAX_FORCE = 0.035;
+
+function step(dt, now){
+  cullPeers(now);
+  const peerCount = peers.size;
+
+  // Reynolds boids applied to peer positions
+  const acc = new THREE.Vector3(0, 0, 0);
+  let cohSum = new THREE.Vector3(0, 0, 0);
+  let aliSum = new THREE.Vector3(0, 0, 0);
+  let sepSum = new THREE.Vector3(0, 0, 0);
+  let cohN = 0, aliN = 0;
+
+  for (const peer of peers.values()){
+    const diff = new THREE.Vector3().subVectors(peer.pos, myPos);
+    const d2 = diff.lengthSq();
+    if (d2 < PERCEPTION_R * PERCEPTION_R && d2 > 1e-6){
+      cohSum.add(peer.pos);
+      cohN++;
+      aliSum.add(peer.vel);
+      aliN++;
+      if (d2 < SEPARATION_R * SEPARATION_R){
+        diff.normalize().multiplyScalar(-1.0 / Math.sqrt(d2));
+        sepSum.add(diff);
+      }
+    }
+  }
+
+  if (cohN > 0){
+    cohSum.divideScalar(cohN).sub(myPos).multiplyScalar(W_COH);
+    acc.add(cohSum);
+  }
+  if (aliN > 0){
+    aliSum.divideScalar(aliN).sub(myVel).multiplyScalar(W_ALI);
+    acc.add(aliSum);
+  }
+  acc.add(sepSum.multiplyScalar(W_SEP));
+
+  // soft world bounds
+  const d2c = myPos.lengthSq();
+  if (d2c > 120){
+    const pull = myPos.clone().normalize().multiplyScalar(-0.015);
+    acc.add(pull);
+  }
+
+  // if alone, gentle drift (the solo bird remembers the shape of a flock)
+  if (peerCount === 0){
+    acc.x += Math.sin(now * 0.0004) * 0.008;
+    acc.y += Math.cos(now * 0.0003) * 0.008;
+    acc.z += Math.sin(now * 0.0005) * 0.008;
+  }
+
+  // integrate
+  if (acc.length() > MAX_FORCE){
+    acc.normalize().multiplyScalar(MAX_FORCE);
+  }
+  myVel.add(acc);
+  if (myVel.length() > MAX_SPEED){
+    myVel.normalize().multiplyScalar(MAX_SPEED);
+  }
+  myPos.add(myVel.clone().multiplyScalar(dt));
+
+  // broadcast state
+  if (now - lastBroadcast > BROADCAST_INTERVAL){
+    broadcast();
+    lastBroadcast = now;
+  }
+
+  // update status display
+  const peersEl = document.getElementById('peers');
+  if (peerCount === 0){
+    peersEl.textContent = 'alone · seeking';
+    peersEl.style.color = '#7a8090';
+  } else if (peerCount === 1){
+    peersEl.textContent = '1 other · pairing';
+    peersEl.style.color = '#9ab6c8';
+  } else {
+    peersEl.textContent = `${peerCount} others · together`;
+    peersEl.style.color = '#b8d4a8';
+  }
+}
+
+// ────────────── render
+// my bird
+const myGeom = new THREE.SphereGeometry(0.16, 12, 12);
+const myMat = new THREE.MeshBasicMaterial({ color: 0xf0e8d8, fog: false });
+const myMesh = new THREE.Mesh(myGeom, myMat);
+scene.add(myMesh);
+
+// peer birds
+const peerMeshes = new Map();
+const peerGeom = new THREE.SphereGeometry(0.14, 10, 10);
+const peerMat = new THREE.MeshBasicMaterial({ color: 0xa8b8c8, fog: false });
+
+function updatePeerMeshes(){
+  // remove stale meshes
+  for (const [id, mesh] of peerMeshes){
+    if (!peers.has(id)){
+      scene.remove(mesh);
+      peerMeshes.delete(id);
+    }
+  }
+  // add/update meshes
+  for (const [id, peer] of peers){
+    if (!peerMeshes.has(id)){
+      const mesh = new THREE.Mesh(peerGeom, peerMat.clone());
+      scene.add(mesh);
+      peerMeshes.set(id, mesh);
+    }
+    const mesh = peerMeshes.get(id);
+    mesh.position.copy(peer.pos);
+  }
+}
+
+// faint connection lines (when >1 peer)
+const lineGeom = new THREE.BufferGeometry();
+const lineMat = new THREE.LineBasicMaterial({ color: 0x6a7a8a, transparent: true, opacity: 0.08, fog: false });
+const lines = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lines);
+
+function updateLines(){
+  if (peers.size === 0){
+    lineGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+    return;
+  }
+  const positions = [];
+  // my bird to each peer
+  for (const peer of peers.values()){
+    positions.push(myPos.x, myPos.y, myPos.z);
+    positions.push(peer.pos.x, peer.pos.y, peer.pos.z);
+  }
+  lineGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// announce presence on load
+broadcast();
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+
+  step(dt, now);
+  myMesh.position.copy(myPos);
+  updatePeerMeshes();
+  updateLines();
+
+  // camera: slow orbit around flock centroid
+  let cx = myPos.x, cy = myPos.y, cz = myPos.z;
+  let n = 1;
+  for (const peer of peers.values()){
+    cx += peer.pos.x;
+    cy += peer.pos.y;
+    cz += peer.pos.z;
+    n++;
+  }
+  cx /= n; cy /= n; cz /= n;
+  const ang = now * 0.00008;
+  const r = 22;
+  camera.position.x = cx + Math.sin(ang) * r;
+  camera.position.z = cz + Math.cos(ang) * r;
+  camera.position.y = cy + Math.sin(ang * 0.4) * 3;
+  camera.lookAt(cx, cy, cz);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+
+// clean disconnect on page close
+addEventListener('beforeunload', () => {
+  channel.postMessage({ id: myId, disconnect: true });
+  channel.close();
+});
+</script>
+</body>
+</html>
