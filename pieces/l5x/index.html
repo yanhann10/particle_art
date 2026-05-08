@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>l5x · suminagashi marbling · 2D fluid dye advection</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f4ece0; overflow:hidden;
+               color:#2a2520; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#2a2520; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.50; font-size: 10px; letter-spacing: 0.04em; color:#2a2520; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.40; font-size: 10px; letter-spacing: 0.04em; color:#2a2520; }
+</style>
+</head>
+<body>
+<div class="id">l5x · suminagashi marbling · 2D fluid dye advection</div>
+<div class="hint">drag pointer to disturb surface · click to drop new ripple</div>
+<div class="src">Amanda Ghassaei Digital Marbling · semi-Lagrangian advection · zero viscosity</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Suminagashi / Ebru marbling: 2D semi-Lagrangian fluid solver on a plane.
+// Dye field advected by velocity field. NO viscosity diffusion → sharp boundaries.
+// User drag adds velocity impulses. Click drops concentric ink rings.
+// Render dye field as textured plane, slowly rotating in 3D for depth.
+//
+// Implementation: dual render-targets (ping-pong) for velocity + dye.
+// Advection: semi-Lagrangian backtrace. Velocity decay without diffusion.
+// Visual: monochrome black ink on cream paper (traditional suminagashi).
+
+const W = 512, H = 512;  // simulation resolution
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf4ece0);
+const camera = new THREE.PerspectiveCamera(35, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 3.5, 8);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ───────────────────────────────────────────────────────────
+// render-target ping-pong for velocity and dye
+// ───────────────────────────────────────────────────────────
+const rtOptions = {
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.FloatType
+};
+let velRead = new THREE.WebGLRenderTarget(W, H, rtOptions);
+let velWrite = new THREE.WebGLRenderTarget(W, H, rtOptions);
+let dyeRead = new THREE.WebGLRenderTarget(W, H, rtOptions);
+let dyeWrite = new THREE.WebGLRenderTarget(W, H, rtOptions);
+
+function swapVel(){ [velRead, velWrite] = [velWrite, velRead]; }
+function swapDye(){ [dyeRead, dyeWrite] = [dyeWrite, dyeRead]; }
+
+// ───────────────────────────────────────────────────────────
+// shaders
+// ───────────────────────────────────────────────────────────
+const advectVS = `
+varying vec2 vUv;
+void main(){
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+// advect velocity: backtrace, sample old velocity, decay slightly (no diffusion)
+const advectVelFS = `
+uniform sampler2D tVel;
+uniform float dt;
+uniform float decay;
+varying vec2 vUv;
+void main(){
+  vec2 vel = texture2D(tVel, vUv).xy;
+  vec2 coord = vUv - vel * dt;
+  vec2 newVel = texture2D(tVel, coord).xy * decay;
+  gl_FragColor = vec4(newVel, 0.0, 1.0);
+}
+`;
+
+// advect dye: backtrace, sample old dye
+const advectDyeFS = `
+uniform sampler2D tDye;
+uniform sampler2D tVel;
+uniform float dt;
+varying vec2 vUv;
+void main(){
+  vec2 vel = texture2D(tVel, vUv).xy;
+  vec2 coord = vUv - vel * dt;
+  vec4 dye = texture2D(tDye, coord);
+  gl_FragColor = dye;
+}
+`;
+
+// add impulse (velocity or dye)
+const impulseFS = `
+uniform sampler2D tBase;
+uniform vec2 point;
+uniform vec2 value;  // for velocity
+uniform vec4 dyeColor; // for dye
+uniform float radius;
+uniform float mode; // 0=velocity, 1=dye
+varying vec2 vUv;
+void main(){
+  vec4 base = texture2D(tBase, vUv);
+  float d = distance(vUv, point);
+  float g = exp(-d*d / (radius*radius));
+  if (mode < 0.5){
+    // velocity impulse
+    base.xy += value * g;
+  } else {
+    // dye impulse
+    base = mix(base, dyeColor, g);
+  }
+  gl_FragColor = base;
+}
+`;
+
+// initialize concentric rings (for suminagashi drop)
+const ringFS = `
+uniform vec2 center;
+uniform float time;
+varying vec2 vUv;
+void main(){
+  float d = distance(vUv, center);
+  float rings = sin(d * 80.0 - time * 0.5) * 0.5 + 0.5;
+  rings = smoothstep(0.45, 0.55, rings);
+  float ink = rings * exp(-d * 6.0);
+  gl_FragColor = vec4(ink, ink, ink, 1.0);
+}
+`;
+
+const advectVelMat = new THREE.ShaderMaterial({
+  vertexShader: advectVS,
+  fragmentShader: advectVelFS,
+  uniforms: {
+    tVel: { value: null },
+    dt: { value: 0.016 },
+    decay: { value: 0.996 }
+  }
+});
+
+const advectDyeMat = new THREE.ShaderMaterial({
+  vertexShader: advectVS,
+  fragmentShader: advectDyeFS,
+  uniforms: {
+    tDye: { value: null },
+    tVel: { value: null },
+    dt: { value: 0.016 }
+  }
+});
+
+const impulseMat = new THREE.ShaderMaterial({
+  vertexShader: advectVS,
+  fragmentShader: impulseFS,
+  uniforms: {
+    tBase: { value: null },
+    point: { value: new THREE.Vector2(0.5, 0.5) },
+    value: { value: new THREE.Vector2(0, 0) },
+    dyeColor: { value: new THREE.Vector4(1, 1, 1, 1) },
+    radius: { value: 0.02 },
+    mode: { value: 0 }
+  }
+});
+
+const ringMat = new THREE.ShaderMaterial({
+  vertexShader: advectVS,
+  fragmentShader: ringFS,
+  uniforms: {
+    center: { value: new THREE.Vector2(0.5, 0.5) },
+    time: { value: 0 }
+  }
+});
+
+const orthoScene = new THREE.Scene();
+const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), advectVelMat);
+orthoScene.add(quad);
+
+function renderPass(mat, target){
+  quad.material = mat;
+  renderer.setRenderTarget(target);
+  renderer.render(orthoScene, orthoCamera);
+}
+
+// initialize dye with concentric rings
+ringMat.uniforms.center.value.set(0.5, 0.5);
+ringMat.uniforms.time.value = 0;
+renderPass(ringMat, dyeRead);
+
+// ───────────────────────────────────────────────────────────
+// display plane
+// ───────────────────────────────────────────────────────────
+const planeGeo = new THREE.PlaneGeometry(6, 6, 1, 1);
+const planeMat = new THREE.MeshBasicMaterial({
+  map: dyeRead.texture,
+  side: THREE.DoubleSide,
+  transparent: false
+});
+const planeMesh = new THREE.Mesh(planeGeo, planeMat);
+scene.add(planeMesh);
+
+// subtle tilt animation
+let tiltPhase = 0;
+
+// ───────────────────────────────────────────────────────────
+// interaction
+// ───────────────────────────────────────────────────────────
+let lastMouse = new THREE.Vector2(-1, -1);
+let mouseVel = new THREE.Vector2(0, 0);
+
+function toUV(clientX, clientY){
+  return new THREE.Vector2(
+    clientX / innerWidth,
+    1.0 - clientY / innerHeight
+  );
+}
+
+renderer.domElement.addEventListener('pointermove', (e) => {
+  const uv = toUV(e.clientX, e.clientY);
+  if (lastMouse.x >= 0){
+    mouseVel.copy(uv).sub(lastMouse).multiplyScalar(18.0);
+    // add velocity impulse
+    impulseMat.uniforms.tBase.value = velRead.texture;
+    impulseMat.uniforms.point.value.copy(uv);
+    impulseMat.uniforms.value.value.copy(mouseVel);
+    impulseMat.uniforms.radius.value = 0.025;
+    impulseMat.uniforms.mode.value = 0; // velocity
+    renderPass(impulseMat, velWrite);
+    swapVel();
+  }
+  lastMouse.copy(uv);
+});
+
+renderer.domElement.addEventListener('pointerup', () => {
+  lastMouse.set(-1, -1);
+});
+
+renderer.domElement.addEventListener('click', (e) => {
+  const uv = toUV(e.clientX, e.clientY);
+  // drop new ink ring
+  ringMat.uniforms.center.value.copy(uv);
+  ringMat.uniforms.time.value = Math.random() * 10;
+  // additive blend into dye
+  const tempDye = new THREE.WebGLRenderTarget(W, H, rtOptions);
+  renderPass(ringMat, tempDye);
+  // blend: read old dye + new ring
+  impulseMat.uniforms.tBase.value = dyeRead.texture;
+  impulseMat.uniforms.point.value.copy(uv);
+  impulseMat.uniforms.dyeColor.value.set(1, 1, 1, 1);
+  impulseMat.uniforms.radius.value = 0.15;
+  impulseMat.uniforms.mode.value = 1; // dye
+  // manually sample ring texture and add
+  // (for simplicity, just drop another ring via impulse)
+  renderPass(impulseMat, dyeWrite);
+  swapDye();
+  tempDye.dispose();
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ───────────────────────────────────────────────────────────
+// simulation loop
+// ───────────────────────────────────────────────────────────
+const dt = 0.016;
+function step(){
+  // advect velocity
+  advectVelMat.uniforms.tVel.value = velRead.texture;
+  advectVelMat.uniforms.dt.value = dt;
+  renderPass(advectVelMat, velWrite);
+  swapVel();
+
+  // advect dye
+  advectDyeMat.uniforms.tDye.value = dyeRead.texture;
+  advectDyeMat.uniforms.tVel.value = velRead.texture;
+  advectDyeMat.uniforms.dt.value = dt;
+  renderPass(advectDyeMat, dyeWrite);
+  swapDye();
+}
+
+function loop(t){
+  step();
+
+  // update display texture
+  planeMat.map = dyeRead.texture;
+  planeMat.needsUpdate = true;
+
+  // subtle tilt
+  tiltPhase += 0.002;
+  planeMesh.rotation.x = Math.sin(tiltPhase * 0.7) * 0.08;
+  planeMesh.rotation.y = Math.cos(tiltPhase * 0.5) * 0.06;
+  planeMesh.rotation.z = Math.sin(tiltPhase * 0.3) * 0.03;
+
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop(0);
+</script>
+</body>
+</html>
