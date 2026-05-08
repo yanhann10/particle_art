@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>p88 · cosmic web</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#020308;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;opacity:0.55;font-size:11px;letter-spacing:0.06em}
+</style>
+</head>
+<body>
+<div class="id">p88</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── Cosmic Web · MillenniumTNG / IllustrisTNG filament topology ──
+   MST + short-edge augmentation of 120 random cluster nodes → Voronoi-edge
+   approximation.  ~60k particles along filaments with Gaussian perpendicular
+   spread, drifting slowly in gravitational infall.
+   Palette: deep navy void → electric blue filaments → warm amber at nodes →
+   magenta/white at cluster cores.
+   Ref: MillenniumTNG (MPA Garching 2024); IllustrisTNG collaboration;
+   NASA Hubble Cosmic Web mapping.                                          */
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020308, 1);
+document.body.appendChild(renderer.domElement);
+
+// ── Graph: 120 cluster nodes, MST + short extras ──
+const NC = 120, CUBE = 8;
+const nodes = [];
+for (let i = 0; i < NC; i++) {
+  nodes.push(new THREE.Vector3(
+    (Math.random() * 2 - 1) * CUBE,
+    (Math.random() * 2 - 1) * CUBE,
+    (Math.random() * 2 - 1) * CUBE
+  ));
+}
+
+const allE = [];
+for (let i = 0; i < NC; i++)
+  for (let j = i + 1; j < NC; j++)
+    allE.push({ i, j, d: nodes[i].distanceTo(nodes[j]) });
+allE.sort((a, b) => a.d - b.d);
+
+// Kruskal MST
+const par = Array.from({ length: NC }, (_, i) => i);
+function find(x) { while (par[x] !== x) x = par[x] = par[par[x]]; return x; }
+const edges = [], spare = [];
+for (const e of allE) {
+  const fi = find(e.i), fj = find(e.j);
+  if (fi !== fj) { par[fi] = fj; edges.push(e); }
+  else spare.push(e);
+}
+// Augment: add ~45 % shortest non-MST edges for web density
+const extra = Math.floor(edges.length * 0.45);
+for (let k = 0; k < Math.min(extra, spare.length); k++) edges.push(spare[k]);
+
+// Node degree → cluster brightness / size
+const deg = new Float32Array(NC);
+for (const e of edges) { deg[e.i]++; deg[e.j]++; }
+
+// ── Particle placement ──
+function bm() {
+  let u, v, s;
+  do { u = Math.random() * 2 - 1; v = Math.random() * 2 - 1; s = u * u + v * v; }
+  while (s >= 1 || s === 0);
+  return u * Math.sqrt(-2 * Math.log(s) / s);
+}
+
+const PPE = 300, PPN = 80;
+const pos = [], aNd = [], aDr = [], aNf = [], aSd = [];
+const _d = new THREE.Vector3(), _p1 = new THREE.Vector3(), _p2 = new THREE.Vector3();
+
+for (const e of edges) {
+  const a = nodes[e.i], b = nodes[e.j];
+  _d.subVectors(b, a);
+  const len = _d.length();
+  _d.normalize();
+
+  // Perpendicular basis
+  const ref = Math.abs(_d.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  _p1.crossVectors(_d, ref).normalize();
+  _p2.crossVectors(_d, _p1).normalize();
+
+  // Thinner for longer filaments
+  const sigma = 0.05 + 0.03 * Math.min(len / (CUBE * 1.5), 1.0);
+
+  for (let k = 0; k < PPE; k++) {
+    const t = Math.random();
+    const r1 = bm() * sigma, r2 = bm() * sigma;
+    pos.push(
+      a.x * (1 - t) + b.x * t + _p1.x * r1 + _p2.x * r2,
+      a.y * (1 - t) + b.y * t + _p1.y * r1 + _p2.y * r2,
+      a.z * (1 - t) + b.z * t + _p1.z * r1 + _p2.z * r2
+    );
+    // 0 at node, 1 at mid-filament
+    aNd.push(Math.min(t, 1 - t) * 2);
+    // Drift direction toward nearest node
+    const sign = t < 0.5 ? -1 : 1;
+    aDr.push(_d.x * sign, _d.y * sign, _d.z * sign);
+    aNf.push(0);
+    aSd.push(Math.random());
+  }
+}
+
+// Node clusters
+for (let ni = 0; ni < NC; ni++) {
+  const n = nodes[ni];
+  const cr = 0.12 + deg[ni] * 0.035;
+  for (let k = 0; k < PPN; k++) {
+    const r = Math.pow(Math.random(), 0.6) * cr;
+    const th = Math.random() * Math.PI * 2;
+    const ph = Math.acos(Math.random() * 2 - 1);
+    pos.push(
+      n.x + r * Math.sin(ph) * Math.cos(th),
+      n.y + r * Math.sin(ph) * Math.sin(th),
+      n.z + r * Math.cos(ph)
+    );
+    aNd.push(0);
+    aDr.push(0, 0, 0);
+    aNf.push(1 + deg[ni] * 0.15);   // encode degree for brightness
+    aSd.push(Math.random());
+  }
+}
+
+const count = pos.length / 3;
+
+// ── Geometry ──
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position',  new THREE.Float32BufferAttribute(pos, 3));
+geom.setAttribute('aNodeDist', new THREE.Float32BufferAttribute(aNd, 1));
+geom.setAttribute('aDrift',    new THREE.Float32BufferAttribute(aDr, 3));
+geom.setAttribute('aNodeFlag', new THREE.Float32BufferAttribute(aNf, 1));
+geom.setAttribute('aSeed',     new THREE.Float32BufferAttribute(aSd, 1));
+
+// ── Shader material ──
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPR:   { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPR;
+    attribute float aNodeDist, aNodeFlag, aSeed;
+    attribute vec3 aDrift;
+    varying float vND, vNF, vFade;
+
+    void main() {
+      vec3 p = position;
+
+      if (aNodeFlag < 0.5) {
+        // Filament particles: slow sinusoidal infall along filament
+        float drift = sin(uTime * 0.06 + aSeed * 6.2832) * 0.18;
+        p += aDrift * drift;
+        // Gentle perpendicular wobble
+        p += vec3(
+          sin(uTime * 0.19 + aSeed * 17.3),
+          cos(uTime * 0.16 + aSeed * 11.7),
+          sin(uTime * 0.22 + aSeed * 7.1)
+        ) * 0.025 * aNodeDist;
+      } else {
+        // Node particles: gentle breathing
+        p += vec3(
+          sin(uTime * 0.14 + aSeed * 13.1),
+          cos(uTime * 0.17 + aSeed * 9.3),
+          sin(uTime * 0.12 + aSeed * 5.7)
+        ) * 0.018;
+      }
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // Size: larger at nodes, smaller mid-filament
+      float sz = aNodeFlag > 0.5
+        ? 3.0 + aNodeFlag * 0.4
+        : mix(2.4, 0.9, aNodeDist);
+      gl_PointSize = sz * uPR * (14.0 / max(dist, 0.5));
+
+      gl_Position = projectionMatrix * mv;
+      vND   = aNodeDist;
+      vNF   = aNodeFlag;
+      vFade = smoothstep(40.0, 6.0, dist);
+    }
+  `,
+  fragmentShader: `
+    varying float vND, vNF, vFade;
+
+    void main() {
+      vec2 c = gl_PointCoord - 0.5;
+      float r2 = dot(c, c);
+      if (r2 > 0.25) discard;
+      float soft = exp(-r2 * 18.0);
+
+      // Palette ─────────────────────────────────────
+      // Deep blue filament core
+      vec3 cFil  = vec3(0.14, 0.36, 0.70);
+      // Pale filament edge
+      vec3 cDim  = vec3(0.08, 0.18, 0.38);
+      // Warm amber transition zone
+      vec3 cAmb  = vec3(0.82, 0.52, 0.22);
+      // Magenta cluster halo
+      vec3 cMag  = vec3(0.88, 0.30, 0.50);
+      // White-hot cluster core
+      vec3 cCore = vec3(1.0, 0.94, 0.88);
+
+      vec3 col;
+      float alpha;
+
+      if (vNF > 0.5) {
+        // Node particles
+        float bright = min(vNF * 0.35, 1.0);
+        col = mix(cMag, cCore, bright * 0.6);
+        alpha = soft * vFade * (0.55 + bright * 0.4);
+      } else {
+        // Filament particles
+        float nd = vND;   // 0 at node end, 1 at mid-filament
+        col = mix(cAmb, cFil, smoothstep(0.0, 0.35, nd));
+        col = mix(col, cDim, smoothstep(0.35, 1.0, nd));
+        alpha = soft * vFade * mix(0.50, 0.15, nd);
+      }
+
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+const scene = new THREE.Scene();
+scene.add(points);
+
+// ── Camera: slow vast dolly through the web ──
+const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.1, 90);
+const centroid = new THREE.Vector3();
+for (const n of nodes) centroid.add(n);
+centroid.divideScalar(NC);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const t0 = performance.now();
+(function loop() {
+  const t = (performance.now() - t0) * 0.001;
+  mat.uniforms.uTime.value = t;
+
+  // Slow orbit with gentle altitude drift — vast cosmic pan
+  const ang = t * 0.035;
+  const r = 16 + Math.sin(t * 0.018) * 4;
+  camera.position.set(
+    centroid.x + Math.sin(ang) * r,
+    centroid.y + Math.sin(ang * 0.6) * 5,
+    centroid.z + Math.cos(ang) * r
+  );
+  camera.lookAt(centroid);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
