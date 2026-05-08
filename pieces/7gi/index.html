@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>7gi · sublime rift</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#04020a;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;opacity:.55;font-size:11px;letter-spacing:.06em;color:#cdd2dc;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+.hint{position:fixed;left:14px;top:14px;opacity:.35;font-size:10px;color:#445;font-family:ui-monospace,"SF Mono",Menlo,monospace;cursor:pointer;transition:opacity 1s}
+.vignette{position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at 50% 50%,transparent 30%,#04020a 100%)}
+</style>
+</head>
+<body>
+<div class="vignette"></div>
+<div class="id">7gi</div>
+<div class="hint" id="hint">click for mic · low rumble</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ─── Sublime Rift ───
+   Turner's late seascapes as particle field: a luminous seam of leaf-particles
+   stretching through infinite void. Camera drifts forward forever.
+   Bass frequencies make the rift breathe. Leaves are the pixel.
+   Reference: J.M.W. Turner "Light and Colour" (1843), James Turrell's Roden Crater.
+   Palette: amber-gold rift core → burnt sienna mid → steel-blue void → pale gold accent.
+*/
+
+const BG = 0x04020a;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(74, innerWidth / innerHeight, 0.05, 900);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+
+// ─── Particle field: Gaussian rift at y=0, infinite z-wrap ───
+const N = 20000;
+const DEPTH = 500;
+const pos   = new Float32Array(N * 3);
+const aSeed = new Float32Array(N);
+const aRot  = new Float32Array(N);
+const aBand = new Float32Array(N);
+
+for (let i = 0; i < N; i++) {
+  pos[i * 3]     = (Math.random() - 0.5) * 220;
+  const u1 = Math.max(1e-6, Math.random()), u2 = Math.random();
+  const g  = Math.sqrt(-2 * Math.log(u1)) * Math.cos(6.2832 * u2);
+  const y  = g * 2.2;
+  pos[i * 3 + 1] = y;
+  pos[i * 3 + 2] = Math.random() * DEPTH;
+  aSeed[i] = Math.random();
+  aRot[i]  = Math.random() * 6.2832;
+  const ay = Math.abs(y);
+  aBand[i] = ay < 1.2 ? 0.0 : ay < 3.5 ? 1.0 : ay < 8.0 ? 2.0 : ay < 16.0 ? 3.0 : 4.0;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('aSeed',    new THREE.BufferAttribute(aSeed, 1));
+geom.setAttribute('aRot',     new THREE.BufferAttribute(aRot, 1));
+geom.setAttribute('aBand',    new THREE.BufferAttribute(aBand, 1));
+
+const uniforms = {
+  uTime:   { value: 0 },
+  uCamZ:   { value: 0 },
+  uPx:     { value: renderer.getPixelRatio() },
+  uBands:  { value: new THREE.Vector4(0, 0, 0, 0) },
+  uTreble: { value: 0 },
+  uBass:   { value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uCamZ, uPx;
+    uniform vec4  uBands;
+    uniform float uTreble, uBass;
+    attribute float aSeed, aRot, aBand;
+    varying float vAlpha, vRot;
+    varying vec3  vCol;
+
+    void main() {
+      vec3 p = position;
+
+      // infinite z-wrap: particles recycle ahead of camera
+      float relZ = mod(p.z - uCamZ + 30.0, 500.0) - 30.0;
+      p.z = uCamZ + relZ;
+
+      // band energy for this particle
+      float e;
+      if      (aBand < 0.5) e = uBands.x;
+      else if (aBand < 1.5) e = uBands.y;
+      else if (aBand < 2.5) e = uBands.z;
+      else if (aBand < 3.5) e = uBands.w;
+      else                  e = uTreble;
+
+      // bass makes the rift breathe vertically
+      float breathe = uBass * 0.7;
+      p.y *= 1.0 + breathe * exp(-position.y * position.y * 0.06);
+
+      // gentle per-particle drift (slow, sublime)
+      float t = uTime;
+      p.x += sin(t * 0.12 + aSeed * 43.0) * 0.35;
+      p.y += cos(t * 0.09 + aSeed * 31.0) * 0.18;
+      p.z += sin(t * 0.07 + aSeed * 22.0) * 0.25;
+
+      // energy displacement: particles push outward from rift
+      p.y += e * sign(position.y) * 0.4;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // size: rift-core particles larger, energy boost
+      float ay = abs(position.y);
+      float baseSize = mix(3.8, 1.4, smoothstep(0.0, 6.0, ay));
+      gl_PointSize = (baseSize + e * 2.2) * uPx * (48.0 / max(dist, 0.1));
+      gl_PointSize = clamp(gl_PointSize, 0.5, 90.0);
+
+      gl_Position = projectionMatrix * mv;
+
+      // ─── Turner palette ───
+      // #e8a020 amber-gold, #c06018 burnt sienna, #3a5070 steel blue, #f0d080 pale gold
+      vec3 amber  = vec3(0.91, 0.63, 0.13);
+      vec3 sienna = vec3(0.75, 0.38, 0.09);
+      vec3 steel  = vec3(0.23, 0.31, 0.44);
+      vec3 gold   = vec3(0.94, 0.82, 0.50);
+
+      float riftDist = smoothstep(0.0, 12.0, ay);
+      vec3 col = mix(
+        mix(amber, sienna, smoothstep(0.0, 3.5, ay)),
+        steel,
+        riftDist
+      );
+      col = mix(col, gold, (1.0 - riftDist) * e * 0.5);
+      col *= 0.45 + e * 1.1;
+
+      vCol = col;
+
+      // manual fog: distance + y-distance from rift
+      float fog   = exp(-dist * 0.0055);
+      float yFade = exp(-ay * ay * 0.01);
+      vAlpha = fog * yFade * (0.35 + e * 0.85) * mix(0.65, 1.0, aSeed);
+
+      // slow tumble
+      vRot = aRot + t * 0.08 * sign(aSeed - 0.5);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha, vRot;
+    varying vec3  vCol;
+
+    void main() {
+      vec2 uv = gl_PointCoord * 2.0 - 1.0;
+
+      // rotate for leaf orientation
+      float c = cos(vRot), s = sin(vRot);
+      vec2 r = vec2(c * uv.x - s * uv.y, s * uv.x + c * uv.y);
+
+      // leaf silhouette: ellipse pinched at tips
+      float rx = r.x * 1.7;
+      float ry = r.y;
+      float pinch = 1.0 + 2.8 * rx * rx;
+      float shape = rx * rx + ry * ry * pinch;
+      if (shape > 1.0) discard;
+
+      float alpha = smoothstep(1.0, 0.15, shape) * vAlpha;
+
+      // subtle midvein
+      float vein = smoothstep(0.07, 0.0, abs(r.y)) * 0.14;
+      // faint lateral veins
+      float lv = smoothstep(0.04, 0.0,
+        abs(fract(r.x * 3.0 + 0.5) - 0.5) - 0.35) * 0.06 * (1.0 - abs(r.x));
+
+      vec3 col = vCol * (1.0 + vein + lv);
+
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ─── Audio (non-blocking) ───
+let analyser = null, freqData = null;
+const hint = document.getElementById('hint');
+
+async function initMic() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.75;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'mic live · low rumble';
+    setTimeout(() => { hint.style.opacity = '0'; }, 2500);
+  } catch (e) {
+    hint.textContent = 'mic denied';
+    setTimeout(() => { hint.style.opacity = '0'; }, 2500);
+  }
+}
+document.body.addEventListener('click', () => {
+  if (!analyser) initMic();
+}, { once: true });
+
+function bandE(arr, lo, hi) {
+  let s = 0;
+  for (let i = lo; i < hi; i++) s += arr[i];
+  return s / ((hi - lo) * 255);
+}
+
+// ─── Resize ───
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─── Render loop ───
+const t0 = performance.now();
+const uB = uniforms.uBands.value;
+
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+  uniforms.uTime.value = t;
+
+  // camera: slow forward drift, gentle y-sway (viewer adrift in void)
+  const camZ = t * 0.32;
+  uniforms.uCamZ.value = camZ;
+  camera.position.set(
+    Math.sin(t * 0.018) * 1.0,
+    0.4 + Math.sin(t * 0.055) * 1.8,
+    camZ
+  );
+  camera.lookAt(
+    Math.sin(t * 0.013) * 2.5,
+    Math.sin(t * 0.035) * 0.6,
+    camZ + 70
+  );
+
+  if (analyser) {
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    uB.x = bandE(freqData, 0, Math.floor(n * 0.04));
+    uB.y = bandE(freqData, Math.floor(n * 0.04), Math.floor(n * 0.12));
+    uB.z = bandE(freqData, Math.floor(n * 0.12), Math.floor(n * 0.30));
+    uB.w = bandE(freqData, Math.floor(n * 0.30), Math.floor(n * 0.55));
+    uniforms.uTreble.value = bandE(freqData, Math.floor(n * 0.55), n);
+    uniforms.uBass.value = uB.x;
+  } else {
+    // synthetic: slow, deep breath — sublime stillness
+    uB.x = 0.28 + 0.22 * Math.sin(t * 0.35);
+    uB.y = 0.20 + 0.14 * Math.sin(t * 0.6 + 1.0);
+    uB.z = 0.14 + 0.10 * Math.sin(t * 0.9 + 2.2);
+    uB.w = 0.08 + 0.06 * Math.sin(t * 1.4 + 0.5);
+    uniforms.uTreble.value = 0.06 + 0.04 * Math.sin(t * 2.0);
+    uniforms.uBass.value = uB.x;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
