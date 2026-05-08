@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>f87 · mosquito in amber · hand-sculpted</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a080c; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  #cam { position:fixed; right:14px; bottom:14px; width:240px; height:160px;
+         border:1px solid #2a2025; border-radius:4px; transform:scaleX(-1); opacity:0.85; }
+  #cam.hidden { display:none; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size:11px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  button.start { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+                 background:#1a141d; color:#e5dcd2; border:1px solid #4a3a44;
+                 padding:12px 22px; border-radius:4px; cursor:pointer;
+                 font-family:inherit; font-size:13px; letter-spacing:0.06em; z-index:5; }
+  button.start:hover { background:#26202a; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.6; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading mosquito in amber · khronos glTF …</div>
+<button class="start" id="startBtn" style="display:none">grant camera · sculpt with hands</button>
+<video id="cam" class="hidden" autoplay playsinline muted></video>
+<div class="id">f87</div>
+<div class="hint" id="hint"></div>
+<div class="src">model: KhronosGroup glTF-Sample-Assets · MosquitoInAmber</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.01, 500);
+camera.position.set(0, 0, 4.5);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a080c, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 60000;
+const positions     = new Float32Array(N * 3);
+const restPositions = new Float32Array(N * 3);
+const seeds         = new Float32Array(N);
+const distFromCore  = new Float32Array(N); // 0=insect, 1=amber shell
+
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uPinch:  { value: 1.0 },
+  uHand:   { value: new THREE.Vector3(0,0,0) },
+  uActive: { value: 0.0 },
+  uReady:  { value: 0.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPinch;
+    uniform vec3  uHand;
+    uniform float uActive;
+    uniform float uReady;
+    attribute vec3  rest;
+    attribute float seed;
+    attribute float layer;
+    varying vec3  vCol;
+    varying float vEnergy;
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.35 + seed * 6.28;
+
+      // breathing — subtle, trapped-in-amber pulse
+      vec3 dir = normalize(p);
+      float breathAmp = 0.03 * (1.0 - layer * 0.6);
+      p += dir * sin(t) * breathAmp * (1.0 + 0.4*sin(seed*9.0));
+
+      // gesture: open hand disperses, fist collapses
+      vec3 fromCenter = p;
+      float disperse = mix(0.0, 0.8, uPinch * 0.5) * uActive;
+      p += fromCenter * disperse;
+
+      // hand pull — gentler for amber
+      vec3 toHand = uHand - p;
+      p += toHand * uActive * 0.03;
+
+      // assembly reveal
+      vec3 entry = vec3(sin(seed*40.0), cos(seed*30.0), sin(seed*22.0)) * 8.0;
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      vEnergy = 0.4 + 0.6*sin(t*0.7);
+
+      // palette: deep amber core → honey → pale resin shell
+      // insect (layer≈0): dark amber-brown, warm
+      vec3 insectA = vec3(0.72, 0.38, 0.12);  // burnt sienna
+      vec3 insectB = vec3(0.85, 0.52, 0.18);  // raw amber
+      vec3 insectC = vec3(0.42, 0.18, 0.08);  // dark ember
+
+      // amber shell (layer≈1): golden translucent
+      vec3 amberA = vec3(0.95, 0.82, 0.45);   // pale honey
+      vec3 amberB = vec3(0.88, 0.65, 0.25);   // deep honey
+      vec3 amberC = vec3(0.98, 0.92, 0.72);   // cream highlight
+
+      vec3 colInsect = mix(insectA, insectB, vEnergy);
+      colInsect = mix(colInsect, insectC, smoothstep(0.78, 1.0, vEnergy) * 0.5);
+
+      vec3 colAmber = mix(amberA, amberB, vEnergy);
+      colAmber = mix(colAmber, amberC, smoothstep(0.82, 1.0, vEnergy) * 0.4);
+
+      vCol = mix(colInsect, colAmber, layer);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sz = (1.0 + 1.2*vEnergy) * uPixel * (18.0/dist) * (0.4 + 0.6*uReady);
+      // amber-shell particles slightly larger, more diffuse
+      sz *= mix(1.0, 1.6, layer);
+      gl_PointSize = sz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vEnergy;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * (0.35 + 0.55*vEnergy);
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const loadingEl = document.getElementById('loading');
+const startBtn  = document.getElementById('startBtn');
+const hintEl    = document.getElementById('hint');
+const camEl     = document.getElementById('cam');
+
+let modelCenter = new THREE.Vector3();
+let revealStart = 0;
+let modelLoaded = false;
+
+function initGeometry(samplers, weights){
+  // samplers: [{sampler, isShell}], weights: proportion per sampler
+  const tmp = new THREE.Vector3();
+  let idx = 0;
+  for (let s = 0; s < samplers.length; s++){
+    const count = Math.floor(N * weights[s]);
+    const { sampler, isShell } = samplers[s];
+    for (let i = 0; i < count && idx < N; i++, idx++){
+      sampler.sample(tmp);
+      restPositions[idx*3]   = tmp.x;
+      restPositions[idx*3+1] = tmp.y;
+      restPositions[idx*3+2] = tmp.z;
+      seeds[idx] = Math.random();
+      distFromCore[idx] = isShell ? (0.6 + Math.random()*0.4) : Math.random()*0.3;
+    }
+  }
+  // fill any remaining
+  for (; idx < N; idx++){
+    samplers[0].sampler.sample(tmp);
+    restPositions[idx*3]   = tmp.x;
+    restPositions[idx*3+1] = tmp.y;
+    restPositions[idx*3+2] = tmp.z;
+    seeds[idx] = Math.random();
+    distFromCore[idx] = Math.random();
+  }
+
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+  geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+  geom.setAttribute('layer',    new THREE.BufferAttribute(distFromCore, 1));
+
+  loadingEl.style.display = 'none';
+  startBtn.style.display = 'inline-block';
+  revealStart = performance.now();
+  modelLoaded = true;
+}
+
+function buildFallback(){
+  // fallback: icosahedron as amber lump
+  const ico = new THREE.IcosahedronGeometry(1.2, 4);
+  const mesh = new THREE.Mesh(ico, new THREE.MeshBasicMaterial());
+  const sampler = new MeshSurfaceSampler(mesh).build();
+  initGeometry([{ sampler, isShell: true }], [1.0]);
+}
+
+// Load MosquitoInAmber
+const GLB_URL = 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/MosquitoInAmber/glTF-Binary/MosquitoInAmber.glb';
+const loader = new GLTFLoader();
+
+// fallback timer
+const fallbackTimer = setTimeout(() => {
+  if (!modelLoaded) {
+    loadingEl.textContent = 'model timeout — fallback amber';
+    buildFallback();
+  }
+}, 8000);
+
+loader.load(GLB_URL,
+  (gltf) => {
+    clearTimeout(fallbackTimer);
+    if (modelLoaded) return;
+
+    const root = gltf.scene;
+    // compute total bounding box
+    const box = new THREE.Box3().setFromObject(root);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scale = 2.5 / maxAxis; // fit to ~2.5 unit radius
+    root.position.sub(center);
+    root.scale.multiplyScalar(scale);
+    root.updateMatrixWorld(true);
+    modelCenter.copy(center).multiplyScalar(0); // centered at origin now
+
+    // collect meshes, classify as shell (translucent/amber) vs insect
+    const samplers = [];
+    const weights = [];
+    let totalArea = 0;
+    const meshes = [];
+
+    root.traverse((child) => {
+      if (child.isMesh && child.geometry){
+        const g = child.geometry.clone();
+        g.applyMatrix4(child.matrixWorld);
+        if (!g.index && g.attributes.position.count < 3) return;
+        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial());
+        // heuristic: if material is transparent or name contains amber/resin → shell
+        const mat = child.material;
+        const isShell = (mat && (mat.transparent || mat.opacity < 0.95)) ||
+                        (child.name && /amber|resin|shell|glass/i.test(child.name));
+        try {
+          const sampler = new MeshSurfaceSampler(m).build();
+          // estimate area by vertex count as rough proxy
+          const area = g.attributes.position.count;
+          meshes.push({ sampler, isShell: !!isShell, area });
+          totalArea += area;
+        } catch(e) { /* skip degenerate meshes */ }
+      }
+    });
+
+    if (meshes.length === 0){
+      buildFallback();
+      return;
+    }
+
+    // assign more particles to insect parts for detail
+    for (const m of meshes){
+      const baseProp = m.area / totalArea;
+      // boost insect parts
+      const w = m.isShell ? baseProp * 0.7 : baseProp * 1.5;
+      samplers.push({ sampler: m.sampler, isShell: m.isShell });
+      weights.push(w);
+    }
+    // normalize weights
+    const wSum = weights.reduce((a,b) => a+b, 0);
+    for (let i = 0; i < weights.length; i++) weights[i] /= wSum;
+
+    initGeometry(samplers, weights);
+
+    // adjust camera to frame object
+    camera.position.set(0, 0.3, 4.5);
+    camera.lookAt(0, 0, 0);
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      loadingEl.textContent = `loading mosquito in amber · ${pct}%`;
+    }
+  },
+  (err) => {
+    clearTimeout(fallbackTimer);
+    console.error(err);
+    loadingEl.textContent = 'load failed — fallback amber';
+    buildFallback();
+  }
+);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// MediaPipe Hands
+let handsActive = false;
+async function loadMP(){
+  const load = (src) => new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = src; s.crossOrigin = 'anonymous';
+    s.onload = res; s.onerror = rej; document.head.appendChild(s);
+  });
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js');
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js');
+}
+async function startHands(){
+  startBtn.style.display = 'none';
+  hintEl.textContent = 'requesting camera…';
+  try { await loadMP(); }
+  catch { hintEl.textContent = 'mediapipe load failed — passive mode'; return; }
+  const hands = new window.Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}` });
+  hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+  hands.onResults((res) => {
+    if (!res.multiHandLandmarks || res.multiHandLandmarks.length === 0){
+      uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 0.0, 0.05);
+      return;
+    }
+    uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 1.0, 0.1);
+    const lm = res.multiHandLandmarks[0];
+    const dx = lm[4].x - lm[8].x, dy = lm[4].y - lm[8].y, dz = lm[4].z - lm[8].z;
+    const pinch = Math.min(2.0, Math.sqrt(dx*dx+dy*dy+dz*dz) * 6.0);
+    uniforms.uPinch.value = THREE.MathUtils.lerp(uniforms.uPinch.value, pinch, 0.15);
+    const palm = lm[9];
+    const wx = (0.5 - palm.x) * 6;
+    const wy = (0.5 - palm.y) * 4;
+    uniforms.uHand.value.set(wx, wy, 0.0);
+    hintEl.textContent = `hand · pinch=${pinch.toFixed(2)}`;
+  });
+  camEl.classList.remove('hidden');
+  const cam = new window.Camera(camEl, {
+    onFrame: async () => { await hands.send({ image: camEl }); },
+    width: 320, height: 240
+  });
+  cam.start();
+  handsActive = true;
+}
+startBtn.addEventListener('click', startHands);
+
+// slow drift orbit — examining the specimen
+const startTime = performance.now();
+function loop(){
+  const t = (performance.now() - startTime) / 1000;
+  uniforms.uTime.value = t;
+
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 3000);
+  }
+
+  // gentle orbital drift — like turning amber in your hand
+  const orbitR = 4.5;
+  const orbitSpeed = 0.06;
+  const vertDrift = Math.sin(t * 0.03) * 0.4;
+  points.rotation.y = t * orbitSpeed;
+  points.rotation.x = Math.sin(t * 0.025) * 0.08;
+
+  if (!handsActive && uniforms.uReady.value > 0.95) {
+    uniforms.uPinch.value = 1.0 + 0.15 * Math.sin(t * 0.3);
+    uniforms.uActive.value = 0.2;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
