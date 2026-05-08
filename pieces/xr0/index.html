@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xr0 · calyx (Reas process · propagate)</title>
+<!-- MOTION: propagate, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">xr0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 12, 20);
+camera.lookAt(0, 2, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+/* --- Background: warm gallery wall gradient via full-screen quad --- */
+const bgScene = new THREE.Scene();
+const bgCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      // Warm taupe gallery wall — subtle vertical gradient
+      vec3 top    = vec3(0.82, 0.78, 0.73);  // warm light taupe
+      vec3 bottom = vec3(0.72, 0.67, 0.62);  // slightly deeper
+      // Slight vignette
+      float vig = 1.0 - 0.15 * length((vUv - 0.5) * vec2(1.4, 1.0));
+      vec3 col = mix(bottom, top, vUv.y) * vig;
+      // Paper grain: deterministic hash
+      float grain = fract(sin(dot(floor(vUv * 800.0), vec2(12.9898, 78.233))) * 43758.5453);
+      col += (grain - 0.5) * 0.018;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const bgQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat);
+bgScene.add(bgQuad);
+
+/* --- Particle system --- */
+const N = 80000;
+let geom, points;
+
+const uniforms = {
+  uTime:      { value: 0 },
+  uPhase:     { value: 0 },
+  uPixel:     { value: renderer.getPixelRatio() },
+  uRowFreq:   { value: 1.2 },
+  uColFreq:   { value: 1.0 },
+  uWaveAmp:   { value: 0.5 },
+  uTwist:     { value: 0.0 },
+  uMorph:     { value: 0.0 },
+  uPetals:    { value: 5.0 },
+  uCupDepth:  { value: 4.0 },
+  uLightAngle:{ value: 0.0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPhase;
+    uniform float uRowFreq;
+    uniform float uColFreq;
+    uniform float uWaveAmp;
+    uniform float uTwist;
+    uniform float uMorph;
+    uniform float uPetals;
+    uniform float uCupDepth;
+    uniform float uLightAngle;
+
+    attribute vec2 gridPos;
+    attribute float seed;
+    attribute float cellRule;
+
+    varying float vDensity;
+    varying float vHeight;
+    varying float vLight;
+    varying float vRule;
+    varying float vRadius;
+
+    void main(){
+      vec2 gp = gridPos;
+
+      /* --- Riley wave interference (2x speed per user request) --- */
+      float rowWave = sin(gp.y * uRowFreq + uTime * 1.2 + uPhase) * uWaveAmp;
+      float colWave = sin(gp.x * uColFreq + uTime * 0.7) * uWaveAmp;
+
+      float twist = uTwist * length(gp) * 0.04;
+      float ct = cos(twist); float st = sin(twist);
+      vec2 twisted = vec2(gp.x * ct - gp.y * st, gp.x * st + gp.y * ct);
+
+      /* --- Calyx morph --- */
+      float r = length(gp);
+      float maxR = 12.0;
+      float nr = clamp(r / maxR, 0.0, 1.0);
+      float theta = atan(gp.y, gp.x);
+
+      float petalShape = 0.5 + 0.5 * cos(theta * uPetals);
+      float cupProfile = uCupDepth * nr * nr * (0.6 + 0.4 * petalShape);
+      float flare = 1.0 + 0.15 * nr * nr * uMorph;
+
+      float m = uMorph;
+      vec3 flatPos = vec3(twisted.x + rowWave, twisted.y + colWave, 0.0);
+
+      float cx = twisted.x * flare + rowWave * (1.0 - 0.5 * m);
+      float cy = twisted.y * flare + colWave * (1.0 - 0.5 * m);
+      float cz = cupProfile * m;
+
+      vec3 p = mix(flatPos, vec3(cx, cy, cz), m);
+
+      /* --- Reas Process-style deterministic rule ---
+         Instead of noise: modular step function on grid coords.
+         Particles are ON or DIMMED based on a cellular rule
+         applied to their quantised grid cell. */
+      vRule = cellRule;
+
+      /* --- Turrell-style drifting light ---
+         A directional light sweeps slowly across the cup.
+         Illumination = dot(surface_approx_normal, light_dir). */
+      // Approximate surface normal from radial + petal shape
+      vec3 approxNormal = normalize(vec3(
+        -2.0 * nr * cos(theta) * uCupDepth * m,
+        -2.0 * nr * sin(theta) * uCupDepth * m,
+        1.0
+      ));
+      // Slowly drifting light direction
+      float la = uLightAngle;
+      vec3 lightDir = normalize(vec3(sin(la) * 0.7, 0.5, cos(la) * 0.7));
+      vLight = max(0.0, dot(approxNormal, lightDir));
+
+      /* --- Propagation wavefront ---
+         A ring of activation sweeps outward from center periodically */
+      float waveFront = mod(uTime * 0.3, 1.5);
+      float dist = nr;
+      float propWave = 1.0 - smoothstep(0.0, 0.12, abs(dist - waveFront));
+
+      vDensity = propWave;
+      vHeight = cz;
+      vRadius = nr;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float camDist = -mv.z;
+      // Reas style: slightly larger, defined dots
+      gl_PointSize = uPixel * max(1.8, 3.2 - camDist * 0.05);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDensity;
+    varying float vHeight;
+    varying float vLight;
+    varying float vRule;
+    varying float vRadius;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      /* --- Near-monochrome: charcoal/graphite palette ---
+         Dominant: warm dark grays (sat ~0.05)
+         Accent: burnt sienna (#6B3A2A) used sparingly on lit propagation wavefront */
+
+      // Base: dark graphite modulated by rule
+      float ruleShade = mix(0.12, 0.28, vRule);
+
+      // Turrell light reveals curvature: push toward lighter warm gray
+      float lit = vLight * 0.35;
+
+      // Propagation wavefront: the ONE accent moment
+      // Burnt sienna accent only where wavefront + light coincide
+      float accentStrength = vDensity * vLight * step(0.3, vDensity);
+
+      // Charcoal base colors
+      vec3 darkGray   = vec3(0.11, 0.10, 0.10);  // near-black graphite
+      vec3 midGray    = vec3(0.32, 0.30, 0.29);   // warm mid-gray
+      vec3 accent     = vec3(0.42, 0.23, 0.16);   // burnt sienna, restrained
+
+      // Mix based on rule + light
+      vec3 base = mix(darkGray, midGray, ruleShade + lit);
+      vec3 col = mix(base, accent, accentStrength * 0.6);
+
+      // Height-based subtle value shift (deeper cup = darker)
+      col *= 1.0 - 0.08 * smoothstep(0.0, 4.0, vHeight);
+
+      // Edge fade on dot
+      float alpha = (0.7 + 0.3 * vRule) * (1.0 - smoothstep(0.15, 0.25, r));
+
+      // Dim particles at very edge for soft boundary
+      alpha *= smoothstep(1.0, 0.85, vRadius);
+
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+function buildGrid(rows, cols, seed){
+  const positions = new Float32Array(N * 3);
+  const gridPositions = new Float32Array(N * 2);
+  const seeds = new Float32Array(N);
+  const cellRules = new Float32Array(N);
+
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  /* --- Reas-style deterministic rule ---
+     Rule 30 (Wolfram elementary CA) applied diagonally across the grid.
+     Each cell's state (0 or 1) determines particle shade.
+     This gives emergent triangular fractal structure — deterministic, no noise. */
+  const rule = 30;
+  const caCols = cols;
+  const caRows = rows;
+  const ca = new Uint8Array(caRows * caCols);
+
+  // Seed: single cell at center of first row
+  ca[Math.floor(caCols / 2)] = 1;
+
+  for (let r = 1; r < caRows; r++) {
+    for (let c = 0; c < caCols; c++) {
+      const left   = c > 0 ? ca[(r - 1) * caCols + c - 1] : 0;
+      const center = ca[(r - 1) * caCols + c];
+      const right  = c < caCols - 1 ? ca[(r - 1) * caCols + c + 1] : 0;
+      const pattern = (left << 2) | (center << 1) | right;
+      ca[r * caCols + c] = (rule >> pattern) & 1;
+    }
+  }
+
+  const width = 24, height = 24;
+  const cellW = width / cols, cellH = height / rows;
+
+  let idx = 0;
+  const pointsPerCell = Math.max(1, Math.floor(N / (rows * cols)));
+
+  for (let i = 0; i < rows && idx < N; i++){
+    for (let j = 0; j < cols && idx < N; j++){
+      const caVal = ca[i * caCols + j] || 0;
+      for (let k = 0; k < pointsPerCell && idx < N; k++){
+        const x = (j + rng() * 0.7 + 0.15) * cellW - width * 0.5;
+        const y = (i + rng() * 0.7 + 0.15) * cellH - height * 0.5;
+        positions[idx * 3] = x;
+        positions[idx * 3 + 1] = y;
+        positions[idx * 3 + 2] = 0;
+        gridPositions[idx * 2] = x;
+        gridPositions[idx * 2 + 1] = y;
+        seeds[idx] = rng();
+        cellRules[idx] = caVal;
+        idx++;
+      }
+    }
+  }
+  while (idx < N){
+    const ri = Math.floor(rng() * rows);
+    const ci = Math.floor(rng() * cols);
+    const caVal = ca[ri * caCols + ci] || 0;
+    const x = (ci + rng() * 0.7 + 0.15) * cellW - width * 0.5;
+    const y = (ri + rng() * 0.7 + 0.15) * cellH - height * 0.5;
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = 0;
+    gridPositions[idx * 2] = x;
+    gridPositions[idx * 2 + 1] = y;
+    seeds[idx] = rng();
+    cellRules[idx] = caVal;
+    idx++;
+  }
+  return { positions, gridPositions, seeds, cellRules };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random() * 1e9);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const rows = 90 + Math.floor(rng() * 50);
+  const cols = 90 + Math.floor(rng() * 50);
+
+  uniforms.uRowFreq.value = 0.9 + rng() * 0.8;
+  uniforms.uColFreq.value = 0.9 + rng() * 0.8;
+  uniforms.uWaveAmp.value = 0.3 + rng() * 0.4;
+  uniforms.uTwist.value = rng() * 3.0;
+  uniforms.uPhase.value = rng() * 6.28;
+  uniforms.uPetals.value = 4 + Math.floor(rng() * 4);
+  uniforms.uCupDepth.value = 3.5 + rng() * 2.5;
+  uniforms.uMorph.value = 0.0;
+
+  const { positions, gridPositions, seeds, cellRules } = buildGrid(rows, cols, seed);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('gridPos', new THREE.BufferAttribute(gridPositions, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('cellRule', new THREE.BufferAttribute(cellRules, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.gridPos.array.set(gridPositions);
+    geom.attributes.gridPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);
+    geom.attributes.seed.needsUpdate = true;
+    geom.attributes.cellRule.array.set(cellRules);
+    geom.attributes.cellRule.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+}
+
+regenerate();
+addEventListener('click', (e) => {
+  if (e.target.tagName === 'CANVAS') regenerate();
+});
+
+/* --- Orbit drag --- */
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 0.55;
+const canvas = renderer.domElement;
+
+canvas.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi = Math.max(0.1, Math.min(1.4, orbitPhi - (e.clientY - prevY) * 0.005));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Morph: flat → calyx over 5 seconds
+  uniforms.uMorph.value += (1.0 - uniforms.uMorph.value) * 0.018;
+
+  // Turrell light drift: very slow circular sweep (~40s period)
+  uniforms.uLightAngle.value = t * 0.157;
+
+  // Restrained auto-orbit (slower than parent — stillness) + manual
+  const autoTheta = t * 0.04;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 21;
+
+  const centroidY = 1.5 * uniforms.uMorph.value;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    centroidY + radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, centroidY, 0);
+
+  // Render background then scene
+  renderer.autoClear = false;
+  renderer.clear();
+  renderer.render(bgScene, bgCamera);
+  renderer.render(scene, camera);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
