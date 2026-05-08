@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>&lt;NEW_ID&gt; · gestural lucy · cy twombly</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f4efe6; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        color:#cdd2dc; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">&lt;NEW_ID&gt; · gestural lucy · cy twombly</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 500);
+camera.position.set(0, 0, 32);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf4efe6, 1);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+/* ── ping-pong render targets for chalk-smear trails ── */
+function makeRT() {
+  return new THREE.WebGLRenderTarget(
+    innerWidth * Math.min(devicePixelRatio, 2),
+    innerHeight * Math.min(devicePixelRatio, 2),
+    { format: THREE.RGBAFormat, type: THREE.UnsignedByteType }
+  );
+}
+let rtA = makeRT(), rtB = makeRT();
+
+/* fullscreen quad helper */
+const fsGeo = new THREE.PlaneGeometry(2, 2);
+const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+/* fade quad: blends previous frame toward cream */
+const fadeMat = new THREE.ShaderMaterial({
+  uniforms: { tPrev: { value: null } },
+  depthTest: false, depthWrite: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tPrev;
+    varying vec2 vUv;
+    void main(){
+      vec4 c = texture2D(tPrev, vUv);
+      vec3 bg = vec3(0.957, 0.937, 0.902);
+      gl_FragColor = vec4(mix(bg, c.rgb, 0.991), 1.0);
+    }`
+});
+const fadeQuad = new THREE.Mesh(fsGeo, fadeMat);
+const fadeScene = new THREE.Scene();
+fadeScene.add(fadeQuad);
+
+/* screen quad: draws RT to screen */
+const screenMat = new THREE.ShaderMaterial({
+  uniforms: { tScreen: { value: null } },
+  depthTest: false, depthWrite: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tScreen;
+    varying vec2 vUv;
+    void main(){ gl_FragColor = texture2D(tScreen, vUv); }`
+});
+const screenQuad = new THREE.Mesh(fsGeo.clone(), screenMat);
+const screenScene = new THREE.Scene();
+screenScene.add(screenQuad);
+
+/* ── particles ── */
+const N = 55000;
+const restPos = new Float32Array(N * 3);
+const seeds   = new Float32Array(N);
+const phases  = new Float32Array(N);
+const radii   = new Float32Array(N); // scribble amplitude per particle
+
+const u = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0.0 }
+};
+
+const ptMat = new THREE.ShaderMaterial({
+  uniforms: u,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    attribute vec3  rest;
+    attribute float seed;
+    attribute float phase;
+    attribute float rad;
+    varying vec3  vCol;
+    varying float vA;
+
+    void main(){
+      vec3 p = rest;
+      float t = uTime;
+
+      /* ── gestural scribble: epicyclic loops along surface tangent ── */
+      vec3 n  = normalize(p);
+      vec3 up = abs(n.y) < 0.99 ? vec3(0.0,1.0,0.0) : vec3(1.0,0.0,0.0);
+      vec3 tg = normalize(cross(n, up));
+      vec3 bt = cross(n, tg);
+
+      float sp   = phase + t * (0.22 + seed * 0.13);
+      float freq = 1.0 + seed * 0.7;
+      float amp  = rad;
+
+      /* primary loop + secondary wobble (golden ratio offset) */
+      float s1 = sin(sp * freq);
+      float c1 = cos(sp * freq * 1.618);
+      float s2 = sin(sp * freq * 2.879 + 1.0);
+
+      p += tg * s1 * amp + bt * c1 * amp * 0.72;
+      /* drift outward slightly — like chalk lifting off */
+      p += n * s2 * amp * 0.25;
+
+      /* slow breathing swell */
+      p += n * sin(t * 0.25 + seed * 6.28) * 0.06;
+
+      /* reveal: fly in from scattered cloud */
+      vec3 entry = vec3(
+        sin(seed * 40.0) * 22.0,
+        cos(seed * 30.0) * 22.0,
+        sin(seed * 22.0) * 14.0
+      );
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      /* ── palette: graphite + warm grey + crimson strokes ── */
+      float isRed = step(0.93, fract(seed * 127.53));
+      float warmth = sin(seed * 43.0) * 0.5 + 0.5;
+      vec3 graphite  = vec3(0.25, 0.24, 0.26);
+      vec3 pencil    = vec3(0.48, 0.44, 0.42);
+      vec3 crimson   = vec3(0.74, 0.16, 0.13);
+      vec3 darkRed   = vec3(0.52, 0.10, 0.10);
+
+      vCol = mix(graphite, pencil, warmth);
+      vCol = mix(vCol, mix(crimson, darkRed, warmth), isRed);
+
+      /* alpha pulses like pressure variation */
+      vA = (0.22 + 0.30 * abs(sin(sp * 1.7 + seed * 11.0))) * uReady;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sz = (1.0 + 1.4 * isRed) * uPixel * (42.0 / dist) * uReady;
+      gl_PointSize = max(1.0, sz);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+      if (r2 > 0.25) discard;
+      /* chalk / soft-pastel falloff */
+      float edge = 1.0 - smoothstep(0.04, 0.25, r2);
+      float a = edge * vA;
+      gl_FragColor = vec4(vCol, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const pts  = new THREE.Points(geom, ptMat);
+scene.add(pts);
+
+/* ── scribble lines: short chains emanating from surface ── */
+const NCHAINS = 1800;
+const CLEN    = 14; // verts per chain
+const LTOTAL  = NCHAINS * CLEN;
+const linePos = new Float32Array(LTOTAL * 3);
+const lineSeed  = new Float32Array(LTOTAL);
+const linePhase = new Float32Array(LTOTAL);
+const lineRad   = new Float32Array(LTOTAL);
+const lineRest  = new Float32Array(LTOTAL * 3);
+const lineStep  = new Float32Array(LTOTAL); // 0..1 along chain
+
+const lineU = {
+  uTime:  u.uTime,
+  uPixel: u.uPixel,
+  uReady: u.uReady
+};
+
+const lineMat = new THREE.ShaderMaterial({
+  uniforms: lineU,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uReady;
+    attribute vec3  rest;
+    attribute float seed;
+    attribute float phase;
+    attribute float rad;
+    attribute float step;
+    varying float vA;
+    varying vec3  vCol;
+
+    void main(){
+      vec3 p = rest;
+      float t = uTime;
+
+      vec3 n  = normalize(p);
+      vec3 up = abs(n.y) < 0.99 ? vec3(0.0,1.0,0.0) : vec3(1.0,0.0,0.0);
+      vec3 tg = normalize(cross(n, up));
+      vec3 bt = cross(n, tg);
+
+      /* each vertex along chain = advancing phase */
+      float sp   = phase + t * (0.18 + seed * 0.1) + step * 1.8;
+      float freq = 0.9 + seed * 0.6;
+      float amp  = rad * (0.5 + step * 0.8);
+
+      float s1 = sin(sp * freq);
+      float c1 = cos(sp * freq * 1.618);
+      p += tg * s1 * amp + bt * c1 * amp * 0.65;
+      p += n * sin(sp * freq * 2.3) * amp * 0.2;
+      p += n * sin(t * 0.25 + seed * 6.28) * 0.06;
+
+      vec3 entry = vec3(
+        sin(seed * 40.0) * 22.0,
+        cos(seed * 30.0) * 22.0,
+        sin(seed * 22.0) * 14.0
+      );
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      float isRed = step(0.90, fract(seed * 91.17));
+      vec3 graphite = vec3(0.30, 0.28, 0.30);
+      vec3 crimson  = vec3(0.72, 0.15, 0.12);
+      vCol = mix(graphite, crimson, isRed);
+
+      /* fade at chain tips */
+      float taper = sin(step * 3.14159);
+      vA = taper * 0.35 * uReady;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    varying vec3  vCol;
+    void main(){
+      gl_FragColor = vec4(vCol, vA);
+    }
+  `
+});
+
+const lineGeom = new THREE.BufferGeometry();
+/* build index for line segments within each chain */
+const indices = [];
+for (let c = 0; c < NCHAINS; c++) {
+  const base = c * CLEN;
+  for (let j = 0; j < CLEN - 1; j++) {
+    indices.push(base + j, base + j + 1);
+  }
+}
+lineGeom.setIndex(indices);
+const lines = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lines);
+
+/* ── load Lucy ── */
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+let revealStart = 0;
+
+new PLYLoader().load(PLY_URL, (geometry) => {
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  const bb = geometry.boundingBox;
+  const ctr = bb.getCenter(new THREE.Vector3());
+  const sz  = bb.getSize(new THREE.Vector3());
+  const sc  = 15 / Math.max(sz.x, sz.y, sz.z);
+  geometry.translate(-ctr.x, -ctr.y, -ctr.z);
+  geometry.scale(sc, sc, sc);
+
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+  const sampler = new MeshSurfaceSampler(mesh).build();
+  const tmp = new THREE.Vector3();
+
+  /* sample points */
+  for (let i = 0; i < N; i++) {
+    sampler.sample(tmp);
+    restPos[i * 3]     = tmp.x;
+    restPos[i * 3 + 1] = tmp.y;
+    restPos[i * 3 + 2] = tmp.z;
+    seeds[i]  = Math.random();
+    phases[i] = Math.random() * Math.PI * 2;
+    radii[i]  = 0.15 + Math.random() * 0.45;
+  }
+  const posArr = new Float32Array(N * 3);
+  geom.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  geom.setAttribute('rest',     new THREE.BufferAttribute(restPos, 3));
+  geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+  geom.setAttribute('phase',    new THREE.BufferAttribute(phases, 1));
+  geom.setAttribute('rad',      new THREE.BufferAttribute(radii, 1));
+
+  /* sample line chains */
+  for (let c = 0; c < NCHAINS; c++) {
+    sampler.sample(tmp);
+    const sd = Math.random();
+    const ph = Math.random() * Math.PI * 2;
+    const rd = 0.25 + Math.random() * 0.55;
+    for (let j = 0; j < CLEN; j++) {
+      const idx = c * CLEN + j;
+      lineRest[idx * 3]     = tmp.x;
+      lineRest[idx * 3 + 1] = tmp.y;
+      lineRest[idx * 3 + 2] = tmp.z;
+      lineSeed[idx]  = sd;
+      linePhase[idx] = ph;
+      lineRad[idx]   = rd;
+      lineStep[idx]  = j / (CLEN - 1);
+    }
+  }
+  const lPosArr = new Float32Array(LTOTAL * 3);
+  lineGeom.setAttribute('position', new THREE.BufferAttribute(lPosArr, 3));
+  lineGeom.setAttribute('rest',     new THREE.BufferAttribute(lineRest, 3));
+  lineGeom.setAttribute('seed',     new THREE.BufferAttribute(lineSeed, 1));
+  lineGeom.setAttribute('phase',    new THREE.BufferAttribute(linePhase, 1));
+  lineGeom.setAttribute('rad',      new THREE.BufferAttribute(lineRad, 1));
+  lineGeom.setAttribute('step',     new THREE.BufferAttribute(lineStep, 1));
+
+  revealStart = performance.now();
+});
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  const w = innerWidth * Math.min(devicePixelRatio, 2);
+  const h = innerHeight * Math.min(devicePixelRatio, 2);
+  rtA.setSize(w, h);
+  rtB.setSize(w, h);
+});
+
+/* ── animation ── */
+const camTarget = new THREE.Vector3();
+const t0 = performance.now();
+
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+  u.uTime.value = t;
+
+  if (revealStart > 0) {
+    u.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 3000);
+  }
+
+  /* orbit + centroid track */
+  const r = 30;
+  const ang = t * 0.04;
+  camera.position.set(
+    Math.sin(ang) * r,
+    1.5 + Math.sin(t * 0.06) * 1.0,
+    Math.cos(ang) * r
+  );
+  camTarget.lerp(new THREE.Vector3(0, 0, 0), 0.02);
+  camera.lookAt(camTarget);
+
+  /* ── trail accumulation (ping-pong) ── */
+  /* 1. fade previous → current RT */
+  fadeMat.uniforms.tPrev.value = rtA.texture;
+  renderer.setRenderTarget(rtB);
+  renderer.clear();
+  renderer.render(fadeScene, ortho);
+
+  /* 2. draw particles + lines on top (no clear) */
+  renderer.render(scene, camera);
+
+  /* 3. draw to screen */
+  screenMat.uniforms.tScreen.value = rtB.texture;
+  renderer.setRenderTarget(null);
+  renderer.clear();
+  renderer.render(screenScene, ortho);
+
+  /* 4. swap */
+  const tmp = rtA;
+  rtA = rtB;
+  rtB = tmp;
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
