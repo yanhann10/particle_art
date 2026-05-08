@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pzi · Process Compendium (sphere)</title>
+<!-- MOTION: accumulation, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#fcfcfa; overflow:hidden;
+               color:#1a1a1a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">pzi</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── Casey Reas Process 18 adaptation to three.js ── */
+/* N agents circling on a sphere surface; when within ε draw persistent connecting quads */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xfcfcfa, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 400;
+const R = 6.0;
+const EPSILON = 0.65;
+const SPEED = 0.018;
+
+class Element {
+  constructor(){
+    this.theta = Math.random() * Math.PI * 2;
+    this.phi = Math.acos(2 * Math.random() - 1);
+    this.axis = new THREE.Vector3(
+      Math.random()-0.5,
+      Math.random()-0.5,
+      Math.random()-0.5
+    ).normalize();
+    this.radius = 0.25 + Math.random() * 0.6;
+    this.speed = SPEED * (0.7 + Math.random() * 0.6);
+    this.pos = new THREE.Vector3();
+    this.contacts = new Map();
+    this.updatePos();
+  }
+  updatePos(){
+    const st = Math.sin(this.theta), ct = Math.cos(this.theta);
+    const sp = Math.sin(this.phi),   cp = Math.cos(this.phi);
+    const base = new THREE.Vector3(st * sp * R, cp * R, ct * sp * R);
+    const q = new THREE.Quaternion().setFromAxisAngle(this.axis, performance.now() * 0.001 * this.speed);
+    base.applyQuaternion(q);
+    this.pos.copy(base);
+  }
+}
+
+const elements = [];
+for (let i=0; i<N; i++) elements.push(new Element());
+
+const connectionMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  side: THREE.DoubleSide,
+  uniforms: {
+    uTime: { value: 0 },
+  },
+  vertexShader: `
+    varying float vAlpha;
+    attribute float alpha;
+    void main(){
+      vAlpha = alpha;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      float a = vAlpha * 0.08;
+      vec3 col = vec3(0.08, 0.08, 0.12);
+      gl_FragColor = vec4(col, a);
+    }
+  `
+});
+
+const connectionGeom = new THREE.BufferGeometry();
+const maxQuads = 50000;
+const positions = new Float32Array(maxQuads * 4 * 3);
+const alphas = new Float32Array(maxQuads * 4);
+const indices = new Uint32Array(maxQuads * 6);
+for (let q=0; q<maxQuads; q++){
+  indices[q*6+0] = q*4+0;
+  indices[q*6+1] = q*4+1;
+  indices[q*6+2] = q*4+2;
+  indices[q*6+3] = q*4+0;
+  indices[q*6+4] = q*4+2;
+  indices[q*6+5] = q*4+3;
+}
+connectionGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+connectionGeom.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
+connectionGeom.setIndex(new THREE.BufferAttribute(indices, 1));
+connectionGeom.setDrawRange(0, 0);
+
+const connectionMesh = new THREE.Mesh(connectionGeom, connectionMat);
+scene.add(connectionMesh);
+
+let quadCount = 0;
+
+function addQuad(p0, p1, p2, p3, alpha){
+  if (quadCount >= maxQuads) return;
+  const base = quadCount * 4 * 3;
+  positions[base+0] = p0.x; positions[base+1] = p0.y; positions[base+2] = p0.z;
+  positions[base+3] = p1.x; positions[base+4] = p1.y; positions[base+5] = p1.z;
+  positions[base+6] = p2.x; positions[base+7] = p2.y; positions[base+8] = p2.z;
+  positions[base+9] = p3.x; positions[base+10]= p3.y; positions[base+11]= p3.z;
+  const abase = quadCount * 4;
+  alphas[abase+0] = alpha;
+  alphas[abase+1] = alpha;
+  alphas[abase+2] = alpha;
+  alphas[abase+3] = alpha;
+  quadCount++;
+  connectionGeom.setDrawRange(0, quadCount * 6);
+}
+
+const agentMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() },
+  },
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vAlpha;
+    void main(){
+      float pulse = 0.6 + 0.4 * sin(uTime * 2.0 + seed * 6.28);
+      vAlpha = pulse * 0.3;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * (32.0/dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha;
+      gl_FragColor = vec4(vec3(0.12, 0.12, 0.18) * a, a);
+    }
+  `
+});
+
+const agentGeom = new THREE.BufferGeometry();
+const agentPos = new Float32Array(N*3);
+const agentSeeds = new Float32Array(N);
+for (let i=0; i<N; i++) agentSeeds[i] = Math.random();
+agentGeom.setAttribute('position', new THREE.BufferAttribute(agentPos, 3));
+agentGeom.setAttribute('seed', new THREE.BufferAttribute(agentSeeds, 1));
+const agentPoints = new THREE.Points(agentGeom, agentMat);
+scene.add(agentPoints);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastUpdate = 0;
+const tempV0 = new THREE.Vector3();
+const tempV1 = new THREE.Vector3();
+const tempV2 = new THREE.Vector3();
+const tempV3 = new THREE.Vector3();
+
+function loop(){
+  const now = performance.now();
+  const elapsed = now / 1000;
+  connectionMat.uniforms.uTime.value = elapsed;
+  agentMat.uniforms.uTime.value = elapsed;
+
+  for (let i=0; i<N; i++){
+    elements[i].updatePos();
+    agentPos[i*3+0] = elements[i].pos.x;
+    agentPos[i*3+1] = elements[i].pos.y;
+    agentPos[i*3+2] = elements[i].pos.z;
+  }
+  agentGeom.attributes.position.needsUpdate = true;
+
+  if (now - lastUpdate > 100){
+    lastUpdate = now;
+    for (let i=0; i<N; i++){
+      for (let j=i+1; j<N; j++){
+        const dist = elements[i].pos.distanceTo(elements[j].pos);
+        const key = `${i}_${j}`;
+        if (dist < EPSILON){
+          if (!elements[i].contacts.has(key)){
+            elements[i].contacts.set(key, now);
+            const perp0 = new THREE.Vector3().crossVectors(elements[i].pos, elements[i].axis).normalize();
+            const perp1 = new THREE.Vector3().crossVectors(elements[j].pos, elements[j].axis).normalize();
+            tempV0.copy(elements[i].pos).addScaledVector(perp0, elements[i].radius * 0.4);
+            tempV1.copy(elements[i].pos).addScaledVector(perp0, -elements[i].radius * 0.4);
+            tempV2.copy(elements[j].pos).addScaledVector(perp1, -elements[j].radius * 0.4);
+            tempV3.copy(elements[j].pos).addScaledVector(perp1, elements[j].radius * 0.4);
+            const contactTime = (now - elements[i].contacts.get(key)) / 1000;
+            const alpha = Math.min(1.0, contactTime * 0.5 + 0.3);
+            addQuad(tempV0, tempV1, tempV2, tempV3, alpha);
+          }
+        } else {
+          elements[i].contacts.delete(key);
+        }
+      }
+    }
+    if (quadCount > 0){
+      connectionGeom.attributes.position.needsUpdate = true;
+      connectionGeom.attributes.alpha.needsUpdate = true;
+    }
+  }
+
+  camera.position.x = 18 * Math.sin(elapsed * 0.04);
+  camera.position.z = 18 * Math.cos(elapsed * 0.04);
+  camera.position.y = 3 * Math.sin(elapsed * 0.07);
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
