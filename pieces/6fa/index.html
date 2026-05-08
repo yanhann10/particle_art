@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: pulse, intensity: gentle -->
+<title>6fa · Mohr hypercube breathing on parchment</title>
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+body {
+  background:
+    radial-gradient(ellipse at 32% 38%, #faf2dd 0%, #ecdcb6 38%, #c5a571 78%, #6e4926 100%),
+    #6e4926;
+  background-blend-mode: normal;
+  color: #2a1a08; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.18  0 0 0 0 0.10  0 0 0 0 0.04  0 0 0 0.32 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/></svg>");
+  mix-blend-mode: multiply; opacity: 0.50;
+}
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+  background: radial-gradient(ellipse 90% 80% at 18% 20%, rgba(255,238,195,0.32), rgba(255,238,195,0) 55%);
+  mix-blend-mode: screen;
+}
+canvas { display:block; position: relative; z-index: 0; }
+.id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">6fa</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ── 6D hypercube: 2^6=64 vertices, 192 edges
+const DIM = 6;
+const NV = 1 << DIM; // 64
+const vertices6D = [];
+for (let i = 0; i < NV; i++) {
+  const v = [];
+  for (let d = 0; d < DIM; d++) v.push(((i >> d) & 1) - 0.5); // centered at 0
+  vertices6D.push(v);
+}
+const edges = [];
+for (let i = 0; i < NV; i++) {
+  for (let d = 0; d < DIM; d++) {
+    const j = i ^ (1 << d);
+    if (j > i) edges.push([i, j, d]); // d = which dimension differs
+  }
+}
+
+// ── Projection matrix R^6 → R^3, orthonormalized via Gram-Schmidt
+// Seeded from a fixed random for reproducibility
+let rngState = 91827364;
+function rng() {
+  rngState ^= rngState << 13; rngState ^= rngState >> 17; rngState ^= rngState << 5;
+  return (rngState >>> 0) / 4294967296;
+}
+const projMatrix = []; // 3 rows of 6
+for (let row = 0; row < 3; row++) {
+  const v = [];
+  for (let c = 0; c < DIM; c++) v.push(rng() - 0.5);
+  // Gram-Schmidt against previous rows
+  for (let prev = 0; prev < row; prev++) {
+    let dot = 0;
+    for (let c = 0; c < DIM; c++) dot += v[c] * projMatrix[prev][c];
+    for (let c = 0; c < DIM; c++) v[c] -= dot * projMatrix[prev][c];
+  }
+  let len = 0;
+  for (let c = 0; c < DIM; c++) len += v[c] * v[c];
+  len = Math.sqrt(len);
+  for (let c = 0; c < DIM; c++) v[c] /= len;
+  projMatrix.push(v);
+}
+
+// ── Givens rotation planes (pick 3 pairs for compound rotation)
+const planes = [[0,3],[1,4],[2,5]];
+const rotSpeeds = [0.13, 0.09, 0.07]; // base speeds
+
+// ── Edge selection rule (Mohr-style): drop edges whose projected midpoint
+// falls in certain quadrants — algorithmic culling
+function edgeVisible(i, j, projected) {
+  const mx = (projected[i*3] + projected[j*3]) * 0.5;
+  const my = (projected[i*3+1] + projected[j*3+1]) * 0.5;
+  // keep ~70% of edges — drop if midpoint in specific angular sectors
+  const ang = Math.atan2(my, mx);
+  const sector = Math.floor(((ang + Math.PI) / (Math.PI * 2)) * 7);
+  return sector !== 2 && sector !== 5; // drop 2 of 7 sectors
+}
+
+// ── Palette: Mohr primaries adapted to parchment atmosphere
+// Deep ink versions that read against warm paper
+const palette = [
+  new THREE.Color(0.08, 0.06, 0.28), // deep indigo
+  new THREE.Color(0.52, 0.08, 0.04), // burnt crimson
+  new THREE.Color(0.04, 0.18, 0.22), // dark teal
+  new THREE.Color(0.38, 0.26, 0.04), // raw umber gold
+  new THREE.Color(0.12, 0.10, 0.08), // warm black
+  new THREE.Color(0.28, 0.04, 0.18), // dark magenta
+];
+
+// ── Build line geometry (will update positions each frame)
+const maxEdges = edges.length;
+const linePositions = new Float32Array(maxEdges * 6); // 2 vertices * 3 coords per edge
+const lineColors = new Float32Array(maxEdges * 6);
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+lineGeom.setAttribute('color', new THREE.BufferAttribute(lineColors, 3));
+lineGeom.setDrawRange(0, 0);
+
+const lineMat = new THREE.LineBasicMaterial({
+  vertexColors: true, transparent: true, opacity: 0.82,
+  blending: THREE.NormalBlending
+});
+const lineObj = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lineObj);
+
+// ── Vertex dots
+const dotGeom = new THREE.BufferGeometry();
+const dotPositions = new Float32Array(NV * 3);
+dotGeom.setAttribute('position', new THREE.BufferAttribute(dotPositions, 3));
+const dotMat = new THREE.PointsMaterial({
+  size: 3.0, sizeAttenuation: true, transparent: true, opacity: 0.6,
+  color: new THREE.Color(0.10, 0.08, 0.06)
+});
+const dotObj = new THREE.Points(dotGeom, dotMat);
+scene.add(dotObj);
+
+// ── Dust motes (inherited atmosphere)
+const N_DUST = 180;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos = new Float32Array(N_DUST * 3);
+const dustSeed = new Float32Array(N_DUST);
+for (let i = 0; i < N_DUST; i++) {
+  dustPos[i*3] = (Math.random()-0.5)*14;
+  dustPos[i*3+1] = (Math.random()-0.5)*8;
+  dustPos[i*3+2] = (Math.random()-0.5)*6;
+  dustSeed[i] = Math.random();
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('seed', new THREE.BufferAttribute(dustSeed, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: {value:0}, uPixel: {value: renderer.getPixelRatio()} },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime; uniform float uPixel;
+    attribute float seed; varying float vGlow;
+    void main(){
+      vec3 p = position;
+      float t = uTime*0.10 + seed*6.28;
+      p.x += sin(t*1.3+seed*30.0)*0.4;
+      p.y -= mod(uTime*0.08+seed*7.0,4.0)-2.0;
+      p.z += cos(t*1.1+seed*22.0)*0.3;
+      float sx = -p.x/7.0, sy = p.y/4.0;
+      vGlow = clamp(0.30+0.55*smoothstep(-0.2,0.6,sx+sy),0.0,1.0);
+      vec4 mv = modelViewMatrix*vec4(p,1.0);
+      gl_PointSize = (1.0+1.4*vGlow)*uPixel*(4.0/-mv.z);
+      gl_Position = projectionMatrix*mv;
+    }`,
+  fragmentShader:`
+    varying float vGlow;
+    void main(){
+      vec2 d = gl_PointCoord-0.5; float r = dot(d,d);
+      if(r>0.25) discard;
+      float a = exp(-r*24.0);
+      vec3 col = vec3(1.0,0.94,0.78)*vGlow;
+      gl_FragColor = vec4(col, a*0.65*vGlow);
+    }`
+});
+const dust = new THREE.Points(dustGeom, dustMat);
+scene.add(dust);
+
+// ── Interaction
+const pointer = new THREE.Vector2(0, 0);
+addEventListener('pointermove', e => {
+  pointer.set((e.clientX/innerWidth)*2-1, (e.clientY/innerHeight)*2-1);
+});
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Animation
+const projected = new Float32Array(NV * 3);
+const rotated = vertices6D.map(v => v.slice());
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  dustMat.uniforms.uTime.value = t;
+
+  // ── Biomorphic motion: rotation speeds modulated by breathing rhythm
+  // Peristaltic pulse: compound sine waves at different rates
+  const breath1 = 0.6 + 0.4 * Math.sin(t * 0.31); // slow systolic
+  const breath2 = 0.7 + 0.3 * Math.sin(t * 0.53 + 1.2); // diastolic offset
+  const breath3 = 0.8 + 0.2 * Math.sin(t * 0.19 + 2.8); // tidal
+
+  // Apply Givens rotations to vertices
+  for (let v = 0; v < NV; v++) {
+    for (let d = 0; d < DIM; d++) rotated[v][d] = vertices6D[v][d];
+  }
+  const breathes = [breath1, breath2, breath3];
+  for (let p = 0; p < planes.length; p++) {
+    const [a, b] = planes[p];
+    const angle = t * rotSpeeds[p] * breathes[p];
+    const c = Math.cos(angle), s = Math.sin(angle);
+    for (let v = 0; v < NV; v++) {
+      const va = rotated[v][a], vb = rotated[v][b];
+      rotated[v][a] = va * c - vb * s;
+      rotated[v][b] = va * s + vb * c;
+    }
+  }
+
+  // ── Tidal expansion/contraction — the whole structure breathes in scale
+  const scale = 3.8 + 0.3 * Math.sin(t * 0.17) + 0.15 * Math.sin(t * 0.41 + 0.7);
+
+  // Project 6D → 3D
+  for (let v = 0; v < NV; v++) {
+    for (let r = 0; r < 3; r++) {
+      let sum = 0;
+      for (let c = 0; c < DIM; c++) sum += projMatrix[r][c] * rotated[v][c];
+      projected[v*3+r] = sum * scale;
+    }
+  }
+
+  // Update dot positions
+  for (let v = 0; v < NV; v++) {
+    dotPositions[v*3] = projected[v*3];
+    dotPositions[v*3+1] = projected[v*3+1];
+    dotPositions[v*3+2] = projected[v*3+2];
+  }
+  dotGeom.attributes.position.needsUpdate = true;
+
+  // Update line positions with edge-selection rule
+  let idx = 0;
+  for (let e = 0; e < edges.length; e++) {
+    const [i, j, dim] = edges[e];
+    if (!edgeVisible(i, j, projected)) continue;
+    const col = palette[dim % palette.length];
+    linePositions[idx*6]   = projected[i*3];
+    linePositions[idx*6+1] = projected[i*3+1];
+    linePositions[idx*6+2] = projected[i*3+2];
+    linePositions[idx*6+3] = projected[j*3];
+    linePositions[idx*6+4] = projected[j*3+1];
+    linePositions[idx*6+5] = projected[j*3+2];
+    lineColors[idx*6]   = col.r; lineColors[idx*6+1] = col.g; lineColors[idx*6+2] = col.b;
+    lineColors[idx*6+3] = col.r; lineColors[idx*6+4] = col.g; lineColors[idx*6+5] = col.b;
+    idx++;
+  }
+  lineGeom.setDrawRange(0, idx * 2);
+  lineGeom.attributes.position.needsUpdate = true;
+  lineGeom.attributes.color.needsUpdate = true;
+
+  // Camera: gentle pointer-responsive drift + tracks centroid
+  let cx=0, cy=0, cz=0;
+  for (let v = 0; v < NV; v++) { cx+=projected[v*3]; cy+=projected[v*3+1]; cz+=projected[v*3+2]; }
+  cx/=NV; cy/=NV; cz/=NV;
+  camera.position.x = cx + pointer.x * 1.2 + Math.sin(t*0.05)*0.3;
+  camera.position.y = cy + pointer.y * 0.8 + Math.sin(t*0.04+1.0)*0.2;
+  camera.position.z = 14 + Math.sin(t*0.07)*0.5;
+  camera.lookAt(cx, cy, cz);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
