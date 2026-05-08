@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9gb · aurora substrate</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0b0f; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">9gb</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0b0f);
+scene.fog = new THREE.Fog(0x0a0b0f, 10, 50);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 24);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── substrate algorithm
+const W = 28, H = 28;
+const grid = [];
+for (let y = 0; y < H; y++){
+  grid[y] = [];
+  for (let x = 0; x < W; x++) grid[y][x] = null;
+}
+
+const lines = [];
+const segments = [];
+
+function gridPt(x, y){
+  const gx = Math.floor((x + W/2) * 2);
+  const gy = Math.floor((y + H/2) * 2);
+  if (gx < 0 || gx >= W || gy < 0 || gy >= H) return null;
+  return grid[gy][gx];
+}
+function markGrid(x, y, lineId){
+  const gx = Math.floor((x + W/2) * 2);
+  const gy = Math.floor((y + H/2) * 2);
+  if (gx >= 0 && gx < W && gy >= 0 && gy < H) grid[gy][gx] = lineId;
+}
+
+function spawnLine(x, y, angle, generation){
+  const line = { x, y, angle, generation, id: lines.length, active: true };
+  lines.push(line);
+  return line;
+}
+
+function growLines(){
+  const stepSize = 0.15;
+  const maxSteps = 150;
+  for (let s = 0; s < maxSteps; s++){
+    let anyActive = false;
+    for (const line of lines){
+      if (!line.active) continue;
+      anyActive = true;
+      const x0 = line.x, y0 = line.y;
+      const dx = Math.cos(line.angle) * stepSize;
+      const dy = Math.sin(line.angle) * stepSize;
+      const x1 = x0 + dx, y1 = y0 + dy;
+      if (Math.abs(x1) > W/2 - 0.5 || Math.abs(y1) > H/2 - 0.5){
+        line.active = false;
+        continue;
+      }
+      const hit = gridPt(x1, y1);
+      if (hit !== null && hit !== line.id){
+        segments.push({ x0, y0, x1, y1, gen: line.generation });
+        line.active = false;
+        const perp1 = line.angle + Math.PI / 2;
+        const perp2 = line.angle - Math.PI / 2;
+        if (Math.random() < 0.5){
+          spawnLine(x1, y1, perp1, line.generation + 1);
+        } else {
+          spawnLine(x1, y1, perp2, line.generation + 1);
+        }
+        continue;
+      }
+      segments.push({ x0, y0, x1, y1, gen: line.generation });
+      markGrid(x1, y1, line.id);
+      line.x = x1;
+      line.y = y1;
+    }
+    if (!anyActive) break;
+  }
+}
+
+// seed from top edge (aurora descends from sky)
+const edgeSeeds = 12;
+for (let i = 0; i < edgeSeeds; i++){
+  const x = (Math.random() - 0.5) * (W - 4);
+  const y = H/2 - 1;
+  const angle = -Math.PI / 2 + (Math.random() - 0.5) * 0.4;
+  spawnLine(x, y, angle, 0);
+}
+
+growLines();
+
+// ────────────── particle placement with vertical weighting
+const N = 70000;
+const positions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const gens = new Float32Array(N);
+const heights = new Float32Array(N);
+
+const segLengths = segments.map(s => Math.hypot(s.x1 - s.x0, s.y1 - s.y0));
+const totalLen = segLengths.reduce((a,b) => a+b, 0);
+let idx = 0;
+for (let i = 0; i < segments.length; i++){
+  const s = segments[i];
+  const count = i === segments.length - 1
+    ? (N - idx)
+    : Math.max(1, Math.floor(N * segLengths[i] / totalLen));
+  for (let k = 0; k < count && idx < N; k++){
+    const t = Math.random();
+    const x = s.x0 + (s.x1 - s.x0) * t;
+    const y = s.y0 + (s.y1 - s.y0) * t;
+    const jitter = 0.06;
+    positions[idx*3]   = x + (Math.random() - 0.5) * jitter;
+    positions[idx*3+1] = y + (Math.random() - 0.5) * jitter;
+    positions[idx*3+2] = (Math.random() - 0.5) * 0.3;
+    seeds[idx] = Math.random();
+    gens[idx] = s.gen / 10;
+    heights[idx] = (y + H/2) / H;
+    idx++;
+  }
+}
+while (idx < N){
+  positions[idx*3] = 0; positions[idx*3+1] = 0; positions[idx*3+2] = 0;
+  seeds[idx] = Math.random();
+  gens[idx] = 0;
+  heights[idx] = 0.5;
+  idx++;
+}
+
+// ────────────── aurora shader
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  fogColor: { value: scene.fog.color },
+  fogNear: { value: scene.fog.near },
+  fogFar: { value: scene.fog.far }
+};
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('gen', new THREE.BufferAttribute(gens, 1));
+geom.setAttribute('height', new THREE.BufferAttribute(heights, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float gen;
+    attribute float height;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogDepth;
+    void main(){
+      vec3 p = position;
+      
+      // vertical wave motion (aurora curtains)
+      float wave1 = sin(p.x * 1.8 + uTime * 0.5 + seed * 6.28) * 0.4;
+      float wave2 = sin(p.x * 3.2 - uTime * 0.7 + seed * 3.14) * 0.2;
+      p.z += (wave1 + wave2) * height * 0.8;
+      
+      // shimmer pulse
+      float phase = uTime * 1.2 + seed * 6.28 + p.y * 0.3;
+      float shimmer = 0.6 + 0.4 * sin(phase);
+      
+      // aurora palette: cyan-green to violet, top to bottom
+      vec3 topColor = vec3(0.15, 0.85, 0.75);     // cyan
+      vec3 midColor = vec3(0.45, 0.95, 0.55);     // green
+      vec3 lowColor = vec3(0.65, 0.35, 0.85);     // violet
+      
+      float h = clamp(height, 0.0, 1.0);
+      vec3 upper = mix(lowColor, midColor, smoothstep(0.2, 0.6, h));
+      vec3 col = mix(upper, topColor, smoothstep(0.6, 0.95, h));
+      
+      // generation fade (later generations dimmer)
+      float genFade = 1.0 - gen * 0.4;
+      vCol = col * shimmer * genFade;
+      
+      vAlpha = (0.25 + 0.15 * shimmer) * genFade;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vFogDepth = -mv.z;
+      float dist = vFogDepth;
+      gl_PointSize = (0.7 + 0.3 * shimmer) * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 fogColor;
+    uniform float fogNear;
+    uniform float fogFar;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float core = exp(-r * 18.0);
+      float a = core * vAlpha;
+      
+      float fogFactor = smoothstep(fogNear, fogFar, vFogDepth);
+      vec3 col = mix(vCol, fogColor, fogFactor);
+      a *= (1.0 - fogFactor * 0.6);
+      
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  
+  const angle = t * 0.06;
+  camera.position.x = Math.sin(angle) * 26;
+  camera.position.z = Math.cos(angle) * 26;
+  camera.position.y = 2 + Math.sin(t * 0.15) * 1.5;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
