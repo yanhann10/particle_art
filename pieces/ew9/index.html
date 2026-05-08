@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ew9 · would like to be sky</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0c12; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">ew9</div>
+<div class="hint">infrastructure dissolves into celestial commons</div>
+<div class="src">after Amelia Winger-Bearskin · Lumen Prize 2025</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Two-layer particle landscape:
+//   1. 'built' layer — orthogonal grids (roads, fences, power lines) rendered in sodium-orange, fading out
+//   2. 'sky' layer — slow-drift star field in cobalt + white, fading in
+// Over 120 seconds the built layer erodes completely revealing shared sky.
+
+const W = 256, H = 256;
+const N_BUILT = W * H;
+const N_SKY = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0c12, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 35, 80);
+camera.lookAt(0, 0, 0);
+
+// ============= BUILT LAYER (infrastructure grid) =============
+const builtGeom = new THREE.BufferGeometry();
+const builtPos = new Float32Array(N_BUILT * 3);
+const builtType = new Float32Array(N_BUILT); // 0=road, 1=fence, 2=powerline
+let idx = 0;
+
+// roads: E-W and N-S grid
+for (let i = 0; i < 18; i++) {
+  const y = (i % 2 === 0) ? 0.2 : 0.1;
+  for (let j = 0; j < 80; j++) {
+    if (idx >= N_BUILT) break;
+    const x = (Math.random() - 0.5) * 140;
+    const z = -70 + i * 8 + (Math.random() - 0.5) * 1.2;
+    builtPos[idx*3] = x;
+    builtPos[idx*3+1] = y;
+    builtPos[idx*3+2] = z;
+    builtType[idx] = 0.0; // road
+    idx++;
+  }
+}
+for (let i = 0; i < 16; i++) {
+  const y = (i % 2 === 0) ? 0.2 : 0.1;
+  for (let j = 0; j < 80; j++) {
+    if (idx >= N_BUILT) break;
+    const x = -70 + i * 9 + (Math.random() - 0.5) * 1.5;
+    const z = (Math.random() - 0.5) * 140;
+    builtPos[idx*3] = x;
+    builtPos[idx*3+1] = y;
+    builtPos[idx*3+2] = z;
+    builtType[idx] = 0.0;
+    idx++;
+  }
+}
+
+// fences: scattered verticals
+for (let i = 0; i < 12; i++) {
+  for (let j = 0; j < 60; j++) {
+    if (idx >= N_BUILT) break;
+    const x = (Math.random() - 0.5) * 100 + (i - 6) * 12;
+    const z = (Math.random() - 0.5) * 120;
+    const y = Math.random() * 3.5 + 0.5;
+    builtPos[idx*3] = x;
+    builtPos[idx*3+1] = y;
+    builtPos[idx*3+2] = z;
+    builtType[idx] = 1.0; // fence
+    idx++;
+  }
+}
+
+// power lines: high horizontal spans
+for (let i = 0; i < 6; i++) {
+  for (let j = 0; j < 100; j++) {
+    if (idx >= N_BUILT) break;
+    const x = (Math.random() - 0.5) * 120;
+    const z = -60 + i * 24 + (Math.random() - 0.5) * 2;
+    const y = 12 + Math.random() * 4;
+    builtPos[idx*3] = x;
+    builtPos[idx*3+1] = y;
+    builtPos[idx*3+2] = z;
+    builtType[idx] = 2.0; // powerline
+    idx++;
+  }
+}
+
+// fill remainder with noise
+while (idx < N_BUILT) {
+  builtPos[idx*3] = (Math.random() - 0.5) * 150;
+  builtPos[idx*3+1] = Math.random() * 5;
+  builtPos[idx*3+2] = (Math.random() - 0.5) * 150;
+  builtType[idx] = Math.floor(Math.random() * 3);
+  idx++;
+}
+
+builtGeom.setAttribute('position', new THREE.BufferAttribute(builtPos, 3));
+builtGeom.setAttribute('pType', new THREE.BufferAttribute(builtType, 1));
+
+const builtMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() },
+    uCycle: { value: 0 } // 0→1 over 120s
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uCycle;
+    attribute float pType;
+    varying float vAlpha;
+    varying float vType;
+    void main(){
+      vec3 p = position;
+      vType = pType;
+      
+      // erosion: built layer fades out as cycle advances
+      float erosion = 1.0 - uCycle;
+      // add spatial variance — things closer to camera erode first
+      float distFactor = (p.z + 70.0) / 140.0; // 0 at near, 1 at far
+      erosion *= smoothstep(0.0, 1.0, distFactor + uCycle * 0.5);
+      
+      vAlpha = erosion * erosion;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float base = (pType < 0.5) ? 2.0 : (pType < 1.5 ? 3.5 : 2.5);
+      gl_PointSize = base * uPixel * (20.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vType;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha;
+      // sodium orange (light pollution)
+      vec3 col = vec3(1.0, 0.52, 0.15);
+      // fences slightly cooler
+      if (vType > 0.5 && vType < 1.5) col = vec3(0.95, 0.62, 0.25);
+      // powerlines brighter
+      if (vType > 1.5) col = vec3(1.0, 0.72, 0.35);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const builtPoints = new THREE.Points(builtGeom, builtMat);
+scene.add(builtPoints);
+
+// ============= SKY LAYER (star field) =============
+const skyGeom = new THREE.BufferGeometry();
+const skyPos = new Float32Array(N_SKY * 3);
+const skyVel = new Float32Array(N_SKY * 3);
+const skyBright = new Float32Array(N_SKY);
+
+for (let i = 0; i < N_SKY; i++) {
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const r = 50 + Math.random() * 80;
+  skyPos[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+  skyPos[i*3+1] = Math.abs(r * Math.cos(phi)) + 20; // above horizon
+  skyPos[i*3+2] = r * Math.sin(phi) * Math.sin(theta);
+  
+  // very slow drift
+  skyVel[i*3]   = (Math.random() - 0.5) * 0.03;
+  skyVel[i*3+1] = (Math.random() - 0.5) * 0.01;
+  skyVel[i*3+2] = (Math.random() - 0.5) * 0.03;
+  
+  skyBright[i] = Math.pow(Math.random(), 2.5); // mostly dim, few bright
+}
+
+skyGeom.setAttribute('position', new THREE.BufferAttribute(skyPos, 3));
+skyGeom.setAttribute('velocity', new THREE.BufferAttribute(skyVel, 3));
+skyGeom.setAttribute('brightness', new THREE.BufferAttribute(skyBright, 1));
+
+const skyMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() },
+    uCycle: { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uCycle;
+    attribute vec3 velocity;
+    attribute float brightness;
+    varying float vAlpha;
+    varying float vBright;
+    void main(){
+      vec3 p = position + velocity * uTime;
+      vBright = brightness;
+      
+      // sky fades in as cycle advances
+      vAlpha = smoothstep(0.0, 0.6, uCycle) * (0.3 + brightness * 0.7);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sz = (0.8 + brightness * 2.2) * uPixel * (25.0 / dist);
+      gl_PointSize = sz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vBright;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 10.0) * vAlpha;
+      
+      // cobalt → white gradient based on brightness
+      vec3 cobalt = vec3(0.20, 0.35, 0.65);
+      vec3 white = vec3(0.95, 0.97, 1.0);
+      vec3 col = mix(cobalt, white, vBright);
+      
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const skyPoints = new THREE.Points(skyGeom, skyMat);
+scene.add(skyPoints);
+
+// ============= GROUND PLANE (minimal dark terrain) =============
+const groundGeom = new THREE.PlaneGeometry(300, 300, 1, 1);
+groundGeom.rotateX(-Math.PI / 2);
+const groundMat = new THREE.MeshBasicMaterial({ 
+  color: 0x0d0f14, 
+  transparent: true, 
+  opacity: 0.7,
+  side: THREE.DoubleSide
+});
+const ground = new THREE.Mesh(groundGeom, groundMat);
+ground.position.y = -0.5;
+scene.add(ground);
+
+// ============= ANIMATION =============
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const CYCLE_DURATION = 120000; // 120 seconds
+const t0 = performance.now();
+
+function loop(now){
+  const elapsed = now - t0;
+  const cycle = Math.min((elapsed / CYCLE_DURATION), 1.0);
+  
+  builtMat.uniforms.uTime.value = elapsed * 0.001;
+  builtMat.uniforms.uCycle.value = cycle;
+  
+  skyMat.uniforms.uTime.value = elapsed * 0.001;
+  skyMat.uniforms.uCycle.value = cycle;
+  
+  // slow camera drift — rises and pulls back as infrastructure fades
+  camera.position.y = 35 + cycle * 15;
+  camera.position.z = 80 + cycle * 20;
+  camera.lookAt(0, 0, -20);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
