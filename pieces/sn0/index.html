@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sn0 · hypercube projection</title>
+<!-- MOTION: rotation, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">sn0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── Manfred Mohr: 8-dimensional hypercube projection (P-197 lineage) ── */
+const N = 8; // 8D hypercube
+const VERT_COUNT = Math.pow(2, N);
+
+/* Generate all 2^N vertices of the N-cube in {-1, +1}^N */
+function generateHypercubeVertices(n) {
+  const count = Math.pow(2, n);
+  const verts = [];
+  for (let i = 0; i < count; i++) {
+    const v = [];
+    for (let d = 0; d < n; d++) {
+      v.push((i & (1 << d)) ? 1 : -1);
+    }
+    verts.push(v);
+  }
+  return verts;
+}
+
+/* Generate all edges of the hypercube — vertices differing in exactly one coordinate */
+function generateHypercubeEdges(verts, n) {
+  const edges = [];
+  for (let i = 0; i < verts.length; i++) {
+    for (let d = 0; d < n; d++) {
+      const neighbor = i ^ (1 << d);
+      if (neighbor > i) { // avoid duplicates
+        edges.push([i, neighbor]);
+      }
+    }
+  }
+  return edges;
+}
+
+/* Random orthonormal projection R^N → R^3 via QR decomposition */
+function randomProjectionMatrix(n, rng) {
+  // Generate 3 random N-vectors, then Gram-Schmidt orthonormalize
+  const basis = [];
+  for (let i = 0; i < 3; i++) {
+    const v = [];
+    for (let j = 0; j < n; j++) v.push(rng() * 2 - 1);
+    basis.push(v);
+  }
+  
+  // Gram-Schmidt
+  for (let i = 0; i < basis.length; i++) {
+    for (let j = 0; j < i; j++) {
+      const dot = basis[i].reduce((s, _, k) => s + basis[i][k] * basis[j][k], 0);
+      for (let k = 0; k < n; k++) basis[i][k] -= dot * basis[j][k];
+    }
+    const norm = Math.sqrt(basis[i].reduce((s, x) => s + x * x, 0));
+    if (norm > 1e-6) {
+      for (let k = 0; k < n; k++) basis[i][k] /= norm;
+    }
+  }
+  return basis;
+}
+
+/* Project N-vector to 3D */
+function project(v, projMatrix) {
+  return projMatrix.map(row => row.reduce((s, x, i) => s + x * v[i], 0));
+}
+
+/* Givens rotation in plane (i, j) by angle theta */
+function givensRotate(v, i, j, theta) {
+  const c = Math.cos(theta), s = Math.sin(theta);
+  const vi = v[i], vj = v[j];
+  const result = [...v];
+  result[i] = c * vi - s * vj;
+  result[j] = s * vi + c * vj;
+  return result;
+}
+
+/* ── Scene setup ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── RNG seeded from timestamp ── */
+let seed = Date.now() >>> 0;
+const rng = () => {
+  seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
+
+/* ── Generate hypercube topology ── */
+const hyperVerts = generateHypercubeVertices(N);
+const hyperEdges = generateHypercubeEdges(hyperVerts, N);
+
+/* ── Random projection matrix & rotation plane ── */
+const projMatrix = randomProjectionMatrix(N, rng);
+const rotPlane = [
+  Math.floor(rng() * N),
+  Math.floor(rng() * N)
+];
+if (rotPlane[0] === rotPlane[1]) rotPlane[1] = (rotPlane[1] + 1) % N;
+
+/* ── Edge selection rule (Mohr's signature constraint) ── */
+/* Keep only edges where sum of endpoint indices mod 5 is 0, 1, or 3 — produces partial constellation */
+const selectedEdges = hyperEdges.filter(([a, b]) => {
+  const s = (a + b) % 5;
+  return s === 0 || s === 1 || s === 3;
+});
+
+/* ── Mohr palette: primaries + white, discrete assignment per edge ── */
+const PALETTE = [
+  new THREE.Color(0xff0000), // red
+  new THREE.Color(0x0040ff), // blue
+  new THREE.Color(0xffdd00), // yellow
+  new THREE.Color(0xffffff), // white
+];
+
+/* ── Build edge lines as individual Line objects for per-edge color ── */
+const lineGroup = new THREE.Group();
+const lineData = selectedEdges.map(([a, b]) => {
+  const col = PALETTE[Math.floor(rng() * PALETTE.length)].clone();
+  const mat = new THREE.LineBasicMaterial({ color: col, linewidth: 1 });
+  const geom = new THREE.BufferGeometry();
+  const positions = new Float32Array(6);
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const line = new THREE.Line(geom, mat);
+  lineGroup.add(line);
+  return { line, a, b };
+});
+scene.add(lineGroup);
+
+/* ── Vertex spheres at projected positions (optional detail) ── */
+const sphereGeom = new THREE.SphereGeometry(0.08, 8, 8);
+const sphereMat = new THREE.MeshBasicMaterial({ color: 0xcccccc });
+const spheres = hyperVerts.map(() => {
+  const mesh = new THREE.Mesh(sphereGeom, sphereMat);
+  scene.add(mesh);
+  return mesh;
+});
+
+/* ── Animation loop ── */
+const start = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+
+  /* Slow rotation in the chosen 2-plane of R^N */
+  const theta = elapsed * 0.15;
+  const rotatedVerts = hyperVerts.map(v => givensRotate(v, rotPlane[0], rotPlane[1], theta));
+
+  /* Project rotated vertices to 3D */
+  const proj3D = rotatedVerts.map(v => project(v, projMatrix));
+
+  /* Update line positions */
+  lineData.forEach(({ line, a, b }) => {
+    const posAttr = line.geometry.attributes.position;
+    const pA = proj3D[a], pB = proj3D[b];
+    posAttr.array[0] = pA[0] * 4.5;
+    posAttr.array[1] = pA[1] * 4.5;
+    posAttr.array[2] = pA[2] * 4.5;
+    posAttr.array[3] = pB[0] * 4.5;
+    posAttr.array[4] = pB[1] * 4.5;
+    posAttr.array[5] = pB[2] * 4.5;
+    posAttr.needsUpdate = true;
+  });
+
+  /* Update vertex sphere positions */
+  spheres.forEach((mesh, i) => {
+    const p = proj3D[i];
+    mesh.position.set(p[0] * 4.5, p[1] * 4.5, p[2] * 4.5);
+  });
+
+  /* Gentle camera orbit for compositional balance */
+  camera.position.x = 14 * Math.sin(elapsed * 0.08);
+  camera.position.z = 14 * Math.cos(elapsed * 0.08);
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
