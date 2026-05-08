@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v3d · soak-stain fields · Frankenthaler growth</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#e4d8c4; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">v3d</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 24, 9);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xe4d8c4, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+controls.maxPolarAngle = Math.PI * 0.44;
+controls.minDistance = 12;
+controls.maxDistance = 50;
+
+/* ── stain shader ── */
+const stainVert = `
+varying vec3 vWorldPos;
+void main(){
+  vec4 wp = modelMatrix * vec4(position,1.0);
+  vWorldPos = wp.xyz;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}`;
+
+const stainFrag = `
+uniform vec3  uColor;
+uniform float uAlpha;
+uniform vec2  uCenter;
+uniform float uRadius;
+uniform float uTime;
+varying vec3  vWorldPos;
+
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+float n2d(vec2 p){
+  vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),
+             mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+}
+float fbm(vec2 p){
+  float v=0.0, a=0.5;
+  for(int i=0;i<5;i++){ v+=a*n2d(p); p*=2.17; a*=0.48; }
+  return v;
+}
+
+void main(){
+  vec2 pos = vWorldPos.xz;
+  float d = length(pos - uCenter);
+  float normD = d / max(uRadius, 0.01);
+
+  /* irregular radial falloff — pigment pools unevenly */
+  float edgeWarp = fbm(pos * 2.8 + 77.0);
+  float warped   = normD + edgeWarp * 0.28 - 0.14;
+
+  /* density: thicker near center, noise-modulated like watercolor pooling */
+  float poolNoise = fbm(pos * 2.0 + 50.0 + uTime * 0.015);
+  float density   = (1.0 - smoothstep(0.0, 1.05, warped)) * (0.55 + 0.45 * poolNoise);
+
+  /* soft feathered edge */
+  float rim = fbm(pos * 3.6 + 130.0);
+  float edge = 1.0 - smoothstep(0.65, 1.15, normD + rim * 0.22);
+
+  /* granulation — tiny pigment grain like real watercolor on linen */
+  float grain = smoothstep(0.38, 0.62, fbm(pos * 12.0 + 300.0));
+  density *= 0.85 + 0.15 * grain;
+
+  float alpha = density * edge * uAlpha;
+  if(alpha < 0.008) discard;
+
+  /* subtle hue shift within stain */
+  float hueShift = fbm(pos * 1.4 + 200.0);
+  vec3 col = uColor * (0.82 + 0.18 * hueShift);
+
+  gl_FragColor = vec4(col, alpha);
+}`;
+
+/* ── linen canvas plane ── */
+const linenVert = `
+varying vec2 vUv;
+void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`;
+const linenFrag = `
+varying vec2 vUv;
+float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+float n(vec2 p){
+  vec2 i=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+}
+void main(){
+  float weave = n(vUv*90.0)*0.05 + n(vUv*220.0)*0.025;
+  float warp  = smoothstep(0.47,0.50,fract(vUv.x*55.0))*0.012;
+  float weft  = smoothstep(0.47,0.50,fract(vUv.y*55.0))*0.012;
+  vec3 linen  = vec3(0.895,0.845,0.765) - weave - warp - weft;
+  gl_FragColor = vec4(linen, 1.0);
+}`;
+const canvasPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(50, 50),
+  new THREE.ShaderMaterial({ vertexShader:linenVert, fragmentShader:linenFrag, side:THREE.DoubleSide })
+);
+canvasPlane.rotation.x = -Math.PI/2;
+canvasPlane.position.y = -0.02;
+scene.add(canvasPlane);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+const sun = new THREE.DirectionalLight(0xfff8ee, 0.3);
+sun.position.set(4, 12, 4);
+scene.add(sun);
+
+/* ── differential-growth 2D stain pool ── */
+class StainPool {
+  constructor(cx, cz, r0, color, alpha, maxV){
+    this.color = color; this.alpha = alpha; this.maxV = maxV;
+    this.cx = cx; this.cz = cz; this.mesh = null;
+    this.verts = [];
+    const N = 28;
+    for(let i=0;i<N;i++){
+      const th = i/N*Math.PI*2, r = r0+(Math.random()-0.5)*r0*0.15;
+      this.verts.push({ x:cx+Math.cos(th)*r, z:cz+Math.sin(th)*r });
+    }
+    this.mat = new THREE.ShaderMaterial({
+      vertexShader: stainVert, fragmentShader: stainFrag,
+      uniforms:{
+        uColor:{ value:new THREE.Color(color) },
+        uAlpha:{ value:alpha },
+        uCenter:{ value:new THREE.Vector2(cx,cz) },
+        uRadius:{ value:r0 },
+        uTime:{ value:0 }
+      },
+      transparent:true, depthWrite:false, side:THREE.DoubleSide
+    });
+  }
+
+  step(){
+    const A=0.04, RR=0.44, RS=0.10, NS=0.004, PR=0.003, MD=0.36;
+    const n = this.verts.length;
+    if(n >= this.maxV) return;
+    const dx=new Float32Array(n), dz=new Float32Array(n);
+
+    for(let i=0;i<n;i++){
+      const v=this.verts[i];
+      for(let j=i+1;j<n;j++){
+        const u=this.verts[j], ex=v.x-u.x, ez=v.z-u.z, d2=ex*ex+ez*ez;
+        if(d2>RR*RR||d2<1e-6) continue;
+        const d=Math.sqrt(d2), f=RS*(1-d/RR)/d;
+        dx[i]+=ex*f; dz[i]+=ez*f; dx[j]-=ex*f; dz[j]-=ez*f;
+      }
+    }
+    for(let i=0;i<n;i++){
+      const a=this.verts[(i-1+n)%n], b=this.verts[(i+1)%n], v=this.verts[i];
+      dx[i]+=(a.x+b.x-2*v.x)*A; dz[i]+=(a.z+b.z-2*v.z)*A;
+    }
+    let ccx=0,ccz=0;
+    for(const v of this.verts){ ccx+=v.x; ccz+=v.z; } ccx/=n; ccz/=n;
+    this.cx=ccx; this.cz=ccz;
+    for(let i=0;i<n;i++){
+      const ox=this.verts[i].x-ccx, oz=this.verts[i].z-ccz;
+      const d=Math.hypot(ox,oz)+1e-6;
+      dx[i]+=(ox/d)*PR; dz[i]+=(oz/d)*PR;
+    }
+    for(let i=0;i<n;i++){
+      this.verts[i].x+=dx[i]+(Math.random()-0.5)*NS;
+      this.verts[i].z+=dz[i]+(Math.random()-0.5)*NS;
+    }
+    const grown=[];
+    for(let i=0;i<this.verts.length;i++){
+      const a=this.verts[i], b=this.verts[(i+1)%this.verts.length];
+      grown.push(a);
+      const ex=b.x-a.x, ez=b.z-a.z;
+      if(ex*ex+ez*ez>MD*MD && this.verts.length+grown.length<this.maxV)
+        grown.push({ x:(a.x+b.x)*0.5, z:(a.z+b.z)*0.5 });
+    }
+    this.verts = grown;
+
+    let maxR=0;
+    for(const v of this.verts){ const d=Math.hypot(v.x-this.cx,v.z-this.cz); if(d>maxR) maxR=d; }
+    this.mat.uniforms.uRadius.value = maxR;
+    this.mat.uniforms.uCenter.value.set(this.cx, this.cz);
+  }
+
+  buildMesh(yLayer){
+    const n=this.verts.length; if(n<3) return;
+    let cx=0,cz=0;
+    for(const v of this.verts){ cx+=v.x; cz+=v.z; } cx/=n; cz/=n;
+    const pos=new Float32Array((n+1)*3);
+    pos[0]=cx; pos[1]=0; pos[2]=cz;
+    for(let i=0;i<n;i++){ pos[(i+1)*3]=this.verts[i].x; pos[(i+1)*3+1]=0; pos[(i+1)*3+2]=this.verts[i].z; }
+    const idx=[];
+    for(let i=0;i<n;i++) idx.push(0, i+1, ((i+1)%n)+1);
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+    g.setIndex(idx); g.computeVertexNormals();
+    if(this.mesh){ scene.remove(this.mesh); this.mesh.geometry.dispose(); }
+    this.mesh = new THREE.Mesh(g, this.mat);
+    this.mesh.position.y = yLayer;
+    this.mesh.renderOrder = yLayer * 1000;
+    scene.add(this.mesh);
+  }
+}
+
+/* Frankenthaler palette — rose, cerulean, raw umber/ochre */
+const pools = [
+  new StainPool(-1.8, -1.0, 1.1, 0xc25058, 0.58, 900),
+  new StainPool( 1.4,  0.6, 0.9, 0x4878a0, 0.50, 900),
+  new StainPool(-0.2,  2.0, 1.0, 0xc49838, 0.44, 800),
+];
+
+/* warm-up growth */
+for(const p of pools) for(let i=0;i<450;i++) p.step();
+
+/* secondary stains — geological layering */
+let spawned2 = false, spawned3 = false;
+function spawnSecondary(){
+  if(spawned2) return; spawned2 = true;
+  const pairs = [[0,1,0xd08890,0.32],[1,2,0x6a9ab0,0.28],[0,2,0xd0a860,0.30]];
+  for(const [ai,bi,col,al] of pairs){
+    const a=pools[ai], b=pools[bi];
+    pools.push(new StainPool(
+      (a.cx+b.cx)*0.5+(Math.random()-0.5)*0.6,
+      (a.cz+b.cz)*0.5+(Math.random()-0.5)*0.6,
+      0.45, col, al, 550
+    ));
+  }
+}
+function spawnTertiary(){
+  if(spawned3) return; spawned3 = true;
+  /* a deep slow stain at the centroid of everything */
+  let gx=0,gz=0;
+  for(const p of pools){ gx+=p.cx; gz+=p.cz; }
+  gx/=pools.length; gz/=pools.length;
+  pools.push(new StainPool(gx, gz, 0.35, 0x8e4048, 0.22, 450));
+  pools.push(new StainPool(gx+1.5, gz-1.0, 0.3, 0x3a6888, 0.20, 400));
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let frame = 0;
+const t0 = performance.now();
+
+(function loop(){
+  const t = (performance.now()-t0)/1000;
+  frame++;
+
+  for(const p of pools){ p.step(); p.mat.uniforms.uTime.value = t; }
+
+  if(frame > 180) spawnSecondary();
+  if(frame > 500) spawnTertiary();
+
+  if(frame % 3 === 0){
+    pools.forEach((p, i) => p.buildMesh(i * 0.003));
+  }
+
+  /* camera tracks centroid of all pools */
+  let gx=0,gz=0;
+  for(const p of pools){ gx+=p.cx; gz+=p.cz; }
+  gx/=pools.length; gz/=pools.length;
+  controls.target.x += (gx - controls.target.x)*0.02;
+  controls.target.z += (gz - controls.target.z)*0.02;
+
+  /* pull camera back as stains expand */
+  let maxExt = 0;
+  for(const p of pools)
+    for(const v of p.verts){
+      const d = Math.hypot(v.x-gx, v.z-gz);
+      if(d > maxExt) maxExt = d;
+    }
+  const wantDist = Math.max(20, maxExt * 2.6);
+  const curDist  = camera.position.distanceTo(controls.target);
+  if(curDist < wantDist){
+    const dir = camera.position.clone().sub(controls.target).normalize();
+    camera.position.copy(controls.target).addScaledVector(dir, curDist + (wantDist-curDist)*0.02);
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
