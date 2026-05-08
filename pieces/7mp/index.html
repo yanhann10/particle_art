@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: breathing, intensity: gentle -->
+<title>7mp · hybrid web scan · Saraceno sparse filament</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020204; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">7mp</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+/* ══════════════════════════════════════════════════════════════
+   Tomás Saraceno — Hybrid Web Scan
+   Sparse luminous filaments in pitch black. 3D laser-scanned
+   spider-web architecture rendered as point + line cloud.
+   ~300 anchor nodes, 2-4 nearest-neighbor edges + long-range
+   guy-lines. The whole web breathes via soft spring + wind.
+   Camera slowly dollies through the structure.
+   ═══════════════════════════════════════════════════════════ */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.05, 120);
+camera.position.set(0, 0, 18);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020204, 1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.autoRotate = false;
+controls.target.set(0, 0, 0);
+
+// ── bloom
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(
+  new THREE.Vector2(innerWidth, innerHeight), 0.9, 0.6, 0.15
+);
+composer.addPass(bloom);
+
+// ── palette: pearlescent silver with faint warm/cool shifts
+const PEARL_BASE = new THREE.Color(0.72, 0.76, 0.82);   // silver
+const PEARL_WARM = new THREE.Color(0.82, 0.76, 0.68);   // faint gold
+const PEARL_COOL = new THREE.Color(0.62, 0.72, 0.84);   // steel blue
+
+// ══════════════════════════════════════════════════════════════
+// GRAPH GENERATION — sparse web topology
+// ══════════════════════════════════════════════════════════════
+
+const N_NODES = 300;
+const VOLUME_R = 7.5;
+const nodes = [];
+
+// Scatter nodes in an oblate ellipsoid — spider webs are wider than tall
+function rng() { return Math.random(); }
+function gauss() { return Math.sqrt(-2 * Math.log(rng() + 1e-9)) * Math.cos(2 * Math.PI * rng()); }
+
+for (let i = 0; i < N_NODES; i++) {
+  // Clustered distribution: mix of uniform + gaussian clusters
+  let x, y, z;
+  if (rng() < 0.35) {
+    // dense cluster nodes (knot-like)
+    const cx = (rng() - 0.5) * VOLUME_R * 0.8;
+    const cy = (rng() - 0.5) * VOLUME_R * 0.5;
+    const cz = (rng() - 0.5) * VOLUME_R * 0.8;
+    x = cx + gauss() * 0.8;
+    y = cy + gauss() * 0.5;
+    z = cz + gauss() * 0.8;
+  } else {
+    // spread nodes
+    x = (rng() - 0.5) * VOLUME_R * 2;
+    y = (rng() - 0.5) * VOLUME_R * 1.2;
+    z = (rng() - 0.5) * VOLUME_R * 2;
+  }
+  nodes.push({
+    rest: new THREE.Vector3(x, y, z),
+    pos:  new THREE.Vector3(x, y, z),
+    vel:  new THREE.Vector3(0, 0, 0),
+    mass: 0.8 + rng() * 0.4,
+    colorMix: rng()  // for pearl tint variation
+  });
+}
+
+// Build edges: each node connects to 2-4 nearest with distance-dependent probability
+const edges = [];
+const edgeSet = new Set();
+
+function dist(a, b) { return a.pos.distanceTo(b.pos); }
+function edgeKey(i, j) { return i < j ? i + ',' + j : j + ',' + i; }
+
+// Sort neighbors by distance for each node
+for (let i = 0; i < N_NODES; i++) {
+  const dists = [];
+  for (let j = 0; j < N_NODES; j++) {
+    if (j === i) continue;
+    dists.push({ j, d: nodes[i].rest.distanceTo(nodes[j].rest) });
+  }
+  dists.sort((a, b) => a.d - b.d);
+
+  // Connect to 2-4 nearest with probability falling off
+  const nConnect = 2 + Math.floor(rng() * 3); // 2, 3, or 4
+  let connected = 0;
+  for (let k = 0; k < Math.min(12, dists.length) && connected < nConnect; k++) {
+    const { j, d } = dists[k];
+    const key = edgeKey(i, j);
+    if (edgeSet.has(key)) { connected++; continue; }
+    // probability falls off with distance
+    const prob = Math.exp(-d * 0.35);
+    if (rng() < prob) {
+      edgeSet.add(key);
+      edges.push([i, j]);
+      connected++;
+    }
+  }
+}
+
+// Add ~25 long-range guy-lines
+for (let g = 0; g < 25; g++) {
+  const i = Math.floor(rng() * N_NODES);
+  let j = Math.floor(rng() * N_NODES);
+  while (j === i) j = Math.floor(rng() * N_NODES);
+  const key = edgeKey(i, j);
+  if (!edgeSet.has(key)) {
+    edgeSet.add(key);
+    edges.push([i, j]);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// RENDERING — Lines + Points
+// ══════════════════════════════════════════════════════════════
+
+// Thread material — additive, silver-pearlescent
+const threadMat = new THREE.ShaderMaterial({
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  vertexShader: `
+    attribute vec3 color;
+    attribute float alpha;
+    varying vec3 vColor;
+    varying float vAlpha;
+    void main() {
+      vColor = color;
+      vAlpha = alpha;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vAlpha;
+    void main() {
+      gl_FragColor = vec4(vColor, vAlpha);
+    }
+  `
+});
+
+// Build line geometry
+const linePositions = new Float32Array(edges.length * 6);
+const lineColors = new Float32Array(edges.length * 6);
+const lineAlphas = new Float32Array(edges.length * 2);
+
+function updateLineGeometry() {
+  for (let e = 0; e < edges.length; e++) {
+    const [i, j] = edges[e];
+    const a = nodes[i], b = nodes[j];
+    linePositions[e * 6]     = a.pos.x;
+    linePositions[e * 6 + 1] = a.pos.y;
+    linePositions[e * 6 + 2] = a.pos.z;
+    linePositions[e * 6 + 3] = b.pos.x;
+    linePositions[e * 6 + 4] = b.pos.y;
+    linePositions[e * 6 + 5] = b.pos.z;
+
+    const d = a.pos.distanceTo(b.pos);
+    // longer threads = fainter (guy-lines are subtle)
+    const alphaBase = Math.max(0.06, 0.55 * Math.exp(-d * 0.12));
+
+    // pearl tint per edge — lerp between warm/cool based on average colorMix
+    const mix = (a.colorMix + b.colorMix) * 0.5;
+    const c = new THREE.Color().copy(PEARL_BASE);
+    if (mix < 0.4) c.lerp(PEARL_COOL, 0.3);
+    else if (mix > 0.6) c.lerp(PEARL_WARM, 0.25);
+
+    lineColors[e * 6]     = c.r; lineColors[e * 6 + 1] = c.g; lineColors[e * 6 + 2] = c.b;
+    lineColors[e * 6 + 3] = c.r; lineColors[e * 6 + 4] = c.g; lineColors[e * 6 + 5] = c.b;
+    lineAlphas[e * 2]     = alphaBase;
+    lineAlphas[e * 2 + 1] = alphaBase;
+  }
+}
+
+updateLineGeometry();
+const lineGeo = new THREE.BufferGeometry();
+lineGeo.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+lineGeo.setAttribute('color', new THREE.BufferAttribute(lineColors, 3));
+lineGeo.setAttribute('alpha', new THREE.BufferAttribute(lineAlphas, 1));
+const lineMesh = new THREE.LineSegments(lineGeo, threadMat);
+scene.add(lineMesh);
+
+// Node sprites — tiny luminous dots at anchor points
+const nodeMat = new THREE.ShaderMaterial({
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  vertexShader: `
+    attribute float size;
+    attribute vec3 color;
+    varying vec3 vColor;
+    void main() {
+      vColor = color;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * (200.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    void main() {
+      float d = length(gl_PointCoord - 0.5) * 2.0;
+      float glow = exp(-d * d * 4.0);
+      float core = smoothstep(0.6, 0.0, d);
+      float a = glow * 0.35 + core * 0.55;
+      gl_FragColor = vec4(vColor, a);
+    }
+  `
+});
+
+const nodePositions = new Float32Array(N_NODES * 3);
+const nodeColors = new Float32Array(N_NODES * 3);
+const nodeSizes = new Float32Array(N_NODES);
+
+// Count connections per node for sizing
+const degree = new Uint8Array(N_NODES);
+for (const [i, j] of edges) { degree[i]++; degree[j]++; }
+
+for (let i = 0; i < N_NODES; i++) {
+  const n = nodes[i];
+  nodePositions[i * 3]     = n.pos.x;
+  nodePositions[i * 3 + 1] = n.pos.y;
+  nodePositions[i * 3 + 2] = n.pos.z;
+  // knot nodes (high degree) are brighter, larger
+  const deg = degree[i];
+  const brightness = 0.5 + Math.min(deg / 6, 1) * 0.5;
+  const c = new THREE.Color().copy(PEARL_BASE).multiplyScalar(brightness);
+  if (n.colorMix > 0.6) c.lerp(PEARL_WARM, 0.2);
+  nodeColors[i * 3]     = c.r;
+  nodeColors[i * 3 + 1] = c.g;
+  nodeColors[i * 3 + 2] = c.b;
+  nodeSizes[i] = 0.8 + deg * 0.35;
+}
+
+const nodeGeo = new THREE.BufferGeometry();
+nodeGeo.setAttribute('position', new THREE.BufferAttribute(nodePositions, 3));
+nodeGeo.setAttribute('color', new THREE.BufferAttribute(nodeColors, 3));
+nodeGeo.setAttribute('size', new THREE.BufferAttribute(nodeSizes, 1));
+const nodePoints = new THREE.Points(nodeGeo, nodeMat);
+scene.add(nodePoints);
+
+// ══════════════════════════════════════════════════════════════
+// PHYSICS — soft spring + wind (breathing)
+// ══════════════════════════════════════════════════════════════
+
+const SPRING_K = 0.015;     // return to rest
+const DAMPING  = 0.92;
+const WIND_STR = 0.0025;
+const tmpV = new THREE.Vector3();
+
+function simulate(t) {
+  // Wind field — slowly rotating gentle breeze
+  const wx = Math.sin(t * 0.13) * WIND_STR;
+  const wy = Math.cos(t * 0.09) * WIND_STR * 0.4;
+  const wz = Math.cos(t * 0.11 + 1.5) * WIND_STR;
+
+  for (let i = 0; i < N_NODES; i++) {
+    const n = nodes[i];
+    // Spring to rest
+    tmpV.copy(n.rest).sub(n.pos).multiplyScalar(SPRING_K / n.mass);
+    n.vel.add(tmpV);
+    // Wind
+    n.vel.x += wx / n.mass;
+    n.vel.y += wy / n.mass;
+    n.vel.z += wz / n.mass;
+    // Slight per-node turbulence
+    const turb = 0.0004;
+    n.vel.x += Math.sin(t * 0.7 + i * 0.37) * turb;
+    n.vel.y += Math.cos(t * 0.5 + i * 0.23) * turb;
+    n.vel.z += Math.sin(t * 0.6 + i * 0.53) * turb;
+    // Damping
+    n.vel.multiplyScalar(DAMPING);
+    n.pos.add(n.vel);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// CAMERA DOLLY — slow drift through the web
+// ══════════════════════════════════════════════════════════════
+
+const DOLLY_SPEED = 0.018;
+const DOLLY_RADIUS = 12;
+let userInteracting = false;
+let interactionTimeout;
+
+controls.addEventListener('start', () => {
+  userInteracting = true;
+  clearTimeout(interactionTimeout);
+});
+controls.addEventListener('end', () => {
+  interactionTimeout = setTimeout(() => { userInteracting = false; }, 3000);
+});
+
+// ── resize
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+
+// ══════════════════════════════════════════════════════════════
+// ANIMATION LOOP
+// ══════════════════════════════════════════════════════════════
+
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+
+  // Physics
+  simulate(t);
+
+  // Update line positions
+  for (let e = 0; e < edges.length; e++) {
+    const [i, j] = edges[e];
+    const a = nodes[i].pos, b = nodes[j].pos;
+    linePositions[e * 6]     = a.x;
+    linePositions[e * 6 + 1] = a.y;
+    linePositions[e * 6 + 2] = a.z;
+    linePositions[e * 6 + 3] = b.x;
+    linePositions[e * 6 + 4] = b.y;
+    linePositions[e * 6 + 5] = b.z;
+
+    // Breathing alpha modulation
+    const d = a.distanceTo(b);
+    const baseAlpha = Math.max(0.06, 0.55 * Math.exp(-d * 0.12));
+    const breathe = 1.0 + 0.15 * Math.sin(t * 0.4 + e * 0.01);
+    lineAlphas[e * 2]     = baseAlpha * breathe;
+    lineAlphas[e * 2 + 1] = baseAlpha * breathe;
+  }
+  lineGeo.attributes.position.needsUpdate = true;
+  lineGeo.attributes.alpha.needsUpdate = true;
+
+  // Update node positions
+  for (let i = 0; i < N_NODES; i++) {
+    const p = nodes[i].pos;
+    nodePositions[i * 3]     = p.x;
+    nodePositions[i * 3 + 1] = p.y;
+    nodePositions[i * 3 + 2] = p.z;
+  }
+  nodeGeo.attributes.position.needsUpdate = true;
+
+  // Auto camera dolly (when not interacting)
+  if (!userInteracting) {
+    const angle = t * DOLLY_SPEED;
+    const yOsc = Math.sin(t * 0.05) * 2;
+    const rOsc = DOLLY_RADIUS + Math.sin(t * 0.03) * 3;
+    camera.position.x += (Math.cos(angle) * rOsc - camera.position.x) * 0.008;
+    camera.position.z += (Math.sin(angle) * rOsc - camera.position.z) * 0.008;
+    camera.position.y += (yOsc - camera.position.y) * 0.008;
+    controls.target.lerp(new THREE.Vector3(0, 0, 0), 0.005);
+  }
+
+  controls.update();
+  composer.render();
+}
+
+animate();
+</script>
+</body>
+</html>
