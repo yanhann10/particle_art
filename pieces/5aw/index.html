@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: trace, intensity: gentle -->
+<title>5aw · calligraphic ink · interactive parameters</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08080d; overflow:hidden;
+               color:#d8c895; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+           letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,monospace; z-index:10; }
+
+  /* FxHash-style parameter panel */
+  .panel {
+    position:fixed; top:16px; right:16px; z-index:20;
+    width:210px; padding:14px 16px 10px;
+    background:rgba(12,12,18,0.82); border:1px solid rgba(205,210,220,0.12);
+    border-radius:6px; backdrop-filter:blur(8px);
+    font-size:10px; letter-spacing:0.03em; color:#9da3b0;
+  }
+  .panel h3 {
+    margin:0 0 10px; font-size:10px; font-weight:500;
+    text-transform:uppercase; letter-spacing:0.12em; color:#6b7080;
+    border-bottom:1px solid rgba(205,210,220,0.08); padding-bottom:6px;
+  }
+  .param { margin-bottom:10px; }
+  .param label {
+    display:flex; justify-content:space-between; margin-bottom:3px;
+  }
+  .param label span.val { color:#d8c895; font-variant-numeric:tabular-nums; }
+  .param input[type=range] {
+    -webkit-appearance:none; appearance:none; width:100%; height:3px;
+    background:rgba(205,210,220,0.12); border-radius:2px; outline:none;
+    cursor:pointer;
+  }
+  .param input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance:none; width:10px; height:10px;
+    background:#d8c895; border-radius:50%; cursor:pointer;
+  }
+  .param input[type=range]::-moz-range-thumb {
+    width:10px; height:10px; border:none;
+    background:#d8c895; border-radius:50%; cursor:pointer;
+  }
+</style>
+</head>
+<body>
+<div class="id">5aw</div>
+
+<div class="panel">
+  <h3>parameters</h3>
+  <div class="param">
+    <label>growth speed <span class="val" id="v-growth">1.00</span></label>
+    <input type="range" id="s-growth" min="0" max="2" step="0.01" value="1">
+  </div>
+  <div class="param">
+    <label>ink pressure <span class="val" id="v-pressure">1.00</span></label>
+    <input type="range" id="s-pressure" min="0.2" max="3" step="0.01" value="1">
+  </div>
+  <div class="param">
+    <label>repulsion <span class="val" id="v-repel">1.00</span></label>
+    <input type="range" id="s-repel" min="0.2" max="2.5" step="0.01" value="1">
+  </div>
+  <div class="param">
+    <label>fog depth <span class="val" id="v-fog">0.014</span></label>
+    <input type="range" id="s-fog" min="0" max="0.06" step="0.001" value="0.014">
+  </div>
+  <div class="param">
+    <label>warmth <span class="val" id="v-hue">0</span></label>
+    <input type="range" id="s-hue" min="-40" max="40" step="1" value="0">
+  </div>
+  <div class="param">
+    <label>radial segments <span class="val" id="v-rad">6</span></label>
+    <input type="range" id="s-rad" min="3" max="16" step="1" value="6">
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── parameter bindings ── */
+const P = {
+  growth:  1.0,
+  pressure:1.0,
+  repel:   1.0,
+  fog:     0.014,
+  hue:     0,
+  radial:  6
+};
+
+function bind(id, key, fmt){
+  const s = document.getElementById('s-'+id);
+  const v = document.getElementById('v-'+id);
+  s.addEventListener('input', ()=>{
+    P[key] = parseFloat(s.value);
+    v.textContent = fmt ? fmt(P[key]) : P[key].toFixed(2);
+  });
+}
+bind('growth','growth');
+bind('pressure','pressure');
+bind('repel','repel');
+bind('fog','fog', v=>v.toFixed(3));
+bind('hue','hue', v=>v.toFixed(0));
+bind('rad','radial', v=>v.toFixed(0));
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x08080d, P.fog);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080d, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+/* ── differential growth (3D) ── */
+const MAX_VERTS = 1800;
+const BASE_ATTRACT = 0.06;
+const BASE_REPEL_R = 0.46;
+const BASE_REPEL_STR = 0.13;
+const BASE_NOISE   = 0.003;
+const BASE_PRESSURE= 0.0028;
+const BASE_RISE    = 0.0042;
+const MAX_D        = 0.36;
+
+const verts = [];
+for (let i = 0; i < 18; i++){
+  const th = i / 18 * Math.PI * 2;
+  const r = 1.4 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+}
+
+const CELL = BASE_REPEL_R, grid = new Map();
+function key3(x,y,z){ return Math.floor(x/CELL)+','+Math.floor(y/CELL)+','+Math.floor(z/CELL); }
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i]; const k = key3(v.x, v.y, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++){
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+function step(){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+
+  const repelStr = BASE_REPEL_STR * P.repel;
+  const rise     = BASE_RISE * P.growth;
+  const pressure = BASE_PRESSURE * P.growth;
+
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    for (const j of neighbors(v)){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x-u.x, ey = v.y-u.y, ez = v.z-u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > BASE_REPEL_R*BASE_REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = repelStr * (1 - d/BASE_REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x+b.x-2*v.x)*BASE_ATTRACT;
+    dy[i] += (a.y+b.y-2*v.y)*BASE_ATTRACT;
+    dz[i] += (a.z+b.z-2*v.z)*BASE_ATTRACT;
+  }
+  let cx=0, cy=0, cz=0;
+  for (let i = 0; i < n; i++){ cx+=verts[i].x; cy+=verts[i].y; cz+=verts[i].z; }
+  cx/=n; cy/=n; cz/=n;
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x-cx, oy = verts[i].y-cy, oz = verts[i].z-cz;
+    const d = Math.hypot(ox,oy,oz)+1e-6;
+    dx[i] += (ox/d)*pressure;
+    dy[i] += (oy/d)*pressure*0.4;
+    dz[i] += (oz/d)*pressure;
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[i].age;
+    const upward = rise * (0.3 + 1.2*Math.min(a*1.5, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*BASE_NOISE;
+    verts[i].y += dy[i] + (Math.random()-0.5)*BASE_NOISE*0.5 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*BASE_NOISE;
+    verts[i].age += 0.0014;
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if (ex*ex+ey*ey+ez*ez > MAX_D*MAX_D && verts.length+grown.length < MAX_VERTS){
+      grown.push({
+        x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5 - 0.05, z:(a.z+b.z)*0.5,
+        age: Math.max(a.age, b.age)*0.5
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+// pre-grow
+for (let s = 0; s < 700; s++) step();
+addEventListener('click', e => {
+  if (e.target.closest('.panel')) return;
+  paused = !paused;
+});
+
+/* ── HSL color helper ── */
+function hslToRgb(h,s,l){
+  h = ((h%360)+360)%360;
+  const c = (1-Math.abs(2*l-1))*s;
+  const x = c*(1-Math.abs((h/60)%2-1));
+  const m = l-c/2;
+  let r,g,b;
+  if(h<60){r=c;g=x;b=0;}
+  else if(h<120){r=x;g=c;b=0;}
+  else if(h<180){r=0;g=c;b=x;}
+  else if(h<240){r=0;g=x;b=c;}
+  else if(h<300){r=x;g=0;b=c;}
+  else{r=c;g=0;b=x;}
+  return new THREE.Color(r+m,g+m,b+m);
+}
+
+/* ── ink tube renderer ── */
+let tubeMesh = null;
+const tubeMat = new THREE.MeshBasicMaterial({
+  color: 0xe8dcc0,
+  transparent: true,
+  opacity: 0.88,
+});
+
+// base ink hue in HSL: ~40° (warm parchment), sat ~0.55, light ~0.85
+const BASE_HUE = 40, BASE_SAT = 0.55, BASE_LIGHT = 0.85;
+
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(){
+  // live fog update
+  scene.fog.density = P.fog;
+
+  // live color update
+  tubeMat.color = hslToRgb(BASE_HUE + P.hue, BASE_SAT, BASE_LIGHT);
+
+  for (let s = 0; s < 2; s++) step();
+
+  if (verts.length > 8){
+    const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+
+    const N_SAMPLES = Math.min(800, verts.length * 2);
+    const RADIAL = P.radial;
+    const radiiList = new Array(N_SAMPLES);
+
+    for (let i = 0; i < N_SAMPLES; i++){
+      const t = i / N_SAMPLES;
+      const dt = 1 / N_SAMPLES;
+      const t1 = curve.getTangent((t - dt + 1) % 1);
+      const t2 = curve.getTangent(t);
+      const t3 = curve.getTangent((t + dt) % 1);
+      const cosAB = t1.dot(t2);
+      const cosBC = t2.dot(t3);
+      const curvature = (2 - cosAB - cosBC) * 0.5;
+      const pr = Math.min(1.0, curvature * 8);
+      const r = (0.018 + 0.10 * pr) * P.pressure;
+      radiiList[i] = r;
+    }
+
+    const positions = new Float32Array(N_SAMPLES * RADIAL * 3);
+    const indices = [];
+    const up = new THREE.Vector3(0, 1, 0);
+    for (let i = 0; i < N_SAMPLES; i++){
+      const t = i / N_SAMPLES;
+      const p = curve.getPointAt(t);
+      const tangent = curve.getTangentAt(t).normalize();
+      const normal = new THREE.Vector3().crossVectors(tangent, up).normalize();
+      if (normal.lengthSq() < 0.001) normal.set(1, 0, 0);
+      const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+      const r = radiiList[i];
+      for (let j = 0; j < RADIAL; j++){
+        const ang = (j / RADIAL) * Math.PI * 2;
+        const v = new THREE.Vector3()
+          .copy(normal).multiplyScalar(Math.cos(ang)*r)
+          .add(binormal.clone().multiplyScalar(Math.sin(ang)*r))
+          .add(p);
+        positions[(i*RADIAL+j)*3]     = v.x;
+        positions[(i*RADIAL+j)*3 + 1] = v.y;
+        positions[(i*RADIAL+j)*3 + 2] = v.z;
+      }
+    }
+    for (let i = 0; i < N_SAMPLES; i++){
+      const ni = (i + 1) % N_SAMPLES;
+      for (let j = 0; j < RADIAL; j++){
+        const nj = (j + 1) % RADIAL;
+        const a = i*RADIAL+j, b = i*RADIAL+nj;
+        const c = ni*RADIAL+j, d = ni*RADIAL+nj;
+        indices.push(a, b, c);
+        indices.push(b, d, c);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.setIndex(indices);
+    g.computeVertexNormals();
+
+    if (tubeMesh){ scene.remove(tubeMesh); tubeMesh.geometry.dispose(); }
+    tubeMesh = new THREE.Mesh(g, tubeMat);
+    scene.add(tubeMesh);
+  }
+
+  // camera follow
+  let yMean = 0; for (const v of verts) yMean += v.y;
+  yMean /= Math.max(verts.length, 1);
+  const targetY = Math.max(yMean, 2.0);
+  controls.target.y += (targetY - controls.target.y) * 0.04;
+  const desiredCamY = targetY + 4;
+  camera.position.y += (desiredCamY - camera.position.y) * 0.04;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
