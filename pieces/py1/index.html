@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>py1 · LiDAR orchard remnant · Quayola</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08070a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+</style>
+</head>
+<body>
+<div class="id">py1</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 300);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08070a, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- L-system tree generation ---
+const branches = [];
+
+function lsystem(pos, dir, len, radius, depth, maxDepth) {
+  if (depth > maxDepth || len < 0.08) return;
+  const end = pos.clone().add(dir.clone().multiplyScalar(len));
+  branches.push({ start: pos.clone(), end: end.clone(), radius, depth });
+
+  const numChildren = depth < 2 ? 3 : (Math.random() < 0.6 ? 2 : 1);
+  for (let c = 0; c < numChildren; c++) {
+    const angle = 0.25 + Math.random() * 0.45;
+    const twist = Math.random() * Math.PI * 2;
+
+    const up = new THREE.Vector3(0, 1, 0);
+    const side = new THREE.Vector3().crossVectors(dir, up);
+    if (side.length() < 0.01) side.set(1, 0, 0);
+    side.normalize();
+    const perp = new THREE.Vector3().crossVectors(dir, side).normalize();
+
+    const newDir = dir.clone().normalize();
+    const deflect = side.clone().multiplyScalar(Math.sin(angle) * Math.cos(twist))
+      .add(perp.clone().multiplyScalar(Math.sin(angle) * Math.sin(twist)))
+      .add(newDir.multiplyScalar(Math.cos(angle)));
+    deflect.normalize();
+
+    const shrink = 0.62 + Math.random() * 0.15;
+    const rShrink = 0.55 + Math.random() * 0.15;
+    lsystem(end, deflect, len * shrink, radius * rShrink, depth + 1, maxDepth);
+  }
+}
+
+// Generate two trees at slightly different positions for an orchard feel
+const treeOffsets = [
+  new THREE.Vector3(-3.5, 0, -1),
+  new THREE.Vector3(4.2, 0, 2.5),
+  new THREE.Vector3(0.5, 0, -4)
+];
+
+for (const offset of treeOffsets) {
+  const savedLen = branches.length;
+  const trunkDir = new THREE.Vector3(
+    (Math.random() - 0.5) * 0.08,
+    1,
+    (Math.random() - 0.5) * 0.08
+  ).normalize();
+  lsystem(offset, trunkDir, 3.5 + Math.random() * 1.5, 0.25, 0, 7);
+}
+
+// --- Sample points on branches as LiDAR scan ---
+const pts = [];
+const noiseAmts = [];
+const occlusionSeed = Math.random() * 1000;
+
+// Occlusion gap volumes — cuboids where LiDAR was blocked
+const gaps = [];
+for (let g = 0; g < 12; g++) {
+  gaps.push({
+    center: new THREE.Vector3(
+      (Math.random() - 0.5) * 14,
+      2 + Math.random() * 8,
+      (Math.random() - 0.5) * 14
+    ),
+    half: new THREE.Vector3(
+      0.4 + Math.random() * 1.2,
+      0.3 + Math.random() * 0.8,
+      0.4 + Math.random() * 1.2
+    )
+  });
+}
+
+function inGap(p) {
+  for (const g of gaps) {
+    if (Math.abs(p.x - g.center.x) < g.half.x &&
+        Math.abs(p.y - g.center.y) < g.half.y &&
+        Math.abs(p.z - g.center.z) < g.half.z) return true;
+  }
+  return false;
+}
+
+function gaussRand() {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+for (const b of branches) {
+  const len = b.start.distanceTo(b.end);
+  // More points on trunk, fewer on twigs
+  const density = b.depth < 2 ? 120 : (b.depth < 4 ? 60 : 30);
+  const nSamples = Math.max(4, Math.floor(len * density));
+
+  for (let s = 0; s < nSamples; s++) {
+    const t = Math.random();
+    const along = b.start.clone().lerp(b.end, t);
+
+    // Cylindrical sampling around branch axis
+    const axis = b.end.clone().sub(b.start).normalize();
+    const arbitrary = Math.abs(axis.y) < 0.9 ? new THREE.Vector3(0,1,0) : new THREE.Vector3(1,0,0);
+    const rad1 = new THREE.Vector3().crossVectors(axis, arbitrary).normalize();
+    const rad2 = new THREE.Vector3().crossVectors(axis, rad1).normalize();
+
+    const angle = Math.random() * Math.PI * 2;
+    const r = b.radius * (0.8 + Math.random() * 0.4);
+    const p = along.clone()
+      .add(rad1.clone().multiplyScalar(Math.cos(angle) * r))
+      .add(rad2.clone().multiplyScalar(Math.sin(angle) * r));
+
+    // LiDAR noise: increases with height (depth from scanner) and branch depth
+    const heightFactor = Math.max(0, p.y) / 12.0;
+    const depthFactor = b.depth / 7.0;
+    const noiseScale = 0.01 + (heightFactor * 0.15 + depthFactor * 0.25);
+
+    p.x += gaussRand() * noiseScale;
+    p.y += gaussRand() * noiseScale;
+    p.z += gaussRand() * noiseScale;
+
+    if (inGap(p)) continue;
+
+    // Random dropout: more likely at higher depths (foliage)
+    if (b.depth > 3 && Math.random() < 0.15) continue;
+
+    pts.push(p.x, p.y, p.z);
+    noiseAmts.push(noiseScale);
+  }
+}
+
+// Add foliage cloud blobs at branch tips (dense noisy clusters = unresolved canopy)
+for (const b of branches) {
+  if (b.depth < 4) continue;
+  const nFoliage = 15 + Math.floor(Math.random() * 25);
+  const center = b.end.clone();
+  const spread = 0.3 + b.depth * 0.15;
+
+  for (let f = 0; f < nFoliage; f++) {
+    const p = center.clone().add(new THREE.Vector3(
+      gaussRand() * spread,
+      gaussRand() * spread * 0.7 + 0.1,
+      gaussRand() * spread
+    ));
+    if (inGap(p)) continue;
+    if (Math.random() < 0.1) continue;
+    pts.push(p.x, p.y, p.z);
+    noiseAmts.push(spread * 0.5);
+  }
+}
+
+// Ground scatter — sparse points on the ground plane (LiDAR ground returns)
+for (let g = 0; g < 2000; g++) {
+  const gx = (Math.random() - 0.5) * 20;
+  const gz = (Math.random() - 0.5) * 20;
+  const gy = gaussRand() * 0.03 - 0.05;
+  if (inGap(new THREE.Vector3(gx, gy, gz))) continue;
+  pts.push(gx, gy, gz);
+  noiseAmts.push(0.02);
+}
+
+const N = pts.length / 3;
+const positions = new Float32Array(pts);
+const noise = new Float32Array(noiseAmts);
+
+// Compute centroid for camera target
+const centroid = new THREE.Vector3();
+for (let i = 0; i < N; i++) {
+  centroid.x += positions[i*3];
+  centroid.y += positions[i*3+1];
+  centroid.z += positions[i*3+2];
+}
+centroid.multiplyScalar(1/N);
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPx: { value: renderer.getPixelRatio() },
+  uCentroidY: { value: centroid.y }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPx;
+    uniform float uCentroidY;
+    attribute float noise;
+    varying float vAlpha;
+    varying float vNoise;
+
+    void main() {
+      vec3 p = position;
+
+      // Subtle scan-line drift: points shimmer very slightly as if the scanner is breathing
+      float drift = sin(p.y * 12.0 + uTime * 0.4) * noise * 0.3;
+      p.x += drift;
+      p.z += cos(p.y * 8.0 + uTime * 0.3) * noise * 0.2;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // Size: trunk points larger, foliage smaller and more diffuse
+      float baseSize = mix(1.6, 0.9, smoothstep(0.01, 0.3, noise));
+      gl_PointSize = baseSize * uPx * (45.0 / max(dist, 1.0));
+
+      // Alpha falloff with height — upper canopy fades like LiDAR signal loss
+      float heightFade = smoothstep(14.0, 6.0, p.y);
+      vAlpha = mix(0.25, 0.7, heightFade) * smoothstep(120.0, 20.0, dist);
+      vNoise = noise;
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vNoise;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      float falloff = exp(-r * 12.0);
+
+      // Near-monochrome: warm stone gray for trunk, cooler blue-gray for foliage
+      vec3 warm = vec3(0.72, 0.68, 0.63);  // limestone
+      vec3 cool = vec3(0.55, 0.58, 0.62);  // slate
+      vec3 col = mix(warm, cool, smoothstep(0.05, 0.25, vNoise));
+
+      float a = falloff * vAlpha;
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('noise', new THREE.BufferAttribute(noise, 1));
+const cloud = new THREE.Points(geom, mat);
+scene.add(cloud);
+
+// Film grain overlay — fullscreen quad
+const grainMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uRes: { value: new THREE.Vector2(innerWidth, innerHeight) } },
+  transparent: true, depthTest: false, depthWrite: false,
+  vertexShader: `void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    uniform float uTime;
+    uniform vec2 uRes;
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    void main() {
+      vec2 uv = gl_FragCoord.xy / uRes;
+      float grain = hash(uv * uRes + uTime * 100.0) * 0.06 - 0.03;
+      // Slight vignette
+      float vig = 1.0 - smoothstep(0.4, 1.1, length(uv - 0.5) * 1.4);
+      gl_FragColor = vec4(vec3(grain), 0.15 * (1.0 - vig * 0.5));
+    }
+  `
+});
+const grainQuad = new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2),
+  grainMat
+);
+grainQuad.frustumCulled = false;
+const grainScene = new THREE.Scene();
+const grainCam = new THREE.Camera();
+grainScene.add(grainQuad);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  grainMat.uniforms.uRes.value.set(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  grainMat.uniforms.uTime.value = t;
+
+  // Slow orbit — reveals the tree as a 3D scan
+  const orbitR = 22;
+  const angle = t * 0.06;
+  const camY = centroid.y + 2.5 + Math.sin(t * 0.03) * 1.5;
+  camera.position.set(
+    centroid.x + Math.cos(angle) * orbitR,
+    camY,
+    centroid.z + Math.sin(angle) * orbitR
+  );
+  camera.lookAt(centroid.x, centroid.y + 1.0, centroid.z);
+
+  renderer.render(scene, camera);
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
