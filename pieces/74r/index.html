@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>74r · vespers pheromone gathering</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#07080d; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+</style>
+<!-- MOTION: drift, intensity: contemplative -->
+</head>
+<body>
+<div class="id">74r</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Sage Jenson (mxsage) · physarum vespers · colonies converging at dusk</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Vespers — the parent's paired physarum colonies drift from warm amber
+   into twilight. The day's trails cool to dusky gold and deep indigo.
+   Agents slowly converge toward center — gathering for evening prayer.
+   Honoring Sage Jenson's physarum work; palette shift nods to
+   James Turrell's twilight installations at Roden Crater. */
+
+const BG = 0x07080d;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, 0, 0);
+
+const N_AGENTS = 40000;
+const SENSOR_DIST = 0.12;
+const SENSOR_ANGLE = 0.42;   // tighter — more devotional following
+const ROTATE_ANGLE = 0.38;
+const STEP_DIST = 0.05;      // slower — evening pace
+const DEPOSIT_AMOUNT = 1.6;
+const DECAY_RATE = 0.96;     // trails linger longer — memory of the day
+const DIFFUSE_RATE = 0.24;
+
+const TEX_SIZE = 1024;
+const WORLD_SIZE = 14;
+
+const agents = [];
+const halfN = Math.floor(N_AGENTS / 2);
+
+// colony 0: spiral from left
+for (let i = 0; i < halfN; i++) {
+  const t = (i / halfN) * Math.PI * 6;
+  const r = 0.4 + (i / halfN) * 2.2;
+  agents.push({
+    x: -3.5 + Math.cos(t) * r,
+    y: Math.sin(t) * r,
+    angle: t + Math.PI / 2 + (Math.random() - 0.5) * 0.4,
+    colony: 0
+  });
+}
+// colony 1: mirror from right
+for (let i = 0; i < N_AGENTS - halfN; i++) {
+  const t = (i / (N_AGENTS - halfN)) * Math.PI * 6;
+  const r = 0.4 + (i / (N_AGENTS - halfN)) * 2.2;
+  agents.push({
+    x: 3.5 - Math.cos(t) * r,
+    y: Math.sin(t) * r,
+    angle: Math.PI - t - Math.PI / 2 + (Math.random() - 0.5) * 0.4,
+    colony: 1
+  });
+}
+
+const trailA = new THREE.WebGLRenderTarget(TEX_SIZE, TEX_SIZE, {
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat, type: THREE.FloatType
+});
+const trailB = new THREE.WebGLRenderTarget(TEX_SIZE, TEX_SIZE, {
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat, type: THREE.FloatType
+});
+let currentTrail = trailA, nextTrail = trailB;
+
+const depositScene = new THREE.Scene();
+const depositCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const depositGeom = new THREE.BufferGeometry();
+const depositPos = new Float32Array(N_AGENTS * 3);
+const depositCol = new Float32Array(N_AGENTS * 3);
+for (let i = 0; i < N_AGENTS; i++) depositPos[i * 3 + 2] = 0;
+depositGeom.setAttribute('position', new THREE.BufferAttribute(depositPos, 3));
+depositGeom.setAttribute('color', new THREE.BufferAttribute(depositCol, 3));
+const depositMat = new THREE.PointsMaterial({
+  size: 2.5 / TEX_SIZE, vertexColors: true,
+  blending: THREE.AdditiveBlending, depthTest: false, transparent: true
+});
+depositScene.add(new THREE.Points(depositGeom, depositMat));
+
+const diffuseMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tTrail: { value: null },
+    uDecay: { value: DECAY_RATE },
+    uDiffuse: { value: DIFFUSE_RATE },
+    uTexelSize: { value: new THREE.Vector2(1 / TEX_SIZE, 1 / TEX_SIZE) }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTrail;
+    uniform float uDecay, uDiffuse;
+    uniform vec2 uTexelSize;
+    varying vec2 vUv;
+    void main() {
+      vec4 center = texture2D(tTrail, vUv);
+      vec4 blur = vec4(0.0);
+      blur += texture2D(tTrail, vUv + vec2(-uTexelSize.x, 0.0));
+      blur += texture2D(tTrail, vUv + vec2(uTexelSize.x, 0.0));
+      blur += texture2D(tTrail, vUv + vec2(0.0, -uTexelSize.y));
+      blur += texture2D(tTrail, vUv + vec2(0.0, uTexelSize.y));
+      blur += texture2D(tTrail, vUv + vec2(-uTexelSize.x, -uTexelSize.y));
+      blur += texture2D(tTrail, vUv + vec2(uTexelSize.x, -uTexelSize.y));
+      blur += texture2D(tTrail, vUv + vec2(-uTexelSize.x, uTexelSize.y));
+      blur += texture2D(tTrail, vUv + vec2(uTexelSize.x, uTexelSize.y));
+      blur /= 8.0;
+      gl_FragColor = mix(center, blur, uDiffuse) * uDecay;
+    }
+  `
+});
+const diffuseScene = new THREE.Scene();
+const diffuseCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+diffuseScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), diffuseMat));
+
+const trailPixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+let needsRead = true;
+let simTime = 0;
+
+function worldToUV(x, y) {
+  return { u: (x / WORLD_SIZE + 1) * 0.5, v: (y / WORLD_SIZE + 1) * 0.5 };
+}
+function sampleTrail(u, v) {
+  const px = Math.floor(u * TEX_SIZE), py = Math.floor(v * TEX_SIZE);
+  if (px < 0 || px >= TEX_SIZE || py < 0 || py >= TEX_SIZE) return 0;
+  const idx = (py * TEX_SIZE + px) * 4;
+  return (trailPixels[idx] + trailPixels[idx + 1] + trailPixels[idx + 2]) / 765;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function stepAgents() {
+  if (paused) return;
+  simTime++;
+
+  if (needsRead) {
+    renderer.readRenderTargetPixels(currentTrail, 0, 0, TEX_SIZE, TEX_SIZE, trailPixels);
+    needsRead = false;
+  }
+
+  // convergence factor: colonies slowly gather toward center over time
+  const convergence = Math.min(simTime / 8000, 0.35);
+
+  for (let i = 0; i < agents.length; i++) {
+    const a = agents[i];
+    const { u, v } = worldToUV(a.x, a.y);
+
+    const senseL = {
+      u: u + Math.cos(a.angle - SENSOR_ANGLE) * SENSOR_DIST / WORLD_SIZE,
+      v: v + Math.sin(a.angle - SENSOR_ANGLE) * SENSOR_DIST / WORLD_SIZE
+    };
+    const senseF = {
+      u: u + Math.cos(a.angle) * SENSOR_DIST / WORLD_SIZE,
+      v: v + Math.sin(a.angle) * SENSOR_DIST / WORLD_SIZE
+    };
+    const senseR = {
+      u: u + Math.cos(a.angle + SENSOR_ANGLE) * SENSOR_DIST / WORLD_SIZE,
+      v: v + Math.sin(a.angle + SENSOR_ANGLE) * SENSOR_DIST / WORLD_SIZE
+    };
+
+    const valL = sampleTrail(senseL.u, senseL.v);
+    const valF = sampleTrail(senseF.u, senseF.v);
+    const valR = sampleTrail(senseR.u, senseR.v);
+
+    if (valF > valL && valF > valR) {
+      // straight
+    } else if (valF < valL && valF < valR) {
+      a.angle += (Math.random() - 0.5) * ROTATE_ANGLE * 2;
+    } else if (valL > valR) {
+      a.angle -= ROTATE_ANGLE;
+    } else if (valR > valL) {
+      a.angle += ROTATE_ANGLE;
+    }
+
+    // gentle pull toward center — vespers gathering
+    const toCenterAngle = Math.atan2(-a.y, -a.x);
+    let angleDiff = toCenterAngle - a.angle;
+    while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+    while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+    a.angle += angleDiff * convergence * 0.012;
+
+    const nx = a.x + Math.cos(a.angle) * STEP_DIST;
+    const ny = a.y + Math.sin(a.angle) * STEP_DIST;
+
+    if (Math.abs(nx) > WORLD_SIZE * 0.48) {
+      a.angle = Math.PI - a.angle + (Math.random() - 0.5) * 0.3;
+    } else {
+      a.x = nx;
+    }
+    if (Math.abs(ny) > WORLD_SIZE * 0.48) {
+      a.angle = -a.angle + (Math.random() - 0.5) * 0.3;
+    } else {
+      a.y = ny;
+    }
+
+    const uv2 = worldToUV(a.x, a.y);
+    depositPos[i * 3] = uv2.u * 2 - 1;
+    depositPos[i * 3 + 1] = uv2.v * 2 - 1;
+
+    // twilight shift: colony 0 becomes dusky gold, colony 1 becomes deep indigo
+    // as simTime increases, colors cool further
+    const cool = Math.min(simTime / 6000, 1.0);
+    if (a.colony === 0) {
+      depositCol[i * 3]     = (1.0 - cool * 0.25) * DEPOSIT_AMOUNT;
+      depositCol[i * 3 + 1] = (0.58 - cool * 0.12) * DEPOSIT_AMOUNT;
+      depositCol[i * 3 + 2] = (0.18 + cool * 0.08) * DEPOSIT_AMOUNT;
+    } else {
+      depositCol[i * 3]     = (0.35 + cool * 0.1) * DEPOSIT_AMOUNT;
+      depositCol[i * 3 + 1] = (0.28 + cool * 0.06) * DEPOSIT_AMOUNT;
+      depositCol[i * 3 + 2] = (0.72 + cool * 0.15) * DEPOSIT_AMOUNT;
+    }
+  }
+  depositGeom.attributes.position.needsUpdate = true;
+  depositGeom.attributes.color.needsUpdate = true;
+
+  renderer.setRenderTarget(currentTrail);
+  renderer.render(depositScene, depositCamera);
+
+  diffuseMat.uniforms.tTrail.value = currentTrail.texture;
+  renderer.setRenderTarget(nextTrail);
+  renderer.render(diffuseScene, diffuseCamera);
+
+  [currentTrail, nextTrail] = [nextTrail, currentTrail];
+  needsRead = true;
+}
+
+// display: vespers palette — dusky gold meeting deep indigo
+const displayGeom = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE);
+const displayMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tTrail: { value: null },
+    uTime: { value: 0 },
+    uFogColor: { value: new THREE.Color(BG) },
+    uFogDensity: { value: 0.018 }
+  },
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    varying vec2 vUv;
+    varying float vFogFactor;
+    uniform float uFogDensity;
+    void main() {
+      vUv = uv;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mv;
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTrail;
+    uniform float uTime;
+    uniform vec3 uFogColor;
+    varying vec2 vUv;
+    varying float vFogFactor;
+
+    void main() {
+      vec4 trail = texture2D(tTrail, vUv);
+      float intensity = (trail.r + trail.g + trail.b) / 3.0;
+
+      // vespers duotone: dusky gold and deep indigo
+      vec3 gold   = vec3(0.92, 0.62, 0.22);
+      vec3 indigo = vec3(0.32, 0.24, 0.68);
+      vec3 dusk   = vec3(0.55, 0.35, 0.45);
+
+      // blend based on channel balance — blue-heavy = indigo colony
+      float blueRatio = trail.b / (trail.r + trail.g + trail.b + 0.001);
+      vec3 col = mix(gold, indigo, smoothstep(0.25, 0.55, blueRatio));
+      // where colonies overlap, a dusty rose appears
+      float overlap = min(trail.r, trail.b) / (max(trail.r, trail.b) + 0.001);
+      col = mix(col, dusk, overlap * 0.5);
+
+      // vespers bell pulse — slow, solemn breathing
+      float bell = 0.94 + 0.06 * sin(uTime * 0.4);
+      // occasional deeper resonance
+      bell *= 0.97 + 0.03 * sin(uTime * 0.17 + 1.3);
+      col *= bell;
+
+      float alpha = smoothstep(0.015, 0.14, intensity) * 0.88;
+
+      col = mix(col, uFogColor, vFogFactor * 0.7);
+      alpha *= (1.0 - vFogFactor * 0.6);
+
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+const displayMesh = new THREE.Mesh(displayGeom, displayMat);
+scene.add(displayMesh);
+
+// faint grain — darker for evening
+const grainMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthWrite: false,
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    float rand(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }
+    void main() {
+      float grain = rand(vUv * 512.0 + uTime * 0.01) * 0.035;
+      gl_FragColor = vec4(vec3(grain * 0.6), grain * 0.6);
+    }
+  `
+});
+const grainMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(WORLD_SIZE * 1.1, WORLD_SIZE * 1.1), grainMat
+);
+grainMesh.position.z = 0.01;
+scene.add(grainMesh);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow
+for (let i = 0; i < 180; i++) stepAgents();
+
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  displayMat.uniforms.uTime.value = t;
+  grainMat.uniforms.uTime.value = t;
+
+  stepAgents();
+  stepAgents();
+
+  displayMat.uniforms.tTrail.value = currentTrail.texture;
+
+  controls.update();
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
