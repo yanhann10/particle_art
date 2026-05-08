@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>r32 · arabesque ribbon · audio-reactive growth</title>
+<!-- MOTION: pulse, intensity: vigorous -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08080d; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; z-index:10; }
+  .mic  { position:fixed; right:14px; bottom:12px; opacity:0.4; font-size:10px; z-index:10; cursor:pointer;
+          background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12);
+          color:#cdd2dc; padding:4px 10px; border-radius:3px; }
+  .mic:hover { opacity:0.7; }
+</style>
+</head>
+<body>
+<div class="id">r32</div>
+<div class="hint">drag to orbit · click ribbon to pause · mic adds bass reactivity</div>
+<button class="mic" id="micBtn">enable mic</button>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x08080d, 0.02);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080d, 1);
+document.body.appendChild(renderer.domElement);
+
+const lightKey = new THREE.DirectionalLight(0xfff2c0, 1.3);
+lightKey.position.set(6, 12, 4);
+scene.add(lightKey);
+scene.add(new THREE.AmbientLight(0x100815, 0.5));
+const lightFill = new THREE.DirectionalLight(0x405078, 0.4);
+lightFill.position.set(-6, 4, -4);
+scene.add(lightFill);
+/* pulsing point light keyed to bass */
+const bassLight = new THREE.PointLight(0xff6030, 0, 30);
+bassLight.position.set(0, 5, 0);
+scene.add(bassLight);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+/* ── post-processing: chromatic aberration + shockwave ── */
+const ChromaShockShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uChroma:  { value: 0.0 },
+    uShock:   { value: 0.0 },   // 0→1 shockwave progress
+    uShockCenter: { value: new THREE.Vector2(0.5, 0.5) },
+    uResolution:  { value: new THREE.Vector2(innerWidth, innerHeight) },
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float uChroma;
+    uniform float uShock;
+    uniform vec2 uShockCenter;
+    uniform vec2 uResolution;
+    varying vec2 vUv;
+    void main(){
+      vec2 uv = vUv;
+      /* shockwave distortion */
+      if(uShock > 0.01 && uShock < 0.99){
+        vec2 aspect = vec2(uResolution.x/uResolution.y, 1.0);
+        vec2 diff = (uv - uShockCenter) * aspect;
+        float dist = length(diff);
+        float radius = uShock * 1.2;
+        float width = 0.12;
+        float ring = 1.0 - smoothstep(width*0.5, width, abs(dist - radius));
+        float strength = ring * 0.06 * (1.0 - uShock);
+        uv += normalize(diff + 0.0001) / aspect * strength;
+      }
+      /* chromatic aberration */
+      vec2 dir = (uv - 0.5) * uChroma;
+      float r = texture2D(tDiffuse, uv + dir).r;
+      float g = texture2D(tDiffuse, uv).g;
+      float b = texture2D(tDiffuse, uv - dir).b;
+      gl_FragColor = vec4(r, g, b, 1.0);
+    }
+  `
+};
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const chromaPass = new ShaderPass(ChromaShockShader);
+composer.addPass(chromaPass);
+
+/* ── audio ── */
+let analyser = null, freqData = null, audioCtx = null;
+let bassEnergy = 0, bassPeak = 0, shockTimer = -1;
+
+document.getElementById('micBtn').addEventListener('click', async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new AudioContext();
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.6;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    document.getElementById('micBtn').textContent = 'mic on';
+    document.getElementById('micBtn').style.borderColor = 'rgba(200,120,40,0.5)';
+  } catch(e){ console.warn('mic denied', e); }
+});
+
+function updateAudio(){
+  if (analyser){
+    analyser.getByteFrequencyData(freqData);
+    /* bass = bins 1-8 (~43-344 Hz at 44100/512) */
+    let sum = 0;
+    for (let i = 1; i < 9; i++) sum += freqData[i];
+    bassEnergy = sum / (8 * 255);
+  } else {
+    /* fallback: gentle synthetic pulse so the piece is dramatic even without mic */
+    const t = performance.now() / 1000;
+    bassEnergy = 0.08 + 0.06 * Math.sin(t * 0.7) * Math.sin(t * 1.1);
+  }
+  /* detect peak for shockwave trigger */
+  if (bassEnergy > 0.45 && bassPeak < 0.3){
+    shockTimer = 0;
+  }
+  bassPeak = bassEnergy;
+}
+
+/* ── shockwave ring geometry in scene ── */
+const shockRingMat = new THREE.MeshBasicMaterial({
+  color: 0xffa050, transparent: true, opacity: 0, side: THREE.DoubleSide,
+  depthWrite: false, blending: THREE.AdditiveBlending
+});
+const shockRingGeo = new THREE.RingGeometry(0.1, 0.4, 64);
+const shockRing = new THREE.Mesh(shockRingGeo, shockRingMat);
+shockRing.rotation.x = -Math.PI / 2;
+scene.add(shockRing);
+
+/* ── differential growth (from parent) ── */
+const MAX_VERTS = 1400;
+const ATTRACT=0.06, REPEL_R=0.55, REPEL_STR=0.14, NOISE=0.003, PRESSURE=0.003, RISE=0.0045, MAX_D=0.42;
+const verts = [];
+for (let i = 0; i < 14; i++){
+  const th = i/14*Math.PI*2, r = 1.6+(Math.random()-0.5)*0.1;
+  verts.push({ x:Math.cos(th)*r, y:0, z:Math.sin(th)*r, age:0 });
+}
+const CELL = REPEL_R, grid = new Map();
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i];
+    const k = Math.floor(v.x/CELL)+','+Math.floor(v.y/CELL)+','+Math.floor(v.z/CELL);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function nbrs(v){
+  const cx=Math.floor(v.x/CELL), cy=Math.floor(v.y/CELL), cz=Math.floor(v.z/CELL), out=[];
+  for (let dx=-1;dx<=1;dx++) for (let dy=-1;dy<=1;dy++) for (let dz=-1;dz<=1;dz++){
+    const arr=grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz)); if(arr) for(const idx of arr) out.push(idx);
+  } return out;
+}
+let paused = false;
+function step(){
+  if(paused) return;
+  const n=verts.length; if(n>=MAX_VERTS) return;
+  rebuildGrid();
+  const dx=new Float32Array(n), dy=new Float32Array(n), dz=new Float32Array(n);
+  for(let i=0;i<n;i++){
+    const v=verts[i];
+    for(const j of nbrs(v)){
+      if(j===i) continue;
+      const u=verts[j], ex=v.x-u.x, ey=v.y-u.y, ez=v.z-u.z, d2=ex*ex+ey*ey+ez*ez;
+      if(d2>REPEL_R*REPEL_R||d2<1e-6) continue;
+      const d=Math.sqrt(d2), f=REPEL_STR*(1-d/REPEL_R)/d;
+      dx[i]+=ex*f; dy[i]+=ey*f; dz[i]+=ez*f;
+    }
+  }
+  for(let i=0;i<n;i++){
+    const a=verts[(i-1+n)%n], b=verts[(i+1)%n], v=verts[i];
+    dx[i]+=(a.x+b.x-2*v.x)*ATTRACT; dy[i]+=(a.y+b.y-2*v.y)*ATTRACT; dz[i]+=(a.z+b.z-2*v.z)*ATTRACT;
+  }
+  let ccx=0,ccy=0,ccz=0;
+  for(let i=0;i<n;i++){ ccx+=verts[i].x; ccy+=verts[i].y; ccz+=verts[i].z; }
+  ccx/=n; ccy/=n; ccz/=n;
+  /* bass-reactive pressure boost */
+  const pressureMul = 1.0 + bassEnergy * 3.0;
+  for(let i=0;i<n;i++){
+    const ox=verts[i].x-ccx, oy=verts[i].y-ccy, oz=verts[i].z-ccz;
+    const d=Math.hypot(ox,oy,oz)+1e-6;
+    dx[i]+=(ox/d)*PRESSURE*pressureMul; dy[i]+=(oy/d)*PRESSURE*0.4*pressureMul; dz[i]+=(oz/d)*PRESSURE*pressureMul;
+  }
+  for(let i=0;i<n;i++){
+    const a=verts[i].age, upward=RISE*(0.3+1.2*Math.min(a*1.5,1.0));
+    verts[i].x+=dx[i]+(Math.random()-0.5)*NOISE;
+    verts[i].y+=dy[i]+(Math.random()-0.5)*NOISE*0.5+upward;
+    verts[i].z+=dz[i]+(Math.random()-0.5)*NOISE;
+    verts[i].age+=0.0014;
+  }
+  const grown=[];
+  for(let i=0;i<n;i++){
+    const a=verts[i], b=verts[(i+1)%n]; grown.push(a);
+    const ex=b.x-a.x, ey=b.y-a.y, ez=b.z-a.z;
+    if(ex*ex+ey*ey+ez*ez>MAX_D*MAX_D && verts.length+grown.length<MAX_VERTS){
+      grown.push({ x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5-0.05, z:(a.z+b.z)*0.5, age:Math.max(a.age,b.age)*0.5 });
+    }
+  }
+  verts.length=0; for(const v of grown) verts.push(v);
+}
+for(let s=0;s<1200;s++) step();
+renderer.domElement.addEventListener('click', ()=>{ paused=!paused; });
+
+/* ── ribbon material — emissive reacts to bass ── */
+const ribbonMat = new THREE.MeshStandardMaterial({
+  color: 0xc9a45a, emissive: 0x2a1a06, roughness: 0.32, metalness: 0.7,
+  side: THREE.DoubleSide,
+});
+let ribbonMesh = null;
+
+/* ── ember particles — tiny sparks dislodged on bass hits ── */
+const EMBER_COUNT = 300;
+const emberGeo = new THREE.BufferGeometry();
+const emberPos = new Float32Array(EMBER_COUNT * 3);
+const emberVel = new Float32Array(EMBER_COUNT * 3);
+const emberLife = new Float32Array(EMBER_COUNT);
+for (let i = 0; i < EMBER_COUNT; i++) emberLife[i] = -1;
+emberGeo.setAttribute('position', new THREE.BufferAttribute(emberPos, 3));
+const emberMat = new THREE.PointsMaterial({
+  color: 0xff8030, size: 0.06, transparent: true, opacity: 0.7,
+  blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true
+});
+const embers = new THREE.Points(emberGeo, emberMat);
+scene.add(embers);
+
+let nextEmber = 0;
+function spawnEmbers(cx, cy, cz, count){
+  for (let i = 0; i < count; i++){
+    const idx = nextEmber % EMBER_COUNT;
+    nextEmber++;
+    emberPos[idx*3]   = cx + (Math.random()-0.5)*3;
+    emberPos[idx*3+1] = cy + Math.random()*2;
+    emberPos[idx*3+2] = cz + (Math.random()-0.5)*3;
+    const angle = Math.random()*Math.PI*2;
+    const speed = 0.02 + Math.random()*0.04;
+    emberVel[idx*3]   = Math.cos(angle)*speed;
+    emberVel[idx*3+1] = 0.01 + Math.random()*0.03;
+    emberVel[idx*3+2] = Math.sin(angle)*speed;
+    emberLife[idx] = 1.0;
+  }
+}
+function updateEmbers(){
+  for (let i = 0; i < EMBER_COUNT; i++){
+    if (emberLife[i] < 0) continue;
+    emberLife[i] -= 0.008;
+    if (emberLife[i] < 0){ emberPos[i*3+1] = -999; continue; }
+    emberPos[i*3]   += emberVel[i*3];
+    emberPos[i*3+1] += emberVel[i*3+1];
+    emberPos[i*3+2] += emberVel[i*3+2];
+    emberVel[i*3+1] += 0.0003; // slight updraft
+  }
+  emberGeo.attributes.position.needsUpdate = true;
+}
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+  chromaPass.uniforms.uResolution.value.set(innerWidth, innerHeight);
+});
+
+/* ── main loop ── */
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+
+  updateAudio();
+
+  /* growth steps — more on bass */
+  const growSteps = 4 + Math.floor(bassEnergy * 8);
+  for (let s = 0; s < growSteps; s++) step();
+
+  /* build ribbon */
+  if (verts.length > 8){
+    const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.0);
+    const N = Math.min(1200, verts.length * 3);
+    const positions = new Float32Array(N * 2 * 3);
+    const indices = [];
+    const up = new THREE.Vector3(0, 1, 0);
+    for (let i = 0; i < N; i++){
+      const tt = i / N;
+      const p = curve.getPointAt(tt);
+      const tangent = curve.getTangentAt(tt).normalize();
+      let lateral = new THREE.Vector3().crossVectors(tangent, up);
+      if (lateral.lengthSq() < 0.001) lateral.set(1, 0, 0);
+      lateral.normalize();
+      /* bass widens ribbon dramatically */
+      const bassWidth = bassEnergy * 0.35;
+      const width = 0.20 + 0.16 * Math.sin(tt * 32.0 + t * 0.4) + bassWidth;
+      const left  = p.clone().addScaledVector(lateral, -width);
+      const right = p.clone().addScaledVector(lateral,  width);
+      positions[i*6]=left.x; positions[i*6+1]=left.y; positions[i*6+2]=left.z;
+      positions[i*6+3]=right.x; positions[i*6+4]=right.y; positions[i*6+5]=right.z;
+    }
+    for (let i = 0; i < N; i++){
+      const ni = (i+1)%N, a=i*2, b=i*2+1, c=ni*2, d=ni*2+1;
+      indices.push(a,b,c); indices.push(b,d,c);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.setIndex(indices);
+    g.computeVertexNormals();
+    if (ribbonMesh){ scene.remove(ribbonMesh); ribbonMesh.geometry.dispose(); }
+    ribbonMesh = new THREE.Mesh(g, ribbonMat);
+    scene.add(ribbonMesh);
+  }
+
+  /* emissive pulses with bass */
+  const emHex = Math.min(255, Math.floor(42 + bassEnergy * 180));
+  ribbonMat.emissive.setRGB(emHex/255, (26 + bassEnergy*80)/255, 6/255);
+
+  /* bass light */
+  bassLight.intensity = bassEnergy * 4.0;
+  let yMean=0, xMean=0, zMean=0;
+  for(const v of verts){ xMean+=v.x; yMean+=v.y; zMean+=v.z; }
+  xMean/=verts.length||1; yMean/=verts.length||1; zMean/=verts.length||1;
+  bassLight.position.set(xMean, yMean, zMean);
+
+  /* shockwave */
+  if (shockTimer >= 0){
+    shockTimer += 0.018;
+    if (shockTimer > 1.0) shockTimer = -1;
+    /* scene ring */
+    const s = shockTimer * 12;
+    shockRing.scale.set(s, s, s);
+    shockRing.position.set(xMean, yMean, zMean);
+    shockRing.lookAt(camera.position);
+    shockRingMat.opacity = 0.25 * (1.0 - shockTimer);
+    /* screen-space shockwave */
+    chromaPass.uniforms.uShock.value = shockTimer;
+    /* project centroid to screen for shockwave center */
+    const proj = new THREE.Vector3(xMean, yMean, zMean).project(camera);
+    chromaPass.uniforms.uShockCenter.value.set(proj.x*0.5+0.5, proj.y*0.5+0.5);
+    /* spawn embers */
+    if (shockTimer < 0.05) spawnEmbers(xMean, yMean, zMean, 40);
+  } else {
+    shockRingMat.opacity = 0;
+    chromaPass.uniforms.uShock.value = 0;
+  }
+
+  /* chromatic aberration — always present subtly, spikes on bass */
+  const chromaBase = 0.002 + 0.003 * Math.sin(t * 0.3);
+  chromaPass.uniforms.uChroma.value = chromaBase + bassEnergy * 0.04;
+
+  /* embers */
+  updateEmbers();
+  emberMat.opacity = 0.4 + bassEnergy * 0.5;
+
+  /* camera tracks centroid */
+  const targetY = Math.max(yMean, 2.0);
+  controls.target.y += (targetY - controls.target.y) * 0.04;
+  controls.target.x += (xMean - controls.target.x) * 0.02;
+  controls.target.z += (zMean - controls.target.z) * 0.02;
+  camera.position.y += (targetY + 4 - camera.position.y) * 0.04;
+
+  controls.update();
+  composer.render();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
