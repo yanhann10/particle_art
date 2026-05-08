@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- MOTION: drift, intensity: calm -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wox · cumulus leaves · border drift</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#0a0908;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;
+    font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;letter-spacing:0.06em;z-index:2}
+.grain{position:fixed;inset:0;pointer-events:none;z-index:1;
+       background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+       opacity:0.35;mix-blend-mode:overlay}
+</style>
+</head>
+<body>
+<div class="id">wox</div>
+<div class="grain"></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── scene ────────────────────────────────────────────── */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0908);
+scene.fog = new THREE.FogExp2(0x0a0908, 0.006);
+
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 400);
+camera.position.set(0, 28, 52);
+
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.target.set(0, 14, 0);
+controls.maxPolarAngle = Math.PI * 0.55;
+
+/* ── lighting: warm above, cool below ─────────────────── */
+const sun = new THREE.DirectionalLight(0xffecd0, 1.4);
+sun.position.set(8, 35, 12);
+scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xc8b898, 0x080a10, 0.45));
+const fill = new THREE.DirectionalLight(0x506880, 0.25);
+fill.position.set(-12, 8, -10);
+scene.add(fill);
+
+/* ── terrain plane with border contour ────────────────── */
+const terrainMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    varying vec3 vP;
+    void main(){
+      vP = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+    }`,
+  fragmentShader: `
+    varying vec3 vP;
+    void main(){
+      vec3 e1 = vec3(0.10, 0.075, 0.05);
+      vec3 e2 = vec3(0.16, 0.12, 0.08);
+      float t = smoothstep(-50.0,50.0, vP.x)*0.4 + smoothstep(-50.0,50.0, vP.z)*0.3;
+      vec3 col = mix(e1, e2, t + sin(vP.x*0.13)*0.08);
+      // border contour — sinuous line at z ≈ 2
+      float bz = 2.0 + sin(vP.x*0.06)*4.5 + sin(vP.x*0.14)*1.8;
+      float border = 1.0 - smoothstep(0.0, 0.35, abs(vP.z - bz));
+      col = mix(col, vec3(0.52, 0.06, 0.04), border * 0.65);
+      // faint grid (satellite scan)
+      float grid = max(
+        smoothstep(0.92,1.0, abs(fract(vP.x*0.1)-0.5)*2.0),
+        smoothstep(0.92,1.0, abs(fract(vP.z*0.1)-0.5)*2.0)
+      );
+      col += grid * 0.012;
+      gl_FragColor = vec4(col, 1.0);
+    }`
+});
+const terrainGeo = new THREE.PlaneGeometry(140, 140, 120, 120);
+terrainGeo.rotateX(-Math.PI/2);
+{
+  const p = terrainGeo.attributes.position;
+  for(let i=0;i<p.count;i++){
+    const x=p.getX(i), z=p.getZ(i);
+    p.setY(i, Math.sin(x*0.04)*0.5 + Math.cos(z*0.06)*0.4 + Math.sin(x*0.12+z*0.08)*0.2);
+  }
+  terrainGeo.computeVertexNormals();
+}
+scene.add(new THREE.Mesh(terrainGeo, terrainMat));
+
+/* ── differential-growth cloud boundaries (ajo DNA) ───── */
+class GrowthRing {
+  constructor(cx,cy,cz,r,max){
+    this.verts=[];
+    const n=12;
+    for(let i=0;i<n;i++){
+      const th=i/n*Math.PI*2;
+      this.verts.push({x:cx+Math.cos(th)*r,y:cy+(Math.random()-0.5)*0.4,z:cz+Math.sin(th)*r});
+    }
+    this.cx=cx;this.cy=cy;this.cz=cz;this.max=max;
+  }
+  step(){
+    const v=this.verts, n=v.length;
+    if(n>=this.max) return;
+    const ATT=0.04, RR=0.9, RS=0.1, MD=0.65;
+    const dx=new Float32Array(n),dy=new Float32Array(n),dz=new Float32Array(n);
+    for(let i=0;i<n;i++) for(let j=i+1;j<n;j++){
+      const ex=v[i].x-v[j].x, ey=v[i].y-v[j].y, ez=v[i].z-v[j].z;
+      const d2=ex*ex+ey*ey+ez*ez;
+      if(d2>RR*RR||d2<1e-6) continue;
+      const d=Math.sqrt(d2), f=RS*(1-d/RR)/d;
+      dx[i]+=ex*f;dy[i]+=ey*f;dz[i]+=ez*f;
+      dx[j]-=ex*f;dy[j]-=ey*f;dz[j]-=ez*f;
+    }
+    for(let i=0;i<n;i++){
+      const a=v[(i-1+n)%n],b=v[(i+1)%n],c=v[i];
+      dx[i]+=(a.x+b.x-2*c.x)*ATT;dy[i]+=(a.y+b.y-2*c.y)*ATT;dz[i]+=(a.z+b.z-2*c.z)*ATT;
+      const ox=c.x-this.cx,oy=c.y-this.cy,oz=c.z-this.cz;
+      const dd=Math.hypot(ox,oy,oz)+1e-6;
+      dx[i]+=ox/dd*0.005;dy[i]+=oy/dd*0.002;dz[i]+=oz/dd*0.005;
+    }
+    for(let i=0;i<n;i++){v[i].x+=dx[i];v[i].y+=dy[i];v[i].z+=dz[i];}
+    const grown=[];
+    for(let i=0;i<n;i++){
+      const a=v[i],b=v[(i+1)%n]; grown.push(a);
+      const ex=b.x-a.x,ey=b.y-a.y,ez=b.z-a.z;
+      if(ex*ex+ey*ey+ez*ez>MD*MD && n+grown.length<this.max)
+        grown.push({x:(a.x+b.x)*.5,y:(a.y+b.y)*.5,z:(a.z+b.z)*.5});
+    }
+    this.verts=grown;
+  }
+}
+
+// Cloud clusters: positions chosen for compositional balance with negative space
+const clouds = [
+  new GrowthRing(  0, 15, -4, 3.0, 200),
+  new GrowthRing(-14, 17,  2, 2.4, 160),
+  new GrowthRing( 12, 14, -1, 2.2, 150),
+  new GrowthRing( -4, 20, -9, 2.6, 170),
+  new GrowthRing(  9, 21,  6, 1.8, 120),
+  new GrowthRing(-20, 18, -7, 1.5, 100),
+  new GrowthRing( 18, 16, -6, 1.6, 110),
+];
+for(const c of clouds) for(let i=0;i<350;i++) c.step();
+
+/* ── leaf geometry ────────────────────────────────────── */
+function leafGeo(){
+  const g = new THREE.BufferGeometry();
+  const s = 0.28;
+  // 5-point leaf shape with midrib curl
+  const v = new Float32Array([
+    0, 0, -s*0.6,           // tip
+    -s*0.45, s*0.06, -s*0.1, // left mid
+    -s*0.25, s*0.1,  s*0.45, // left base
+     s*0.25, s*0.1,  s*0.45, // right base
+     s*0.45, s*0.06, -s*0.1, // right mid
+     0, s*0.14, s*0.15,      // center lift
+  ]);
+  g.setAttribute('position', new THREE.BufferAttribute(v,3));
+  g.setIndex([0,1,5, 1,2,5, 2,3,5, 3,4,5, 4,0,5]);
+  g.computeVertexNormals();
+  return g;
+}
+
+/* ── instanced leaves ─────────────────────────────────── */
+const TOTAL = 7000;
+const lg = leafGeo();
+const lmat = new THREE.MeshStandardMaterial({
+  color: 0xffffff,
+  roughness: 0.82,
+  metalness: 0.0,
+  side: THREE.DoubleSide,
+  transparent: true,
+  opacity: 0.78,
+});
+const leaves = new THREE.InstancedMesh(lg, lmat, TOTAL);
+scene.add(leaves);
+
+// Palette: 5 hand-picked cloud tones
+const PAL = [
+  new THREE.Color(0.90, 0.87, 0.82), // warm white
+  new THREE.Color(0.82, 0.80, 0.78), // warm gray
+  new THREE.Color(0.88, 0.85, 0.80), // parchment
+  new THREE.Color(0.78, 0.78, 0.82), // cool gray (higher altitude)
+  new THREE.Color(0.92, 0.90, 0.86), // bright top
+];
+
+const leafState = [];
+function scatter(){
+  const pts = [];
+  for(const c of clouds) for(const v of c.verts)
+    pts.push({x:v.x, y:v.y, z:v.z, cx:c.cx, cy:c.cy, cz:c.cz});
+
+  for(let i=0; i<TOTAL; i++){
+    const src = pts[Math.floor(Math.random()*pts.length)];
+    // volumetric fill: scatter within cluster volume, biased toward interior
+    const phi = Math.random()*Math.PI*2, cosT = Math.random()*2-1, sinT = Math.sqrt(1-cosT*cosT);
+    const r = Math.pow(Math.random(), 0.6) * 3.5;
+    leafState.push({
+      x: src.x + Math.cos(phi)*sinT*r*0.7 + (src.x-src.cx)*0.3,
+      y: src.y + cosT*r*0.4,
+      z: src.z + Math.sin(phi)*sinT*r*0.7 + (src.z-src.cz)*0.3,
+      rx: Math.random()*6.28,
+      ry: Math.random()*6.28,
+      rz: Math.random()*3.14,
+      sc: 0.6 + Math.random()*0.9,
+      wp: Math.random()*6.28,          // wind phase
+      wa: 0.001 + Math.random()*0.003, // wind amplitude
+      tb: (Math.random()-0.5)*0.002,   // tumble rate
+      ci: Math.floor(Math.random()*PAL.length), // palette index
+    });
+  }
+}
+scatter();
+
+const _d = new THREE.Object3D();
+const _c = new THREE.Color();
+
+function updateLeaves(t){
+  const windX = 0.004; // persistent eastward drift
+  for(let i=0;i<TOTAL;i++){
+    const l = leafState[i];
+    // gentle drift
+    l.x += Math.sin(l.wp + t*0.22)*l.wa + windX;
+    l.y += Math.cos(l.wp*1.7 + t*0.15)*l.wa*0.25;
+    l.z += Math.sin(l.wp*0.6 + t*0.18)*l.wa*0.4;
+    l.rx += l.tb*0.4;
+    l.ry += l.tb;
+
+    _d.position.set(l.x, l.y, l.z);
+    _d.rotation.set(l.rx, l.ry, l.rz);
+    _d.scale.setScalar(l.sc);
+    _d.updateMatrix();
+    leaves.setMatrixAt(i, _d.matrix);
+
+    // altitude-based color shift: warm low, cool high
+    const hN = Math.max(0, Math.min(1, (l.y - 10)/14));
+    _c.copy(PAL[l.ci]);
+    _c.lerp(PAL[3], hN*0.5); // cooler at height
+    // per-leaf variation
+    _c.r += Math.sin(i*7.3)*0.025;
+    _c.g += Math.sin(i*11.1)*0.02;
+    _c.b += Math.sin(i*13.7)*0.02;
+    leaves.setColorAt(i, _c);
+  }
+  leaves.instanceMatrix.needsUpdate = true;
+  if(leaves.instanceColor) leaves.instanceColor.needsUpdate = true;
+}
+
+/* ── volumetric haze layer between terrain and clouds ─── */
+const hazeMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  uniforms: { uTime: {value:0} },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uTime;
+    void main(){
+      float d = length(vUv - 0.5);
+      float a = smoothstep(0.5, 0.15, d) * 0.12;
+      // slow drift pattern
+      a *= 0.7 + 0.3*sin(vUv.x*4.0 + uTime*0.08)*sin(vUv.y*3.0 - uTime*0.05);
+      gl_FragColor = vec4(0.12, 0.10, 0.08, a);
+    }`
+});
+const hazePlane = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), hazeMat);
+hazePlane.rotation.x = -Math.PI/2;
+hazePlane.position.y = 6;
+scene.add(hazePlane);
+
+/* ── resize ───────────────────────────────────────────── */
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── render loop ──────────────────────────────────────── */
+const t0 = performance.now();
+function loop(){
+  const t = (performance.now()-t0)/1000;
+
+  updateLeaves(t);
+  hazeMat.uniforms.uTime.value = t;
+
+  // slow orbital drift — satellite's patient gaze
+  const a = t * 0.012;
+  const cr = 50;
+  camera.position.x += (Math.cos(a)*cr - camera.position.x)*0.003;
+  camera.position.z += (Math.sin(a)*cr - camera.position.z)*0.003;
+  camera.position.y += (26 + Math.sin(t*0.04)*3 - camera.position.y)*0.003;
+
+  controls.target.y += (14 - controls.target.y)*0.005;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+// initial paint
+updateLeaves(0);
+loop();
+</script>
+</body>
+</html>
