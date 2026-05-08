@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>strange attractor · memo akten slow drift</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020608; overflow:hidden;
+               color:#afc5d8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">c8n</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Memo Akten-style: no click-to-cycle, no UI chrome. One attractor (Aizawa),
+// slow camera drift through layered particle fog, depth-stratified color,
+// momentum-based camera motion. Particles have inertia. Oceanic palette.
+
+const W = 256, H = 256, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020608, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  const r = Math.random() * 0.5 + 0.05;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.random() * Math.PI;
+  init[i*4]   = r * Math.sin(phi) * Math.cos(theta);
+  init[i*4+1] = r * Math.sin(phi) * Math.sin(theta);
+  init[i*4+2] = r * Math.cos(phi);
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(rtB); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = { prev: { value: rtA.texture }, uDt: { value: 0.0 } };
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    varying vec2 vUv;
+    vec3 aizawa(vec3 p){
+      const float a=0.95, b=0.7, c=0.6, d=3.5, e=0.25, f=0.1;
+      return vec3((p.z-b)*p.x - d*p.y, d*p.x + (p.z-b)*p.y,
+                  c + a*p.z - p.z*p.z*p.z/3.0 - (p.x*p.x + p.y*p.y)*(1.0+e*p.z) + f*p.z*p.x*p.x*p.x);
+    }
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz, dp = aizawa(p);
+      p += dp * uDt * 0.18;
+      float age = mod(s.w + uDt * 0.035, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x020608, 0.12);
+
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 80);
+camera.position.set(0, 0.8, 6.5);
+camera.lookAt(0, 0, 0);
+
+let camVel = new THREE.Vector3(0, 0, 0);
+let camTarget = new THREE.Vector3(0, 0.8, 6.5);
+let lookTarget = new THREE.Vector3(0, 0, 0);
+let lookVel = new THREE.Vector3(0, 0, 0);
+
+// deep background fog plane
+const bgGeom = new THREE.PlaneGeometry(60, 60);
+const bgMat = new THREE.MeshBasicMaterial({ color: 0x051018, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
+const bgPlane = new THREE.Mesh(bgGeom, bgMat);
+bgPlane.position.set(0, 0, -18);
+scene.add(bgPlane);
+
+// volumetric fog layers
+for (let i = 0; i < 4; i++){
+  const layerGeom = new THREE.PlaneGeometry(24 + i*8, 24 + i*8, 1, 1);
+  const depth = -8 - i * 4;
+  const opacity = 0.08 - i * 0.015;
+  const layerMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uSeed: { value: i * 0.3 }, uColor: { value: new THREE.Color(0.05, 0.12, 0.18) } },
+    transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+    fragmentShader: `
+      uniform float uTime, uSeed; uniform vec3 uColor; varying vec2 vUv;
+      float n(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+      void main(){
+        vec2 p = vUv * 6.0 + vec2(uTime * 0.008 + uSeed, uTime * 0.005);
+        float val = n(floor(p)) * 0.5 + n(floor(p * 2.0)) * 0.3 + n(floor(p * 4.0)) * 0.2;
+        float a = smoothstep(0.3, 0.7, val) * ${opacity.toFixed(3)};
+        gl_FragColor = vec4(uColor, a);
+      }
+    `
+  });
+  const layer = new THREE.Mesh(layerGeom, layerMat);
+  layer.position.set(0, 0, depth);
+  layer.rotation.x = -0.05;
+  scene.add(layer);
+}
+
+// particle system
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2] = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state: { value: rtA.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime: { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state; uniform float uPixel, uTime;
+    attribute vec2 uvIdx;
+    varying vec3 vCol; varying float vAlpha, vFogDepth;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz * 4.5;
+      float age = s.w;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vFogDepth = -mv.z;
+      float depthNorm = clamp(vFogDepth / 20.0, 0.0, 1.0);
+      vec3 nearCol = vec3(0.15, 0.35, 0.48);
+      vec3 farCol = vec3(0.05, 0.14, 0.22);
+      vCol = mix(nearCol, farCol, depthNorm);
+      vCol = mix(vCol, vCol * 1.3 + vec3(0.08, 0.12, 0.18), smoothstep(0.0, 0.4, age));
+      vAlpha = 1.0 - smoothstep(0.85, 1.0, age);
+      gl_PointSize = (1.2 + 0.6 * sin(age * 6.28)) * uPixel * (4.0 / max(1.0, vFogDepth));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol; varying float vAlpha, vFogDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * vAlpha;
+      float fogF = 1.0 - exp(-0.004 * vFogDepth * vFogDepth);
+      vec3 col = mix(vCol, vec3(0.01, 0.03, 0.05), fogF);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  const t = now / 1000;
+
+  simUniforms.uDt.value = dt;
+  for (let i = 0; i < 3; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = t;
+
+  // momentum-based camera drift
+  const orbitRadius = 6.5 + Math.sin(t * 0.08) * 1.5;
+  const orbitAngle = t * 0.04;
+  const orbitY = 0.8 + Math.sin(t * 0.05) * 0.6;
+  camTarget.set(Math.sin(orbitAngle) * orbitRadius, orbitY, Math.cos(orbitAngle) * orbitRadius);
+  camVel.lerp(camTarget.clone().sub(camera.position), 0.015);
+  camera.position.add(camVel);
+
+  lookTarget.set(Math.sin(t * 0.03) * 0.5, Math.cos(t * 0.025) * 0.3, 0);
+  lookVel.lerp(lookTarget.clone().sub(camera.position).normalize().multiplyScalar(10), 0.01);
+  const lookAt = camera.position.clone().add(lookVel);
+  camera.lookAt(lookAt);
+
+  // update fog layers
+  scene.children.forEach(child => {
+    if (child.material && child.material.uniforms && child.material.uniforms.uTime){
+      child.material.uniforms.uTime.value = t;
+    }
+  });
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
