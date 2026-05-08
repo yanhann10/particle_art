@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9ou · Hobbs streamline packing · 3D flow plateau</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1914; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">9ou</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Tyler Hobbs' Fidenza signature: streamlines that NEVER OVERLAP, packing like rivers.
+// We generate a 2D flow-field via simplex noise, integrate streamlines with collision-detection
+// so they carve around each other, then render each as a thick varying-width ribbon in 3D.
+// Palette: muted earth tones (ochre, umber, moss, charcoal). The plane rotates slowly so the
+// ribbons read as sculptural relief.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1914);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 12, 18);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// simplex noise (inline, single-octave)
+const G2 = (3.0 - Math.sqrt(3.0)) / 6.0, F2 = 0.5 * (Math.sqrt(3.0) - 1.0);
+const grad2 = [[1,1],[-1,1],[1,-1],[-1,-1],[1,0],[-1,0],[0,1],[0,-1]];
+const perm = new Uint8Array(512);
+for (let i = 0; i < 256; i++) perm[i] = i;
+for (let i = 255; i > 0; i--){
+  const j = Math.floor(Math.random()*(i+1));
+  [perm[i], perm[j]] = [perm[j], perm[i]];
+}
+for (let i = 0; i < 256; i++) perm[256+i] = perm[i];
+function noise2(x, y){
+  let n0=0, n1=0, n2=0;
+  const s = (x+y)*F2, i = Math.floor(x+s), j = Math.floor(y+s);
+  const t = (i+j)*G2, X0 = i-t, Y0 = j-t, x0 = x-X0, y0 = y-Y0;
+  const i1 = x0>y0 ? 1:0, j1 = x0>y0 ? 0:1;
+  const x1 = x0-i1+G2, y1 = y0-j1+G2, x2 = x0-1.0+2.0*G2, y2 = y0-1.0+2.0*G2;
+  const ii = i&255, jj = j&255;
+  const gi0 = perm[ii+perm[jj]]%8, gi1 = perm[ii+i1+perm[jj+j1]]%8, gi2 = perm[ii+1+perm[jj+1]]%8;
+  let t0 = 0.5 - x0*x0 - y0*y0; if (t0>0){ t0*=t0; n0 = t0*t0*(grad2[gi0][0]*x0+grad2[gi0][1]*y0); }
+  let t1 = 0.5 - x1*x1 - y1*y1; if (t1>0){ t1*=t1; n1 = t1*t1*(grad2[gi1][0]*x1+grad2[gi1][1]*y1); }
+  let t2 = 0.5 - x2*x2 - y2*y2; if (t2>0){ t2*=t2; n2 = t2*t2*(grad2[gi2][0]*x2+grad2[gi2][1]*y2); }
+  return 70.0*(n0+n1+n2);
+}
+
+// flow-field: 2D simplex at three octaves, then curl
+const SCALE = 0.12;
+function flowAt(x, z){
+  const px = x*SCALE, py = z*SCALE;
+  const a = noise2(px, py) + 0.5*noise2(px*2, py*2) + 0.25*noise2(px*4, py*4);
+  const b = noise2(px+10, py+10) + 0.5*noise2((px+10)*2, (py+10)*2) + 0.25*noise2((px+10)*4, (py+10)*4);
+  // curl: (∂b/∂x, -∂a/∂y) — approximated via finite diff
+  const dx = 0.05;
+  const dBdX = (noise2((x+dx)*SCALE+10, z*SCALE+10) - b)/dx;
+  const dAdZ = (noise2(x*SCALE, (z+dx)*SCALE) - a)/dx;
+  const ang = Math.atan2(-dAdZ, dBdX);
+  return ang;
+}
+
+// occupancy grid for collision-detect (each cell stores a list of curve indices)
+const GRID = 0.25;
+const occupied = new Map();
+function cellKey(x, z){ return Math.floor(x/GRID)+','+Math.floor(z/GRID); }
+function isOccupied(x, z, excludeIdx){
+  const k = cellKey(x, z);
+  const arr = occupied.get(k);
+  if (!arr) return false;
+  for (const idx of arr) if (idx !== excludeIdx) return true;
+  return false;
+}
+function markOccupied(x, z, idx){
+  const k = cellKey(x, z);
+  if (!occupied.has(k)) occupied.set(k, []);
+  occupied.get(k).push(idx);
+}
+
+// integrate one streamline from (sx, sz) until collision or bounds or max-length
+// returns array of {x, z} points
+function traceStream(sx, sz, curveIdx, maxLen=60){
+  const pts = [{x:sx, z:sz}];
+  let x=sx, z=sz, len=0;
+  const step = 0.15;
+  while (len < maxLen){
+    const ang = flowAt(x, z);
+    const dx = Math.cos(ang)*step, dz = Math.sin(ang)*step;
+    const nx = x+dx, nz = z+dz;
+    // collision check: if any neighbor cell is occupied by another curve, stop
+    const checks = [[nx,nz], [nx+GRID,nz], [nx-GRID,nz], [nx,nz+GRID], [nx,nz-GRID]];
+    let hit = false;
+    for (const [cx,cz] of checks){
+      if (isOccupied(cx, cz, curveIdx)){ hit = true; break; }
+    }
+    if (hit) break;
+    if (Math.abs(nx)>12 || Math.abs(nz)>12) break;
+    x=nx; z=nz; len+=step;
+    pts.push({x, z});
+  }
+  return pts;
+}
+
+// Hobbs palette: muted earth tones (luxe mode)
+const palette = [
+  new THREE.Color(0xc9a66b), // ochre
+  new THREE.Color(0x7a5c47), // umber
+  new THREE.Color(0x5a7054), // moss
+  new THREE.Color(0x3d3d38), // charcoal
+  new THREE.Color(0xa68a6d), // sand
+  new THREE.Color(0x4a423a)  // burnt umber
+];
+
+// generate ~40 streamlines, each with a unique color and varying thickness
+const streams = [];
+const N_STREAMS = 40;
+for (let i = 0; i < N_STREAMS; i++){
+  const sx = (Math.random()-0.5)*18, sz = (Math.random()-0.5)*18;
+  // check initial occupancy
+  if (isOccupied(sx, sz, i)) continue;
+  const pts = traceStream(sx, sz, i, 50 + Math.random()*30);
+  if (pts.length < 5) continue;
+  // mark all points occupied
+  for (const p of pts) markOccupied(p.x, p.z, i);
+  streams.push({
+    pts,
+    color: palette[Math.floor(Math.random()*palette.length)],
+    baseRadius: 0.12 + Math.random()*0.15
+  });
+}
+
+// render each streamline as a thick ribbon with varying width (TubeGeometry)
+const group = new THREE.Group();
+scene.add(group);
+for (const stream of streams){
+  const {pts, color, baseRadius} = stream;
+  if (pts.length < 2) continue;
+  // build a THREE.CatmullRomCurve3 (lifted to 3D: y=height from simplex)
+  const curve3d = pts.map(p => {
+    const h = noise2(p.x*0.3, p.z*0.3)*0.8;
+    return new THREE.Vector3(p.x, h, p.z);
+  });
+  const path = new THREE.CatmullRomCurve3(curve3d);
+  // vary radius along length: starts thin, swells mid, tapers end
+  const radFunc = (u) => {
+    const mid = Math.abs(u*2 - 1); // 0 at ends, 1 at center
+    const swell = 0.6 + 0.4*Math.sin(u*Math.PI);
+    return baseRadius * swell * (0.7 + 0.3*mid);
+  };
+  const geom = new THREE.TubeGeometry(path, Math.min(pts.length*3, 200), 1, 8, false);
+  // manual radius modulation per-vertex
+  const pos = geom.attributes.position;
+  for (let i = 0; i < pos.count; i++){
+    const seg = Math.floor(i / 9);
+    const u = seg / Math.max(1, Math.floor(pos.count/9)-1);
+    const r = radFunc(u);
+    const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
+    const center = path.getPoint(u);
+    const dir = v.clone().sub(center);
+    const desiredLen = r;
+    dir.setLength(desiredLen);
+    pos.setXYZ(i, center.x+dir.x, center.y+dir.y, center.z+dir.z);
+  }
+  pos.needsUpdate = true;
+  // flat painterly material (Lambert, no specular)
+  const mat = new THREE.MeshLambertMaterial({ color, flatShading: true });
+  const mesh = new THREE.Mesh(geom, mat);
+  group.add(mesh);
+}
+
+// lighting: soft warm ambient + one subtle directional from above-left
+const amb = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(amb);
+const dir = new THREE.DirectionalLight(0xfff5e6, 0.5);
+dir.position.set(-6, 8, 4);
+scene.add(dir);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  // slow rotation: the plateau drifts gently so streamlines read as sculptural
+  group.rotation.y = t * 0.08;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
