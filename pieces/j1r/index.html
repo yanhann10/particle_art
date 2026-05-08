@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>j1r · blind camera · the city remembered through its noise</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background: #b8a89a;
+    background-image:
+      repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,255,255,0.02) 2px, rgba(255,255,255,0.02) 4px),
+      repeating-linear-gradient(90deg, transparent, transparent 2px, rgba(0,0,0,0.015) 2px, rgba(0,0,0,0.015) 4px),
+      radial-gradient(ellipse at 30% 20%, rgba(255,255,255,0.12), transparent 50%),
+      radial-gradient(ellipse at 70% 80%, rgba(0,0,0,0.08), transparent 45%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 10px; letter-spacing: 0.04em; max-width:320px; line-height:1.4; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.38; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">j1r · blind camera · the city remembered through its noise</div>
+<div class="hint">synthetic soundscape drives particle hallucination — ambient noise reconstructing a remembered street scene</div>
+<div class="src">diego trujillo pisanty · lumen prize 2024 · descended from sav</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Diego Trujillo Pisanty · Blind Camera (2024 Lumen Prize Still Image Winner)
+// Neural network reconstructs images of Mexico City from ambient sound alone.
+// Images feel like a city remembered through its noise — granular, dreamlike,
+// sun-bleached, smog-tinted.
+//
+// TECHNIQUE: synthetic FFT-like spectral bins (8 frequency bands) drive a 2D
+// particle field over a depth-warped ground plane. Each bin's magnitude acts
+// as a local attractor pulling nearby points into emergent silhouettes:
+// - low frequencies (bass/traffic) → horizontal street forms
+// - mid frequencies (voices/vendors) → vertical human-scale clusters
+// - high frequencies (wind/metal) → dispersed atmospheric noise
+// Particles drift between coherence (recognizable street scene) and dissolution
+// (pure noise cloud) as the synthetic soundscape evolves.
+//
+// PALETTE: sun-bleached concrete (#d4c8ba), smog ochre (#b89a6e), faded asphalt
+// (#6a5f58), haze white (#f2ede8). The ground texture is paper-grain concrete
+// rendered via CSS (no blank canvas).
+//
+// NARRATIVE ARC: The piece cycles through GATHER (points coalesce into street
+// geometry) → HOLD (brief legible silhouette) → DISPERSE (form dissolves into
+// ambient noise) → RE-GATHER. This is memory: the city assembles from sound,
+// holds for a moment, then forgets itself.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0xb8a89a, 12, 42);
+const camera = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, 0.1, 80);
+camera.position.set(0, 5.5, 18);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── synthetic soundscape (8 frequency bins)
+const BINS = 8;
+const spectrum = new Float32Array(BINS);
+const spectrumSmooth = new Float32Array(BINS);
+const binPhase = new Float32Array(BINS);
+const binFreq = new Float32Array(BINS);
+for (let i = 0; i < BINS; i++){
+  binPhase[i] = Math.random() * Math.PI * 2;
+  binFreq[i] = 0.0003 + i * 0.00012 + Math.random() * 0.00008;
+}
+
+function updateSpectrum(t){
+  // synthetic FFT: each bin oscillates with slow drift + occasional bursts
+  for (let i = 0; i < BINS; i++){
+    const base = 0.15 + 0.25 * Math.sin(binPhase[i] + t * binFreq[i]);
+    const burst = Math.max(0, Math.sin(t * 0.0002 + i * 0.8) - 0.6) * 1.8;
+    spectrum[i] = Math.min(1.0, base + burst);
+    spectrumSmooth[i] += (spectrum[i] - spectrumSmooth[i]) * 0.08;
+  }
+}
+
+// ────────────── particle field (2D street-scale scatter)
+const N = 1800;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const binAssign = new Uint8Array(N);  // which frequency bin attracts this particle
+const seedArr = new Float32Array(N);
+
+// init: scattered over ground plane with slight height variance (dust layer)
+for (let i = 0; i < N; i++){
+  pos[i*3]     = (Math.random() - 0.5) * 32;
+  pos[i*3 + 1] = Math.random() * 0.8 - 0.2;
+  pos[i*3 + 2] = (Math.random() - 0.5) * 20;
+  vel[i*3]     = 0;
+  vel[i*3 + 1] = 0;
+  vel[i*3 + 2] = 0;
+  binAssign[i] = Math.floor(Math.random() * BINS);
+  seedArr[i]   = Math.random();
+}
+
+// attractor positions per bin (hand-placed to suggest street geometry)
+const attractors = [
+  { x: -6,  y: 0.2, z: -3 },   // bin 0: low bass → left street edge
+  { x:  6,  y: 0.2, z: -3 },   // bin 1: low-mid → right street edge
+  { x: -3,  y: 1.8, z:  0 },   // bin 2: mid → human-scale cluster left
+  { x:  3,  y: 1.8, z:  0 },   // bin 3: mid → human-scale cluster right
+  { x:  0,  y: 0.4, z: -4 },   // bin 4: upper-mid → center ground (vendor)
+  { x: -8,  y: 0.6, z:  2 },   // bin 5: high-mid → dispersed back-left
+  { x:  8,  y: 0.6, z:  2 },   // bin 6: high-mid → dispersed back-right
+  { x:  0,  y: 3.2, z:  1 }    // bin 7: high → atmospheric scatter overhead
+];
+
+function stepParticles(dt){
+  // each particle is pulled toward its assigned bin's attractor with strength
+  // proportional to that bin's current spectral magnitude
+  for (let i = 0; i < N; i++){
+    const bin = binAssign[i];
+    const mag = spectrumSmooth[bin];
+    const att = attractors[bin];
+    const dx = att.x - pos[i*3];
+    const dy = att.y - pos[i*3+1];
+    const dz = att.z - pos[i*3+2];
+    const d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.1;
+    // attractor force scales with spectral magnitude
+    const force = mag * 0.12;
+    vel[i*3]     += (dx / d) * force * dt * 60;
+    vel[i*3 + 1] += (dy / d) * force * dt * 60;
+    vel[i*3 + 2] += (dz / d) * force * dt * 60;
+    // ambient drift: particles never fully settle (the city is always moving)
+    vel[i*3]     += (Math.random() - 0.5) * 0.015;
+    vel[i*3 + 1] += (Math.random() - 0.5) * 0.010;
+    vel[i*3 + 2] += (Math.random() - 0.5) * 0.012;
+    // damping
+    vel[i*3]     *= 0.92;
+    vel[i*3 + 1] *= 0.88;
+    vel[i*3 + 2] *= 0.90;
+    pos[i*3]     += vel[i*3]   * dt;
+    pos[i*3 + 1] += vel[i*3+1] * dt;
+    pos[i*3 + 2] += vel[i*3+2] * dt;
+    // ground clamp (with small bounce) — particles stay near street level
+    if (pos[i*3+1] < 0.0){
+      pos[i*3+1] = 0.0;
+      vel[i*3+1] *= -0.3;
+    }
+    // soft world bounds
+    const px = pos[i*3], pz = pos[i*3+2];
+    const d2 = px*px + pz*pz;
+    if (d2 > 400){
+      const inv = 0.008 / Math.sqrt(d2);
+      vel[i*3]   += -px * inv;
+      vel[i*3+2] += -pz * inv;
+    }
+  }
+}
+
+// ────────────── render
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+const binAttr = new Float32Array(N);
+for (let i = 0; i < N; i++) binAttr[i] = binAssign[i] / BINS;
+geom.setAttribute('binIndex', new THREE.BufferAttribute(binAttr, 1));
+
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uSpec0:  { value: 0 },
+  uSpec1:  { value: 0 },
+  uSpec2:  { value: 0 },
+  uSpec3:  { value: 0 },
+  uSpec4:  { value: 0 },
+  uSpec5:  { value: 0 },
+  uSpec6:  { value: 0 },
+  uSpec7:  { value: 0 }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uSpec0, uSpec1, uSpec2, uSpec3, uSpec4, uSpec5, uSpec6, uSpec7;
+    attribute float seed;
+    attribute float binIndex;
+    varying vec3  vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // bin-specific spectral magnitude
+      float spec = mix(uSpec0, uSpec1, step(0.125, binIndex));
+      spec = mix(spec, uSpec2, step(0.25, binIndex));
+      spec = mix(spec, uSpec3, step(0.375, binIndex));
+      spec = mix(spec, uSpec4, step(0.5, binIndex));
+      spec = mix(spec, uSpec5, step(0.625, binIndex));
+      spec = mix(spec, uSpec6, step(0.75, binIndex));
+      spec = mix(spec, uSpec7, step(0.875, binIndex));
+      // size: stronger bins → larger points (the sound makes the image visible)
+      float baseSize = 1.4 + spec * 2.2;
+      gl_PointSize = baseSize * uPixel * (18.0 / max(1.0, dist));
+      vAlpha = clamp(1.0 - (dist - 16.0) / 26.0, 0.0, 1.0) * (0.3 + spec * 0.7);
+
+      // PALETTE: sun-bleached concrete, smog ochre, faded asphalt, haze white
+      vec3 concrete = vec3(0.83, 0.78, 0.73);   // #d4c8ba
+      vec3 smog     = vec3(0.72, 0.60, 0.43);   // #b89a6e
+      vec3 asphalt  = vec3(0.42, 0.37, 0.35);   // #6a5f58
+      vec3 haze     = vec3(0.95, 0.93, 0.91);   // #f2ede8
+      // low bins → ground (concrete/asphalt), high bins → atmospheric (haze/smog)
+      vec3 lowCol  = mix(asphalt, concrete, smoothstep(0.0, 0.3, binIndex));
+      vec3 highCol = mix(smog, haze, smoothstep(0.6, 1.0, binIndex));
+      vCol = mix(lowCol, highCol, smoothstep(0.25, 0.75, binIndex));
+      // particles in active bins glow slightly brighter (the sound illuminates)
+      vCol *= (0.85 + spec * 0.35);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a * 0.9);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ground plane (depth-warped concrete slab — the remembered street surface)
+const groundGeo = new THREE.PlaneGeometry(40, 28, 32, 24);
+const groundPos = groundGeo.attributes.position.array;
+for (let i = 0; i < groundPos.length; i += 3){
+  const x = groundPos[i], z = groundPos[i+1];
+  const d = Math.sqrt(x*x + z*z);
+  groundPos[i+2] = -Math.sin(d * 0.08) * 0.4 - 0.5;  // subtle concave warp
+}
+groundGeo.computeVertexNormals();
+const groundMat = new THREE.MeshBasicMaterial({
+  color: 0xa89880, transparent: true, opacity: 0.18, side: THREE.DoubleSide
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.5;
+scene.add(ground);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = now / 1000;
+  updateSpectrum(now);
+  uniforms.uSpec0.value = spectrumSmooth[0];
+  uniforms.uSpec1.value = spectrumSmooth[1];
+  uniforms.uSpec2.value = spectrumSmooth[2];
+  uniforms.uSpec3.value = spectrumSmooth[3];
+  uniforms.uSpec4.value = spectrumSmooth[4];
+  uniforms.uSpec5.value = spectrumSmooth[5];
+  uniforms.uSpec6.value = spectrumSmooth[6];
+  uniforms.uSpec7.value = spectrumSmooth[7];
+  stepParticles(dt);
+  geom.attributes.position.needsUpdate = true;
+
+  // slow camera drift: gentle pan across the reconstructed scene
+  const ang = now * 0.00008;
+  camera.position.x = Math.sin(ang) * 4.5;
+  camera.position.z = 18 + Math.cos(ang * 0.6) * 3;
+  camera.lookAt(0, 1.2, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
