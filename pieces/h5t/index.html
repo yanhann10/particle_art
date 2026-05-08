@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h5t · sixth extinction clock (GPGPU)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .counter { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; 
+             letter-spacing: 0.04em; line-height: 1.6; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">h5t</div>
+<div class="counter">
+  <div>geological seconds: <span id="geo-time">0</span></div>
+  <div>species culled: <span id="cull-count">0</span></div>
+  <div>remaining: <span id="remain-count">102400</span></div>
+</div>
+<div class="src">dark ecology · timothy morton · mass extinction as particle field</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// The piece tracks geological deep-time at 1 million years per second of viewer-time.
+// Every 66 million years (66 seconds), we undergo a mass-extinction event:
+// 65-85% of particles are culled instantly. The attractor parameters shift slightly.
+// The remaining particles drift through a modified Lorenz basin that slowly collapses
+// toward stasis as biodiversity drops. Palette: Cambrian ochre → Permian ash → Holocene grey.
+// The viewer watches loss accumulate at a pace they cannot feel directly.
+
+const W = 320, H = 320;
+let N = W * H;  // starts at ~102k, will decrease
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 6.0;
+  init[i*4+1] = (Math.random()*2-1) * 6.0;
+  init[i*4+2] = (Math.random()*2-1) * 6.0 + 20.0;
+  init[i*4+3] = Math.random();  // alive=1.0 initially, will mark dead as 0.0
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// simulation: modified Lorenz with mass-extinction events
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt:    { value: 0.004 },
+  uSigma: { value: 9.2 },
+  uRho:   { value: 24.5 },
+  uBeta:  { value: 2.5 },
+  uExtinctionFlag: { value: 0.0 },  // triggers particle death when >0
+  uSeed:  { value: Math.random() * 1000.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uSigma;
+    uniform float uRho;
+    uniform float uBeta;
+    uniform float uExtinctionFlag;
+    uniform float uSeed;
+    varying vec2 vUv;
+
+    float hash(vec2 p){
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float alive = s.w;
+
+      // if extinction event is active, kill particle with probability
+      if (uExtinctionFlag > 0.5){
+        float r = hash(vUv + uSeed);
+        if (r < 0.75) alive = 0.0;  // 75% die
+      }
+
+      if (alive < 0.5){
+        // dead particles drift outward slowly, never integrated
+        p += vec3(hash(vUv)*2.0-1.0, hash(vUv.yx)*2.0-1.0, hash(vUv.xx)*2.0-1.0) * 0.02;
+      } else {
+        // living particles follow attractor
+        vec3 dp = vec3(
+          uSigma * (p.y - p.x),
+          p.x * (uRho - p.z) - p.y,
+          p.x * p.y - uBeta * p.z
+        );
+        p += dp * uDt;
+      }
+
+      gl_FragColor = vec4(p, alive);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 400);
+camera.position.set(0, 0, 75);
+camera.lookAt(0, 0, 15);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0 },
+    uEra:   { value: 0.0 }  // 0=Cambrian, 1=modern
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uTime;
+    uniform float uEra;
+    attribute vec2 uvIdx;
+    varying float vAlive;
+    varying float vDepth;
+    varying float vEra;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAlive = s.w;
+      vEra = uEra;
+      
+      p.z -= 20.0;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      vDepth = dist;
+      
+      float sz = vAlive > 0.5 ? 0.9 : 0.4;
+      gl_PointSize = sz * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlive;
+    varying float vDepth;
+    varying float vEra;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      
+      // palette shift over geological epochs
+      // Cambrian (era=0): warm ochre #8b6f47
+      // Permian (era=0.5): volcanic ash #5a534e
+      // Holocene (era=1.0): dead grey #3d3d3d
+      vec3 cambrianCol = vec3(0.545, 0.435, 0.278);
+      vec3 permianCol  = vec3(0.353, 0.325, 0.306);
+      vec3 holoceneCol = vec3(0.239, 0.239, 0.239);
+      
+      vec3 col = mix(cambrianCol, permianCol, smoothstep(0.0, 0.5, vEra));
+      col = mix(col, holoceneCol, smoothstep(0.5, 1.0, vEra));
+      
+      if (vAlive < 0.5){
+        // dead particles: faded grey
+        col = vec3(0.18, 0.17, 0.16);
+        a *= 0.3;
+      }
+      
+      gl_FragColor = vec4(col * a * 0.6, a);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// geological time tracking
+let geoSeconds = 0;  // each real-second = 1 million years
+let lastExtinction = 0;
+let extinctionCount = 0;
+let cullCount = 0;
+
+const geoTimeEl = document.getElementById('geo-time');
+const cullCountEl = document.getElementById('cull-count');
+const remainCountEl = document.getElementById('remain-count');
+
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = (now - lastTime) / 1000; 
+  lastTime = now;
+  
+  geoSeconds += dt;
+  
+  // mass extinction every 66 seconds (66 million years in piece-time)
+  // Cambrian explosion → Ordovician-Silurian → Late Devonian → Permian-Triassic → Triassic-Jurassic → Cretaceous-Paleogene → Holocene
+  const timeSinceLastExtinction = geoSeconds - lastExtinction;
+  if (timeSinceLastExtinction > 66.0){
+    simUniforms.uExtinctionFlag.value = 1.0;
+    simUniforms.uSeed.value = Math.random() * 1000.0;
+    lastExtinction = geoSeconds;
+    extinctionCount++;
+    
+    // shift attractor params slightly — ecosystem destabilization
+    simUniforms.uSigma.value = 9.2 - extinctionCount * 0.3;
+    simUniforms.uRho.value   = 24.5 - extinctionCount * 0.8;
+    simUniforms.uBeta.value  = 2.5 - extinctionCount * 0.05;
+    
+    // count culled particles after extinction
+    setTimeout(() => {
+      cullCount += Math.floor(N * 0.75);
+      cullCountEl.textContent = cullCount.toLocaleString();
+      remainCountEl.textContent = (N * H * W - cullCount).toLocaleString();
+    }, 100);
+  } else {
+    simUniforms.uExtinctionFlag.value = 0.0;
+  }
+  
+  // era parameter: 0 at start, approaches 1 as time goes on
+  const eraProgress = Math.min(geoSeconds / 300.0, 1.0);  // 5 minutes = full progression
+  pointsMat.uniforms.uEra.value = eraProgress;
+  
+  geoTimeEl.textContent = Math.floor(geoSeconds).toLocaleString();
+
+  // step sim
+  for (let i = 0; i < 3; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = now / 1000;
+  
+  // extremely slow camera drift — deep time pacing
+  const ang = now * 0.00008;
+  camera.position.x = Math.sin(ang) * 75;
+  camera.position.z = Math.cos(ang) * 75;
+  camera.position.y = Math.sin(ang * 0.3) * 12;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
