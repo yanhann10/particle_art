@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>b01 · process elements · casey reas</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+html, body { margin:0; padding:0; height:100%; background:#080808; overflow:hidden; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">b01</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const W = innerWidth, H = innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.setClearColor(0x080808, 1);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+// Two render targets for ping-pong accumulation
+const rtOpts = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: THREE.HalfFloatType };
+let rtA = new THREE.WebGLRenderTarget(W * Math.min(devicePixelRatio, 2), H * Math.min(devicePixelRatio, 2), rtOpts);
+let rtB = new THREE.WebGLRenderTarget(W * Math.min(devicePixelRatio, 2), H * Math.min(devicePixelRatio, 2), rtOpts);
+
+// Fullscreen quad to display accumulated buffer with slight fade
+const fadeScene = new THREE.Scene();
+const fadeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const fadeMat = new THREE.ShaderMaterial({
+  uniforms: { tAccum: { value: null } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tAccum;
+    varying vec2 vUv;
+    void main(){
+      vec4 c = texture2D(tAccum, vUv);
+      gl_FragColor = vec4(c.rgb, 1.0) * 0.997;
+    }
+  `,
+  depthTest: false, depthWrite: false
+});
+const fadeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), fadeMat);
+fadeScene.add(fadeQuad);
+
+// Main scene for drawing connections
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 200);
+camera.position.set(0, 0, 38);
+
+// Agent system - 400 elements on sphere surface following circular arcs
+const NUM = 400;
+const SPHERE_R = 12;
+const EPSILON = 2.2; // proximity threshold for connection
+
+class Element {
+  constructor(i) {
+    // Position on sphere via random axis + circular path
+    this.axis = new THREE.Vector3(
+      Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5
+    ).normalize();
+    // Perpendicular vectors for circular motion
+    this.perp1 = new THREE.Vector3();
+    this.perp2 = new THREE.Vector3();
+    const arbitrary = Math.abs(this.axis.x) < 0.9 ? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,1,0);
+    this.perp1.crossVectors(this.axis, arbitrary).normalize();
+    this.perp2.crossVectors(this.axis, this.perp1).normalize();
+    
+    this.radius = SPHERE_R * (0.6 + Math.random() * 0.4);
+    this.speed = (0.15 + Math.random() * 0.25) * (Math.random() < 0.5 ? 1 : -1);
+    this.phase = Math.random() * Math.PI * 2;
+    this.arcRadius = 0.8 + Math.random() * 2.5; // radius of circular arc on sphere
+    
+    // Center of circular path on sphere
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    this.center = new THREE.Vector3(
+      Math.sin(phi) * Math.cos(theta),
+      Math.sin(phi) * Math.sin(theta),
+      Math.cos(phi)
+    ).multiplyScalar(SPHERE_R);
+    
+    this.pos = new THREE.Vector3();
+    this.prevPos = new THREE.Vector3();
+    this.update(0);
+    this.prevPos.copy(this.pos);
+  }
+  
+  update(t) {
+    this.prevPos.copy(this.pos);
+    const angle = t * this.speed + this.phase;
+    // Circular arc around center on sphere surface
+    const offset = new THREE.Vector3()
+      .addScaledVector(this.perp1, Math.cos(angle) * this.arcRadius)
+      .addScaledVector(this.perp2, Math.sin(angle) * this.arcRadius);
+    this.pos.copy(this.center).add(offset).normalize().multiplyScalar(SPHERE_R);
+  }
+}
+
+const elements = [];
+for (let i = 0; i < NUM; i++) elements.push(new Element(i));
+
+// Connection quad geometry - preallocate a large buffer
+const MAX_QUADS_PER_FRAME = 800;
+const quadPositions = new Float32Array(MAX_QUADS_PER_FRAME * 6 * 3); // 2 triangles per quad
+const quadAlphas = new Float32Array(MAX_QUADS_PER_FRAME * 6);
+const quadGeom = new THREE.BufferGeometry();
+quadGeom.setAttribute('position', new THREE.BufferAttribute(quadPositions, 3));
+quadGeom.setAttribute('alpha', new THREE.BufferAttribute(quadAlphas, 1));
+quadGeom.setDrawRange(0, 0);
+
+const quadMat = new THREE.ShaderMaterial({
+  uniforms: {},
+  vertexShader: `
+    attribute float alpha;
+    varying float vAlpha;
+    void main(){
+      vAlpha = alpha;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      // Warm sumi-ink white with slight amber
+      vec3 col = vec3(0.92, 0.88, 0.82);
+      gl_FragColor = vec4(col * vAlpha, vAlpha);
+    }
+  `,
+  transparent: true,
+  depthTest: false,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const quadMesh = new THREE.Mesh(quadGeom, quadMat);
+scene.add(quadMesh);
+
+// Agent dots - subtle indicators
+const dotGeom = new THREE.BufferGeometry();
+const dotPositions = new Float32Array(NUM * 3);
+dotGeom.setAttribute('position', new THREE.BufferAttribute(dotPositions, 3));
+const dotMat = new THREE.PointsMaterial({
+  size: 1.5,
+  color: 0x443833,
+  transparent: true,
+  opacity: 0.3,
+  blending: THREE.AdditiveBlending,
+  depthTest: false
+});
+const dots = new THREE.Points(dotGeom, dotMat);
+scene.add(dots);
+
+// Contact time tracking for alpha growth
+const contactMap = new Map();
+function contactKey(i, j) { return i < j ? `${i}_${j}` : `${j}_${i}`; }
+
+const _v = new THREE.Vector3();
+
+function buildQuads(t) {
+  let quadCount = 0;
+  const activeContacts = new Set();
+  
+  for (let i = 0; i < NUM && quadCount < MAX_QUADS_PER_FRAME; i++) {
+    for (let j = i + 1; j < NUM && quadCount < MAX_QUADS_PER_FRAME; j++) {
+      const dist = elements[i].pos.distanceTo(elements[j].pos);
+      if (dist < EPSILON) {
+        const key = contactKey(i, j);
+        activeContacts.add(key);
+        let ct = contactMap.get(key) || 0;
+        ct += 0.016; // accumulate contact time
+        contactMap.set(key, ct);
+        
+        // Alpha grows with contact time, proximity
+        const proximity = 1.0 - dist / EPSILON;
+        const alpha = Math.min(0.12, ct * 0.02) * proximity;
+        
+        if (alpha < 0.003) continue;
+        
+        // Build quad from prev/current positions of both agents
+        const a = elements[i].pos;
+        const b = elements[i].prevPos;
+        const c = elements[j].pos;
+        const d = elements[j].prevPos;
+        
+        const base = quadCount * 18;
+        const aBase = quadCount * 6;
+        
+        // Triangle 1: a, b, c
+        quadPositions[base]    = a.x; quadPositions[base+1]  = a.y; quadPositions[base+2]  = a.z;
+        quadPositions[base+3]  = b.x; quadPositions[base+4]  = b.y; quadPositions[base+5]  = b.z;
+        quadPositions[base+6]  = c.x; quadPositions[base+7]  = c.y; quadPositions[base+8]  = c.z;
+        // Triangle 2: b, c, d
+        quadPositions[base+9]  = b.x; quadPositions[base+10] = b.y; quadPositions[base+11] = b.z;
+        quadPositions[base+12] = c.x; quadPositions[base+13] = c.y; quadPositions[base+14] = c.z;
+        quadPositions[base+15] = d.x; quadPositions[base+16] = d.y; quadPositions[base+17] = d.z;
+        
+        for (let v = 0; v < 6; v++) quadAlphas[aBase + v] = alpha;
+        quadCount++;
+      }
+    }
+  }
+  
+  // Decay contacts no longer active
+  for (const [key, val] of contactMap) {
+    if (!activeContacts.has(key)) {
+      const nv = val * 0.95;
+      if (nv < 0.001) contactMap.delete(key);
+      else contactMap.set(key, nv);
+    }
+  }
+  
+  quadGeom.attributes.position.needsUpdate = true;
+  quadGeom.attributes.alpha.needsUpdate = true;
+  quadGeom.setDrawRange(0, quadCount * 6);
+}
+
+// Also draw thin arc traces for each element
+const traceGeom = new THREE.BufferGeometry();
+const tracePositions = new Float32Array(NUM * 2 * 3);
+traceGeom.setAttribute('position', new THREE.BufferAttribute(tracePositions, 3));
+const traceMat = new THREE.LineBasicMaterial({
+  color: 0x2a2420,
+  transparent: true,
+  opacity: 0.15,
+  blending: THREE.AdditiveBlending,
+  depthTest: false
+});
+const traces = new THREE.LineSegments(traceGeom, traceMat);
+scene.add(traces);
+
+function updateTraces() {
+  for (let i = 0; i < NUM; i++) {
+    const e = elements[i];
+    const b = i * 6;
+    tracePositions[b]   = e.prevPos.x; tracePositions[b+1] = e.prevPos.y; tracePositions[b+2] = e.prevPos.z;
+    tracePositions[b+3] = e.pos.x;     tracePositions[b+4] = e.pos.y;     tracePositions[b+5] = e.pos.z;
+  }
+  traceGeom.attributes.position.needsUpdate = true;
+}
+
+// Compose scene to display
+const displayScene = new THREE.Scene();
+const displayMat = new THREE.ShaderMaterial({
+  uniforms: { tAccum: { value: null } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tAccum;
+    varying vec2 vUv;
+    void main(){
+      vec4 c = texture2D(tAccum, vUv);
+      // Slight vignette
+      vec2 q = vUv - 0.5;
+      float vig = 1.0 - dot(q, q) * 0.8;
+      gl_FragColor = vec4(c.rgb * vig, 1.0);
+    }
+  `,
+  depthTest: false
+});
+const displayQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), displayMat);
+displayScene.add(displayQuad);
+
+// Slow camera orbit
+let camAngle = 0;
+
+addEventListener('resize', () => {
+  const w = innerWidth, h = innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+  const pw = w * Math.min(devicePixelRatio, 2);
+  const ph = h * Math.min(devicePixelRatio, 2);
+  rtA.setSize(pw, ph);
+  rtB.setSize(pw, ph);
+});
+
+const startTime = performance.now();
+
+function loop() {
+  const t = (performance.now() - startTime) / 1000;
+  
+  // Update agents
+  for (const el of elements) el.update(t);
+  
+  // Update dot positions
+  for (let i = 0; i < NUM; i++) {
+    dotPositions[i*3]   = elements[i].pos.x;
+    dotPositions[i*3+1] = elements[i].pos.y;
+    dotPositions[i*3+2] = elements[i].pos.z;
+  }
+  dotGeom.attributes.position.needsUpdate = true;
+  
+  // Build connection quads
+  buildQuads(t);
+  updateTraces();
+  
+  // Camera orbit
+  camAngle += 0.0012;
+  camera.position.set(Math.sin(camAngle) * 38, Math.sin(camAngle * 0.3) * 4, Math.cos(camAngle) * 38);
+  camera.lookAt(0, 0, 0);
+  
+  // Render pass: fade old accumulation
+  fadeMat.uniforms.tAccum.value = rtA.texture;
+  renderer.setRenderTarget(rtB);
+  renderer.clear();
+  renderer.render(fadeScene, fadeCam);
+  
+  // Draw new connections on top
+  renderer.render(scene, camera);
+  
+  // Swap
+  [rtA, rtB] = [rtB, rtA];
+  
+  // Display to screen
+  displayMat.uniforms.tAccum.value = rtA.texture;
+  renderer.setRenderTarget(null);
+  renderer.clear();
+  renderer.render(displayScene, fadeCam);
+  
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
