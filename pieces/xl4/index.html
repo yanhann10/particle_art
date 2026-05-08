@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xl4 · Chladni plate resonance</title>
+<!-- MOTION: settling, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">xl4</div>
+<div class="hint">resonant modes · sand self-organizes to nodal lines</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Ernst Chladni — Entdeckungen über die Theorie des Klanges (1787) ── */
+/* Plate eigenmode: u(x,y,m,n) = cos(mπx/L)cos(nπy/L) - cos(nπx/L)cos(mπy/L) */
+/* Particles move toward nodal lines where |u|=0 via gradient descent */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(28, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 14, 24);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+controls.maxPolarAngle = Math.PI * 0.48;
+controls.minDistance = 12;
+controls.maxDistance = 40;
+
+const N = 50000;
+const L = 10.0; // plate half-width
+
+/* plate geometry — dark brushed metal */
+const plateMat = new THREE.MeshStandardMaterial({
+  color: 0x1a1816,
+  metalness: 0.88,
+  roughness: 0.32,
+  emissive: 0x050403,
+  emissiveIntensity: 0.18
+});
+const plateGeom = new THREE.PlaneGeometry(L*2, L*2, 1, 1);
+const plate = new THREE.Mesh(plateGeom, plateMat);
+plate.rotation.x = -Math.PI/2;
+scene.add(plate);
+
+/* rim — thin dark frame */
+const rimMat = new THREE.MeshBasicMaterial({ color: 0x0d0c0a });
+const rimThick = 0.22;
+const rimH = 0.08;
+const rimGeom = new THREE.BoxGeometry(L*2 + rimThick*2, rimH, rimThick);
+const rim1 = new THREE.Mesh(rimGeom, rimMat);
+rim1.position.set(0, -rimH/2, -L - rimThick/2);
+const rim2 = rim1.clone();
+rim2.position.set(0, -rimH/2, L + rimThick/2);
+const rimGeom2 = new THREE.BoxGeometry(rimThick, rimH, L*2);
+const rim3 = new THREE.Mesh(rimGeom2, rimMat);
+rim3.position.set(-L - rimThick/2, -rimH/2, 0);
+const rim4 = rim3.clone();
+rim4.position.set(L + rimThick/2, -rimH/2, 0);
+scene.add(rim1, rim2, rim3, rim4);
+
+/* ambient light — low warm glow */
+const ambient = new THREE.AmbientLight(0xffeedd, 0.25);
+scene.add(ambient);
+/* directional — raking side-light to sculpt the sand pattern */
+const dirLight = new THREE.DirectionalLight(0xfff4e0, 0.85);
+dirLight.position.set(-8, 12, 6);
+scene.add(dirLight);
+/* small rim-light from opposite side */
+const rimLight = new THREE.DirectionalLight(0xffd8a8, 0.35);
+rimLight.position.set(6, 8, -4);
+scene.add(rimLight);
+
+/* particle system */
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3); // for physics sim
+const seeds = new Float32Array(N);
+const ages = new Float32Array(N);
+
+function resetParticles() {
+  for (let i = 0; i < N; i++) {
+    const x = (Math.random() - 0.5) * L * 2;
+    const z = (Math.random() - 0.5) * L * 2;
+    positions[i*3]   = x;
+    positions[i*3+1] = 0.01 + Math.random() * 0.03; // slight height variation
+    positions[i*3+2] = z;
+    velocities[i*3]   = 0;
+    velocities[i*3+1] = 0;
+    velocities[i*3+2] = 0;
+    seeds[i] = Math.random();
+    ages[i] = Math.random() * 3.0;
+  }
+}
+resetParticles();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('age', new THREE.BufferAttribute(ages, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float age;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      /* sand particles settle on plate surface */
+      p.y = max(0.005, p.y - age * 0.001);
+      
+      /* micro-jitter — grains never perfectly still */
+      float jit = 0.006;
+      p.x += jit * sin(uTime * 3.0 + seed * 62.8);
+      p.z += jit * cos(uTime * 2.7 + seed * 50.0);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * (28.0 / dist);
+      gl_Position = projectionMatrix * mv;
+      
+      /* fade in over first second of age */
+      vAlpha = smoothstep(0.0, 1.0, age);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      /* sand color — pale warm off-white */
+      vec3 sandCol = vec3(0.94, 0.89, 0.82);
+      float core = exp(-r * 18.0);
+      float a = core * vAlpha * 0.92;
+      gl_FragColor = vec4(sandCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* mode sequence — hand-picked Chladni patterns */
+const modes = [
+  { m: 1, n: 1, label: '(1,1) cross' },
+  { m: 2, n: 1, label: '(2,1) grid' },
+  { m: 2, n: 2, label: '(2,2) rosette' },
+  { m: 3, n: 1, label: '(3,1) triple' },
+  { m: 3, n: 2, label: '(3,2) complex' },
+  { m: 3, n: 3, label: '(3,3) hexagon' },
+  { m: 4, n: 2, label: '(4,2) nested' },
+  { m: 4, n: 4, label: '(4,4) mandala' }
+];
+let modeIndex = 0;
+let modeT = 0;
+let currentM = modes[0].m;
+let currentN = modes[0].n;
+let nextM = modes[0].m;
+let nextN = modes[0].n;
+const modeDuration = 12.0; // seconds per mode
+const transitionDuration = 3.0; // morph time
+
+function eigenmode(x, z, m, n) {
+  const px = Math.PI * x / L;
+  const pz = Math.PI * z / L;
+  return Math.cos(m*px)*Math.cos(n*pz) - Math.cos(n*px)*Math.cos(m*pz);
+}
+
+function eigenmodeGradient(x, z, m, n) {
+  const px = Math.PI * x / L;
+  const pz = Math.PI * z / L;
+  const u = eigenmode(x, z, m, n);
+  const eps = 0.02;
+  const ux = (eigenmode(x+eps, z, m, n) - u) / eps;
+  const uz = (eigenmode(x, z+eps, m, n) - u) / eps;
+  return { gx: ux, gz: uz };
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let prevTime = start;
+
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  const dt = Math.min((now - prevTime) / 1000, 0.05);
+  prevTime = now;
+  
+  mat.uniforms.uTime.value = elapsed;
+  
+  /* mode transition logic */
+  modeT += dt;
+  if (modeT > modeDuration) {
+    modeT = 0;
+    modeIndex = (modeIndex + 1) % modes.length;
+    currentM = nextM;
+    currentN = nextN;
+    nextM = modes[modeIndex].m;
+    nextN = modes[modeIndex].n;
+  }
+  
+  /* blend factor for mode morph */
+  const blendT = modeT < transitionDuration 
+    ? modeT / transitionDuration 
+    : 1.0;
+  const blend = blendT * blendT * (3 - 2*blendT); // smoothstep
+  
+  /* physics step — particles seek nodal lines */
+  const damping = 0.88;
+  const forceScale = 0.15;
+  const brownian = 0.008;
+  
+  for (let i = 0; i < N; i++) {
+    const x = positions[i*3];
+    const z = positions[i*3+2];
+    
+    /* compute blended eigenmode gradient */
+    const g1 = eigenmodeGradient(x, z, currentM, currentN);
+    const g2 = eigenmodeGradient(x, z, nextM, nextN);
+    const gx = g1.gx * (1-blend) + g2.gx * blend;
+    const gz = g1.gz * (1-blend) + g2.gz * blend;
+    
+    /* move downhill toward nodal lines */
+    velocities[i*3]   += -gx * forceScale * dt;
+    velocities[i*3+2] += -gz * forceScale * dt;
+    
+    /* Brownian jitter — prevents perfect collapse, keeps sand grainy */
+    velocities[i*3]   += (Math.random()-0.5) * brownian;
+    velocities[i*3+2] += (Math.random()-0.5) * brownian;
+    
+    /* damping */
+    velocities[i*3]   *= damping;
+    velocities[i*3+2] *= damping;
+    
+    /* integrate */
+    positions[i*3]   += velocities[i*3] * dt;
+    positions[i*3+2] += velocities[i*3+2] * dt;
+    
+    /* clamp to plate bounds */
+    positions[i*3]   = Math.max(-L, Math.min(L, positions[i*3]));
+    positions[i*3+2] = Math.max(-L, Math.min(L, positions[i*3+2]));
+    
+    /* age increases */
+    ages[i] += dt;
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
