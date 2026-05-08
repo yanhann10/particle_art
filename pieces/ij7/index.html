@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- MOTION: sway, intensity: gentle -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ij7 · hybrid web scan</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#030304;overflow:hidden;
+  color:#cdd2dc;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;letter-spacing:0.06em}
+</style>
+</head>
+<body>
+<div class="id">ij7</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* Tomás Saraceno — Hybrid Web Scan
+   Sparse luminous filaments in pitch black. Clustered anchor nodes
+   connected by short local threads + long-range guy-lines.
+   Achromatic pearlescent palette. Gentle wind-driven sway.
+   Camera slowly orbits and dollies through the structure. */
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.setClearColor(0x030304,1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x030304,0.008);
+const camera = new THREE.PerspectiveCamera(50,innerWidth/innerHeight,0.1,250);
+
+// --- Clustered web topology ---
+const NUM_CLUSTERS = 8;
+const WORLD_R = 24;
+const CLUSTER_R_MIN = 3.5, CLUSTER_R_MAX = 6.5;
+const clusterCenters = [];
+const clusterRadii = [];
+
+for(let c=0;c<NUM_CLUSTERS;c++){
+  const th = Math.random()*Math.PI*2;
+  const ph = Math.acos(2*Math.random()-1);
+  const r = WORLD_R*(0.25+Math.random()*0.7);
+  clusterCenters.push(new THREE.Vector3(
+    r*Math.sin(ph)*Math.cos(th),
+    r*Math.sin(ph)*Math.sin(th)*0.55,
+    r*Math.cos(ph)
+  ));
+  clusterRadii.push(CLUSTER_R_MIN+Math.random()*(CLUSTER_R_MAX-CLUSTER_R_MIN));
+}
+
+const nodes = [];
+for(let c=0;c<NUM_CLUSTERS;c++){
+  const center = clusterCenters[c];
+  const cr = clusterRadii[c];
+  const count = 28+Math.floor(Math.random()*22);
+  for(let i=0;i<count;i++){
+    const th = Math.random()*Math.PI*2;
+    const ph = Math.acos(2*Math.random()-1);
+    const r = cr*Math.pow(Math.random(),0.6);
+    const offset = new THREE.Vector3(
+      r*Math.sin(ph)*Math.cos(th),
+      r*Math.sin(ph)*Math.sin(th)*0.7,
+      r*Math.cos(ph)
+    );
+    const pos = center.clone().add(offset);
+    nodes.push({pos:pos.clone(),restPos:pos.clone(),vel:new THREE.Vector3(),cluster:c,conn:0});
+  }
+}
+const N = nodes.length;
+
+// --- Build edges ---
+const edges = [];
+const edgeSet = new Set();
+function addEdge(a,b,type){
+  const key = Math.min(a,b)+'-'+Math.max(a,b);
+  if(edgeSet.has(key)) return;
+  edgeSet.add(key);
+  edges.push({a,b,type});
+  nodes[a].conn++;
+  nodes[b].conn++;
+}
+
+// intra-cluster: 2-3 nearest neighbors
+for(let c=0;c<NUM_CLUSTERS;c++){
+  const ci = [];
+  for(let i=0;i<N;i++) if(nodes[i].cluster===c) ci.push(i);
+  for(const i of ci){
+    const dists = ci.filter(j=>j!==i)
+      .map(j=>({j,d:nodes[i].pos.distanceTo(nodes[j].pos)}))
+      .sort((a,b)=>a.d-b.d);
+    const k = 2+Math.floor(Math.random()*2);
+    for(let n=0;n<Math.min(k,dists.length);n++) addEdge(i,dists[n].j,'local');
+  }
+}
+
+// inter-cluster guy-lines
+for(let c1=0;c1<NUM_CLUSTERS;c1++){
+  for(let c2=c1+1;c2<NUM_CLUSTERS;c2++){
+    const d = clusterCenters[c1].distanceTo(clusterCenters[c2]);
+    const numLinks = d < WORLD_R*0.9 ? (1+Math.floor(Math.random()*2)) : (Math.random()<0.35?1:0);
+    if(!numLinks) continue;
+    const pairs = [];
+    for(let i=0;i<N;i++) if(nodes[i].cluster===c1){
+      for(let j=0;j<N;j++) if(nodes[j].cluster===c2){
+        pairs.push({i,j,d:nodes[i].pos.distanceTo(nodes[j].pos)});
+      }
+    }
+    pairs.sort((a,b)=>a.d-b.d);
+    for(let n=0;n<Math.min(numLinks,pairs.length);n++) addEdge(pairs[n].i,pairs[n].j,'guyline');
+  }
+}
+
+const E = edges.length;
+
+// --- Pearlescent cluster palette: silver with faint spectral shift ---
+const clusterCol = [];
+for(let c=0;c<NUM_CLUSTERS;c++){
+  const h = 0.55+c*0.04+(Math.random()-0.5)*0.06;
+  const s = 0.03+Math.random()*0.07;
+  const l = 0.72+Math.random()*0.13;
+  clusterCol.push(new THREE.Color().setHSL(h,s,l));
+}
+
+// --- Line geometry ---
+const linePos = new Float32Array(E*6);
+const lineCol = new Float32Array(E*6);
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position',new THREE.BufferAttribute(linePos,3));
+lineGeom.setAttribute('color',new THREE.BufferAttribute(lineCol,3));
+const lineMat = new THREE.LineBasicMaterial({
+  vertexColors:true, transparent:true, opacity:0.8,
+  blending:THREE.AdditiveBlending, depthWrite:false
+});
+scene.add(new THREE.LineSegments(lineGeom,lineMat));
+
+// --- Node sprites ---
+const nodePos = new Float32Array(N*3);
+const nodeSize = new Float32Array(N);
+const nodeCol = new Float32Array(N*3);
+const nodeGeom = new THREE.BufferGeometry();
+nodeGeom.setAttribute('position',new THREE.BufferAttribute(nodePos,3));
+nodeGeom.setAttribute('aSize',new THREE.BufferAttribute(nodeSize,1));
+nodeGeom.setAttribute('color',new THREE.BufferAttribute(nodeCol,3));
+
+const nodeMat = new THREE.ShaderMaterial({
+  transparent:true, blending:THREE.AdditiveBlending, depthWrite:false,
+  vertexShader:`
+    attribute float aSize;
+    attribute vec3 color;
+    varying vec3 vCol;
+    void main(){
+      vCol=color;
+      vec4 mv=modelViewMatrix*vec4(position,1.0);
+      gl_PointSize=aSize*(280.0/max(-mv.z,1.0));
+      gl_Position=projectionMatrix*mv;
+    }`,
+  fragmentShader:`
+    varying vec3 vCol;
+    void main(){
+      vec2 d=gl_PointCoord-0.5;
+      float r2=dot(d,d);
+      if(r2>0.25) discard;
+      float a=exp(-r2*16.0)*0.85;
+      gl_FragColor=vec4(vCol*a,a);
+    }`
+});
+scene.add(new THREE.Points(nodeGeom,nodeMat));
+
+// --- Glow halo pass (larger, dimmer points for bloom effect) ---
+const glowSize = new Float32Array(N);
+const glowGeom = new THREE.BufferGeometry();
+glowGeom.setAttribute('position',nodeGeom.getAttribute('position'));
+glowGeom.setAttribute('aSize',new THREE.BufferAttribute(glowSize,1));
+glowGeom.setAttribute('color',nodeGeom.getAttribute('color'));
+const glowMat = new THREE.ShaderMaterial({
+  transparent:true, blending:THREE.AdditiveBlending, depthWrite:false,
+  vertexShader:`
+    attribute float aSize;
+    attribute vec3 color;
+    varying vec3 vCol;
+    void main(){
+      vCol=color;
+      vec4 mv=modelViewMatrix*vec4(position,1.0);
+      gl_PointSize=aSize*(280.0/max(-mv.z,1.0));
+      gl_Position=projectionMatrix*mv;
+    }`,
+  fragmentShader:`
+    varying vec3 vCol;
+    void main(){
+      vec2 d=gl_PointCoord-0.5;
+      float r2=dot(d,d);
+      if(r2>0.25) discard;
+      float a=exp(-r2*5.0)*0.12;
+      gl_FragColor=vec4(vCol*a,a);
+    }`
+});
+scene.add(new THREE.Points(glowGeom,glowMat));
+
+// init sizes by connectivity
+for(let i=0;i<N;i++){
+  const c = Math.min(nodes[i].conn,6);
+  nodeSize[i] = 0.8+c*0.35;
+  glowSize[i] = nodeSize[i]*3.5;
+  const cc = clusterCol[nodes[i].cluster];
+  nodeCol[i*3]=cc.r; nodeCol[i*3+1]=cc.g; nodeCol[i*3+2]=cc.b;
+}
+nodeGeom.attributes.aSize.needsUpdate=true;
+nodeGeom.attributes.color.needsUpdate=true;
+glowGeom.attributes.aSize.needsUpdate=true;
+
+function updateGeom(){
+  for(let i=0;i<N;i++){
+    nodePos[i*3]=nodes[i].pos.x;
+    nodePos[i*3+1]=nodes[i].pos.y;
+    nodePos[i*3+2]=nodes[i].pos.z;
+  }
+  nodeGeom.attributes.position.needsUpdate=true;
+
+  for(let e=0;e<E;e++){
+    const {a,b,type}=edges[e];
+    linePos[e*6]=nodes[a].pos.x;   linePos[e*6+1]=nodes[a].pos.y;   linePos[e*6+2]=nodes[a].pos.z;
+    linePos[e*6+3]=nodes[b].pos.x; linePos[e*6+4]=nodes[b].pos.y; linePos[e*6+5]=nodes[b].pos.z;
+    const ca=clusterCol[nodes[a].cluster], cb=clusterCol[nodes[b].cluster];
+    const dim = type==='guyline' ? 0.22 : 0.5;
+    lineCol[e*6]=ca.r*dim;   lineCol[e*6+1]=ca.g*dim;   lineCol[e*6+2]=ca.b*dim;
+    lineCol[e*6+3]=cb.r*dim; lineCol[e*6+4]=cb.g*dim; lineCol[e*6+5]=cb.b*dim;
+  }
+  lineGeom.attributes.position.needsUpdate=true;
+  lineGeom.attributes.color.needsUpdate=true;
+}
+
+// --- Physics: spring return + wind sway ---
+const tmp = new THREE.Vector3();
+const windDir = new THREE.Vector3();
+const SPRING_K = 1.2;
+const DAMP = 0.88;
+
+function simulate(dt){
+  const t = performance.now()*0.001;
+  // slowly rotating wind
+  windDir.set(
+    Math.sin(t*0.11)*0.22 + Math.sin(t*0.31)*0.06,
+    Math.sin(t*0.07)*0.09 + 0.015,
+    Math.cos(t*0.09)*0.18 + Math.cos(t*0.29)*0.05
+  );
+  for(let i=0;i<N;i++){
+    const n=nodes[i];
+    // spring
+    tmp.copy(n.restPos).sub(n.pos).multiplyScalar(SPRING_K*dt);
+    n.vel.add(tmp);
+    // wind
+    n.vel.x += windDir.x*dt*0.6;
+    n.vel.y += windDir.y*dt*0.4;
+    n.vel.z += windDir.z*dt*0.6;
+    // per-node turbulence
+    const phase = i*0.173;
+    n.vel.x += Math.sin(t*0.53+phase)*dt*0.04;
+    n.vel.y += Math.cos(t*0.41+phase*1.3)*dt*0.03;
+    n.vel.z += Math.sin(t*0.37+phase*0.7)*dt*0.035;
+    // damp
+    n.vel.multiplyScalar(DAMP);
+    n.pos.addScaledVector(n.vel,dt);
+  }
+}
+
+// --- Resize ---
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+// --- Animate ---
+let lastT=performance.now();
+updateGeom();
+
+function loop(){
+  const now=performance.now();
+  const dt=Math.min((now-lastT)/1000, 0.05);
+  lastT=now;
+
+  simulate(dt);
+  updateGeom();
+
+  // camera: slow orbit with dolly breathing
+  const t=now*0.001;
+  const orbitR = 44+Math.sin(t*0.032)*14;
+  const ang = t*0.028;
+  const camY = Math.sin(t*0.019)*7;
+  camera.position.set(
+    Math.sin(ang)*orbitR,
+    camY+2,
+    Math.cos(ang)*orbitR
+  );
+  camera.lookAt(0,0,0);
+
+  renderer.render(scene,camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
