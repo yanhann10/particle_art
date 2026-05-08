@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: murmur, intensity: vigorous -->
+<title>f6n · fox murmuration · Reynolds flocking on surface sample</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0b0f; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.6; font-size:11px; letter-spacing:0.04em; z-index:10; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">f6n</div>
+<div class="hint" id="hint">loading fox model…</div>
+<div class="src">Craig Reynolds 1986 · boids on fox surface</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 50);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0d0b0f, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── particle count & buffers ── */
+const N = 60000;
+const positions  = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const homePos    = new Float32Array(N * 3); // fox surface targets
+const seeds      = new Float32Array(N);
+const trails     = new Float32Array(N);
+
+/* ── initialize in a dispersed sphere (fallback until model loads) ── */
+for (let i = 0; i < N; i++){
+  const theta = Math.random() * Math.PI * 2;
+  const phi   = Math.acos(2 * Math.random() - 1);
+  const r     = 4 + Math.random() * 10;
+  positions[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+  positions[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+  positions[i*3+2] = r * Math.cos(phi);
+  homePos[i*3]     = positions[i*3];
+  homePos[i*3+1]   = positions[i*3+1];
+  homePos[i*3+2]   = positions[i*3+2];
+  const vt = Math.random() * Math.PI * 2;
+  const vp = Math.acos(2 * Math.random() - 1);
+  const sp = 0.4 + Math.random() * 0.3;
+  velocities[i*3]   = sp * Math.sin(vp) * Math.cos(vt);
+  velocities[i*3+1] = sp * Math.sin(vp) * Math.sin(vt);
+  velocities[i*3+2] = sp * Math.cos(vp);
+  seeds[i]  = Math.random();
+  trails[i] = Math.random() * 0.3;
+}
+
+/* ── shader material ── */
+const uniforms = { uTime:{ value:0 }, uPixel:{ value: renderer.getPixelRatio() } };
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent:true, depthWrite:false, blending: THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float trail;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      float phase = seed * 6.28 + uTime * 0.3;
+      float pulse = 0.5 + 0.5 * sin(phase);
+      vec3 c0 = vec3(0.22, 0.18, 0.38);
+      vec3 c1 = vec3(0.78, 0.45, 0.52);
+      vec3 c2 = vec3(0.92, 0.76, 0.48);
+      float blend = smoothstep(0.3, 0.7, pulse);
+      vCol = mix(c0, c1, blend);
+      vCol = mix(vCol, c2, smoothstep(0.7, 1.0, pulse) * 0.6);
+      vAlpha = 0.45 + 0.45 * pulse + trail * 0.3;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.4 + 0.8*pulse + trail*1.5) * uPixel * (50.0/max(dist,1.0));
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader:`
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 16.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }`
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('trail', new THREE.BufferAttribute(trails, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── load fox model & sample surface ── */
+let modelLoaded = false;
+const loader = new GLTFLoader();
+loader.load(
+  'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Fox/glTF-Binary/Fox.glb',
+  (gltf) => {
+    let targetMesh = null;
+    gltf.scene.traverse(child => {
+      if (!targetMesh && child.isMesh && child.geometry.attributes.position) {
+        targetMesh = child;
+      }
+    });
+    if (!targetMesh) return;
+
+    /* apply any transforms baked on the mesh */
+    targetMesh.updateWorldMatrix(true, false);
+    const geo = targetMesh.geometry.clone();
+    geo.applyMatrix4(targetMesh.matrixWorld);
+
+    /* compute bounding box & re-normalize to fit camera */
+    geo.computeBoundingBox();
+    const bb = geo.boundingBox;
+    const center = new THREE.Vector3();
+    bb.getCenter(center);
+    const size = new THREE.Vector3();
+    bb.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const DESIRED = 24; // target extent in world units
+    const scale = DESIRED / maxDim;
+
+    /* build sampler */
+    const samplerMesh = new THREE.Mesh(geo);
+    const sampler = new MeshSurfaceSampler(samplerMesh).build();
+    const samplePos = new THREE.Vector3();
+
+    for (let i = 0; i < N; i++){
+      sampler.sample(samplePos);
+      homePos[i*3]   = (samplePos.x - center.x) * scale;
+      homePos[i*3+1] = (samplePos.y - center.y) * scale;
+      homePos[i*3+2] = (samplePos.z - center.z) * scale;
+    }
+    modelLoaded = true;
+    document.getElementById('hint').textContent =
+      'Reynolds 1986 · fox murmuration · cohesion + alignment + separation';
+  },
+  undefined,
+  (err) => {
+    /* fallback: keep sphere distribution, still runs */
+    document.getElementById('hint').textContent =
+      'murmuration (fallback) · Reynolds 1986';
+  }
+);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── spatial hash ── */
+const PERCEPTION = 3.0;
+const SEPARATION_DIST = 1.0;
+const COHESION_F  = 0.018;
+const ALIGNMENT_F = 0.07;
+const SEPARATION_F= 0.14;
+const BOUNDARY_F  = 0.25;
+const HOME_F_BASE = 0.04;
+const MAX_SPEED = 1.6;
+const MIN_SPEED = 0.4;
+const BOUNDARY  = 28;
+const MAX_NEIGHBORS = 10;
+
+const CELL = PERCEPTION * 1.5;
+let grid = new Map();
+
+function cellKey(x,y,z){
+  return ((Math.floor(x/CELL)*73856093)^(Math.floor(y/CELL)*19349663)^(Math.floor(z/CELL)*83492791))|0;
+}
+
+function rebuildGrid(){
+  grid.clear();
+  for(let i=0;i<N;i++){
+    const k = cellKey(positions[i*3],positions[i*3+1],positions[i*3+2]);
+    let bucket = grid.get(k);
+    if(!bucket){ bucket=[]; grid.set(k,bucket); }
+    bucket.push(i);
+  }
+}
+
+const _offsets = [];
+for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++) for(let dz=-1;dz<=1;dz++) _offsets.push([dx,dy,dz]);
+
+function* neighborIndices(x,y,z){
+  const cx=Math.floor(x/CELL), cy=Math.floor(y/CELL), cz=Math.floor(z/CELL);
+  for(const [dx,dy,dz] of _offsets){
+    const k = (((cx+dx)*73856093)^((cy+dy)*19349663)^((cz+dz)*83492791))|0;
+    const b = grid.get(k);
+    if(b) for(const j of b) yield j;
+  }
+}
+
+/* ── round-robin boid update: process BATCH_SIZE per frame ── */
+const BATCH = 10000;
+let batchStart = 0;
+
+function updateBoids(dt, elapsed){
+  rebuildGrid();
+
+  /* homing force oscillates — fox gathers then disperses */
+  const breathCycle = elapsed * 0.12; // ~52s full cycle
+  const gatherPhase = 0.5 + 0.5 * Math.sin(breathCycle);
+  /* first 6 seconds: strong homing to reveal fox shape quickly */
+  const earlyBoost = elapsed < 6.0 ? 2.5 * (1.0 - elapsed/6.0) : 0.0;
+  const homeForce = HOME_F_BASE * (0.3 + gatherPhase * 1.8) + earlyBoost * HOME_F_BASE;
+
+  const end = Math.min(batchStart + BATCH, N);
+
+  for(let i = batchStart; i < end; i++){
+    const px=positions[i*3], py=positions[i*3+1], pz=positions[i*3+2];
+    let sx=0,sy=0,sz=0; // steering
+    let apx=0,apy=0,apz=0; // avg pos
+    let avx=0,avy=0,avz=0; // avg vel
+    let cn=0, an=0, checked=0;
+
+    for(const j of neighborIndices(px,py,pz)){
+      if(j===i) continue;
+      if(checked >= MAX_NEIGHBORS) break;
+      const dx=positions[j*3]-px, dy=positions[j*3+1]-py, dz=positions[j*3+2]-pz;
+      const dSq=dx*dx+dy*dy+dz*dz;
+      if(dSq < PERCEPTION*PERCEPTION && dSq > 0.001){
+        checked++;
+        const d=Math.sqrt(dSq);
+        apx+=positions[j*3]; apy+=positions[j*3+1]; apz+=positions[j*3+2]; cn++;
+        avx+=velocities[j*3]; avy+=velocities[j*3+1]; avz+=velocities[j*3+2]; an++;
+        if(d < SEPARATION_DIST){
+          const f=(SEPARATION_DIST-d)/SEPARATION_DIST;
+          sx -= (dx/d)*f*SEPARATION_F;
+          sy -= (dy/d)*f*SEPARATION_F;
+          sz -= (dz/d)*f*SEPARATION_F;
+        }
+      }
+    }
+
+    if(cn>0){
+      sx += (apx/cn - px)*COHESION_F;
+      sy += (apy/cn - py)*COHESION_F;
+      sz += (apz/cn - pz)*COHESION_F;
+    }
+    if(an>0){
+      sx += (avx/an - velocities[i*3])*ALIGNMENT_F;
+      sy += (avy/an - velocities[i*3+1])*ALIGNMENT_F;
+      sz += (avz/an - velocities[i*3+2])*ALIGNMENT_F;
+    }
+
+    /* homing toward fox surface position */
+    sx += (homePos[i*3]   - px) * homeForce;
+    sy += (homePos[i*3+1] - py) * homeForce;
+    sz += (homePos[i*3+2] - pz) * homeForce;
+
+    /* boundary */
+    const dfc = Math.sqrt(px*px+py*py+pz*pz);
+    if(dfc > BOUNDARY*0.7){
+      const f = Math.pow((dfc-BOUNDARY*0.7)/(BOUNDARY*0.3),2);
+      sx -= (px/dfc)*f*BOUNDARY_F;
+      sy -= (py/dfc)*f*BOUNDARY_F;
+      sz -= (pz/dfc)*f*BOUNDARY_F;
+    }
+
+    velocities[i*3]   += sx*dt;
+    velocities[i*3+1] += sy*dt;
+    velocities[i*3+2] += sz*dt;
+
+    let spd = Math.sqrt(velocities[i*3]**2+velocities[i*3+1]**2+velocities[i*3+2]**2);
+    if(spd > MAX_SPEED){ const s=MAX_SPEED/spd; velocities[i*3]*=s; velocities[i*3+1]*=s; velocities[i*3+2]*=s; spd=MAX_SPEED; }
+    else if(spd < MIN_SPEED && spd > 0.01){ const s=MIN_SPEED/spd; velocities[i*3]*=s; velocities[i*3+1]*=s; velocities[i*3+2]*=s; spd=MIN_SPEED; }
+
+    trails[i] = THREE.MathUtils.lerp(trails[i], spd/MAX_SPEED, 0.08);
+  }
+
+  /* move ALL particles each frame (even non-updated ones drift on last velocity) */
+  for(let i=0;i<N;i++){
+    positions[i*3]   += velocities[i*3]*dt;
+    positions[i*3+1] += velocities[i*3+1]*dt;
+    positions[i*3+2] += velocities[i*3+2]*dt;
+  }
+
+  batchStart = end >= N ? 0 : end;
+
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.trail.needsUpdate = true;
+  geom.computeBoundingSphere();
+}
+
+/* ── camera tracks centroid ── */
+const centroid = new THREE.Vector3();
+function updateCamera(elapsed){
+  centroid.set(0,0,0);
+  /* sample every 8th particle for centroid — fast enough */
+  let cnt=0;
+  for(let i=0;i<N;i+=8){
+    centroid.x+=positions[i*3]; centroid.y+=positions[i*3+1]; centroid.z+=positions[i*3+2]; cnt++;
+  }
+  centroid.multiplyScalar(1/cnt);
+
+  const orbitR = 42;
+  const a = elapsed * 0.06;
+  camera.position.x = centroid.x + Math.cos(a) * orbitR;
+  camera.position.z = centroid.z + Math.sin(a) * orbitR;
+  camera.position.y = centroid.y + Math.sin(a*0.37) * 10;
+  camera.lookAt(centroid);
+}
+
+/* ── main loop ── */
+let lastTime = performance.now();
+const start = performance.now();
+let frameCount = 0;
+const hintEl = document.getElementById('hint');
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now-lastTime)/1000, 0.05);
+  lastTime = now;
+  const elapsed = (now-start)/1000;
+
+  uniforms.uTime.value = elapsed;
+  updateBoids(dt*60, elapsed);
+  updateCamera(elapsed);
+
+  frameCount++;
+  if(frameCount % 90 === 0){
+    let avgSpd=0;
+    for(let i=0;i<N;i+=16){
+      avgSpd+=Math.sqrt(velocities[i*3]**2+velocities[i*3+1]**2+velocities[i*3+2]**2);
+    }
+    avgSpd /= (N/16);
+    const coh = (avgSpd/MAX_SPEED*100).toFixed(0);
+    const state = modelLoaded ? 'fox surface' : 'sphere fallback';
+    hintEl.textContent = `murmuration coherence: ${coh}% · ${N/1000}k boids · ${state}`;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
