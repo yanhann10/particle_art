@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4rv · biological membrane (Hesse)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">4rv</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 2, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+// --- Differential growth with 3D sag variation (Hesse: irregular membrane) ---
+const MAX_VERTS = 4500;
+const ATTRACT   = 0.055;
+const REPEL_R   = 0.44;
+const REPEL_STR = 0.11;
+const NOISE     = 0.003;
+const PRESSURE  = 0.003;
+const MAX_D     = 0.30;
+
+const verts = []; // {x, z, y, age, sag, cluster}
+const NV0 = 28;
+for (let i = 0; i < NV0; i++){
+  const th = i / NV0 * Math.PI * 2;
+  const r  = 1.5 + (Math.random() - 0.5) * 0.15;
+  // sag: per-vertex random droop amount — creates uneven membrane heights
+  const sag = 0.3 + Math.random() * 1.8;
+  // cluster: some vertices belong to denser clump zones (asymmetric)
+  const cluster = Math.random() < 0.3 ? 1.0 : 0.0;
+  verts.push({ x: Math.cos(th)*r, z: Math.sin(th)*r, y: 0, age: 0, sag, cluster });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function key(x,z){ return (Math.floor(x/CELL))+','+(Math.floor(z/CELL)); }
+function rebuildGrid(){
+  grid.clear();
+  for (let i=0;i<verts.length;i++){
+    const v=verts[i], k=key(v.x,v.z);
+    if(!grid.has(k)) grid.set(k,[]);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx=Math.floor(v.x/CELL), cz=Math.floor(v.z/CELL), out=[];
+  for(let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++){
+    const arr=grid.get((cx+dx)+','+(cz+dz));
+    if(arr) for(const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', ()=>{ paused=!paused; });
+
+function step(){
+  if(paused) return;
+  const n=verts.length;
+  if(n>=MAX_VERTS) return;
+  rebuildGrid();
+  const dx=new Float32Array(n), dz=new Float32Array(n);
+
+  for(let i=0;i<n;i++){
+    const v=verts[i], cands=neighbors(v);
+    for(const j of cands){
+      if(j===i) continue;
+      const u=verts[j], ex=v.x-u.x, ez=v.z-u.z, d2=ex*ex+ez*ez;
+      if(d2>REPEL_R*REPEL_R||d2<1e-6) continue;
+      const d=Math.sqrt(d2), f=REPEL_STR*(1-d/REPEL_R)/d;
+      dx[i]+=ex*f; dz[i]+=ez*f;
+    }
+  }
+  for(let i=0;i<n;i++){
+    const a=verts[(i-1+n)%n], b=verts[(i+1)%n], v=verts[i];
+    dx[i]+=(a.x+b.x-2*v.x)*ATTRACT;
+    dz[i]+=(a.z+b.z-2*v.z)*ATTRACT;
+  }
+  let cx=0,cz=0;
+  for(let i=0;i<n;i++){cx+=verts[i].x;cz+=verts[i].z;}
+  cx/=n; cz/=n;
+  for(let i=0;i<n;i++){
+    const ox=verts[i].x-cx, oz=verts[i].z-cz, d=Math.hypot(ox,oz)+1e-6;
+    dx[i]+=(ox/d)*PRESSURE; dz[i]+=(oz/d)*PRESSURE;
+  }
+  for(let i=0;i<n;i++){
+    verts[i].x+=dx[i]+(Math.random()-0.5)*NOISE;
+    verts[i].z+=dz[i]+(Math.random()-0.5)*NOISE;
+    verts[i].age+=0.0005;
+    // Y varies per-vertex based on individual sag — creates uneven drooping membrane
+    const sagTarget = -verts[i].sag * Math.min(verts[i].age * 0.7, 1.0);
+    verts[i].y += (sagTarget - verts[i].y) * 0.04;
+  }
+
+  const grown=[];
+  for(let i=0;i<n;i++){
+    const a=verts[i], b=verts[(i+1)%n];
+    grown.push(a);
+    const ex=b.x-a.x, ez=b.z-a.z;
+    if(ex*ex+ez*ez>MAX_D*MAX_D && verts.length+grown.length<MAX_VERTS){
+      // child inherits a sag near parents but with random deviation — asymmetric clustering
+      const childSag = (a.sag+b.sag)*0.5 + (Math.random()-0.4)*0.6;
+      const childCluster = (a.cluster>0||b.cluster>0) ? (Math.random()<0.5?1:0) : (Math.random()<0.15?1:0);
+      grown.push({
+        x:(a.x+b.x)*0.5, z:(a.z+b.z)*0.5,
+        y:(a.y+b.y)*0.5,
+        age: Math.max(a.age,b.age)*0.85,
+        sag: Math.max(0.2, childSag),
+        cluster: childCluster
+      });
+    }
+  }
+  verts.length=0;
+  for(const v of grown) verts.push(v);
+}
+
+// --- Two particle populations ---
+// Pop A: strand particles along curve (thinner, numerous) — the membrane threads
+// Pop B: bead/node particles at cluster vertices (thicker, fewer) — latex drip / fiberglass nodes
+const N_STRAND = 35000;
+const N_BEAD   = 5000;
+const N_TOTAL  = N_STRAND + N_BEAD;
+
+const rPos  = new Float32Array(N_TOTAL * 3);
+const rSeed = new Float32Array(N_TOTAL);
+const rAge  = new Float32Array(N_TOTAL);
+const rType = new Float32Array(N_TOTAL); // 0=strand, 1=bead
+for(let i=0;i<N_TOTAL;i++) rSeed[i]=Math.random();
+for(let i=N_STRAND;i<N_TOTAL;i++) rType[i]=1.0;
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeed, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('bead',     new THREE.BufferAttribute(rType, 1));
+
+const uniforms = { uTime:{value:0}, uPixel:{value:renderer.getPixelRatio()} };
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float age;
+    attribute float bead;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      float t = uTime*0.4 + seed*6.28;
+      // strands sway gently; beads are more static
+      float sway = mix(0.006, 0.002, bead);
+      p += sway * vec3(sin(t), cos(t*0.7)*0.5, cos(t));
+
+      // Hesse palette: latex beige / warm bisque monochrome
+      // strands: pale latex cream
+      // beads: darker amber/resin node
+      float k = clamp(age*0.9, 0.0, 1.0);
+      vec3 strandCol = mix(vec3(0.88,0.82,0.72), vec3(0.72,0.58,0.46), k);
+      vec3 beadCol   = mix(vec3(0.78,0.62,0.48), vec3(0.55,0.38,0.28), k);
+      vCol = mix(strandCol, beadCol, bead);
+
+      vec4 mv = modelViewMatrix * vec4(p,1.0);
+      float dist = -mv.z;
+      // beads are 3x larger than strand particles
+      float sz = mix(1.2, 3.6, bead) * uPixel * (40.0/dist);
+      gl_PointSize = sz;
+      vAlpha = mix(0.55, 0.8, bead);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader:`
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r>0.25) discard;
+      float a = exp(-r*14.0) * vAlpha;
+      // fog: manual distance-based fade to background
+      gl_FragColor = vec4(vCol*a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// --- Catenary fibers: hanging threads between distant curve points ---
+// These are additional line geometries for the characteristic Hesse droop
+const fiberGroup = new THREE.Group();
+scene.add(fiberGroup);
+const fiberMat = new THREE.LineBasicMaterial({
+  color: 0xc4b098, transparent:true, opacity:0.18
+});
+
+let lastFiberUpdate = 0;
+function updateFibers(t){
+  if(t - lastFiberUpdate < 2.0) return; // update every 2s
+  lastFiberUpdate = t;
+  // clear old
+  while(fiberGroup.children.length>0) {
+    const c=fiberGroup.children[0];
+    c.geometry.dispose();
+    fiberGroup.remove(c);
+  }
+  const n=verts.length;
+  if(n<30) return;
+  // pick pairs of vertices that are far on curve but have deep sag — hang catenary between
+  const numFibers = Math.min(24, Math.floor(n/40));
+  for(let f=0;f<numFibers;f++){
+    const i = Math.floor(Math.random()*n);
+    const span = 8 + Math.floor(Math.random()*20);
+    const j = (i+span)%n;
+    const a=verts[i], b=verts[j];
+    const pts=[];
+    const steps=12;
+    const midSag = Math.min(a.y, b.y) - 0.4 - Math.random()*1.2;
+    for(let s=0;s<=steps;s++){
+      const u=s/steps;
+      const x=a.x+(b.x-a.x)*u;
+      const z=a.z+(b.z-a.z)*u;
+      // catenary approximation: parabolic sag
+      const sagU = 4*u*(1-u); // peaks at 0.5
+      const y = a.y+(b.y-a.y)*u + sagU*(midSag - (a.y+b.y)*0.5);
+      pts.push(new THREE.Vector3(x, y, z));
+    }
+    const lineGeom = new THREE.BufferGeometry().setFromPoints(pts);
+    fiberGroup.add(new THREE.Line(lineGeom, fiberMat));
+  }
+}
+
+addEventListener('resize', ()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+// pre-grow
+for(let s=0;s<600;s++) step();
+
+const start=performance.now();
+function loop(){
+  const t=(performance.now()-start)/1000;
+  uniforms.uTime.value=t;
+
+  for(let s=0;s<4;s++) step();
+
+  const n=verts.length;
+
+  // --- camera tracks centroid, pulls back as form grows ---
+  let cx=0,cy=0,cz=0, maxR=0;
+  for(let i=0;i<n;i++){cx+=verts[i].x;cy+=verts[i].y;cz+=verts[i].z;}
+  cx/=n; cy/=n; cz/=n;
+  for(let i=0;i<n;i++){
+    const dx=verts[i].x-cx, dz=verts[i].z-cz, dy=verts[i].y-cy;
+    maxR=Math.max(maxR, Math.sqrt(dx*dx+dz*dz+dy*dy));
+  }
+  const target = new THREE.Vector3(cx, cy, cz);
+  controls.target.lerp(target, 0.02);
+  // pull camera back so form fills ~60% of frame
+  const desiredDist = Math.max(12, maxR * 2.8);
+  const dir = camera.position.clone().sub(controls.target).normalize();
+  const idealPos = controls.target.clone().add(dir.multiplyScalar(desiredDist));
+  camera.position.lerp(idealPos, 0.01);
+
+  // --- distribute strand particles along curve ---
+  const lengths=[];
+  let total=0;
+  for(let i=0;i<n;i++){
+    const a=verts[i], b=verts[(i+1)%n];
+    const L=Math.sqrt((b.x-a.x)**2+(b.z-a.z)**2+(b.y-a.y)**2);
+    lengths.push(L); total+=L;
+  }
+  if(total>0){
+    let written=0;
+    for(let i=0;i<n;i++){
+      const share=(i===n-1)?N_STRAND-written:Math.max(1,Math.floor(N_STRAND*lengths[i]/total));
+      const a=verts[i], b=verts[(i+1)%n];
+      for(let k=0;k<share&&written<N_STRAND;k++){
+        const u=Math.random();
+        // spread particles slightly in Y for strand thickness
+        rPos[written*3]  =a.x+(b.x-a.x)*u+(Math.random()-0.5)*0.02;
+        rPos[written*3+1]=a.y+(b.y-a.y)*u+(Math.random()-0.5)*0.04;
+        rPos[written*3+2]=a.z+(b.z-a.z)*u+(Math.random()-0.5)*0.02;
+        rAge[written]=Math.max(a.age,b.age);
+        written++;
+      }
+    }
+  }
+
+  // --- distribute bead particles at cluster vertices and high-curvature nodes ---
+  let beadWritten=0;
+  const beadStart=N_STRAND;
+  // collect cluster/node vertices
+  const nodeVerts=[];
+  for(let i=0;i<n;i++){
+    const v=verts[i];
+    // curvature: angle between prev-cur and cur-next
+    const a=verts[(i-1+n)%n], b=verts[(i+1)%n];
+    const ax=v.x-a.x, az=v.z-a.z, bx=b.x-v.x, bz=b.z-v.z;
+    const cross=Math.abs(ax*bz-az*bx);
+    if(v.cluster>0.5 || cross>0.04){
+      nodeVerts.push(v);
+    }
+  }
+  if(nodeVerts.length>0){
+    const perNode=Math.floor(N_BEAD/nodeVerts.length);
+    for(const v of nodeVerts){
+      for(let k=0;k<perNode&&beadWritten<N_BEAD;k++){
+        const idx=beadStart+beadWritten;
+        // clump beads in a small sphere around the node
+        const r=0.08+Math.random()*0.12;
+        const th=Math.random()*Math.PI*2;
+        const ph=Math.random()*Math.PI;
+        rPos[idx*3]  =v.x+Math.sin(ph)*Math.cos(th)*r;
+        rPos[idx*3+1]=v.y+Math.cos(ph)*r - Math.random()*0.06;
+        rPos[idx*3+2]=v.z+Math.sin(ph)*Math.sin(th)*r;
+        rAge[idx]=v.age;
+        beadWritten++;
+      }
+    }
+  }
+  // fill remaining beads at origin (invisible)
+  for(let i=beadWritten;i<N_BEAD;i++){
+    const idx=beadStart+i;
+    rPos[idx*3]=0; rPos[idx*3+1]=-100; rPos[idx*3+2]=0;
+  }
+
+  geom.attributes.position.needsUpdate=true;
+  geom.attributes.age.needsUpdate=true;
+
+  updateFibers(t);
+
+  controls.update();
+  renderer.render(scene,camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
