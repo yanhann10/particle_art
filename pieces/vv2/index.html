@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>vv2 · lorenz sublime</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020306; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">vv2</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  Burke/Kant sublime via Lorenz attractor — camera drifts INSIDE the
+  structure so 100k particles surround the viewer, streaming past like
+  stars in hyperspace but shaped by the strange attractor's topology.
+  Nearby particles burn bright pale steel; distant ones fade through
+  exponential fog into void. A single warm amber accent marks the
+  high-speed crossing zone between lobes — the luminous band.
+
+  Palette (5 hand-picked colors, Turrell / Sugimoto / Eliasson lineage):
+    #b8c4e8  pale steel       — nearby base
+    #4a6fa5  deep slate blue  — mid-distance
+    #1a2744  void blue        — far / fog tint
+    #f0c060  amber crossing   — speed accent
+    #020306  abyss            — background
+*/
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020306, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ---- ping-pong state ---- */
+const rtP = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+              minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+              depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtP);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtP);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 14.0;
+  init[i*4+1] = (Math.random()*2-1) * 14.0;
+  init[i*4+2] = (Math.random()*2-1) * 14.0 + 25.0;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv;
+    void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const quadScene = new THREE.Scene();
+quadScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA);
+renderer.render(quadScene, camOrtho);
+renderer.setRenderTarget(null);
+
+/* ---- Lorenz integrator ---- */
+const simU = {
+  prev:   { value: rtA.texture },
+  uDt:    { value: 0.005 },
+  uSigma: { value: 10.0 },
+  uRho:   { value: 28.0 },
+  uBeta:  { value: 8.0/3.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simU,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uSigma, uRho, uBeta;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vec3 dp = vec3(
+        uSigma * (p.y - p.x),
+        p.x * (uRho - p.z) - p.y,
+        p.x * p.y - uBeta * p.z
+      );
+      p += dp * uDt;
+      age = mod(age + uDt * 0.05, 1.0);
+      gl_FragColor = vec4(p, age);
+    }`
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+/* ---- render scene ---- */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(72, innerWidth/innerHeight, 0.05, 350);
+
+/* background: vertical void gradient + vignette */
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false, depthTest: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv;
+    gl_Position=vec4(position.xy, 0.9999, 1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      vec3 top = vec3(0.025, 0.035, 0.07);
+      vec3 bot = vec3(0.006, 0.008, 0.018);
+      vec3 col = mix(bot, top, vUv.y * 0.8 + 0.1);
+      float vig = 1.0 - 0.45 * pow(length(vUv - 0.5) * 1.4, 2.0);
+      gl_FragColor = vec4(col * vig, 1.0);
+    }`
+});
+const bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(2,2), bgMat);
+bgMesh.renderOrder = -2;
+bgMesh.frustumCulled = false;
+scene.add(bgMesh);
+
+/* particles */
+const geom = new THREE.BufferGeometry();
+const uvIdx = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  uvIdx[i*2]   = (x + 0.5) / W;
+  uvIdx[i*2+1] = (y + 0.5) / H;
+}
+geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+geom.setAttribute('uvIdx',    new THREE.BufferAttribute(uvIdx, 2));
+
+const ptMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0 }
+  },
+  transparent: true, depthWrite: false, depthTest: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vDist;
+    varying float vSpeed;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      p.z -= 25.0;
+      vAge = s.w;
+
+      float speed = length(vec3(
+        10.0 * (p.y - p.x),
+        p.x * 28.0 - p.y - p.x * (p.z + 25.0),
+        p.x * p.y - 2.6667 * (p.z + 25.0)
+      )) * 0.003;
+      vSpeed = clamp(speed, 0.0, 1.0);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDist = -mv.z;
+
+      float sz = (1.8 + 3.0 * vSpeed) * uPixel * (45.0 / max(vDist, 0.3));
+      gl_PointSize = clamp(sz, 0.4, 14.0);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying float vAge;
+    varying float vDist;
+    varying float vSpeed;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d,d);
+      if (r2 > 0.25) discard;
+      float soft = exp(-r2 * 12.0);
+
+      /* exponential depth fog — particles fade into the abyss */
+      float fog = exp(-vDist * 0.028);
+      fog = clamp(fog, 0.0, 1.0);
+
+      /* palette: steel → slate → amber by speed */
+      vec3 paleSteel = vec3(0.72, 0.77, 0.91);
+      vec3 slateBlue = vec3(0.29, 0.44, 0.65);
+      vec3 amber     = vec3(0.94, 0.75, 0.38);
+      vec3 voidBlue  = vec3(0.10, 0.15, 0.27);
+
+      float k = mod(vAge + vSpeed * 0.25, 1.0);
+      vec3 col = mix(slateBlue, paleSteel, smoothstep(0.0, 0.45, k));
+      /* amber only at high speed — the crossing zone luminous band */
+      col = mix(col, amber, smoothstep(0.55, 0.92, vSpeed));
+      /* far particles tint toward void blue */
+      col = mix(col, voidBlue, smoothstep(0.4, 0.0, fog));
+
+      float brightness = fog * (0.28 + vSpeed * 0.72);
+      float alpha = soft * fog * 0.8;
+
+      gl_FragColor = vec4(col * brightness * soft, alpha);
+    }`
+});
+const pts = new THREE.Points(geom, ptMat);
+scene.add(pts);
+
+/* film grain — photochemical imperfection (Lia Halloran) */
+const grainMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, depthTest: false,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv;
+    gl_Position=vec4(position.xy, -0.9999, 1.0); }`,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+    void main(){
+      float g = hash(vUv * 900.0 + fract(uTime * 7.3) * 100.0);
+      gl_FragColor = vec4(vec3(g * 0.12 + 0.02), 0.035);
+    }`
+});
+const grainMesh = new THREE.Mesh(new THREE.PlaneGeometry(2,2), grainMat);
+grainMesh.renderOrder = 100;
+grainMesh.frustumCulled = false;
+scene.add(grainMesh);
+
+/* ---- resize ---- */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ---- camera drift: slow figure-8 through attractor interior ----
+   The Lorenz attractor's two lobes center at ≈ (±8.49, ±8.49, 27)
+   → centered at (±8.49, ±8.49, 2). Camera traces a slow lemniscate
+   through both lobes so the viewer passes through the dense crossing
+   zone — the narrative arc: lobe A (calm density) → crossing (bright
+   convergence, amber flare) → lobe B (calm density) → return.
+   Period ≈ 420 seconds for one full cycle. */
+
+function camDrift(t) {
+  const s = t * 0.015;
+  const r = 7.5;
+  const x = Math.sin(s) * r;
+  const y = Math.cos(s * 0.67) * 3.5 + Math.sin(s * 0.31) * 1.8;
+  const z = Math.cos(s) * r * Math.cos(s * 0.47);
+  return new THREE.Vector3(x, y, z);
+}
+
+const lookTarget = new THREE.Vector3();
+const smoothLook = new THREE.Vector3(0, 0, 0);
+
+const startT = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - startT) / 1000;
+
+  /* sim: 4 substeps */
+  for (let i = 0; i < 4; i++){
+    simU.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  ptMat.uniforms.state.value = rtA.texture;
+  ptMat.uniforms.uTime.value = elapsed;
+  grainMat.uniforms.uTime.value = elapsed;
+
+  /* drift camera */
+  const pos = camDrift(elapsed);
+  camera.position.copy(pos);
+
+  /* look ahead along the path, blended toward center for stability */
+  const ahead = camDrift(elapsed + 3.0);
+  lookTarget.copy(ahead).lerp(new THREE.Vector3(0, 0, 0), 0.35);
+  smoothLook.lerp(lookTarget, 0.02);
+  camera.lookAt(smoothLook);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
