@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4rv · Neto sacs — vibratory weight</title>
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#ede8e0; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">4rv</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xede8e0);
+scene.fog = new THREE.FogExp2(0xede8e0, 0.018);
+
+const camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, 0.1, 150);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const ambLight = new THREE.AmbientLight(0xfff5e6, 0.9);
+scene.add(ambLight);
+const dirLight = new THREE.DirectionalLight(0xffeedd, 0.5);
+dirLight.position.set(-4, 8, 3);
+scene.add(dirLight);
+const fillLight = new THREE.DirectionalLight(0xe8ddd0, 0.3);
+fillLight.position.set(4, 3, -2);
+scene.add(fillLight);
+
+/* ── Deterministic RNG ── */
+let rngState = 48271953;
+function rng(){ rngState |= 0; rngState = rngState + 0x6d2b79f5 | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+/* ── Ceiling plane (invisible, structural reference) ── */
+const CEILING_Y = 7.0;
+const FLOOR_Y = -5.0;
+
+/* ── Sac definitions ── */
+// Each sac: attachment point on ceiling, drop length, belly radius, color
+const SAC_COUNT = 7;
+const sacs = [];
+const sacParticles = [];
+
+// Neto palette: turmeric, clove, cumin, saffron cream, paprika blush
+const sacColors = [
+  new THREE.Color(0xd4a843), // turmeric
+  new THREE.Color(0xc49a6c), // clove
+  new THREE.Color(0xbf8a3d), // cumin gold
+  new THREE.Color(0xe8cfa0), // saffron cream
+  new THREE.Color(0xc87f5a), // paprika
+  new THREE.Color(0xdbb978), // curry
+  new THREE.Color(0xe0c090), // pale spice
+];
+
+// Layout: sacs spread across a gallery-scale space
+const sacConfigs = [
+  { x: -3.2, z: -1.0, dropLen: 6.5, bellyR: 1.6, bellyPos: 0.65 },
+  { x:  1.5, z:  0.5, dropLen: 8.0, bellyR: 2.0, bellyPos: 0.55 },
+  { x: -0.5, z: -4.0, dropLen: 5.5, bellyR: 1.2, bellyPos: 0.60 },
+  { x:  4.0, z: -2.5, dropLen: 7.0, bellyR: 1.4, bellyPos: 0.70 },
+  { x: -5.0, z:  2.0, dropLen: 9.0, bellyR: 1.8, bellyPos: 0.58 },
+  { x:  2.5, z:  3.5, dropLen: 6.0, bellyR: 1.1, bellyPos: 0.62 },
+  { x: -1.8, z:  4.5, dropLen: 7.5, bellyR: 1.5, bellyPos: 0.53 },
+];
+
+/* ── Sac profile: stocking shape with belly bulge ── */
+function sacRadius(t, bellyR, bellyPos) {
+  // t: 0=attachment (ceiling), 1=tip (bottom)
+  // narrow neck at top, swells to belly, tapers to drip-tip
+  const neck = 0.15;
+  const tipR = 0.25;
+  if (t < 0.08) return neck + (bellyR * 0.3 - neck) * (t / 0.08); // neck opening
+  if (t < bellyPos) {
+    const s = (t - 0.08) / (bellyPos - 0.08);
+    const ease = Math.sin(s * Math.PI * 0.5);
+    return neck + (bellyR - neck) * ease;
+  }
+  // belly to tip taper
+  const s = (t - bellyPos) / (1.0 - bellyPos);
+  const ease = 1.0 - s * s;
+  return tipR + (bellyR - tipR) * ease;
+}
+
+/* ── Build particle systems for each sac ── */
+const PARTICLES_PER_SAC_SHELL = 6000;
+const PARTICLES_PER_SAC_FILL = 4000;
+
+// Shared material for shell particles
+const shellVertShader = `
+  attribute float aSize;
+  attribute float aAlpha;
+  varying float vAlpha;
+  void main(){
+    vAlpha = aAlpha;
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = aSize * (280.0 / -mv.z);
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+const shellFragShader = `
+  uniform vec3 uColor;
+  varying float vAlpha;
+  void main(){
+    float d = length(gl_PointCoord - 0.5) * 2.0;
+    if(d > 1.0) discard;
+    float soft = 1.0 - d * d;
+    vec3 fogColor = vec3(0.929, 0.910, 0.878);
+    float fogFactor = gl_FragCoord.z / gl_FragCoord.w;
+    fogFactor = 1.0 - exp(-0.018 * 0.018 * fogFactor * fogFactor);
+    fogFactor = clamp(fogFactor, 0.0, 1.0);
+    vec3 col = mix(uColor, fogColor, fogFactor);
+    gl_FragColor = vec4(col, vAlpha * soft);
+  }
+`;
+
+// Build thread lines from ceiling to sac tops
+const threadGroup = new THREE.Group();
+scene.add(threadGroup);
+
+for (let si = 0; si < SAC_COUNT; si++) {
+  const cfg = sacConfigs[si];
+  const color = sacColors[si];
+  const attachY = CEILING_Y;
+  const tipY = attachY - cfg.dropLen;
+  const centerX = cfg.x;
+  const centerZ = cfg.z;
+
+  // Shell particles — on the stocking surface
+  const totalShell = PARTICLES_PER_SAC_SHELL;
+  const shellPos = new Float32Array(totalShell * 3);
+  const shellSizes = new Float32Array(totalShell);
+  const shellAlphas = new Float32Array(totalShell);
+  const shellBasePos = new Float32Array(totalShell * 3);
+  const shellT = new Float32Array(totalShell); // parametric t for damping
+
+  for (let i = 0; i < totalShell; i++) {
+    const t = rng(); // 0=top, 1=bottom
+    const r = sacRadius(t, cfg.bellyR, cfg.bellyPos);
+    const theta = rng() * Math.PI * 2;
+    // slight noise on surface
+    const rOff = r * (0.97 + rng() * 0.06);
+    const x = centerX + Math.cos(theta) * rOff;
+    const z = centerZ + Math.sin(theta) * rOff;
+    const y = attachY - t * cfg.dropLen;
+
+    shellBasePos[i*3]   = x;
+    shellBasePos[i*3+1] = y;
+    shellBasePos[i*3+2] = z;
+    shellPos[i*3]   = x;
+    shellPos[i*3+1] = y;
+    shellPos[i*3+2] = z;
+    shellT[i] = t;
+    shellSizes[i] = 1.2 + rng() * 1.0;
+    // opacity: denser at belly, lighter at neck/tip
+    const bellyDist = Math.abs(t - cfg.bellyPos);
+    shellAlphas[i] = 0.25 + 0.35 * (1.0 - bellyDist * 1.5);
+  }
+
+  // Fill particles — inside the sac, denser near belly bottom
+  const totalFill = PARTICLES_PER_SAC_FILL;
+  const fillPos = new Float32Array(totalFill * 3);
+  const fillSizes = new Float32Array(totalFill);
+  const fillAlphas = new Float32Array(totalFill);
+  const fillBasePos = new Float32Array(totalFill * 3);
+  const fillT = new Float32Array(totalFill);
+
+  for (let i = 0; i < totalFill; i++) {
+    // bias t toward belly and below (where spice weight settles)
+    let t = rng();
+    t = 0.3 + t * 0.7; // skip the thin neck, focus belly-to-tip
+    // bias toward lower portion
+    t = Math.pow(t, 0.7);
+    t = Math.min(t, 0.98);
+
+    const maxR = sacRadius(t, cfg.bellyR, cfg.bellyPos) * 0.88;
+    // random point inside the cross-section
+    const rFill = maxR * Math.sqrt(rng()); // uniform disk
+    const theta = rng() * Math.PI * 2;
+    const x = centerX + Math.cos(theta) * rFill;
+    const z = centerZ + Math.sin(theta) * rFill;
+    const y = attachY - t * cfg.dropLen;
+
+    fillBasePos[i*3]   = x;
+    fillBasePos[i*3+1] = y;
+    fillBasePos[i*3+2] = z;
+    fillPos[i*3]   = x;
+    fillPos[i*3+1] = y;
+    fillPos[i*3+2] = z;
+    fillT[i] = t;
+    fillSizes[i] = 0.6 + rng() * 0.8;
+    // denser/more opaque near bottom of belly
+    const depth = (t - 0.3) / 0.7;
+    fillAlphas[i] = 0.08 + 0.18 * depth;
+  }
+
+  // Slightly darker fill color (spice settling)
+  const fillColor = color.clone().multiplyScalar(0.78);
+
+  // Create shell points
+  const shellGeo = new THREE.BufferGeometry();
+  shellGeo.setAttribute('position', new THREE.BufferAttribute(shellPos, 3));
+  shellGeo.setAttribute('aSize', new THREE.BufferAttribute(shellSizes, 1));
+  shellGeo.setAttribute('aAlpha', new THREE.BufferAttribute(shellAlphas, 1));
+
+  const shellMat = new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: color } },
+    vertexShader: shellVertShader,
+    fragmentShader: shellFragShader,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.NormalBlending,
+  });
+
+  const shellPoints = new THREE.Points(shellGeo, shellMat);
+  scene.add(shellPoints);
+
+  // Create fill points
+  const fillGeo = new THREE.BufferGeometry();
+  fillGeo.setAttribute('position', new THREE.BufferAttribute(fillPos, 3));
+  fillGeo.setAttribute('aSize', new THREE.BufferAttribute(fillSizes, 1));
+  fillGeo.setAttribute('aAlpha', new THREE.BufferAttribute(fillAlphas, 1));
+
+  const fillMat = new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: fillColor } },
+    vertexShader: shellVertShader,
+    fragmentShader: shellFragShader,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.NormalBlending,
+  });
+
+  const fillPoints = new THREE.Points(fillGeo, fillMat);
+  scene.add(fillPoints);
+
+  // Suspension threads — thin lines from ceiling spread to sac top
+  const threadCount = 3 + Math.floor(rng() * 3);
+  const threadVerts = [];
+  for (let ti = 0; ti < threadCount; ti++) {
+    const ceilSpread = 1.5 + rng() * 2.0;
+    const ang = (ti / threadCount) * Math.PI * 2 + rng() * 0.4;
+    const cx = centerX + Math.cos(ang) * ceilSpread;
+    const cz = centerZ + Math.sin(ang) * ceilSpread;
+    // thread from ceiling to attachment ring
+    const neckR = 0.15 + rng() * 0.1;
+    const ax = centerX + Math.cos(ang) * neckR;
+    const az = centerZ + Math.sin(ang) * neckR;
+    threadVerts.push(cx, CEILING_Y + 0.5, cz, ax, attachY, az);
+  }
+  const threadGeo = new THREE.BufferGeometry();
+  threadGeo.setAttribute('position', new THREE.Float32BufferAttribute(threadVerts, 3));
+  const threadMat = new THREE.LineBasicMaterial({
+    color: color.clone().multiplyScalar(0.6),
+    transparent: true,
+    opacity: 0.3,
+    fog: true,
+  });
+  const threadLines = new THREE.LineSegments(threadGeo, threadMat);
+  threadGroup.add(threadLines);
+
+  sacParticles.push({
+    shellGeo, shellBasePos, shellT, shellPoints,
+    fillGeo, fillBasePos, fillT, fillPoints,
+    cfg, attachY,
+    // per-sac phase offset for vibratory individuality
+    phaseOffset: rng() * Math.PI * 2,
+    freqMult: 0.8 + rng() * 0.4,
+  });
+}
+
+/* ── Centroid for camera tracking ── */
+const centroid = new THREE.Vector3();
+for (const cfg of sacConfigs) {
+  centroid.x += cfg.x;
+  centroid.z += cfg.z;
+  centroid.y += (CEILING_Y - cfg.dropLen * 0.5);
+}
+centroid.divideScalar(SAC_COUNT);
+
+/* ── Camera orbit ── */
+const camRadius = 14.0;
+const camHeight = 1.5;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── Animate ── */
+const start = performance.now();
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+
+  // Vibratory animation — standing-wave oscillation with damping gradient
+  for (const sp of sacParticles) {
+    const { shellGeo, shellBasePos, shellT, fillGeo, fillBasePos, fillT,
+            cfg, phaseOffset, freqMult } = sp;
+
+    // Shell particles
+    const sArr = shellGeo.attributes.position.array;
+    const sCount = shellT.length;
+    for (let i = 0; i < sCount; i++) {
+      const t = shellT[i];
+      // Damping: attachment zone (t<0.1) nearly still, belly/tip carries oscillation
+      const damping = t < 0.1 ? t * 10.0 * t * 10.0 * 0.01 : Math.pow(t, 1.5);
+      // Standing wave: multiple harmonics for organic feel
+      const phase1 = elapsed * 1.8 * freqMult + phaseOffset + t * 4.0;
+      const phase2 = elapsed * 2.7 * freqMult + phaseOffset * 1.3 + t * 6.0;
+      const swing = (Math.sin(phase1) * 0.7 + Math.sin(phase2) * 0.3);
+      const amp = damping * 0.12;
+
+      sArr[i*3]   = shellBasePos[i*3]   + swing * amp;
+      sArr[i*3+1] = shellBasePos[i*3+1] + Math.cos(phase1 * 0.7) * amp * 0.3;
+      sArr[i*3+2] = shellBasePos[i*3+2] + Math.cos(phase2) * amp * 0.6;
+    }
+    shellGeo.attributes.position.needsUpdate = true;
+
+    // Fill particles — same wave but slightly lagged (inertia of weight)
+    const fArr = fillGeo.attributes.position.array;
+    const fCount = fillT.length;
+    for (let i = 0; i < fCount; i++) {
+      const t = fillT[i];
+      const damping = t < 0.1 ? t * t : Math.pow(t, 1.5);
+      const phase1 = elapsed * 1.8 * freqMult + phaseOffset + t * 4.0 - 0.3;
+      const phase2 = elapsed * 2.7 * freqMult + phaseOffset * 1.3 + t * 6.0 - 0.2;
+      const swing = (Math.sin(phase1) * 0.7 + Math.sin(phase2) * 0.3);
+      const amp = damping * 0.10;
+
+      fArr[i*3]   = fillBasePos[i*3]   + swing * amp;
+      fArr[i*3+1] = fillBasePos[i*3+1] + Math.cos(phase1 * 0.7) * amp * 0.25;
+      fArr[i*3+2] = fillBasePos[i*3+2] + Math.cos(phase2) * amp * 0.5;
+    }
+    fillGeo.attributes.position.needsUpdate = true;
+  }
+
+  // Camera: slow orbit tracking centroid
+  const angle = elapsed * 0.025;
+  camera.position.set(
+    centroid.x + Math.cos(angle) * camRadius,
+    centroid.y + camHeight + Math.sin(elapsed * 0.015) * 1.2,
+    centroid.z + Math.sin(angle) * camRadius
+  );
+  camera.lookAt(centroid.x + Math.sin(elapsed * 0.02) * 0.5,
+                centroid.y - 0.5,
+                centroid.z + Math.cos(elapsed * 0.018) * 0.3);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
