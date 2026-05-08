@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>j2e · thread-constellation (cypress → dress)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">j2e</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a0a, 0.022);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 10, 20);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0a, 1);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── create cypress geometry (simplified L-system as volume)
+const cypressGeom = new THREE.CylinderGeometry(0.4, 1.2, 14, 16, 8);
+cypressGeom.translate(0, 7, 0);
+const cypressMesh = new THREE.Mesh(cypressGeom, new THREE.MeshBasicMaterial());
+
+// ────────────── create dress geometry (hanging garment silhouette)
+const dressGeom = new THREE.Group();
+// bodice: narrow cylinder
+const bodice = new THREE.CylinderGeometry(0.6, 0.7, 4, 12);
+bodice.translate(0, 10, 0);
+// skirt: flared cone
+const skirt = new THREE.ConeGeometry(3.2, 8, 16, 4);
+skirt.translate(0, 6, 0);
+// merge into single geometry
+const dressMerged = new THREE.BufferGeometry();
+const bodicePos = bodice.attributes.position.array;
+const skirtPos = skirt.attributes.position.array;
+const totalVerts = bodicePos.length / 3 + skirtPos.length / 3;
+const mergedPos = new Float32Array(totalVerts * 3);
+mergedPos.set(bodicePos, 0);
+mergedPos.set(skirtPos, bodicePos.length);
+dressMerged.setAttribute('position', new THREE.BufferAttribute(mergedPos, 3));
+dressMerged.computeVertexNormals();
+const dressMesh = new THREE.Mesh(dressMerged, new THREE.MeshBasicMaterial());
+
+// ────────────── sample anchors from both objects
+const cypressSampler = new MeshSurfaceSampler(cypressMesh).build();
+const dressSampler = new MeshSurfaceSampler(dressMesh).build();
+
+const THREAD_COUNT = 12000;
+const segments = [];
+const tempPos = new THREE.Vector3();
+const rng = () => Math.random();
+
+// 45% cypress-to-dress threads
+const C2D = Math.floor(THREAD_COUNT * 0.45);
+for (let i = 0; i < C2D; i++){
+  const from = new THREE.Vector3();
+  const to = new THREE.Vector3();
+  cypressSampler.sample(from);
+  dressSampler.sample(to);
+  segments.push({ from, to, cat: 'c2d' });
+}
+
+// 35% dress-internal threads (dress to dress)
+const D2D = Math.floor(THREAD_COUNT * 0.35);
+for (let i = 0; i < D2D; i++){
+  const from = new THREE.Vector3();
+  const to = new THREE.Vector3();
+  dressSampler.sample(from);
+  dressSampler.sample(to);
+  segments.push({ from, to, cat: 'd2d' });
+}
+
+// 20% cypress-internal threads (cypress to cypress)
+const C2C = THREAD_COUNT - C2D - D2D;
+for (let i = 0; i < C2C; i++){
+  const from = new THREE.Vector3();
+  const to = new THREE.Vector3();
+  cypressSampler.sample(from);
+  cypressSampler.sample(to);
+  segments.push({ from, to, cat: 'c2c' });
+}
+
+// ────────────── build line geometry
+const positions = new Float32Array(segments.length * 6);
+const seeds = new Float32Array(segments.length * 2);
+for (let i = 0; i < segments.length; i++){
+  const s = segments[i];
+  positions[i*6+0] = s.from.x;
+  positions[i*6+1] = s.from.y;
+  positions[i*6+2] = s.from.z;
+  positions[i*6+3] = s.to.x;
+  positions[i*6+4] = s.to.y;
+  positions[i*6+5] = s.to.z;
+  const r = rng();
+  seeds[i*2+0] = r;
+  seeds[i*2+1] = r;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+
+// ────────────── shader material (crimson threads, additive)
+const uniforms = {
+  uTime: { value: 0 },
+  uPointer: { value: new THREE.Vector2(0.5, 0.5) }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform vec2 uPointer;
+    attribute float seed;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.4 + seed * 6.28;
+      float sway = 0.08 * (p.y / 14.0);
+      p.x += sway * sin(t);
+      p.z += sway * cos(t * 0.85);
+      
+      vec2 screenPos = vec2(p.x / 20.0 + 0.5, p.y / 20.0 + 0.5);
+      float pointerDist = length(screenPos - uPointer);
+      float influence = exp(-pointerDist * 3.0);
+      p.x += influence * 0.3 * sin(uTime * 2.0);
+      p.z += influence * 0.3 * cos(uTime * 2.0);
+      
+      vAlpha = 0.08 + 0.04 * sin(t * 0.6);
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      vec3 crimson = vec3(0.61, 0.12, 0.12);
+      gl_FragColor = vec4(crimson * vAlpha, vAlpha);
+    }
+  `
+});
+
+const lines = new THREE.LineSegments(geom, mat);
+scene.add(lines);
+
+// ────────────── pointer tracking
+let pointerX = 0.5, pointerY = 0.5;
+addEventListener('pointermove', e => {
+  pointerX = e.clientX / innerWidth;
+  pointerY = 1.0 - e.clientY / innerHeight;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ────────────── animation loop
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  uniforms.uPointer.value.set(pointerX, pointerY);
+  
+  const ang = t * 0.08;
+  camera.position.x = Math.sin(ang) * 20;
+  camera.position.z = Math.cos(ang) * 20;
+  camera.lookAt(0, 8, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
