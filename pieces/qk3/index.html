@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qk3 · human unreadable (hash-seeded dance)</title>
+<!-- MOTION: sway, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0604; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; max-width:340px; line-height:1.4; }
+  .seed { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 9px; letter-spacing: 0.02em; font-family: monospace; }
+</style>
+</head>
+<body>
+<div class="id">qk3</div>
+<div class="hint">cryptographic choreography · each dancer's motion derived from 256-bit seed · click to regenerate</div>
+<div class="seed" id="seed"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// PRNG seeded from a hex string
+class SeededRandom {
+  constructor(seed) {
+    this.state = this.hashSeed(seed);
+  }
+  hashSeed(s) {
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return Math.abs(h);
+  }
+  next() {
+    this.state = Math.imul(this.state, 1103515245) + 12345;
+    return ((this.state >>> 16) & 0x7fff) / 0x7fff;
+  }
+}
+
+function genSeed() {
+  const arr = new Uint8Array(32);
+  crypto.getRandomValues(arr);
+  return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+let seed = genSeed();
+document.getElementById('seed').textContent = 'seed: ' + seed.slice(0, 16) + '…';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0604, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0a0604, 6, 14);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 30);
+camera.position.set(0, 2.2, 9);
+camera.lookAt(0, 1.5, 0);
+
+// stage cyc gradient backdrop
+const bgGeo = new THREE.PlaneGeometry(40, 20);
+const bgMat = new THREE.ShaderMaterial({
+  side: THREE.DoubleSide,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uTime;
+    void main() {
+      float t = vUv.y;
+      vec3 top = vec3(0.08, 0.05, 0.04);
+      vec3 mid = vec3(0.18, 0.12, 0.06);
+      vec3 bot = vec3(0.26, 0.18, 0.10);
+      vec3 col = mix(bot, mid, smoothstep(0.0, 0.5, t));
+      col = mix(col, top, smoothstep(0.5, 1.0, t));
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const bgMesh = new THREE.Mesh(bgGeo, bgMat);
+bgMesh.position.set(0, 5, -6);
+scene.add(bgMesh);
+
+// stage floor plane
+const floorGeo = new THREE.PlaneGeometry(20, 20);
+const floorMat = new THREE.MeshBasicMaterial({ color: 0x0f0906, side: THREE.DoubleSide });
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.rotation.x = -Math.PI / 2;
+floor.position.y = 0;
+scene.add(floor);
+
+// lighting
+const key = new THREE.DirectionalLight(0xffcc99, 1.8);
+key.position.set(3, 6, 4);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0x6688aa, 0.4);
+fill.position.set(-4, 3, -2);
+scene.add(fill);
+const amb = new THREE.AmbientLight(0x221a16, 0.6);
+scene.add(amb);
+
+// dancer skeleton structure
+const JOINT_COUNT = 13;
+const BONE_PAIRS = [
+  [0, 1], [1, 2], [2, 3],    // spine
+  [1, 4], [4, 5], [5, 6],    // left arm
+  [1, 7], [7, 8], [8, 9],    // right arm
+  [0, 10], [10, 11],         // left leg
+  [0, 12]                    // right leg
+];
+
+class Dancer {
+  constructor(rng, index, total) {
+    this.rng = rng;
+    this.index = index;
+    this.joints = Array(JOINT_COUNT).fill(null).map(() => new THREE.Vector3());
+    
+    // hash-derived base pose offsets
+    const xOff = (index - (total - 1) / 2) * 1.8;
+    this.baseX = xOff;
+    this.baseY = 0;
+    this.baseZ = this.rng.next() * 0.6 - 0.3;
+    
+    // motion parameters from seed
+    this.phaseOffset = this.rng.next() * Math.PI * 2;
+    this.freqMult = 0.7 + this.rng.next() * 0.6;
+    this.ampScale = 0.4 + this.rng.next() * 0.5;
+    this.armAsym = this.rng.next() * 0.3;
+    this.legAsym = this.rng.next() * 0.2;
+    
+    // joint spring coupling params
+    this.springK = 0.15 + this.rng.next() * 0.1;
+    this.damping = 0.88 + this.rng.next() * 0.08;
+    
+    this.velocities = Array(JOINT_COUNT).fill(null).map(() => new THREE.Vector3());
+    
+    // palette per dancer from seed
+    const hue = this.rng.next();
+    this.color = new THREE.Color().setHSL(0.08 + hue * 0.15, 0.65, 0.55);
+    
+    this.initPose();
+    this.buildMesh();
+  }
+  
+  initPose() {
+    // base skeleton in T-pose relative to root
+    this.joints[0].set(0, 0.2, 0);      // pelvis
+    this.joints[1].set(0, 0.8, 0);      // spine mid
+    this.joints[2].set(0, 1.3, 0);      // chest
+    this.joints[3].set(0, 1.8, 0);      // head
+    this.joints[4].set(-0.4, 1.2, 0);   // left shoulder
+    this.joints[5].set(-0.8, 1.0, 0);   // left elbow
+    this.joints[6].set(-1.2, 0.8, 0);   // left hand
+    this.joints[7].set(0.4, 1.2, 0);    // right shoulder
+    this.joints[8].set(0.8, 1.0, 0);    // right elbow
+    this.joints[9].set(1.2, 0.8, 0);    // right hand
+    this.joints[10].set(-0.2, -0.4, 0); // left knee
+    this.joints[11].set(-0.2, -1.0, 0); // left foot
+    this.joints[12].set(0.2, -0.4, 0);  // right knee
+  }
+  
+  buildMesh() {
+    const positions = [];
+    const colors = [];
+    
+    BONE_PAIRS.forEach(([a, b]) => {
+      positions.push(
+        this.joints[a].x, this.joints[a].y, this.joints[a].z,
+        this.joints[b].x, this.joints[b].y, this.joints[b].z
+      );
+      colors.push(
+        this.color.r, this.color.g, this.color.b,
+        this.color.r, this.color.g, this.color.b
+      );
+    });
+    
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    
+    const mat = new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 });
+    this.lineMesh = new THREE.LineSegments(geo, mat);
+    scene.add(this.lineMesh);
+    
+    // joint spheres
+    const sphereGeo = new THREE.SphereGeometry(0.04, 8, 8);
+    const sphereMat = new THREE.MeshBasicMaterial({ color: this.color });
+    this.spheres = this.joints.map(() => {
+      const mesh = new THREE.Mesh(sphereGeo, sphereMat);
+      scene.add(mesh);
+      return mesh;
+    });
+  }
+  
+  update(t) {
+    const phase = t * this.freqMult + this.phaseOffset;
+    
+    // target positions from choreography functions
+    const targets = this.joints.map((j, i) => j.clone());
+    
+    // root
+    targets[0].x = this.baseX + Math.sin(phase * 0.5) * 0.2 * this.ampScale;
+    targets[0].y = 0.2 + Math.abs(Math.sin(phase * 1.2)) * 0.15 * this.ampScale;
+    targets[0].z = this.baseZ + Math.cos(phase * 0.6) * 0.15 * this.ampScale;
+    
+    // spine sway
+    const spineWave = Math.sin(phase) * 0.3 * this.ampScale;
+    targets[1].x = targets[0].x + spineWave * 0.5;
+    targets[1].y = targets[0].y + 0.6;
+    targets[2].x = targets[0].x + spineWave * 0.8;
+    targets[2].y = targets[1].y + 0.5;
+    targets[3].x = targets[2].x + spineWave * 0.6;
+    targets[3].y = targets[2].y + 0.5;
+    
+    // arms
+    const leftArmPhase = phase + this.armAsym;
+    const rightArmPhase = phase - this.armAsym;
+    
+    targets[4].x = targets[2].x - 0.4 + Math.sin(leftArmPhase * 1.3) * 0.3 * this.ampScale;
+    targets[4].y = targets[2].y - 0.1 + Math.cos(leftArmPhase * 0.9) * 0.2 * this.ampScale;
+    targets[5].x = targets[4].x - 0.4 + Math.sin(leftArmPhase * 1.5) * 0.2;
+    targets[5].y = targets[4].y - 0.2;
+    targets[6].x = targets[5].x - 0.4;
+    targets[6].y = targets[5].y - 0.2;
+    
+    targets[7].x = targets[2].x + 0.4 + Math.sin(rightArmPhase * 1.3) * 0.3 * this.ampScale;
+    targets[7].y = targets[2].y - 0.1 + Math.cos(rightArmPhase * 0.9) * 0.2 * this.ampScale;
+    targets[8].x = targets[7].x + 0.4 + Math.sin(rightArmPhase * 1.5) * 0.2;
+    targets[8].y = targets[7].y - 0.2;
+    targets[9].x = targets[8].x + 0.4;
+    targets[9].y = targets[8].y - 0.2;
+    
+    // legs
+    const leftLegPhase = phase + this.legAsym;
+    const rightLegPhase = phase - this.legAsym;
+    
+    targets[10].x = targets[0].x - 0.2 + Math.sin(leftLegPhase * 2.0) * 0.15 * this.ampScale;
+    targets[10].y = -0.4 + Math.abs(Math.cos(leftLegPhase * 2.0)) * 0.2 * this.ampScale;
+    targets[11].x = targets[10].x;
+    targets[11].y = -1.0;
+    
+    targets[12].x = targets[0].x + 0.2 + Math.sin(rightLegPhase * 2.0) * 0.15 * this.ampScale;
+    targets[12].y = -0.4 + Math.abs(Math.cos(rightLegPhase * 2.0)) * 0.2 * this.ampScale;
+    
+    // spring-damped motion toward targets
+    this.joints.forEach((j, i) => {
+      const force = targets[i].clone().sub(j).multiplyScalar(this.springK);
+      this.velocities[i].add(force);
+      this.velocities[i].multiplyScalar(this.damping);
+      j.add(this.velocities[i]);
+    });
+    
+    // update mesh
+    const positions = this.lineMesh.geometry.attributes.position.array;
+    let idx = 0;
+    BONE_PAIRS.forEach(([a, b]) => {
+      positions[idx++] = this.joints[a].x;
+      positions[idx++] = this.joints[a].y;
+      positions[idx++] = this.joints[a].z;
+      positions[idx++] = this.joints[b].x;
+      positions[idx++] = this.joints[b].y;
+      positions[idx++] = this.joints[b].z;
+    });
+    this.lineMesh.geometry.attributes.position.needsUpdate = true;
+    
+    this.spheres.forEach((sphere, i) => {
+      sphere.position.copy(this.joints[i]);
+    });
+  }
+  
+  dispose() {
+    scene.remove(this.lineMesh);
+    this.lineMesh.geometry.dispose();
+    this.lineMesh.material.dispose();
+    this.spheres.forEach(s => {
+      scene.remove(s);
+      s.geometry.dispose();
+      s.material.dispose();
+    });
+  }
+}
+
+let dancers = [];
+
+function initDancers() {
+  dancers.forEach(d => d.dispose());
+  dancers = [];
+  
+  const rng = new SeededRandom(seed);
+  const count = 5;
+  
+  for (let i = 0; i < count; i++) {
+    dancers.push(new Dancer(rng, i, count));
+  }
+}
+
+initDancers();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+addEventListener('click', () => {
+  seed = genSeed();
+  document.getElementById('seed').textContent = 'seed: ' + seed.slice(0, 16) + '…';
+  initDancers();
+});
+
+const t0 = performance.now();
+function loop() {
+  const t = (performance.now() - t0) * 0.001;
+  
+  bgMat.uniforms.uTime.value = t;
+  
+  dancers.forEach(d => d.update(t));
+  
+  // gentle camera arc
+  const camAngle = t * 0.08;
+  camera.position.x = Math.sin(camAngle) * 0.6;
+  camera.position.z = 9 + Math.cos(camAngle) * 0.4;
+  camera.lookAt(0, 1.5, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
