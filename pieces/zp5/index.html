@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- MOTION: erosion, intensity: gentle -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zp5 · midnight sky</title>
+<style>
+html, body { margin:0; padding:0; height:100%; background:#020308; overflow:hidden; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">zp5</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* Amelia Winger-Bearskin — "I WOULD LIKE TO BE MIDNIGHT / I WOULD LIKE TO BE SKY"
+   Two-layer particle landscape: a 'built' layer of orthogonal infrastructure
+   (roads, poles, fences, power lines — sodium-orange light pollution) that
+   progressively erodes into the 'sky' layer (slow drift, deep cobalt field
+   of stars). Each particle is a leaf — the infrastructure decomposes into
+   foliage that drifts upward, revealing the shared celestial commons beneath.
+   90-second cycle: built → erosion → midnight → rebuilding. */
+
+const W = 320, H = 320, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020308, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtOpts = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtOpts);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtOpts);
+
+const builtData = new Float32Array(N * 4);
+const skyData   = new Float32Array(N * 4);
+
+for (let i = 0; i < N; i++) {
+  const r1 = Math.random(), r2 = Math.random(), r3 = Math.random(), r4 = Math.random();
+  let bx, by, bz;
+  const type = r1;
+
+  if (type < 0.25) {
+    // Roads: horizontal lines at ground
+    const lane = Math.floor(r2 * 6) - 3;
+    bx = (r3 - 0.5) * 90;
+    by = -9 + lane * 0.12;
+    bz = (r4 - 0.5) * 35;
+  } else if (type < 0.42) {
+    // Power lines: wires strung high
+    bx = (r3 - 0.5) * 85;
+    by = -1 + Math.floor(r2 * 4) * 2.2;
+    bz = Math.floor(r4 * 5 - 2.5) * 9;
+  } else if (type < 0.56) {
+    // Poles / towers: vertical elements
+    const px = Math.floor(r2 * 8 - 4) * 10;
+    const pz = Math.floor(r3 * 5 - 2.5) * 9;
+    bx = px + (r4 - 0.5) * 0.4;
+    by = -9 + r4 * 17;
+    bz = pz + (r2 - 0.5) * 0.4;
+  } else if (type < 0.7) {
+    // Fences: low horizontal
+    bx = (r2 - 0.5) * 65;
+    by = -7.5 + r3 * 1.5;
+    bz = Math.floor(r4 * 7 - 3.5) * 5.5;
+  } else if (type < 0.82) {
+    // Grid intersections: clumps at crossroads
+    const gx = Math.floor(r2 * 6 - 3) * 14;
+    const gz = Math.floor(r3 * 4 - 2) * 10;
+    bx = gx + (r4 - 0.5) * 3;
+    by = -9 + r4 * 3;
+    bz = gz + (r2 - 0.5) * 3;
+  } else {
+    // Ground scatter
+    bx = (r2 - 0.5) * 80;
+    by = -9 + (r3 - 0.5) * 1.0;
+    bz = (r4 - 0.5) * 30;
+  }
+
+  builtData[i*4]   = bx;
+  builtData[i*4+1] = by;
+  builtData[i*4+2] = bz;
+  builtData[i*4+3] = r1; // erosion phase offset
+
+  // Sky: stars in a broad dome
+  const theta = r1 * Math.PI * 2;
+  const phi = r2 * Math.PI * 0.48 + 0.04;
+  const rad = 12 + r3 * 55;
+  skyData[i*4]   = Math.cos(theta) * Math.sin(phi) * rad;
+  skyData[i*4+1] = Math.cos(phi) * rad * 0.55 + 8;
+  skyData[i*4+2] = Math.sin(theta) * Math.sin(phi) * rad * 0.6;
+  skyData[i*4+3] = r4; // brightness
+}
+
+const builtTex = new THREE.DataTexture(builtData, W, H, THREE.RGBAFormat, THREE.FloatType);
+builtTex.needsUpdate = true;
+const skyTex = new THREE.DataTexture(skyData, W, H, THREE.RGBAFormat, THREE.FloatType);
+skyTex.needsUpdate = true;
+
+// Init at built positions
+const initData = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  initData[i*4]   = builtData[i*4];
+  initData[i*4+1] = builtData[i*4+1];
+  initData[i*4+2] = builtData[i*4+2];
+  initData[i*4+3] = 0.0;
+}
+const initTex = new THREE.DataTexture(initData, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// Simulation
+const simMat = new THREE.ShaderMaterial({
+  uniforms: {
+    prev:   { value: rtA.texture },
+    uBuilt: { value: builtTex },
+    uSky:   { value: skyTex },
+    uCycle: { value: 0.0 },
+    uTime:  { value: 0.0 },
+    uDt:    { value: 0.016 }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev, uBuilt, uSky;
+    uniform float uCycle, uTime, uDt;
+    varying vec2 vUv;
+
+    float hash(vec2 p){
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+
+    void main(){
+      vec4 cur   = texture2D(prev, vUv);
+      vec4 built = texture2D(uBuilt, vUv);
+      vec4 sky   = texture2D(uSky, vUv);
+
+      float phase = built.w;
+      // Staggered erosion: lower phase erodes first
+      float erodeT = smoothstep(phase * 0.55, phase * 0.55 + 0.38, uCycle);
+
+      vec3 target = mix(built.xyz, sky.xyz, erodeT);
+
+      // Transitional drift: leaves rising
+      float transit = erodeT * (1.0 - erodeT) * 4.0;
+      float h1 = hash(vUv);
+      float h2 = hash(vUv + 0.37);
+      float h3 = hash(vUv + 0.71);
+
+      // Upward leaf drift during erosion
+      vec3 drift = vec3(
+        sin(h1 * 6.2832 + uTime * 0.7) * transit * 4.0,
+        transit * 6.0 + sin(h2 * 6.2832 + uTime * 1.1) * transit * 2.0,
+        cos(h3 * 6.2832 + uTime * 0.5) * transit * 2.5
+      );
+
+      // Gentle sky drift when settled as stars
+      vec3 skyMotion = vec3(
+        sin(h1 * 6.28 + uTime * 0.12) * erodeT * 0.08,
+        cos(h2 * 3.14 + uTime * 0.09) * erodeT * 0.04,
+        sin(h3 * 4.71 + uTime * 0.11) * erodeT * 0.06
+      );
+
+      target += drift + skyMotion;
+
+      float rate = mix(3.0, 0.9, erodeT);
+      vec3 pos = cur.xyz + (target - cur.xyz) * uDt * rate;
+
+      gl_FragColor = vec4(pos, erodeT);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// Render
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 500);
+
+const geom = new THREE.BufferGeometry();
+const uvIdx = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  uvIdx[i*2]   = (x + 0.5) / W;
+  uvIdx[i*2+1] = (y + 0.5) / H;
+}
+geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+geom.setAttribute('uvIdx', new THREE.BufferAttribute(uvIdx, 2));
+
+// Palette: sodium #e89340, amber #c07530, fade #8a4820,
+//          cobalt #1a2d5e, midnight #0c1428, star #d5dae8, warm star #e8c896
+const ptMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtA.texture },
+    uSky:   { value: skyTex },
+    uPixel: { value: renderer.getPixelRatio() },
+    uCycle: { value: 0.0 },
+    uTime:  { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state, uSky;
+    uniform float uPixel, uCycle, uTime;
+    attribute vec2 uvIdx;
+    varying float vErode;
+    varying float vBright;
+    varying vec2 vUvIdx;
+
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec4 sky = texture2D(uSky, uvIdx);
+      vec3 p = s.xyz;
+      vErode = s.w;
+      vBright = sky.w;
+      vUvIdx = uvIdx;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 1.0);
+
+      // Leaves when transitioning, dots when infrastructure, tiny when stars
+      float isLeaf = step(0.12, vErode) * step(vErode, 0.88);
+      float baseSize = mix(1.2, 3.2, isLeaf);
+      // Stars: variable size by brightness
+      float starSize = 0.5 + vBright * 2.2;
+      // Twinkle
+      float twinkle = 0.75 + 0.25 * sin(uTime * (2.0 + vBright * 4.0) + vBright * 40.0);
+      starSize *= twinkle;
+      baseSize = mix(baseSize, starSize, smoothstep(0.82, 1.0, vErode));
+
+      gl_PointSize = baseSize * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vErode;
+    varying float vBright;
+    varying vec2 vUvIdx;
+
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+
+      // Leaf shape during transition
+      float isLeaf = step(0.12, vErode) * step(vErode, 0.88);
+      float mask;
+
+      if (isLeaf > 0.5) {
+        // Leaf: pointed ellipse rotated by particle ID
+        float angle = vUvIdx.x * 3.14159 + vUvIdx.y * 2.71;
+        float ca = cos(angle), sa = sin(angle);
+        vec2 r = vec2(uv.x * ca - uv.y * sa, uv.x * sa + uv.y * ca);
+        // Ellipse with pointed ends
+        float e = r.x * r.x * 4.0 + r.y * r.y * 12.0;
+        float tip = r.x * 0.8; // asymmetric point
+        e += tip * tip * tip * 2.0;
+        // Vein line
+        float vein = exp(-abs(r.y) * 25.0) * 0.25;
+        mask = (1.0 - smoothstep(0.12, 0.2, e)) + vein;
+        mask = clamp(mask, 0.0, 1.0);
+        if (mask < 0.02) discard;
+      } else {
+        float r2 = dot(uv, uv);
+        if (r2 > 0.25) discard;
+        mask = exp(-r2 * 14.0);
+      }
+
+      // Sodium orange → cobalt → star white
+      vec3 sodium  = vec3(0.91, 0.58, 0.25);
+      vec3 amber   = vec3(0.75, 0.46, 0.19);
+      vec3 fadeCol = vec3(0.54, 0.29, 0.13);
+      vec3 cobalt  = vec3(0.10, 0.18, 0.37);
+      vec3 starW   = vec3(0.84, 0.86, 0.91);
+      vec3 starAmb = vec3(0.92, 0.78, 0.59);
+
+      vec3 col;
+      float alpha;
+
+      if (vErode < 0.12) {
+        // Infrastructure: sodium glow
+        col = mix(sodium, amber, vBright * 0.6);
+        // Light pollution haze: brighter near ground
+        alpha = mask * 0.55;
+      } else if (vErode < 0.88) {
+        // Leaves in transit
+        float t = (vErode - 0.12) / 0.76;
+        col = mix(sodium, fadeCol, t * 0.7);
+        col = mix(col, cobalt, t * t);
+        alpha = mask * mix(0.5, 0.18, t);
+      } else {
+        // Stars
+        float t = (vErode - 0.88) / 0.12;
+        vec3 starCol = mix(starW, starAmb, step(0.65, vBright));
+        col = mix(cobalt, starCol, t);
+        alpha = mask * mix(0.12, 0.65 * (0.6 + 0.4 * vBright), t);
+      }
+
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+
+const pts = new THREE.Points(geom, ptMat);
+scene.add(pts);
+
+// Horizon glow: warm orange ground-light that fades as infrastructure erodes
+const glowGeom = new THREE.PlaneGeometry(200, 40);
+const glowMat = new THREE.ShaderMaterial({
+  uniforms: { uCycle: { value: 0.0 } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+  `,
+  fragmentShader: `
+    uniform float uCycle;
+    varying vec2 vUv;
+    void main(){
+      float yFade = 1.0 - smoothstep(0.0, 0.7, vUv.y);
+      float xFade = 1.0 - pow(abs(vUv.x - 0.5) * 2.0, 2.0);
+      float glow = yFade * xFade * (1.0 - uCycle) * 0.06;
+      vec3 col = vec3(0.85, 0.45, 0.12);
+      gl_FragColor = vec4(col * glow, glow);
+    }
+  `
+});
+const glowPlane = new THREE.Mesh(glowGeom, glowMat);
+glowPlane.position.y = -5;
+glowPlane.rotation.x = -0.15;
+scene.add(glowPlane);
+
+// Film grain overlay via post-processing quad (subtle cyanotype texture)
+const grainScene = new THREE.Scene();
+const grainCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const grainMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, depthTest: false,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
+    void main(){
+      float grain = hash(vUv * 800.0 + uTime * 7.3) * 0.03;
+      gl_FragColor = vec4(vec3(grain * 0.6, grain * 0.65, grain * 0.8), grain);
+    }
+  `
+});
+grainScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), grainMat));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const CYCLE_DUR = 90.0;
+const t0 = performance.now();
+
+function sStep(a, b, t) {
+  const x = Math.max(0, Math.min(1, (t - a) / (b - a)));
+  return x * x * (3 - 2 * x);
+}
+
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - t0) / 1000;
+  const dt = 0.016;
+
+  // Cycle: erode → hold midnight → rebuild
+  const cp = (elapsed % CYCLE_DUR) / CYCLE_DUR;
+  let cycle;
+  if (cp < 0.42) cycle = sStep(0, 0.42, cp);
+  else if (cp < 0.58) cycle = 1.0;
+  else cycle = 1.0 - sStep(0.58, 1.0, cp);
+
+  // Sim
+  simMat.uniforms.uCycle.value = cycle;
+  simMat.uniforms.uTime.value = elapsed;
+  simMat.uniforms.uDt.value = dt;
+  simMat.uniforms.prev.value = rtA.texture;
+  renderer.setRenderTarget(rtB);
+  renderer.render(simScene, camOrtho);
+  let tmp = rtA; rtA = rtB; rtB = tmp;
+  renderer.setRenderTarget(null);
+
+  // Render
+  ptMat.uniforms.state.value = rtA.texture;
+  ptMat.uniforms.uCycle.value = cycle;
+  ptMat.uniforms.uTime.value = elapsed;
+  glowMat.uniforms.uCycle.value = cycle;
+  grainMat.uniforms.uTime.value = elapsed;
+
+  // Camera: slow orbit, tilts skyward as infrastructure erodes
+  const ang = elapsed * 0.018;
+  const tiltUp = cycle * 10;
+  camera.position.set(
+    Math.sin(ang) * 58,
+    4 + tiltUp,
+    Math.cos(ang) * 58
+  );
+  camera.lookAt(0, -3 + tiltUp * 0.4, 0);
+
+  // Background color: dark ground → deeper midnight
+  const bgR = 0.008 * (1.0 - cycle * 0.4);
+  const bgG = 0.012 * (1.0 - cycle * 0.3);
+  const bgB = 0.03 * (1.0 - cycle * 0.2);
+  renderer.setClearColor(new THREE.Color(bgR, bgG, bgB), 1);
+
+  renderer.render(scene, camera);
+
+  // Film grain pass (autoClear off)
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
