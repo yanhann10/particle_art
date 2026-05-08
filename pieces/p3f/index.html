@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: propagate, intensity: gentle -->
+<title>p3f · relational cypress</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06070a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .social{ position:fixed; right:14px; top:14px; opacity:0.5; font-size:10px; letter-spacing:0.04em; text-align:right; line-height:1.6; }
+  .label { position:fixed; right:14px; bottom:12px; opacity:0.65; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">p3f</div>
+<div class="hint">drag to orbit · open more tabs to gather</div>
+<div class="social" id="socialInfo">1 presence · 0 pulses</div>
+<div class="label" id="phaseLabel">cypress 100%</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ═══════════ social layer ═══════════ */
+const BC = new BroadcastChannel('relational-cypress');
+const myId = Math.random().toString(36).slice(2,8);
+const peers = new Map(); // id → lastSeen
+let peerCount = 1;
+let totalPulses = 0;
+let waveOriginTime = -99;  // time of last external pulse (for propagation wave)
+let waveMorphBias = 0;     // collective morph bias from peers
+
+BC.onmessage = e => {
+  const d = e.data;
+  if (d.type === 'heartbeat' && d.id !== myId) {
+    peers.set(d.id, performance.now());
+    waveMorphBias = d.morph ?? 0;
+  }
+  if (d.type === 'click' && d.id !== myId) {
+    target = d.target;
+    waveOriginTime = performance.now() / 1000;
+  }
+  if (d.type === 'pulse') {
+    totalPulses++;
+    waveOriginTime = performance.now() / 1000;
+  }
+};
+
+// heartbeat
+setInterval(() => {
+  BC.postMessage({ type:'heartbeat', id:myId, morph: phase });
+  // prune stale peers (>4s)
+  const now = performance.now();
+  for (const [k,v] of peers) if (now - v > 4000) peers.delete(k);
+  peerCount = 1 + peers.size;
+}, 1000);
+
+// Binance WebSocket — public trade stream, no auth needed
+// Each trade = one external pulse that propagates through the field
+let ws = null;
+let wsConnected = false;
+function connectWS() {
+  try {
+    ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade');
+    ws.onopen = () => { wsConnected = true; };
+    ws.onmessage = () => {
+      totalPulses++;
+      if (totalPulses % 3 === 0) { // throttle visual waves to every 3rd trade
+        waveOriginTime = performance.now() / 1000;
+        BC.postMessage({ type:'pulse' });
+      }
+    };
+    ws.onclose = () => { wsConnected = false; setTimeout(connectWS, 5000); };
+    ws.onerror = () => { ws.close(); };
+  } catch(_) { /* fallback: no external pulses, still works */ }
+}
+connectWS();
+
+/* ═══════════ scene ═══════════ */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x06070a, 0.016);
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(14, 6, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06070a, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 8, 0);
+
+/* ═══════════ pose A: cypress L-system ═══════════ */
+const RULES = {
+  'F': [
+    { p: 0.55, s: 'F[+f][-f]F' },
+    { p: 0.25, s: 'FF[/f]\\F' },
+    { p: 0.20, s: 'F[+f-f][/f\\f]F' },
+  ],
+  'f': [
+    { p: 0.6, s: 'f[+f][-f]' },
+    { p: 0.4, s: 'f' },
+  ]
+};
+const ANGLE = THREE.MathUtils.degToRad(13);
+const STEP_BASE = 0.55;
+
+function expand(axiom, depth, rng){
+  let s = axiom;
+  for (let d = 0; d < depth; d++){
+    let out = '';
+    for (const ch of s){
+      if (ch in RULES){
+        const r = rng(); let acc = 0;
+        for (const opt of RULES[ch]){ acc += opt.p; if (r <= acc){ out += opt.s; break; } }
+      } else out += ch;
+    }
+    s = out;
+  }
+  return s;
+}
+
+function turtle(str){
+  const stack = [], segments = [];
+  let pos = new THREE.Vector3(0,0,0);
+  let h = new THREE.Vector3(0,1,0);
+  let l = new THREE.Vector3(-1,0,0);
+  let u = new THREE.Vector3(0,0,1);
+  let gen = 0;
+  const rot = (axis, ang) => {
+    const q = new THREE.Quaternion().setFromAxisAngle(axis, ang);
+    h.applyQuaternion(q); l.applyQuaternion(q); u.applyQuaternion(q);
+  };
+  for (const ch of str){
+    switch(ch){
+      case 'F': case 'f': {
+        const step = STEP_BASE * Math.pow(0.85, gen);
+        const next = pos.clone().addScaledVector(h, step);
+        segments.push({ from: pos.clone(), to: next.clone(), gen });
+        pos = next; break;
+      }
+      case '+': rot(u, +ANGLE); break;
+      case '-': rot(u, -ANGLE); break;
+      case '&': rot(l, +ANGLE); break;
+      case '^': rot(l, -ANGLE); break;
+      case '/': rot(h, +ANGLE*1.5); break;
+      case '\\': rot(h, -ANGLE*1.5); break;
+      case '[': stack.push({pos:pos.clone(),h:h.clone(),l:l.clone(),u:u.clone(),gen}); gen++; break;
+      case ']': { const f = stack.pop(); pos=f.pos; h=f.h; l=f.l; u=f.u; gen=f.gen; break; }
+    }
+  }
+  return segments;
+}
+
+const rng = (() => { let s = 0xC0FFEE; return () => { s = (s + 0x6D2B79F5) | 0;
+  let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296; }; })();
+const cypressSegs = turtle(expand('F', 6, rng));
+
+/* ═══════════ pose B: art-deco tower ═══════════ */
+function sampleArtDeco(N){
+  const out = new Float32Array(N*3);
+  const pos = new THREE.Vector3();
+  const tiers = [
+    { hw:4.5, y0:0, y1:4, ridges:14 },
+    { hw:3.4, y0:4, y1:7.5, ridges:12 },
+    { hw:2.4, y0:7.5, y1:10.5, ridges:10 },
+    { hw:1.5, y0:10.5, y1:13, ridges:8 },
+    { hw:0.85, y0:13, y1:15, ridges:6 },
+  ];
+  const spireBase=0.6, spireTop=18.5, spireApex=20.5;
+  const W=Math.floor(N*0.55), B=Math.floor(N*0.25), S=Math.floor(N*0.12), C=N-W-B-S;
+  let i=0;
+  const tierW = tiers.map(t=>8*t.hw*(t.y1-t.y0));
+  const tw = tierW.reduce((a,b)=>a+b,0);
+  for (let ti=0; ti<tiers.length; ti++){
+    const t=tiers[ti];
+    const count = ti===tiers.length-1 ? W-Math.floor(tierW.slice(0,ti).reduce((a,b)=>a+b/tw*W,0)) : Math.floor(tierW[ti]/tw*W);
+    for (let k=0; k<count; k++){
+      const face=Math.floor(Math.random()*4);
+      const r=Math.floor(Math.random()*t.ridges);
+      const rf=(r+0.5)/t.ridges;
+      const along=(rf*2-1)*t.hw;
+      const y=t.y0+Math.random()*(t.y1-t.y0);
+      const j=0.04;
+      switch(face){
+        case 0: pos.set(t.hw+(Math.random()-.5)*j,y,along); break;
+        case 1: pos.set(-t.hw+(Math.random()-.5)*j,y,along); break;
+        case 2: pos.set(along,y,t.hw+(Math.random()-.5)*j); break;
+        case 3: pos.set(along,y,-t.hw+(Math.random()-.5)*j); break;
+      }
+      out[i*3]=pos.x; out[i*3+1]=pos.y; out[i*3+2]=pos.z; i++;
+    }
+  }
+  for (let k=0; k<B; k++){
+    const ti=Math.floor(Math.random()*tiers.length), t=tiers[ti];
+    const edge=Math.random()<0.6?t.y1:t.y0;
+    const face=Math.floor(Math.random()*4), along=(Math.random()*2-1)*t.hw, j=0.02;
+    switch(face){
+      case 0: pos.set(t.hw,edge+(Math.random()-.5)*j,along); break;
+      case 1: pos.set(-t.hw,edge+(Math.random()-.5)*j,along); break;
+      case 2: pos.set(along,edge+(Math.random()-.5)*j,t.hw); break;
+      case 3: pos.set(along,edge+(Math.random()-.5)*j,-t.hw); break;
+    }
+    out[i*3]=pos.x; out[i*3+1]=pos.y; out[i*3+2]=pos.z; i++;
+  }
+  for (let k=0; k<S; k++){
+    const t=Math.random(), y=spireTop+t*(spireApex-spireTop), r=spireBase*(1-t);
+    const th=Math.random()*Math.PI*2;
+    pos.set(Math.cos(th)*r,y,Math.sin(th)*r);
+    out[i*3]=pos.x; out[i*3+1]=pos.y; out[i*3+2]=pos.z; i++;
+  }
+  const chevrons=16;
+  for (let k=0; k<C; k++){
+    const ch=Math.floor(Math.random()*chevrons);
+    const th=(ch+0.5)/chevrons*Math.PI*2;
+    const along=Math.random(), inner=0.7, outer=2.0, r=inner+along*(outer-inner);
+    const y=spireTop-0.4+along*0.8+(Math.random()-.5)*0.05;
+    pos.set(Math.cos(th)*r,y,Math.sin(th)*r);
+    out[i*3]=pos.x; out[i*3+1]=pos.y; out[i*3+2]=pos.z; i++;
+  }
+  return out;
+}
+
+/* ═══════════ build particle arrays ═══════════ */
+const N = 70000;
+const treePos = new Float32Array(N*3);
+const towerPos = sampleArtDeco(N);
+const seeds = new Float32Array(N);
+
+const lens = cypressSegs.map(s=>s.from.distanceTo(s.to));
+const totalLen = lens.reduce((a,b)=>a+b,0);
+const N_SKEL = Math.floor(N*0.55);
+let written = 0;
+const v = new THREE.Vector3();
+
+for (let i=0; i<cypressSegs.length; i++){
+  const share = i===cypressSegs.length-1 ? N_SKEL-written : Math.max(1,Math.floor(N_SKEL*lens[i]/totalLen));
+  for (let k=0; k<share && written<N_SKEL; k++){
+    const t=Math.random();
+    v.lerpVectors(cypressSegs[i].from, cypressSegs[i].to, t);
+    const jitter = 0.05*Math.pow(0.85, cypressSegs[i].gen);
+    treePos[written*3]=v.x+(Math.random()-.5)*jitter;
+    treePos[written*3+1]=v.y+(Math.random()-.5)*jitter;
+    treePos[written*3+2]=v.z+(Math.random()-.5)*jitter;
+    seeds[written]=Math.random(); written++;
+  }
+}
+
+{
+  let yMin=Infinity, yMax=-Infinity;
+  for (const s of cypressSegs){ yMin=Math.min(yMin,s.from.y,s.to.y); yMax=Math.max(yMax,s.from.y,s.to.y); }
+  const trunkH=yMax-yMin, haloYStart=yMin+trunkH*0.16;
+  const RIDGES=8, SPIRAL=0.9, TUFT_COUNT=24;
+  const tuftYs=[], tuftThetas=[];
+  for (let i=0;i<TUFT_COUNT;i++){
+    tuftYs.push(haloYStart+(i+0.5)/TUFT_COUNT*(yMax-haloYStart));
+    tuftThetas.push(Math.random()*Math.PI*2);
+  }
+  const N_FOLIAGE=N-N_SKEL;
+  const N_RIDGE=Math.floor(N_FOLIAGE*0.6);
+
+  for (let k=0; k<N_RIDGE && written<N; k++){
+    const yt=Math.random(), y=haloYStart+yt*(yMax-haloYStart);
+    const taper=Math.max(0.18,1-1.5*Math.pow(yt-0.45,2));
+    const baseR=0.05+0.95*taper;
+    const ridge=Math.floor(Math.random()*RIDGES);
+    const ridgeTh=ridge/RIDGES*Math.PI*2+y*SPIRAL;
+    const th=ridgeTh+(Math.random()-.5)*0.3;
+    const r=baseR*(0.55+0.45*Math.random());
+    treePos[written*3]=Math.cos(th)*r;
+    treePos[written*3+1]=y+(Math.random()-.5)*0.05;
+    treePos[written*3+2]=Math.sin(th)*r;
+    seeds[written]=Math.random(); written++;
+  }
+  const N_TUFT=N_FOLIAGE-N_RIDGE;
+  for (let k=0; k<N_TUFT && written<N; k++){
+    const ti=Math.floor(Math.random()*TUFT_COUNT);
+    const tuftY=tuftYs[ti], tuftTh=tuftThetas[ti];
+    const yt=(tuftY-haloYStart)/(yMax-haloYStart);
+    const taper=Math.max(0.18,1-1.5*Math.pow(yt-0.45,2));
+    const baseR=0.05+0.95*taper;
+    const reach=baseR+0.1+Math.random()*0.35;
+    const localY=tuftY+(Math.random()-.5)*0.4;
+    const localTh=tuftTh+(Math.random()-.5)*0.4;
+    const localR=reach+(Math.random()-.5)*0.18;
+    treePos[written*3]=Math.cos(localTh)*localR;
+    treePos[written*3+1]=localY;
+    treePos[written*3+2]=Math.sin(localTh)*localR;
+    seeds[written]=Math.random(); written++;
+  }
+}
+while(written<N){ treePos[written*3]=0; treePos[written*3+1]=0; treePos[written*3+2]=0; seeds[written]=Math.random(); written++; }
+
+function fitToHeight(arr, targetH){
+  let minY=Infinity, maxY=-Infinity, cx=0, cz=0;
+  const n=arr.length/3;
+  for (let i=0;i<n;i++){ minY=Math.min(minY,arr[i*3+1]); maxY=Math.max(maxY,arr[i*3+1]); cx+=arr[i*3]; cz+=arr[i*3+2]; }
+  cx/=n; cz/=n;
+  const s=targetH/(maxY-minY);
+  for (let i=0;i<n;i++){ arr[i*3]=(arr[i*3]-cx)*s; arr[i*3+1]=(arr[i*3+1]-minY)*s; arr[i*3+2]=(arr[i*3+2]-cz)*s; }
+}
+fitToHeight(treePos, 16);
+fitToHeight(towerPos, 16);
+
+/* ═══════════ shader ═══════════ */
+const uniforms = {
+  uTime:      { value: 0 },
+  uPixel:     { value: renderer.getPixelRatio() },
+  uMix:       { value: 0 },
+  uPresence:  { value: 1.0 },   // number of active presences (tabs + ws)
+  uWaveTime:  { value: -99.0 }, // time since last propagation wave
+};
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(treePos.slice(), 3));
+geom.setAttribute('treePos',  new THREE.BufferAttribute(treePos, 3));
+geom.setAttribute('towerPos', new THREE.BufferAttribute(towerPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uMix;
+    uniform float uPresence;
+    uniform float uWaveTime;
+    attribute vec3 treePos;
+    attribute vec3 towerPos;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main(){
+      float m = smoothstep(0.0, 1.0, uMix);
+      vec3 p = mix(treePos, towerPos, m);
+      float t = uTime * 0.55 + seed * 6.28;
+
+      // sway: organic at m=0, rigid at m=1
+      float swayAmt = (1.0 - m) * 0.06 * (p.y / 16.0);
+      p.x += swayAmt * sin(t);
+      p.z += swayAmt * cos(t * 0.9);
+
+      // propagation wave: ripple outward from center when pulse arrives
+      float wAge = uTime - uWaveTime;
+      float dist = length(p - vec3(0.0, 8.0, 0.0));
+      float waveFront = wAge * 8.0; // propagation speed
+      float waveHit = 1.0 - smoothstep(0.0, 2.5, abs(dist - waveFront));
+      float waveDecay = exp(-wAge * 1.2);
+      float wave = waveHit * waveDecay * 0.35;
+
+      // wave displaces particles outward from center
+      vec3 radDir = normalize(p - vec3(0.0, 8.0, 0.0) + 0.001);
+      p += radDir * wave;
+
+      // presence warmth: more presences = warmer, more luminous
+      float warmth = clamp((uPresence - 1.0) / 5.0, 0.0, 1.0);
+
+      // color: solitary=cool blue-green cypress / warm bronze deco
+      // with presence: shift toward shared warmth (amber glow)
+      float hk = clamp(p.y / 16.0, 0.0, 1.0);
+      // cypress palette: cool when alone, warming with company
+      vec3 treeA = mix(vec3(0.12, 0.28, 0.26), vec3(0.22, 0.34, 0.20), warmth);
+      vec3 treeB = mix(vec3(0.35, 0.58, 0.50), vec3(0.60, 0.78, 0.38), warmth);
+      vec3 treeC = mix(vec3(0.60, 0.75, 0.68), vec3(0.88, 0.92, 0.55), warmth);
+      // deco palette
+      vec3 decoA = mix(vec3(0.30, 0.26, 0.22), vec3(0.45, 0.32, 0.18), warmth);
+      vec3 decoB = mix(vec3(0.70, 0.58, 0.42), vec3(0.94, 0.74, 0.40), warmth);
+      vec3 decoC = mix(vec3(0.85, 0.82, 0.76), vec3(0.99, 0.94, 0.82), warmth);
+
+      vec3 treeCol = mix(treeA, treeB, hk);
+      treeCol = mix(treeCol, treeC, smoothstep(0.7,1.0,hk)*0.6);
+      vec3 decoCol = mix(decoA, decoB, hk);
+      decoCol = mix(decoCol, decoC, smoothstep(0.85,1.0,hk)*0.7);
+      vCol = mix(treeCol, decoCol, m);
+
+      // wave flash: brief white-gold highlight as wave passes
+      vec3 waveCol = mix(vec3(0.9,0.85,0.7), vec3(1.0,0.95,0.8), warmth);
+      vCol = mix(vCol, waveCol, wave * 2.0);
+
+      float energy = 0.5 + 0.5 * sin(t * 0.8);
+      // presence boosts base alpha
+      float presenceAlpha = 0.42 + 0.15 * warmth;
+      vAlpha = (presenceAlpha + 0.55 * energy) * (1.0 + wave * 3.0);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dz = -mv.z;
+      gl_PointSize = (0.9 + 0.7 * energy + wave * 2.0) * uPixel * (50.0 / dz);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 18.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ═══════════ interaction ═══════════ */
+let target = 0;
+let phase = 0;
+addEventListener('click', () => {
+  target = 1 - target;
+  BC.postMessage({ type:'click', id:myId, target });
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const phaseLabel = document.getElementById('phaseLabel');
+const socialInfo = document.getElementById('socialInfo');
+const start = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // auto-toggle every ~14s
+  const auto = (Math.floor(t / 14) % 2 === 1) ? 1 : 0;
+  const desired = target ^ auto;
+  phase += (desired - phase) * 0.018;
+  uniforms.uMix.value = phase;
+
+  // social uniforms
+  const effectivePresence = peerCount + (wsConnected ? 0.5 : 0);
+  uniforms.uPresence.value = effectivePresence;
+  uniforms.uWaveTime.value = waveOriginTime;
+
+  // UI labels
+  const pct = Math.round((1 - phase) * 100);
+  phaseLabel.textContent = phase < 0.5 ? `cypress ${pct}%` : `art-deco ${100-pct}%`;
+
+  const pulseRate = Math.min(totalPulses, 999);
+  const presenceWord = peerCount === 1 ? 'presence' : 'presences';
+  socialInfo.textContent = `${peerCount} ${presenceWord} · ${pulseRate} pulses` + (wsConnected ? ' · live' : '');
+
+  // gentle camera orbit
+  const ang = t * 0.045;
+  camera.position.x = Math.sin(ang) * 22;
+  camera.position.z = Math.cos(ang) * 22;
+  camera.lookAt(0, 8, 0);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
