@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4hf · hybrid web scan · Saraceno filament archive</title>
+<!-- MOTION: breathing, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000000; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">4hf</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.05, 300);
+camera.position.set(0, 2, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.03;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.15;
+controls.target.set(0, 0, 0);
+
+// ─────────── node generation: clustered anchor points ───────────
+const NUM_NODES = 300;
+const NUM_CLUSTERS = 7;
+const BOUNDS = 9;
+
+const clusterCenters = [];
+for (let i = 0; i < NUM_CLUSTERS; i++) {
+  clusterCenters.push(new THREE.Vector3(
+    (Math.random() - 0.5) * BOUNDS * 1.2,
+    (Math.random() - 0.5) * BOUNDS * 0.8,
+    (Math.random() - 0.5) * BOUNDS * 1.2
+  ));
+}
+
+function gaussRand() {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+const nodes = [];
+const restPositions = [];
+const velocities = [];
+
+for (let i = 0; i < NUM_NODES; i++) {
+  const ci = Math.floor(Math.random() * NUM_CLUSTERS);
+  const c = clusterCenters[ci];
+  const spread = 1.2 + Math.random() * 2.0;
+  const pos = new THREE.Vector3(
+    c.x + gaussRand() * spread,
+    c.y + gaussRand() * spread * 0.7,
+    c.z + gaussRand() * spread
+  );
+  // clamp loosely
+  pos.clampScalar(-BOUNDS * 1.1, BOUNDS * 1.1);
+  nodes.push(pos.clone());
+  restPositions.push(pos.clone());
+  velocities.push(new THREE.Vector3(0, 0, 0));
+}
+
+// ─────────── graph construction: k-nearest + long-range ───────────
+const edges = [];
+const edgeSet = new Set();
+
+function edgeKey(a, b) { return a < b ? a + ',' + b : b + ',' + a; }
+
+// For each node find nearest neighbors
+const dists = new Float32Array(NUM_NODES);
+for (let i = 0; i < NUM_NODES; i++) {
+  const sorted = [];
+  for (let j = 0; j < NUM_NODES; j++) {
+    if (j === i) continue;
+    sorted.push({ idx: j, d: nodes[i].distanceTo(nodes[j]) });
+  }
+  sorted.sort((a, b) => a.d - b.d);
+
+  // connect to 2-4 nearest with distance-based probability
+  const numConnect = 2 + Math.floor(Math.random() * 3); // 2,3,4
+  let connected = 0;
+  for (let k = 0; k < Math.min(sorted.length, 12) && connected < numConnect; k++) {
+    const { idx, d } = sorted[k];
+    const key = edgeKey(i, idx);
+    if (edgeSet.has(key)) { connected++; continue; }
+    // probability falls off with distance
+    const prob = Math.exp(-d * 0.35);
+    if (Math.random() < prob || k < 2) {
+      edges.push([i, idx, d]);
+      edgeSet.add(key);
+      connected++;
+    }
+  }
+}
+
+// add ~25 long-range guy-lines
+for (let g = 0; g < 25; g++) {
+  let a = Math.floor(Math.random() * NUM_NODES);
+  let b = Math.floor(Math.random() * NUM_NODES);
+  if (a === b) continue;
+  const key = edgeKey(a, b);
+  if (edgeSet.has(key)) continue;
+  const d = nodes[a].distanceTo(nodes[b]);
+  if (d > 4.0) { // only truly long-range
+    edges.push([a, b, d]);
+    edgeSet.add(key);
+  }
+}
+
+// ─────────── thread rendering ───────────
+const threadPositions = new Float32Array(edges.length * 6);
+const threadAlphas = new Float32Array(edges.length * 2);
+
+function updateThreadGeometry() {
+  for (let i = 0; i < edges.length; i++) {
+    const [a, b] = edges[i];
+    threadPositions[i * 6]     = nodes[a].x;
+    threadPositions[i * 6 + 1] = nodes[a].y;
+    threadPositions[i * 6 + 2] = nodes[a].z;
+    threadPositions[i * 6 + 3] = nodes[b].x;
+    threadPositions[i * 6 + 4] = nodes[b].y;
+    threadPositions[i * 6 + 5] = nodes[b].z;
+  }
+}
+
+// compute alphas based on edge length (shorter = brighter, long-range = faint)
+for (let i = 0; i < edges.length; i++) {
+  const d = edges[i][2];
+  let alpha;
+  if (d < 3.0) {
+    alpha = 0.35 + 0.45 * (1.0 - d / 3.0);
+  } else {
+    alpha = 0.12 * Math.exp(-(d - 3.0) * 0.2);
+  }
+  threadAlphas[i * 2] = alpha;
+  threadAlphas[i * 2 + 1] = alpha;
+}
+
+updateThreadGeometry();
+
+const threadGeo = new THREE.BufferGeometry();
+threadGeo.setAttribute('position', new THREE.BufferAttribute(threadPositions, 3));
+threadGeo.setAttribute('alpha', new THREE.BufferAttribute(threadAlphas, 1));
+
+const threadMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    attribute float alpha;
+    varying float vAlpha;
+    varying vec3 vWorldPos;
+    void main() {
+      vAlpha = alpha;
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorldPos = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying vec3 vWorldPos;
+    void main() {
+      // pearlescent silver: slight warm-cool shift based on world Y
+      float warmShift = smoothstep(-6.0, 6.0, vWorldPos.y);
+      vec3 cool = vec3(0.72, 0.78, 0.88);   // cool silver-blue
+      vec3 warm = vec3(0.88, 0.84, 0.78);   // warm pearl
+      vec3 col = mix(cool, warm, warmShift);
+      gl_FragColor = vec4(col, vAlpha);
+    }
+  `,
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+
+const threadMesh = new THREE.LineSegments(threadGeo, threadMat);
+scene.add(threadMesh);
+
+// ─────────── node sprites ───────────
+const nodeGeo = new THREE.BufferGeometry();
+const nodePos = new Float32Array(NUM_NODES * 3);
+const nodeSizes = new Float32Array(NUM_NODES);
+const nodeIntensities = new Float32Array(NUM_NODES);
+
+// count connections per node for sizing
+const connCount = new Uint8Array(NUM_NODES);
+for (const [a, b] of edges) { connCount[a]++; connCount[b]++; }
+
+for (let i = 0; i < NUM_NODES; i++) {
+  nodePos[i * 3]     = nodes[i].x;
+  nodePos[i * 3 + 1] = nodes[i].y;
+  nodePos[i * 3 + 2] = nodes[i].z;
+  // junction nodes (high connectivity) are slightly larger
+  const c = connCount[i];
+  nodeSizes[i] = c >= 4 ? 3.5 : (c >= 2 ? 2.2 : 1.5);
+  nodeIntensities[i] = c >= 4 ? 0.9 : (c >= 2 ? 0.5 : 0.3);
+}
+
+nodeGeo.setAttribute('position', new THREE.BufferAttribute(nodePos, 3));
+nodeGeo.setAttribute('size', new THREE.BufferAttribute(nodeSizes, 1));
+nodeGeo.setAttribute('intensity', new THREE.BufferAttribute(nodeIntensities, 1));
+
+const nodeMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    attribute float size;
+    attribute float intensity;
+    varying float vInt;
+    void main() {
+      vInt = intensity;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * (300.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vInt;
+    void main() {
+      float r = length(gl_PointCoord - vec2(0.5));
+      if (r > 0.5) discard;
+      float glow = exp(-r * 6.0) * vInt;
+      vec3 col = vec3(0.85, 0.88, 0.92);
+      gl_FragColor = vec4(col * glow, glow);
+    }
+  `,
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+
+const nodePoints = new THREE.Points(nodeGeo, nodeMat);
+scene.add(nodePoints);
+
+// ─────────── subtle dust motes for atmosphere ───────────
+const DUST_COUNT = 120;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(DUST_COUNT * 3);
+const dustVel = [];
+for (let i = 0; i < DUST_COUNT; i++) {
+  dustPos[i * 3]     = (Math.random() - 0.5) * BOUNDS * 2.5;
+  dustPos[i * 3 + 1] = (Math.random() - 0.5) * BOUNDS * 2.0;
+  dustPos[i * 3 + 2] = (Math.random() - 0.5) * BOUNDS * 2.5;
+  dustVel.push(new THREE.Vector3(
+    (Math.random() - 0.5) * 0.002,
+    (Math.random() - 0.5) * 0.001,
+    (Math.random() - 0.5) * 0.002
+  ));
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+
+const dustMat = new THREE.PointsMaterial({
+  color: 0x556677,
+  size: 0.04,
+  transparent: true,
+  opacity: 0.15,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+const dustPoints = new THREE.Points(dustGeo, dustMat);
+scene.add(dustPoints);
+
+// ─────────── film grain overlay ───────────
+const grainCanvas = document.createElement('canvas');
+grainCanvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;mix-blend-mode:screen;opacity:0.04;';
+grainCanvas.width = 256; grainCanvas.height = 256;
+document.body.appendChild(grainCanvas);
+const grainCtx = grainCanvas.getContext('2d');
+
+function updateGrain() {
+  const img = grainCtx.createImageData(256, 256);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = Math.random() * 60;
+    img.data[i] = img.data[i+1] = img.data[i+2] = v;
+    img.data[i+3] = 255;
+  }
+  grainCtx.putImageData(img, 0, 0);
+}
+
+// ─────────── physics: spring + wind breathing ───────────
+const SPRING_K = 0.008;
+const DAMPING = 0.92;
+const tmp = new THREE.Vector3();
+
+function simulate(t) {
+  // wind field: slow sinusoidal drift
+  const windX = Math.sin(t * 0.13) * 0.0012;
+  const windY = Math.cos(t * 0.09) * 0.0006;
+  const windZ = Math.sin(t * 0.11 + 1.5) * 0.0010;
+
+  for (let i = 0; i < NUM_NODES; i++) {
+    // spring toward rest
+    tmp.copy(restPositions[i]).sub(nodes[i]).multiplyScalar(SPRING_K);
+    velocities[i].add(tmp);
+
+    // wind
+    velocities[i].x += windX;
+    velocities[i].y += windY;
+    velocities[i].z += windZ;
+
+    // breathing: gentle radial oscillation
+    const breathPhase = t * 0.4 + i * 0.02;
+    const breathAmp = 0.0004 * (1.0 + 0.5 * Math.sin(breathPhase));
+    tmp.copy(nodes[i]).normalize().multiplyScalar(breathAmp * Math.sin(breathPhase));
+    velocities[i].add(tmp);
+
+    // damp
+    velocities[i].multiplyScalar(DAMPING);
+
+    // integrate
+    nodes[i].add(velocities[i]);
+  }
+}
+
+// ─────────── camera dolly path ───────────
+const dollyRadius = 16;
+const dollySpeed = 0.012;
+let dollyAngle = 0;
+let dollyY = 2;
+
+// ─────────── resize ───────────
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─────────── main loop ───────────
+const start = performance.now();
+let grainTimer = 0;
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+
+  simulate(t);
+
+  // update thread positions
+  updateThreadGeometry();
+  threadGeo.attributes.position.needsUpdate = true;
+
+  // modulate thread alpha with breathing
+  const breathGlobal = 1.0 + 0.15 * Math.sin(t * 0.4);
+  for (let i = 0; i < edges.length; i++) {
+    const d = edges[i][2];
+    let baseAlpha;
+    if (d < 3.0) {
+      baseAlpha = 0.35 + 0.45 * (1.0 - d / 3.0);
+    } else {
+      baseAlpha = 0.12 * Math.exp(-(d - 3.0) * 0.2);
+    }
+    const a = baseAlpha * breathGlobal;
+    threadAlphas[i * 2] = a;
+    threadAlphas[i * 2 + 1] = a;
+  }
+  threadGeo.attributes.alpha.needsUpdate = true;
+
+  // update node positions
+  for (let i = 0; i < NUM_NODES; i++) {
+    nodePos[i * 3]     = nodes[i].x;
+    nodePos[i * 3 + 1] = nodes[i].y;
+    nodePos[i * 3 + 2] = nodes[i].z;
+  }
+  nodeGeo.attributes.position.needsUpdate = true;
+
+  // node brightness pulse
+  for (let i = 0; i < NUM_NODES; i++) {
+    const c = connCount[i];
+    const base = c >= 4 ? 0.9 : (c >= 2 ? 0.5 : 0.3);
+    const pulse = 1.0 + 0.3 * Math.sin(t * 0.5 + i * 0.15);
+    nodeIntensities[i] = base * pulse * breathGlobal;
+  }
+  nodeGeo.attributes.intensity.needsUpdate = true;
+
+  // dust motes drift
+  for (let i = 0; i < DUST_COUNT; i++) {
+    dustPos[i * 3]     += dustVel[i].x;
+    dustPos[i * 3 + 1] += dustVel[i].y;
+    dustPos[i * 3 + 2] += dustVel[i].z;
+    // wrap
+    for (let c = 0; c < 3; c++) {
+      if (dustPos[i * 3 + c] > BOUNDS * 1.5) dustPos[i * 3 + c] = -BOUNDS * 1.5;
+      if (dustPos[i * 3 + c] < -BOUNDS * 1.5) dustPos[i * 3 + c] = BOUNDS * 1.5;
+    }
+  }
+  dustGeo.attributes.position.needsUpdate = true;
+
+  // slow camera dolly — gentle elliptical orbit with Y undulation
+  dollyAngle += dollySpeed * 0.016;
+  dollyY = 1.5 * Math.sin(dollyAngle * 0.3);
+  const camTargetX = Math.cos(dollyAngle) * dollyRadius;
+  const camTargetZ = Math.sin(dollyAngle) * dollyRadius * 0.8;
+  camera.position.x += (camTargetX - camera.position.x) * 0.01;
+  camera.position.z += (camTargetZ - camera.position.z) * 0.01;
+  camera.position.y += (dollyY - camera.position.y) * 0.01;
+
+  controls.update();
+
+  // film grain every ~3 frames
+  grainTimer++;
+  if (grainTimer % 3 === 0) updateGrain();
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+updateGrain();
+loop();
+</script>
+</body>
+</html>
