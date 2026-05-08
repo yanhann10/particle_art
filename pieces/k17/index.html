@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>k17 · noctilucent cells · Andy Lomas</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#050810; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">k17</div>
+<div class="hint" id="hint">noctilucent morphogenesis · mesospheric glow</div>
+<div class="src">Andy Lomas · Cellular Forms 2014 · noctilucent</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const BG = 0x050810;
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(BG, 40, 90);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(28, 18, 32);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+
+// Cellular growth data structures
+const MAX_CELLS = 18000;
+let cellCount = 250;
+const positions = new Float32Array(MAX_CELLS * 3);
+const radii = new Float32Array(MAX_CELLS);
+const nutrients = new Float32Array(MAX_CELLS);
+const ages = new Float32Array(MAX_CELLS);
+const exposed = new Float32Array(MAX_CELLS); // how exposed each cell is (noctilucent glow factor)
+const neighbors = [];
+
+// Initialize seed cluster
+const seedRadius = 1.2;
+for (let i = 0; i < cellCount; i++){
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const r = seedRadius * Math.pow(Math.random(), 0.33);
+  positions[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+  positions[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+  positions[i*3+2] = r * Math.cos(phi);
+  radii[i] = 0.22 + Math.random() * 0.08;
+  nutrients[i] = Math.random() * 0.3;
+  ages[i] = 0;
+  exposed[i] = 0.5;
+  neighbors[i] = [];
+}
+
+function rebuildNeighbors(){
+  const MAX_NEIGHBORS = 8;
+  const SEARCH_RADIUS = 2.5;
+  for (let i = 0; i < cellCount; i++){
+    neighbors[i] = [];
+    const px = positions[i*3], py = positions[i*3+1], pz = positions[i*3+2];
+    const dists = [];
+    for (let j = 0; j < cellCount; j++){
+      if (i === j) continue;
+      const dx = positions[j*3]-px, dy = positions[j*3+1]-py, dz = positions[j*3+2]-pz;
+      const d = Math.sqrt(dx*dx+dy*dy+dz*dz);
+      if (d < SEARCH_RADIUS) dists.push({idx:j, dist:d});
+    }
+    dists.sort((a,b) => a.dist - b.dist);
+    for (let k = 0; k < Math.min(MAX_NEIGHBORS, dists.length); k++){
+      neighbors[i].push(dists[k].idx);
+    }
+    // Exposed factor: fewer neighbors = more surface = more noctilucent glow
+    exposed[i] = 1.0 - Math.min(neighbors[i].length, 7) / 7.0;
+  }
+}
+rebuildNeighbors();
+
+const cellGeom = new THREE.IcosahedronGeometry(1, 2);
+const cellMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uLightDir: { value: new THREE.Vector3(-0.3, -0.6, 0.5).normalize() }, // light from below horizon
+    uFogColor: { value: new THREE.Color(BG) },
+    uFogNear: { value: 40 },
+    uFogFar: { value: 90 }
+  },
+  vertexShader: `
+    uniform float uTime;
+    varying vec3 vNormal;
+    varying vec3 vViewPos;
+    varying float vAge;
+    varying float vExposed;
+    attribute float age;
+    attribute float aExposed;
+
+    void main(){
+      vNormal = normalize(normalMatrix * normal);
+      vec4 mvPos = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+      vViewPos = mvPos.xyz;
+      vAge = age;
+      vExposed = aExposed;
+      gl_Position = projectionMatrix * mvPos;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform vec3 uLightDir;
+    uniform vec3 uFogColor;
+    uniform float uFogNear;
+    uniform float uFogFar;
+    varying vec3 vNormal;
+    varying vec3 vViewPos;
+    varying float vAge;
+    varying float vExposed;
+
+    void main(){
+      vec3 N = normalize(vNormal);
+      vec3 V = normalize(-vViewPos);
+
+      // Light from below the horizon — noctilucent illumination
+      float NdotL = max(0.0, dot(N, uLightDir));
+      float rim = pow(1.0 - abs(dot(N, V)), 3.0);
+
+      // Noctilucent palette: electric blue-silver for lit surfaces, deep indigo shadow
+      vec3 nightBlue  = vec3(0.06, 0.08, 0.18);
+      vec3 iceBlue    = vec3(0.55, 0.72, 0.92);
+      vec3 silverGlow = vec3(0.78, 0.85, 0.96);
+
+      // Surface cells glow brighter (noctilucent = night-shining at the edge)
+      float glowFactor = 0.3 + 0.7 * vExposed;
+
+      // Base shading
+      float diff = 0.15 + 0.55 * NdotL;
+      vec3 col = mix(nightBlue, iceBlue, diff * glowFactor);
+
+      // Rim glow — the defining noctilucent edge luminescence
+      col += silverGlow * rim * glowFactor * 0.6;
+
+      // Young cells pulse slightly brighter, like freshly crystallized ice
+      float youth = smoothstep(12.0, 0.0, vAge);
+      col += iceBlue * youth * 0.08;
+
+      // Subtle warm highlight on the most exposed surfaces
+      // (noctilucent clouds sometimes show faint gold at the lower edge)
+      vec3 warmEdge = vec3(0.85, 0.72, 0.50);
+      float upFacing = max(0.0, dot(N, vec3(0.0, -1.0, 0.0)));
+      col += warmEdge * upFacing * vExposed * 0.06;
+
+      // Time-varying shimmer on surface cells (atmospheric scintillation)
+      float shimmer = sin(uTime * 1.2 + vViewPos.x * 3.0 + vViewPos.z * 2.5) * 0.5 + 0.5;
+      col += silverGlow * shimmer * vExposed * 0.04;
+
+      // Fog
+      float depth = length(vViewPos);
+      float fogFactor = smoothstep(uFogNear, uFogFar, depth);
+      col = mix(col, uFogColor, fogFactor);
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+
+const cells = new THREE.InstancedMesh(cellGeom, cellMat, MAX_CELLS);
+cells.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+cells.count = cellCount;
+
+const dummy = new THREE.Object3D();
+for (let i = 0; i < cellCount; i++){
+  dummy.position.set(positions[i*3], positions[i*3+1], positions[i*3+2]);
+  dummy.scale.setScalar(radii[i]);
+  dummy.updateMatrix();
+  cells.setMatrixAt(i, dummy.matrix);
+}
+cells.instanceMatrix.needsUpdate = true;
+
+const ageAttr = new THREE.InstancedBufferAttribute(ages, 1);
+ageAttr.setUsage(THREE.DynamicDrawUsage);
+cellGeom.setAttribute('age', ageAttr);
+
+const exposedAttr = new THREE.InstancedBufferAttribute(exposed, 1);
+exposedAttr.setUsage(THREE.DynamicDrawUsage);
+cellGeom.setAttribute('aExposed', exposedAttr);
+
+scene.add(cells);
+
+// Dim directional — most light comes from shader's below-horizon calculation
+const light = new THREE.DirectionalLight(0x8090b0, 0.4);
+light.position.set(-6, -12, 8);
+scene.add(light);
+scene.add(new THREE.AmbientLight(0x1a2040, 0.2));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Morphogenesis step — identical mechanics, slightly slower growth for ethereal feel
+const NUTRIENT_FLOW = 0.07;
+const SPLIT_THRESHOLD = 2.0;
+const SPRING_K = 0.11;
+const DAMPING = 0.87;
+const REST_LENGTH = 0.8;
+const REPULSION_DIST = 0.6;
+const REPULSION_K = 0.24;
+
+const forces = new Float32Array(MAX_CELLS * 3);
+
+function morphogenesisStep(dt){
+  if (cellCount >= MAX_CELLS - 10) return;
+  forces.fill(0);
+
+  for (let i = 0; i < cellCount; i++){
+    for (const j of neighbors[i]){
+      const dx = positions[j*3]-positions[i*3];
+      const dy = positions[j*3+1]-positions[i*3+1];
+      const dz = positions[j*3+2]-positions[i*3+2];
+      const dist = Math.sqrt(dx*dx+dy*dy+dz*dz);
+      if (dist < 0.01) continue;
+      const stretch = dist - REST_LENGTH * (radii[i] + radii[j]);
+      const force = stretch * SPRING_K;
+      forces[i*3]   += (dx/dist)*force;
+      forces[i*3+1] += (dy/dist)*force;
+      forces[i*3+2] += (dz/dist)*force;
+    }
+  }
+
+  for (let i = 0; i < cellCount; i++){
+    const px=positions[i*3], py=positions[i*3+1], pz=positions[i*3+2];
+    for (let j = i+1; j < cellCount; j++){
+      if (neighbors[i].includes(j)) continue;
+      const dx=positions[j*3]-px, dy=positions[j*3+1]-py, dz=positions[j*3+2]-pz;
+      const dist = Math.sqrt(dx*dx+dy*dy+dz*dz);
+      const minDist = (radii[i]+radii[j]) * REPULSION_DIST;
+      if (dist < minDist && dist > 0.01){
+        const force = ((minDist-dist)/minDist) * REPULSION_K;
+        const fx=(dx/dist)*force, fy=(dy/dist)*force, fz=(dz/dist)*force;
+        forces[i*3]-=fx; forces[i*3+1]-=fy; forces[i*3+2]-=fz;
+        forces[j*3]+=fx; forces[j*3+1]+=fy; forces[j*3+2]+=fz;
+      }
+    }
+  }
+
+  for (let i = 0; i < cellCount; i++){
+    positions[i*3]   += forces[i*3]*dt;
+    positions[i*3+1] += forces[i*3+1]*dt;
+    positions[i*3+2] += forces[i*3+2]*dt;
+    forces[i*3]*=DAMPING; forces[i*3+1]*=DAMPING; forces[i*3+2]*=DAMPING;
+  }
+
+  for (let i = 0; i < cellCount; i++){
+    let inflow = 0;
+    for (const j of neighbors[i]){
+      inflow += (nutrients[j]-nutrients[i]) * NUTRIENT_FLOW;
+    }
+    nutrients[i] += inflow * dt;
+    const isExposed = neighbors[i].length < 7;
+    if (isExposed) nutrients[i] += 0.022 * dt;
+    ages[i] += dt;
+    // Update exposed metric smoothly
+    exposed[i] += ((1.0 - Math.min(neighbors[i].length, 7)/7.0) - exposed[i]) * 0.05;
+  }
+
+  const toSplit = [];
+  for (let i = 0; i < cellCount; i++){
+    if (nutrients[i] > SPLIT_THRESHOLD) toSplit.push(i);
+  }
+
+  for (const parent of toSplit){
+    if (cellCount >= MAX_CELLS - 1) break;
+    const daughter = cellCount++;
+    nutrients[parent] *= 0.5;
+    nutrients[daughter] = nutrients[parent];
+    const theta = Math.random()*Math.PI*2;
+    const phi = Math.random()*Math.PI;
+    const offset = (radii[parent]+0.3)*0.8;
+    positions[daughter*3]   = positions[parent*3]   + offset*Math.sin(phi)*Math.cos(theta);
+    positions[daughter*3+1] = positions[parent*3+1] + offset*Math.sin(phi)*Math.sin(theta);
+    positions[daughter*3+2] = positions[parent*3+2] + offset*Math.cos(phi);
+    radii[daughter] = radii[parent] * (0.85 + Math.random()*0.15);
+    ages[daughter] = 0;
+    exposed[daughter] = 0.8;
+    neighbors[daughter] = [];
+    neighbors[parent].push(daughter);
+    neighbors[daughter].push(parent);
+    const inherited = neighbors[parent].slice(0,3);
+    for (const n of inherited){
+      if (!neighbors[daughter].includes(n)) neighbors[daughter].push(n);
+      if (!neighbors[n].includes(daughter)) neighbors[n].push(daughter);
+    }
+  }
+
+  if (toSplit.length > 0 && cellCount % 50 === 0) rebuildNeighbors();
+}
+
+function updateInstances(){
+  for (let i = 0; i < cellCount; i++){
+    dummy.position.set(positions[i*3], positions[i*3+1], positions[i*3+2]);
+    dummy.scale.setScalar(radii[i]);
+    dummy.updateMatrix();
+    cells.setMatrixAt(i, dummy.matrix);
+  }
+  cells.count = cellCount;
+  cells.instanceMatrix.needsUpdate = true;
+  ageAttr.array = ages;
+  ageAttr.needsUpdate = true;
+  exposedAttr.array = exposed;
+  exposedAttr.needsUpdate = true;
+}
+
+const centroid = new THREE.Vector3();
+function updateCamera(){
+  centroid.set(0,0,0);
+  for (let i = 0; i < cellCount; i++){
+    centroid.x += positions[i*3];
+    centroid.y += positions[i*3+1];
+    centroid.z += positions[i*3+2];
+  }
+  centroid.multiplyScalar(1/cellCount);
+  let maxDist = 0;
+  for (let i = 0; i < cellCount; i++){
+    const dx=positions[i*3]-centroid.x, dy=positions[i*3+1]-centroid.y, dz=positions[i*3+2]-centroid.z;
+    maxDist = Math.max(maxDist, Math.sqrt(dx*dx+dy*dy+dz*dz));
+  }
+  const orbitRadius = Math.max(18, maxDist * 2.8);
+  const t = performance.now() * 0.00005; // slightly slower orbit — contemplative
+  camera.position.x = centroid.x + Math.cos(t) * orbitRadius;
+  camera.position.z = centroid.z + Math.sin(t) * orbitRadius;
+  camera.position.y = centroid.y + Math.sin(t*0.35) * orbitRadius * 0.35 + orbitRadius * 0.25;
+  camera.lookAt(centroid);
+}
+
+let lastTime = performance.now();
+const start = performance.now();
+const hintEl = document.getElementById('hint');
+let frameCount = 0;
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now-lastTime)/1000, 0.033);
+  lastTime = now;
+  const t = (now-start)/1000;
+  frameCount++;
+
+  for (let i = 0; i < 3; i++) morphogenesisStep(dt/3);
+  updateInstances();
+  updateCamera();
+  cellMat.uniforms.uTime.value = t;
+
+  if (frameCount % 30 === 0){
+    const progress = ((cellCount/MAX_CELLS)*100).toFixed(1);
+    hintEl.textContent = `${cellCount} cells · ${progress}% · noctilucent growth`;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
