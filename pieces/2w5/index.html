@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>2w5 · Shiota web — barn lamp vigil</title>
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#050505; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">2w5</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x050505);
+scene.fog = new THREE.FogExp2(0x050505, 0.04);
+
+const camera = new THREE.PerspectiveCamera(62, innerWidth/innerHeight, 0.1, 120);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const ambLight = new THREE.AmbientLight(0x221111, 0.8);
+scene.add(ambLight);
+const dirLight = new THREE.DirectionalLight(0xffeedd, 0.6);
+dirLight.position.set(-3, 5, 2);
+scene.add(dirLight);
+
+// warm point light near the object center
+const warmLight = new THREE.PointLight(0xffaa66, 0.8, 20, 2);
+warmLight.position.set(3.5, 2.5, -2.0);
+scene.add(warmLight);
+
+let rngState = 91827364;
+function rng(){ rngState |= 0; rngState = rngState + 0x6d2b79f5 | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+const objectCenter = new THREE.Vector3(2.8, 0.6, -3.0);
+const ROOM = { w: 18, h: 12, d: 28 };
+
+function wallPoint(){
+  const face = Math.floor(rng() * 6);
+  let x, y, z;
+  const hw = ROOM.w/2, hh = ROOM.h/2, hd = ROOM.d/2;
+  switch(face){
+    case 0: x=-hw; y=(rng()-0.5)*ROOM.h; z=(rng()-0.5)*ROOM.d; break;
+    case 1: x= hw; y=(rng()-0.5)*ROOM.h; z=(rng()-0.5)*ROOM.d; break;
+    case 2: y=-hh; x=(rng()-0.5)*ROOM.w; z=(rng()-0.5)*ROOM.d; break;
+    case 3: y= hh; x=(rng()-0.5)*ROOM.w; z=(rng()-0.5)*ROOM.d; break;
+    case 4: z=-hd; x=(rng()-0.5)*ROOM.w; y=(rng()-0.5)*ROOM.h; break;
+    case 5: z= hd; x=(rng()-0.5)*ROOM.w; y=(rng()-0.5)*ROOM.h; break;
+  }
+  return new THREE.Vector3(x, y, z);
+}
+
+// Surface sample points — filled by model loader or fallback
+let surfacePoints = [];
+let objectRadius = 1.8;
+let lampMesh = null;
+
+// ── Fallback: icosahedron so we render immediately
+function buildFallbackSurface(){
+  const geo = new THREE.IcosahedronGeometry(objectRadius, 3);
+  const tempMesh = new THREE.Mesh(geo);
+  const sampler = new MeshSurfaceSampler(tempMesh).build();
+  const pos = new THREE.Vector3();
+  surfacePoints = [];
+  for(let i = 0; i < 60000; i++){
+    sampler.sample(pos);
+    surfacePoints.push(pos.clone().add(objectCenter));
+  }
+  geo.dispose();
+}
+
+// Build threads from surface points
+let threads = null;
+let basePositions = null;
+let lineCount = 0;
+
+function buildThreads(){
+  if(threads){ scene.remove(threads); threads.geometry.dispose(); }
+
+  const NUM_ANCHORS = 600;
+  const anchors = [];
+  for(let i = 0; i < NUM_ANCHORS; i++){
+    if(rng() < 0.35){
+      // pick a surface point near the object
+      const sp = surfacePoints[Math.floor(rng()*surfacePoints.length)].clone();
+      const outward = sp.clone().sub(objectCenter).normalize();
+      sp.add(outward.multiplyScalar(0.1 + rng()*2.2));
+      anchors.push(sp);
+    } else {
+      anchors.push(wallPoint());
+    }
+  }
+
+  const NUM_LINES = 20000;
+  const linePositions = new Float32Array(NUM_LINES * 6);
+  let li = 0;
+
+  function surfaceNear(from){
+    // pick nearest-ish surface point
+    let best = surfacePoints[Math.floor(rng()*surfacePoints.length)];
+    for(let j = 0; j < 4; j++){
+      const c = surfacePoints[Math.floor(rng()*surfacePoints.length)];
+      if(c.distanceTo(from) < best.distanceTo(from)) best = c;
+    }
+    return best.clone().add(new THREE.Vector3((rng()-0.5)*0.3,(rng()-0.5)*0.3,(rng()-0.5)*0.3));
+  }
+
+  // Cat A: wall-to-wall threads passing near object (~40%)
+  const catA = Math.floor(NUM_LINES * 0.4);
+  for(let i = 0; i < catA && li < NUM_LINES; i++){
+    const a = wallPoint(), b = wallPoint();
+    const mid = a.clone().add(b).multiplyScalar(0.5);
+    if(mid.distanceTo(objectCenter) > 12 && rng() > 0.3){ i--; continue; }
+    const idx = li * 6;
+    linePositions[idx]=a.x; linePositions[idx+1]=a.y; linePositions[idx+2]=a.z;
+    linePositions[idx+3]=b.x; linePositions[idx+4]=b.y; linePositions[idx+5]=b.z;
+    li++;
+  }
+
+  // Cat B: threads converging on lamp surface from anchors (~35%)
+  const catB = Math.floor(NUM_LINES * 0.35);
+  for(let i = 0; i < catB && li < NUM_LINES; i++){
+    const a = anchors[Math.floor(rng()*anchors.length)];
+    const near = surfaceNear(a);
+    // 8% of threads stop short (Quayola directive)
+    if(rng() < 0.08){
+      const dir = near.clone().sub(a).normalize();
+      const shortfall = 0.3 + rng() * 1.2;
+      near.sub(dir.multiplyScalar(shortfall));
+    }
+    const idx = li * 6;
+    linePositions[idx]=a.x; linePositions[idx+1]=a.y; linePositions[idx+2]=a.z;
+    linePositions[idx+3]=near.x; linePositions[idx+4]=near.y; linePositions[idx+5]=near.z;
+    li++;
+  }
+
+  // Cat C: short local threads between nearby anchors
+  while(li < NUM_LINES){
+    const ai = Math.floor(rng()*anchors.length);
+    const a = anchors[ai];
+    let best = null, bestDist = Infinity;
+    for(let j = 0; j < 8; j++){
+      const bi = Math.floor(rng()*anchors.length);
+      if(bi===ai) continue;
+      const d = a.distanceTo(anchors[bi]);
+      if(d < bestDist && d > 0.2){ bestDist=d; best=anchors[bi]; }
+    }
+    if(!best) best = wallPoint();
+    const idx = li * 6;
+    linePositions[idx]=a.x; linePositions[idx+1]=a.y; linePositions[idx+2]=a.z;
+    linePositions[idx+3]=best.x; linePositions[idx+4]=best.y; linePositions[idx+5]=best.z;
+    li++;
+  }
+
+  lineCount = li;
+  basePositions = new Float32Array(linePositions);
+
+  const lineGeo = new THREE.BufferGeometry();
+  lineGeo.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+
+  const lineMat = new THREE.LineBasicMaterial({
+    color: 0xc20018,
+    transparent: true,
+    opacity: 0.07,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    fog: true
+  });
+  threads = new THREE.LineSegments(lineGeo, lineMat);
+  scene.add(threads);
+
+  // Dark fragments caught in the web
+  for(let i = 0; i < 18; i++){
+    const size = 0.05 + rng()*0.15;
+    const geo = rng()>0.5
+      ? new THREE.BoxGeometry(size, size*(0.3+rng()*1.4), size*(0.3+rng()))
+      : new THREE.TetrahedronGeometry(size, 0);
+    const mat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(0.04+rng()*0.06, 0.02+rng()*0.03, 0.02+rng()*0.02),
+      transparent: true, opacity: 0.6+rng()*0.3
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    const t = rng();
+    const segIdx = Math.floor(rng()*lineCount)*6;
+    mesh.position.set(
+      basePositions[segIdx]*(1-t)+basePositions[segIdx+3]*t,
+      basePositions[segIdx+1]*(1-t)+basePositions[segIdx+4]*t,
+      basePositions[segIdx+2]*(1-t)+basePositions[segIdx+5]*t
+    );
+    mesh.rotation.set(rng()*Math.PI, rng()*Math.PI, rng()*Math.PI);
+    scene.add(mesh);
+  }
+
+  // Suspension threads from ceiling to object top
+  const hh = ROOM.h/2;
+  for(let i = 0; i < 8; i++){
+    const topPt = surfacePoints[Math.floor(rng()*surfacePoints.length)].clone();
+    // only pick points in upper half of object
+    if(topPt.y < objectCenter.y){ i--; continue; }
+    const ceilPt = new THREE.Vector3(topPt.x + (rng()-0.5)*0.5, hh, topPt.z + (rng()-0.5)*0.5);
+    const sGeo = new THREE.BufferGeometry();
+    sGeo.setAttribute('position', new THREE.Float32BufferAttribute([
+      ceilPt.x, ceilPt.y, ceilPt.z, topPt.x, topPt.y, topPt.z
+    ], 3));
+    const sMat = new THREE.LineBasicMaterial({
+      color: 0xc20018, transparent: true, opacity: 0.12,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    scene.add(new THREE.LineSegments(sGeo, sMat));
+  }
+}
+
+// Build immediately with fallback
+buildFallbackSurface();
+
+// Reset RNG for consistent thread generation
+rngState = 55443322;
+buildThreads();
+
+// ── Load barn lamp model asynchronously
+const loader = new GLTFLoader();
+loader.load(
+  'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/AnisotropyBarnLamp/glTF-Binary/AnisotropyBarnLamp.glb',
+  (gltf) => {
+    let targetMesh = null;
+    gltf.scene.traverse((child) => {
+      if(!targetMesh && child.isMesh && child.geometry && child.geometry.attributes.position){
+        targetMesh = child;
+      }
+    });
+    if(!targetMesh) return;
+
+    // Compute bounding box and re-normalize to fit framing
+    const geo = targetMesh.geometry.clone();
+    // Apply any transforms from the scene hierarchy
+    targetMesh.updateWorldMatrix(true, false);
+    geo.applyMatrix4(targetMesh.matrixWorld);
+
+    geo.computeBoundingBox();
+    const bb = geo.boundingBox;
+    const size = new THREE.Vector3();
+    bb.getSize(size);
+    const center = new THREE.Vector3();
+    bb.getCenter(center);
+
+    // Scale to fit ~3.6 units (diameter of old sphere)
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const targetSize = 3.6;
+    const scale = targetSize / maxDim;
+
+    // Transform geometry: center then scale then translate to objectCenter
+    geo.translate(-center.x, -center.y, -center.z);
+    geo.scale(scale, scale, scale);
+    geo.translate(objectCenter.x, objectCenter.y, objectCenter.z);
+
+    // Add the lamp mesh itself as a ghostly presence
+    const lampDisplayMat = new THREE.MeshStandardMaterial({
+      color: 0x0a0808,
+      emissive: 0x1a0a05,
+      emissiveIntensity: 0.3,
+      roughness: 0.95,
+      metalness: 0.1,
+      transparent: true,
+      opacity: 0.7
+    });
+    lampMesh = new THREE.Mesh(geo.clone(), lampDisplayMat);
+    scene.add(lampMesh);
+
+    // Re-sample surface
+    const samplerMesh = new THREE.Mesh(geo);
+    const sampler = new MeshSurfaceSampler(samplerMesh).build();
+    const pos = new THREE.Vector3();
+    surfacePoints = [];
+    for(let i = 0; i < 60000; i++){
+      sampler.sample(pos);
+      surfacePoints.push(pos.clone());
+    }
+
+    // Recompute bounding radius
+    let maxR = 0;
+    for(const p of surfacePoints){
+      const d = p.distanceTo(objectCenter);
+      if(d > maxR) maxR = d;
+    }
+    objectRadius = maxR;
+
+    // Rebuild threads with lamp surface points
+    rngState = 55443322;
+    buildThreads();
+
+    geo.dispose();
+  },
+  undefined,
+  (err) => { console.warn('Model load failed, using fallback geometry', err); }
+);
+
+// ── Camera path
+const cameraPath = { radius: 6.5, height: 0.8, speed: 0.018, lookBias: new THREE.Vector3(0.5, 0.3, 0) };
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const elapsed = (performance.now()-start)/1000;
+
+  // Breathing
+  if(threads && basePositions){
+    const posAttr = threads.geometry.attributes.position;
+    const arr = posAttr.array;
+    const breathAmp = 0.015, breathFreq = 0.3;
+    for(let i = 0; i < lineCount*6; i+=3){
+      const bx = basePositions[i], by = basePositions[i+1], bz = basePositions[i+2];
+      const phase = bx*0.7 + by*1.1 + bz*0.5;
+      const b = Math.sin(elapsed*breathFreq + phase)*breathAmp;
+      arr[i] = bx+b; arr[i+1] = by+b*0.7; arr[i+2] = bz+b*0.5;
+    }
+    posAttr.needsUpdate = true;
+  }
+
+  // Camera orbit
+  const angle = elapsed * cameraPath.speed;
+  camera.position.set(
+    objectCenter.x + Math.cos(angle)*cameraPath.radius,
+    objectCenter.y + cameraPath.height + Math.sin(elapsed*0.012)*1.5,
+    objectCenter.z + Math.sin(angle)*cameraPath.radius
+  );
+  const lookTarget = objectCenter.clone();
+  lookTarget.x += Math.sin(elapsed*0.04)*cameraPath.lookBias.x;
+  lookTarget.y += Math.cos(elapsed*0.03)*cameraPath.lookBias.y;
+  camera.lookAt(lookTarget);
+
+  // Warm light gentle flicker
+  warmLight.intensity = 0.7 + Math.sin(elapsed*0.8)*0.1 + Math.sin(elapsed*2.3)*0.05;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
