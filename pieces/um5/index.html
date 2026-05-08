@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: crystallize, intensity: gentle -->
+<title>um5 · substrate · tarbell</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0e0b08; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">um5</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Substrate algorithm (Jared Tarbell, 2003) ── */
+const GW = 400, GH = 400;
+const grid = new Int8Array(GW * GH).fill(-1);
+const allSegments = [];
+let birthCounter = 0;
+
+const activeCracks = [];
+const MAX_CRACKS = 350;
+
+function spawnCrack(x, y, angle, gen) {
+  if (activeCracks.length >= MAX_CRACKS) return;
+  activeCracks.push({ x, y, angle, gen, pts: [{ x, y }], alive: true, age: 0 });
+}
+
+/* seed initial fractures — axis-aligned, scattered */
+for (let i = 0; i < 14; i++) {
+  const x = 30 + Math.random() * (GW - 60);
+  const y = 30 + Math.random() * (GH - 60);
+  const angle = Math.floor(Math.random() * 4) * Math.PI * 0.5;
+  const ix = Math.round(x), iy = Math.round(y);
+  if (ix >= 0 && ix < GW && iy >= 0 && iy < GH) grid[iy * GW + ix] = 0;
+  spawnCrack(x, y, angle, 0);
+}
+
+/* run the algorithm to exhaustion */
+for (let iter = 0; iter < 500000; iter++) {
+  let anyAlive = false;
+  for (let ci = 0; ci < activeCracks.length; ci++) {
+    const c = activeCracks[ci];
+    if (!c.alive) continue;
+    anyAlive = true;
+
+    const nx = c.x + Math.cos(c.angle);
+    const ny = c.y + Math.sin(c.angle);
+    const ix = Math.round(nx), iy = Math.round(ny);
+
+    if (ix < 1 || ix >= GW - 1 || iy < 1 || iy >= GH - 1) {
+      c.alive = false;
+      if (c.pts.length > 3) allSegments.push({ pts: c.pts, gen: c.gen, birth: birthCounter++ });
+      continue;
+    }
+
+    if (grid[iy * GW + ix] >= 0 && c.age > 2) {
+      c.alive = false;
+      if (c.pts.length > 3) allSegments.push({ pts: c.pts, gen: c.gen, birth: birthCounter++ });
+      /* spawn perpendicular cracks at collision point */
+      spawnCrack(c.x, c.y, c.angle + Math.PI * 0.5, Math.min(c.gen + 1, 8));
+      spawnCrack(c.x, c.y, c.angle - Math.PI * 0.5, Math.min(c.gen + 1, 8));
+      continue;
+    }
+
+    c.x = nx;
+    c.y = ny;
+    c.age++;
+    grid[iy * GW + ix] = c.gen;
+    c.pts.push({ x: nx, y: ny });
+  }
+  if (!anyAlive) break;
+}
+
+/* finalize surviving cracks */
+for (const c of activeCracks) {
+  if (c.alive && c.pts.length > 3) {
+    allSegments.push({ pts: c.pts, gen: c.gen, birth: birthCounter++ });
+  }
+}
+
+/* ── Distribute particles along segments ── */
+const N = 80000;
+const positions = new Float32Array(N * 3);
+const seeds     = new Float32Array(N);
+const genAttr   = new Float32Array(N);
+const birthAttr = new Float32Array(N);
+
+/* measure segment lengths */
+const segLens = allSegments.map(seg => {
+  let len = 0;
+  for (let i = 1; i < seg.pts.length; i++) {
+    const dx = seg.pts[i].x - seg.pts[i - 1].x;
+    const dy = seg.pts[i].y - seg.pts[i - 1].y;
+    len += Math.sqrt(dx * dx + dy * dy);
+  }
+  return Math.max(len, 0.1);
+});
+const totalLen = segLens.reduce((a, b) => a + b, 0);
+const maxGen = allSegments.reduce((m, s) => Math.max(m, s.gen), 1) || 1;
+const maxBirth = birthCounter || 1;
+
+/* grid → world mapping */
+const SCALE = 0.055;
+const OX = -GW * SCALE * 0.5;
+const OZ = -GH * SCALE * 0.5;
+
+let written = 0;
+for (let si = 0; si < allSegments.length; si++) {
+  const seg = allSegments[si];
+  const share = si === allSegments.length - 1
+    ? N - written
+    : Math.max(1, Math.floor(N * segLens[si] / totalLen));
+
+  for (let k = 0; k < share && written < N; k++) {
+    const t = Math.random() * (seg.pts.length - 1);
+    const idx = Math.min(Math.floor(t), seg.pts.length - 2);
+    const frac = t - idx;
+    const p0 = seg.pts[idx];
+    const p1 = seg.pts[idx + 1];
+
+    const wx = (p0.x + (p1.x - p0.x) * frac) * SCALE + OX;
+    const wz = (p0.y + (p1.y - p0.y) * frac) * SCALE + OZ;
+
+    /* perpendicular scatter for line thickness */
+    const dx = p1.x - p0.x, dy = p1.y - p0.y;
+    const ln = Math.sqrt(dx * dx + dy * dy) || 1;
+    const perpX = -dy / ln, perpZ = dx / ln;
+    const scatter = (Math.random() - 0.5) * 0.14 * SCALE;
+
+    /* generation-based height: earlier gens slightly raised */
+    const genNorm = seg.gen / maxGen;
+    const wy = (1.0 - genNorm) * 0.25 + (Math.random() - 0.5) * 0.06;
+
+    positions[written * 3]     = wx + perpX * scatter;
+    positions[written * 3 + 1] = wy;
+    positions[written * 3 + 2] = wz + perpZ * scatter;
+
+    seeds[written]     = Math.random();
+    genAttr[written]   = genNorm;
+    birthAttr[written] = seg.birth / maxBirth;
+    written++;
+  }
+}
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0e0b08, 0.035);
+
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(6, 14, 16);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0e0b08, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.target.set(0, 0, 0);
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.25;
+
+/* ── Shader material ── */
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uReveal: { value: 0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReveal;
+    attribute float seed;
+    attribute float gen;
+    attribute float birth;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec3 p = position;
+
+      /* reveal in birth order — substrate grows before our eyes */
+      float revealT = smoothstep(birth - 0.015, birth + 0.015, uReveal);
+      if (revealT < 0.005) {
+        gl_PointSize = 0.0;
+        gl_Position = vec4(0.0, 0.0, -100.0, 1.0);
+        vAlpha = 0.0;
+        vCol = vec3(0.0);
+        return;
+      }
+
+      /* gentle breathing along the crack lines */
+      float t = uTime * 0.35 + seed * 6.2832;
+      p.y += 0.025 * sin(t + birth * 18.0);
+      p.x += 0.012 * sin(t * 0.7 + gen * 8.0);
+      p.z += 0.012 * cos(t * 0.6 + gen * 5.0);
+
+      /* ── Palette: Jared Tarbell warm architectural ── */
+      /* 5 hand-picked colors:
+         burnt umber (#5A3218) — foundation cracks
+         raw sienna  (#C48840) — mid-gen warmth
+         ochre gold  (#D4A84B) — bright generation tips
+         dust cream   (#E8D5B0) — newest hairline cracks
+         deep shadow (#2A1A0C) — darkest generation base */
+      vec3 shadow    = vec3(0.165, 0.102, 0.047);
+      vec3 umber     = vec3(0.353, 0.196, 0.094);
+      vec3 sienna    = vec3(0.769, 0.533, 0.251);
+      vec3 ochreGold = vec3(0.831, 0.659, 0.294);
+      vec3 dustCream = vec3(0.910, 0.835, 0.690);
+
+      float g = gen;
+      vec3 col;
+      if (g < 0.25) {
+        col = mix(shadow, umber, g * 4.0);
+      } else if (g < 0.5) {
+        col = mix(umber, sienna, (g - 0.25) * 4.0);
+      } else if (g < 0.75) {
+        col = mix(sienna, ochreGold, (g - 0.5) * 4.0);
+      } else {
+        col = mix(ochreGold, dustCream, (g - 0.75) * 4.0);
+      }
+
+      /* per-segment hue variation — subtle warmth shifts */
+      float segHue = sin(birth * 47.0 + seed * 3.0);
+      col.r += segHue * 0.03;
+      col.g += segHue * 0.015;
+
+      /* newly revealed particles flash slightly brighter */
+      float flashT = smoothstep(0.0, 0.08, uReveal - birth);
+      float flash = (1.0 - flashT) * 0.3;
+      col += flash * dustCream;
+
+      vCol = col;
+      vAlpha = (0.45 + 0.35 * (1.0 - g)) * revealT;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sz = (1.0 + 0.5 * g) * uPixel * (32.0 / max(dist, 1.0));
+      sz *= 0.4 + 0.6 * revealT;
+      gl_PointSize = sz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('gen',      new THREE.BufferAttribute(genAttr, 1));
+geom.setAttribute('birth',    new THREE.BufferAttribute(birthAttr, 1));
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── Atmospheric ground plane — warm ambient glow ── */
+const groundGeo = new THREE.PlaneGeometry(40, 40);
+const groundMat = new THREE.MeshBasicMaterial({
+  color: 0x1a110a,
+  transparent: true,
+  opacity: 0.35,
+  side: THREE.DoubleSide
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI * 0.5;
+ground.position.y = -0.05;
+scene.add(ground);
+
+/* ── Resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── Animation loop ── */
+const start = performance.now();
+function loop() {
+  const elapsed = (performance.now() - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  /* growth reveal: 15 seconds to full coverage */
+  uniforms.uReveal.value = Math.min(1.0, elapsed / 15.0);
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
