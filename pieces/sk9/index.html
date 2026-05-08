@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sk9 · Lee Ufan encounter (single gesture)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f8f8f6; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.3; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.3; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+</style>
+</head>
+<body>
+<div class="id">sk9</div>
+<div class="hint">click to place new stroke</div>
+<div class="src">Lee Ufan · mono-ha encounter · 12k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 20;
+const camera = new THREE.OrthographicCamera(
+  frustumSize * aspect / -2, frustumSize * aspect / 2,
+  frustumSize / 2, frustumSize / -2,
+  0.1, 100
+);
+camera.position.set(0, 0, 10);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf8f8f6, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 12000;
+let geom, points, mat;
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uFade: { value: 0 },
+};
+
+mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uFade;
+    
+    attribute float phase;
+    attribute float radius;
+    attribute vec3 center;
+    
+    varying float vAlpha;
+    varying float vDensity;
+    
+    void main(){
+      float t = clamp(uTime - phase, 0.0, 1.0);
+      float eased = t * t * (3.0 - 2.0 * t);
+      
+      vec3 p = center * eased;
+      
+      float distFromCenter = length(center);
+      vDensity = 1.0 - smoothstep(0.0, radius, distFromCenter);
+      
+      vAlpha = smoothstep(0.0, 0.2, eased) * (1.0 - uFade);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = uPixel * 1.8;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vDensity;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      
+      float edge = smoothstep(0.25, 0.15, r);
+      float alpha = vAlpha * edge * vDensity;
+      
+      vec3 col = vec3(0.08, 0.08, 0.10);
+      gl_FragColor = vec4(col, alpha * 0.85);
+    }
+  `
+});
+
+function buildStroke(centerX, centerY, seed){
+  const positions = new Float32Array(N * 3);
+  const phases = new Float32Array(N);
+  const radii = new Float32Array(N);
+  const centers = new Float32Array(N * 3);
+  
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  
+  const strokeWidth = 3.5 + rng() * 2.5;
+  const strokeLength = 8 + rng() * 6;
+  const angle = rng() * Math.PI * 2;
+  const pressure = 0.6 + rng() * 0.4;
+  
+  for (let i = 0; i < N; i++){
+    const progress = rng();
+    const widthVar = Math.pow(Math.sin(progress * Math.PI), pressure);
+    const spread = (rng() - 0.5) * strokeWidth * widthVar;
+    
+    const along = (progress - 0.5) * strokeLength;
+    const perpX = Math.cos(angle + Math.PI * 0.5);
+    const perpY = Math.sin(angle + Math.PI * 0.5);
+    const alongX = Math.cos(angle);
+    const alongY = Math.sin(angle);
+    
+    const x = centerX + alongX * along + perpX * spread;
+    const y = centerY + alongY * along + perpY * spread;
+    
+    positions[i * 3] = 0;
+    positions[i * 3 + 1] = 0;
+    positions[i * 3 + 2] = 0;
+    
+    centers[i * 3] = x;
+    centers[i * 3 + 1] = y;
+    centers[i * 3 + 2] = 0;
+    
+    phases[i] = progress * 0.8 + rng() * 0.2;
+    radii[i] = strokeWidth * 0.5;
+  }
+  
+  return { positions, phases, radii, centers };
+}
+
+function placeStroke(x, y){
+  uniforms.uTime.value = 0;
+  uniforms.uFade.value = 0;
+  
+  const seed = Math.floor(Math.random() * 1e9);
+  const { positions, phases, radii, centers } = buildStroke(x, y, seed);
+  
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('phase', new THREE.BufferAttribute(phases, 1));
+    geom.setAttribute('radius', new THREE.BufferAttribute(radii, 1));
+    geom.setAttribute('center', new THREE.BufferAttribute(centers, 3));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.phase.array.set(phases);
+    geom.attributes.phase.needsUpdate = true;
+    geom.attributes.radius.array.set(radii);
+    geom.attributes.radius.needsUpdate = true;
+    geom.attributes.center.array.set(centers);
+    geom.attributes.center.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+}
+
+placeStroke(0, 0);
+
+addEventListener('click', (e) => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  
+  const worldX = x * frustumSize * aspect * 0.5;
+  const worldY = y * frustumSize * 0.5;
+  
+  uniforms.uFade.value = 1.0;
+  setTimeout(() => placeStroke(worldX, worldY), 200);
+});
+
+addEventListener('resize', () => {
+  const newAspect = innerWidth / innerHeight;
+  camera.left = frustumSize * newAspect / -2;
+  camera.right = frustumSize * newAspect / 2;
+  camera.top = frustumSize / 2;
+  camera.bottom = frustumSize / -2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+  
+  if (uniforms.uFade.value > 0){
+    uniforms.uFade.value = Math.max(0, uniforms.uFade.value - 0.016 * 5);
+  }
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
