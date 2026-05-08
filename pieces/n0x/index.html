@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>n0x · mycelial substrate (slime mold foraging)</title>
+<!-- MOTION: crawl, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">n0x</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(-8, 22, 11);
+camera.lookAt(-3, 0, 2);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+let geom, points;
+
+// Slime mold network state
+const NUM_NODES = 240;
+const nodes = [];
+const edges = [];
+
+class FoodNode {
+  constructor(x, y, z, nutrient){
+    this.pos = new THREE.Vector3(x, y, z);
+    this.nutrient = nutrient;
+    this.connected = false;
+    this.activePaths = 0;
+  }
+}
+
+class PheromonePath {
+  constructor(from, to){
+    this.from = from;
+    this.to = to;
+    this.strength = 0.05;
+    this.age = 0;
+    this.active = true;
+  }
+}
+
+// Seed RNG
+let seed = Math.floor(Math.random() * 1e9) >>> 0;
+function rng(){
+  seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+  let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// Initialize food nodes in asymmetric clusters
+function initNodes(){
+  nodes.length = 0;
+  
+  // Three nutrient-rich zones (not centered)
+  const zones = [
+    { cx: -6, cy: 0.2, cz: -4, r: 5, n: 60 },
+    { cx: 3, cy: 0.8, cz: 5, r: 6, n: 80 },
+    { cx: 8, cy: -0.3, cz: -2, r: 4, n: 50 }
+  ];
+  
+  zones.forEach(zone => {
+    for(let i = 0; i < zone.n; i++){
+      const theta = rng() * Math.PI * 2;
+      const phi = Math.acos(2 * rng() - 1);
+      const r = Math.pow(rng(), 0.6) * zone.r;
+      const x = zone.cx + r * Math.sin(phi) * Math.cos(theta);
+      const y = zone.cy + r * Math.sin(phi) * Math.sin(theta) * 0.3;
+      const z = zone.cz + r * Math.cos(phi);
+      const nutrient = 0.3 + rng() * 0.7;
+      nodes.push(new FoodNode(x, y, z, nutrient));
+    }
+  });
+  
+  // Sparse outliers
+  for(let i = nodes.length; i < NUM_NODES; i++){
+    const x = (rng() - 0.5) * 28;
+    const y = (rng() - 0.5) * 2;
+    const z = (rng() - 0.5) * 28;
+    const nutrient = 0.1 + rng() * 0.3;
+    nodes.push(new FoodNode(x, y, z, nutrient));
+  }
+}
+
+// Slime mold foraging algorithm (Physarum polycephalum model)
+function growNetwork(){
+  edges.length = 0;
+  
+  // Start from highest nutrient node
+  let startNode = nodes.reduce((max, n) => n.nutrient > max.nutrient ? n : max, nodes[0]);
+  startNode.connected = true;
+  
+  const frontier = [startNode];
+  const connected = new Set([startNode]);
+  
+  // Iterative growth: pick closest high-value unconnected node from frontier
+  while(connected.size < NUM_NODES){
+    let bestDist = Infinity;
+    let bestFrom = null;
+    let bestTo = null;
+    
+    // For each frontier node, find nearest unconnected high-value target
+    for(let from of frontier){
+      for(let to of nodes){
+        if(connected.has(to)) continue;
+        const dist = from.pos.distanceTo(to.pos);
+        // Weight by inverse distance and nutrient value
+        const score = dist / (to.nutrient + 0.1);
+        if(score < bestDist){
+          bestDist = score;
+          bestFrom = from;
+          bestTo = to;
+        }
+      }
+    }
+    
+    if(!bestTo) break;
+    
+    // Connect
+    const path = new PheromonePath(bestFrom, bestTo);
+    edges.push(path);
+    bestTo.connected = true;
+    connected.add(bestTo);
+    
+    // Probabilistically add to frontier based on nutrient
+    if(rng() < bestTo.nutrient * 0.7){
+      frontier.push(bestTo);
+      // Prune old low-nutrient frontier nodes
+      if(frontier.length > 12){
+        frontier.sort((a, b) => b.nutrient - a.nutrient);
+        frontier.length = 12;
+      }
+    }
+    
+    // Occasionally add anastomosis (reconnection between nearby connected nodes)
+    if(connected.size % 15 === 0 && rng() < 0.4){
+      const candidates = Array.from(connected).filter(n => 
+        n !== bestFrom && n !== bestTo && n.pos.distanceTo(bestTo.pos) < 4
+      );
+      if(candidates.length > 0){
+        const target = candidates[Math.floor(rng() * candidates.length)];
+        edges.push(new PheromonePath(bestTo, target));
+      }
+    }
+  }
+}
+
+// Build particle field along pheromone trails
+function buildParticles(){
+  const positions = new Float32Array(N * 3);
+  const trailIds = new Float32Array(N);
+  const ages = new Float32Array(N);
+  
+  let idx = 0;
+  
+  edges.forEach((edge, edgeIdx) => {
+    const from = edge.from.pos;
+    const to = edge.to.pos;
+    const dist = from.distanceTo(to);
+    const nutrientFlow = (edge.from.nutrient + edge.to.nutrient) * 0.5;
+    const density = Math.floor(nutrientFlow * 180 * Math.min(1, dist / 3));
+    
+    for(let i = 0; i < density && idx < N; i++){
+      const t = rng();
+      // Bias toward nodes (thicker at junctions)
+      const bias = Math.pow(Math.abs(t - 0.5) * 2, 0.4) * 0.5;
+      const tb = t < 0.5 ? 0.5 - bias : 0.5 + bias;
+      
+      const p = new THREE.Vector3().lerpVectors(from, to, tb);
+      // Radial spread proportional to flow strength
+      const spread = 0.08 + nutrientFlow * 0.12;
+      p.x += (rng() - 0.5) * spread;
+      p.y += (rng() - 0.5) * spread * 0.4;
+      p.z += (rng() - 0.5) * spread;
+      
+      positions[idx * 3] = p.x;
+      positions[idx * 3 + 1] = p.y;
+      positions[idx * 3 + 2] = p.z;
+      trailIds[idx] = edgeIdx / edges.length;
+      ages[idx] = rng();
+      idx++;
+    }
+  });
+  
+  // Fill remaining with substrate scatter
+  while(idx < N){
+    const x = (rng() - 0.5) * 24;
+    const y = (rng() - 0.5) * 1.5;
+    const z = (rng() - 0.5) * 24;
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = z;
+    trailIds[idx] = -1;
+    ages[idx] = rng();
+    idx++;
+  }
+  
+  return { positions, trailIds, ages };
+}
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uPulse: { value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPulse;
+    
+    attribute float trailId;
+    attribute float age;
+    
+    varying float vTrailId;
+    varying float vAge;
+    varying float vDist;
+    
+    void main(){
+      vec3 p = position;
+      
+      // Slow creep along trails
+      if(trailId >= 0.0){
+        float crawl = uTime * 0.15 + age * 6.28;
+        p.y += sin(crawl) * 0.08;
+        p.x += cos(crawl * 1.3 + trailId * 10.0) * 0.05;
+      }
+      
+      vTrailId = trailId;
+      vAge = age;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDist = -mv.z;
+      
+      float size = trailId >= 0.0 ? 2.5 : 1.2;
+      gl_PointSize = uPixel * size * (1.0 + uPulse * 0.3 * sin(uTime * 2.0 + age * 6.28));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vTrailId;
+    varying float vAge;
+    varying float vDist;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if(r > 0.25) discard;
+      
+      // Bioluminescent palette: amber/ochre mycelium on dark substrate
+      vec3 trail = vec3(0.82, 0.65, 0.28); // warm amber
+      vec3 substrate = vec3(0.15, 0.12, 0.09); // dark humus
+      
+      vec3 col = vTrailId >= 0.0 ? trail : substrate;
+      
+      // Pulsing glow on active trails
+      float glow = vTrailId >= 0.0 ? (0.6 + 0.4 * vAge) : 0.3;
+      
+      float alpha = glow * (1.0 - smoothstep(0.15, 0.25, r));
+      alpha *= smoothstep(40.0, 10.0, vDist);
+      
+      gl_FragColor = vec4(col * (0.4 + glow * 0.6), alpha * 0.7);
+    }
+  `
+});
+
+function regenerate(){
+  seed = Math.floor(Math.random() * 1e9) >>> 0;
+  initNodes();
+  growNetwork();
+  const { positions, trailIds, ages } = buildParticles();
+  
+  if(!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('trailId', new THREE.BufferAttribute(trailIds, 1));
+    geom.setAttribute('age', new THREE.BufferAttribute(ages, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.trailId.array.set(trailIds);
+    geom.attributes.trailId.needsUpdate = true;
+    geom.attributes.age.array.set(ages);
+    geom.attributes.age.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+  
+  // Camera looks at network centroid
+  const centroid = new THREE.Vector3();
+  nodes.forEach(n => centroid.add(n.pos));
+  centroid.divideScalar(nodes.length);
+  camera.lookAt(centroid);
+}
+
+regenerate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+  
+  // Slow metabolic pulse
+  uniforms.uPulse.value = Math.sin(t * 0.4) * 0.5 + 0.5;
+  
+  // Very slow camera drift (not orbit, drift)
+  const drift = t * 0.02;
+  camera.position.x = -8 + Math.sin(drift * 0.7) * 3;
+  camera.position.z = 11 + Math.cos(drift * 0.5) * 4;
+  camera.position.y = 22 + Math.sin(drift * 0.3) * 2;
+  
+  // Re-target centroid periodically
+  const centroid = new THREE.Vector3();
+  nodes.forEach(n => centroid.add(n.pos));
+  centroid.divideScalar(nodes.length);
+  camera.lookAt(centroid);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
