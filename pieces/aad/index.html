@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>aad · object point cloud · hand-sculpted Lucy · sodium/cyan</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08090e; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  #cam { position:fixed; right:14px; bottom:14px; width:240px; height:160px;
+         border:1px solid #1a2028; border-radius:4px; transform:scaleX(-1); opacity:0.85; }
+  #cam.hidden { display:none; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size: 11px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #0e1218; color:#c8d0da; border:1px solid #2a3040;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; z-index:5; }
+  button.start:hover { background:#161c26; }
+  .loading { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+             font-size: 13px; opacity: 0.6; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy · stanford 3d scanning repo …</div>
+<button class="start" id="startBtn" style="display:none">grant camera · sculpt with hands</button>
+<video id="cam" class="hidden" autoplay playsinline muted></video>
+<div class="id">aad</div>
+<div class="hint" id="hint"></div>
+<div class="src">model: stanford 3d scanning repo · public-research</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 30);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08090e, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 60000;
+const positions    = new Float32Array(N * 3);
+const restPositions = new Float32Array(N * 3);
+const seeds        = new Float32Array(N);
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uPinch: { value: 1.0 },
+  uHand:  { value: new THREE.Vector3(0,0,0) },
+  uActive:{ value: 0.0 },
+  uReady: { value: 0.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPinch;
+    uniform vec3  uHand;
+    uniform float uActive;
+    uniform float uReady;
+    attribute vec3  rest;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vEnergy;
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.5 + seed * 6.28;
+
+      // breathing
+      vec3 dir = normalize(p);
+      p += dir * sin(t) * 0.06 * (1.0 + 0.5*sin(seed*9.0));
+
+      // gesture
+      vec3 fromCenter = p;
+      float disperse = mix(0.0, 1.5, uPinch * 0.5) * uActive;
+      p += fromCenter * disperse;
+
+      // hand pull
+      vec3 toHand = uHand - p;
+      p += toHand * uActive * 0.04;
+
+      // assembly reveal
+      vec3 entry = vec3(sin(seed*40.0), cos(seed*30.0), sin(seed*22.0)) * 18.0;
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      vEnergy = 0.4 + 0.6*sin(t*0.7);
+
+      // --- sodium-amber + ice-cyan duotone ---
+      // sodium amber pole: warm orange-gold (like sodium vapor lamp)
+      vec3 sodiumLo  = vec3(0.92, 0.62, 0.18);  // deep amber
+      vec3 sodiumHi  = vec3(1.00, 0.82, 0.32);  // bright sodium yellow
+
+      // ice cyan pole: cold blue-white
+      vec3 cyanLo    = vec3(0.35, 0.72, 0.82);   // muted teal
+      vec3 cyanHi    = vec3(0.68, 0.92, 0.98);   // pale ice
+
+      // height-driven duotone split: lower body → cyan, upper → sodium
+      // normalized Y from rest position (-7.5 to 7.5 mapped to 0-1)
+      float yNorm = clamp((rest.y + 7.5) / 15.0, 0.0, 1.0);
+
+      // blend factor: use height + seed for per-particle variation
+      float blend = smoothstep(0.25, 0.75, yNorm + (seed - 0.5) * 0.3);
+
+      vec3 warm = mix(sodiumLo, sodiumHi, vEnergy);
+      vec3 cool = mix(cyanLo, cyanHi, vEnergy);
+      vCol = mix(cool, warm, blend);
+
+      // hot particles at transition zone get a white-ish highlight
+      float edgeDist = abs(blend - 0.5) * 2.0;
+      float edgeGlow = (1.0 - smoothstep(0.0, 0.4, edgeDist)) * 0.3 * vEnergy;
+      vCol += vec3(edgeGlow);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.0 + 1.6*vEnergy) * uPixel * (45.0/dist) * (0.4 + 0.6*uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vEnergy;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 17.0) * (0.45 + 0.55*vEnergy);
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const loadingEl = document.getElementById('loading');
+const startBtn  = document.getElementById('startBtn');
+const hintEl    = document.getElementById('hint');
+const camEl     = document.getElementById('cam');
+
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+const loader = new PLYLoader();
+loader.load(PLY_URL,
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scale = 15 / maxAxis;
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp = new THREE.Vector3();
+    for (let i = 0; i < N; i++){
+      sampler.sample(tmp);
+      restPositions[i*3]   = tmp.x;
+      restPositions[i*3+1] = tmp.y;
+      restPositions[i*3+2] = tmp.z;
+      seeds[i] = Math.random();
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+
+    loadingEl.style.display = 'none';
+    startBtn.style.display = 'inline-block';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      loadingEl.textContent = `loading lucy · ${pct}% · stanford 3d scanning repo`;
+    }
+  },
+  (err) => {
+    loadingEl.textContent = 'load failed — check network';
+    console.error(err);
+  });
+
+let revealStart = 0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// MediaPipe Hands
+let handsActive = false;
+async function loadMP(){
+  const load = (src) => new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = src; s.crossOrigin = 'anonymous';
+    s.onload = res; s.onerror = rej; document.head.appendChild(s);
+  });
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js');
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js');
+}
+async function startHands(){
+  startBtn.style.display = 'none';
+  hintEl.textContent = 'requesting camera…';
+  try { await loadMP(); }
+  catch { hintEl.textContent = 'mediapipe load failed — passive mode'; return; }
+  const hands = new window.Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}` });
+  hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+  hands.onResults((res) => {
+    if (!res.multiHandLandmarks || res.multiHandLandmarks.length === 0){
+      uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 0.0, 0.05);
+      return;
+    }
+    uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 1.0, 0.1);
+    const lm = res.multiHandLandmarks[0];
+    const dx = lm[4].x - lm[8].x, dy = lm[4].y - lm[8].y, dz = lm[4].z - lm[8].z;
+    const pinch = Math.min(2.0, Math.sqrt(dx*dx+dy*dy+dz*dz) * 6.0);
+    uniforms.uPinch.value = THREE.MathUtils.lerp(uniforms.uPinch.value, pinch, 0.15);
+    const palm = lm[9];
+    const wx = (0.5 - palm.x) * 22;
+    const wy = (0.5 - palm.y) * 14;
+    uniforms.uHand.value.set(wx, wy, 0.0);
+    hintEl.textContent = `hand · pinch=${pinch.toFixed(2)}`;
+  });
+  camEl.classList.remove('hidden');
+  const cam = new window.Camera(camEl, {
+    onFrame: async () => { await hands.send({ image: camEl }); },
+    width: 320, height: 240
+  });
+  cam.start();
+  handsActive = true;
+}
+startBtn.addEventListener('click', startHands);
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 2500);
+  }
+  points.rotation.y = t * 0.05;
+
+  if (!handsActive && uniforms.uReady.value > 0.95) {
+    uniforms.uPinch.value = 1.0 + 0.25 * Math.sin(t * 0.4);
+    uniforms.uActive.value = 0.35;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
