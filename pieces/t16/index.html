@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>t16 · elemental</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">t16 · elemental</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  // Initialize in a disc with some depth — like particles of light suspended in fog
+  const angle = Math.random() * Math.PI * 2;
+  const rad = Math.pow(Math.random(), 0.5) * 2.2;
+  init[i*4]   = Math.cos(angle) * rad;
+  init[i*4+1] = Math.sin(angle) * rad;
+  init[i*4+2] = (Math.random() - 0.5) * 0.4;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev:  { value: rtA.texture },
+  uDt:   { value: 0.005 },
+  uTime: { value: 0.0 },
+  uRes:  { value: new THREE.Vector2(W, H) }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uTime;
+    uniform vec2 uRes;
+    varying vec2 vUv;
+
+    float hash(vec2 p){
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vec2 pid = vUv * uRes;
+
+      float h1 = hash(pid);
+      float h2 = hash(pid + 71.0);
+      float h3 = hash(pid + 137.0);
+      float h4 = hash(pid + 213.0);
+
+      // Eliasson's Weather Project: particles orbit a luminous disc
+      // The sun is geometry — a semicircle reflected into wholeness
+      // Here: particles are drawn to a ring (the sun's edge) and orbit it
+
+      // Target ring radius breathes slowly like a living sun
+      float ringRadius = 1.6 + sin(uTime * 0.08) * 0.15;
+      float ringThickness = 0.3 + h1 * 0.2;
+
+      // Current distance from center in xy plane
+      float dist = length(p.xy);
+      float angle = atan(p.y, p.x);
+
+      // Radial force: pull toward ring
+      float radialTarget = ringRadius + (h2 - 0.5) * ringThickness;
+      float radialForce = (radialTarget - dist) * 0.4;
+
+      // Orbital force: particles circle the ring like convection currents
+      // Speed varies by layer — inner faster, outer slower (Kepler-like)
+      float orbitSpeed = 0.3 / (0.5 + dist * 0.4);
+      orbitSpeed *= (0.7 + h3 * 0.6);
+      // Some particles counter-rotate for depth
+      orbitSpeed *= (h4 > 0.85) ? -1.0 : 1.0;
+
+      vec2 tangent = vec2(-p.y, p.x) / max(dist, 0.01);
+      vec2 radial = p.xy / max(dist, 0.01);
+
+      vec3 dp = vec3(0.0);
+      dp.xy += tangent * orbitSpeed;
+      dp.xy += radial * radialForce;
+
+      // Z-axis: particles undulate like heat shimmer / fog layers
+      float targetZ = sin(angle * 3.0 + uTime * 0.12) * 0.15 * (1.0 - abs(dist - ringRadius));
+      targetZ += sin(angle * 7.0 - uTime * 0.07) * 0.06;
+      dp.z += (targetZ - p.z) * 0.8;
+
+      // Eliasson's monofrequency light: everything collapses perception of depth
+      // Flatten z gently to keep the disc-ness
+      dp.z -= p.z * 0.3;
+
+      // Ghost of parent attractor — subtle perturbation keeping it alive
+      vec3 att = vec3(
+        (p.z * 4.0 - 0.7) * p.x - 3.5 * p.y,
+        3.5 * p.x + (p.z * 4.0 - 0.7) * p.y,
+        0.6 + 0.95 * p.z - (p.z * p.z * p.z) / 3.0
+      );
+      dp += att * 0.008;
+
+      // Convection: warm particles rise at inner ring, cool sink at outer
+      float convection = (ringRadius - dist) * 0.05;
+      dp.z += convection * (0.5 + h1 * 0.5);
+
+      // Viscosity — fog-like resistance
+      float speed = length(dp);
+      dp *= 0.82 / (1.0 + speed * 0.1);
+
+      p += dp * uDt;
+
+      // Respawn particles that escape — return them to the ring's heart
+      if(length(p.xy) > 4.0 || abs(p.z) > 1.5){
+        float respAngle = hash(vec2(h1, floor(uTime * 0.5))) * 6.2832;
+        float respRad = ringRadius + (h2 - 0.5) * 0.3;
+        p.x = cos(respAngle) * respRad;
+        p.y = sin(respAngle) * respRad;
+        p.z = (h3 - 0.5) * 0.1;
+        age = 0.0;
+      }
+
+      age = mod(age + uDt * 0.025, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// Render
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.05, 80);
+camera.position.set(0, 0, 6.0);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vDist;
+    varying float vHash;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      vDist = length(p.xy);
+      vHash = fract(sin(dot(uvIdx, vec2(127.1, 311.7))) * 43758.5453);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float d = -mv.z;
+      float thickness = 0.4 + vHash * 0.4;
+      float sz = thickness * uPixel * (5.5 / max(d, 0.5));
+      gl_PointSize = sz;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vDist;
+    varying float vHash;
+    uniform float uTime;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+
+      // Eliasson monofrequency palette: sodium-vapor amber
+      // The Weather Project collapsed color to a single frequency —
+      // everything becomes gold, shadow becomes silhouette
+      vec3 c_core   = vec3(0.95, 0.65, 0.12);  // sodium vapor center
+      vec3 c_mid    = vec3(0.85, 0.45, 0.08);  // amber glow
+      vec3 c_edge   = vec3(0.55, 0.25, 0.05);  // deep ember
+      vec3 c_fog    = vec3(0.30, 0.15, 0.04);  // fog-scattered light
+
+      // Ring radius ~1.6; particles near ring center glow brightest
+      float ringDist = abs(vDist - 1.6);
+      float ringGlow = exp(-ringDist * 2.5);
+
+      vec3 col;
+      if(ringGlow > 0.6){
+        col = mix(c_mid, c_core, (ringGlow - 0.6) * 2.5);
+      } else if(ringGlow > 0.3){
+        col = mix(c_edge, c_mid, (ringGlow - 0.3) * 3.33);
+      } else {
+        col = mix(c_fog, c_edge, ringGlow * 3.33);
+      }
+
+      // Slight variation by hash — not all sodium lamps are identical
+      col *= 0.9 + vHash * 0.2;
+
+      // Age dims slightly — fog absorbs over time
+      col *= 1.0 - vAge * 0.1;
+
+      // Opacity: denser near ring, foggy at edges
+      float opacity = a * (0.15 + ringGlow * 0.55 + (1.0 - vAge) * 0.1);
+      gl_FragColor = vec4(col * opacity, opacity);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let t0 = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  simUniforms.uTime.value = elapsed;
+
+  for (let i = 0; i < 3; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = elapsed;
+
+  // Camera: Eliasson installations are about the viewer's position in space
+  // Slow orbit, mostly frontal — you face the sun
+  const ang = elapsed * 0.02;
+  const camDist = 5.5 + Math.sin(elapsed * 0.04) * 0.3;
+  const camX = Math.sin(ang) * 1.2;
+  const camY = Math.sin(elapsed * 0.015) * 0.4;
+  const camZ = camDist;
+  camera.position.set(camX, camY, camZ);
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
