@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6uk · AUTO{}Construccion · self-assembling housing</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0c10; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .phase { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size: 11px; letter-spacing: 0.08em; }
+</style>
+</head>
+<body>
+<div class="id">6uk · AUTO{}Construccion</div>
+<div class="hint">click to pulse collapse · auto-cycles build/dissolve</div>
+<div class="phase" id="phase">phase: GROW</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// CNDSD & Ivan Abreu — speculative housing constructing itself in real time.
+// Cubes snap to a voxel grid driven by L-system grammar: start from seed,
+// spawn rooms with probability rules. Every 6s, walls dissolve into falling
+// cubes (gravity). Then the structure re-seeds and grows again.
+//
+// MOTION SIGNATURE: discrete grid-based growth (no smooth motion), gravity collapse.
+// PALETTE: rebar gray (#3a3f44), cinder block (#787a7e), neon code-flash (#40e0d0).
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0c10, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0c10, 0.028);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(14, 12, 14);
+camera.lookAt(0, 0, 0);
+
+const ambient = new THREE.AmbientLight(0x404550, 0.4);
+scene.add(ambient);
+
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+dirLight.position.set(5, 10, 3);
+scene.add(dirLight);
+
+const rimLight = new THREE.DirectionalLight(0x40e0d0, 0.25);
+rimLight.position.set(-8, 2, -6);
+scene.add(rimLight);
+
+// ─────────────────────────── voxel cube system ───────────────────────────
+// each cube: {x,y,z, state:'grow'|'solid'|'fall', vy, mat}
+const VOXEL_SIZE = 1.0;
+const cubes = [];
+const cubeGeom = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+
+const matRebar = new THREE.MeshStandardMaterial({
+  color: 0x3a3f44, metalness: 0.85, roughness: 0.3, emissive: 0x000000
+});
+const matCinder = new THREE.MeshStandardMaterial({
+  color: 0x787a7e, metalness: 0.1, roughness: 0.9, emissive: 0x000000
+});
+const matCode = new THREE.MeshStandardMaterial({
+  color: 0x40e0d0, metalness: 0.3, roughness: 0.4, emissive: 0x102828, emissiveIntensity: 0.6
+});
+
+const materials = [matRebar, matCinder, matCode];
+
+function addCube(x, y, z, matIdx){
+  const mat = materials[matIdx % materials.length];
+  const mesh = new THREE.Mesh(cubeGeom, mat);
+  mesh.position.set(x * VOXEL_SIZE, y * VOXEL_SIZE, z * VOXEL_SIZE);
+  mesh.scale.set(0.98, 0.98, 0.98); // slight gap
+  scene.add(mesh);
+  cubes.push({ x, y, z, state: 'grow', vy: 0, mesh, matIdx });
+}
+
+function removeCube(idx){
+  scene.remove(cubes[idx].mesh);
+  cubes.splice(idx, 1);
+}
+
+// ─────────────────────────── L-system grammar ───────────────────────────
+// Simple stochastic room-growth: from seed, expand neighbors with probability.
+// Each generation spawns 1-3 neighbors if empty. Stop after N generations.
+const occupied = new Set();
+
+function keyOf(x, y, z){ return `${x},${y},${z}`; }
+
+function isOccupied(x, y, z){ return occupied.has(keyOf(x, y, z)); }
+
+function spawnCubeIfEmpty(x, y, z, matIdx){
+  const k = keyOf(x, y, z);
+  if (occupied.has(k)) return false;
+  occupied.add(k);
+  addCube(x, y, z, matIdx);
+  return true;
+}
+
+const dirs = [
+  [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]
+];
+
+function growGeneration(frontier, probSpawn, matIdx){
+  const newFrontier = [];
+  for (const [x, y, z] of frontier){
+    // try spawning 1-3 neighbors
+    const shuffled = dirs.slice().sort(() => Math.random() - 0.5);
+    let spawned = 0;
+    for (let i = 0; i < shuffled.length && spawned < 3; i++){
+      const [dx, dy, dz] = shuffled[i];
+      const nx = x + dx, ny = y + dy, nz = z + dz;
+      if (ny < 0) continue; // no underground
+      if (Math.random() < probSpawn){
+        if (spawnCubeIfEmpty(nx, ny, nz, matIdx)){
+          newFrontier.push([nx, ny, nz]);
+          spawned++;
+        }
+      }
+    }
+  }
+  return newFrontier;
+}
+
+function buildStructure(){
+  // seed: ground level cross
+  const seedMat = 1; // cinder
+  const seed = [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]];
+  let frontier = [];
+  for (const [x, y, z] of seed){
+    if (spawnCubeIfEmpty(x, y, z, seedMat)){
+      frontier.push([x, y, z]);
+    }
+  }
+
+  // generations: vertical first, then spread
+  const gens = [
+    { count: 4, prob: 0.7, mat: 1 },  // cinder vertical
+    { count: 3, prob: 0.5, mat: 0 },  // rebar spread
+    { count: 3, prob: 0.6, mat: 1 },  // cinder walls
+    { count: 2, prob: 0.4, mat: 2 },  // code-flash accents
+  ];
+
+  for (const g of gens){
+    for (let i = 0; i < g.count; i++){
+      frontier = growGeneration(frontier, g.prob, g.mat);
+      if (frontier.length === 0) break;
+    }
+  }
+
+  // mark all as solid
+  for (const c of cubes) c.state = 'solid';
+}
+
+function collapseStructure(){
+  // all cubes enter 'fall' state
+  for (const c of cubes){
+    c.state = 'fall';
+    c.vy = 0;
+  }
+}
+
+function clearStructure(){
+  while (cubes.length > 0) removeCube(0);
+  occupied.clear();
+}
+
+// ─────────────────────────── cycle phases ───────────────────────────
+let phase = 'GROW'; // 'GROW' | 'SOLID' | 'COLLAPSE'
+let phaseStartT = performance.now();
+const GROW_DUR = 3500;   // ms to build
+const SOLID_DUR = 2500;  // hold
+const COLLAPSE_DUR = 2800; // fall
+
+const phaseEl = document.getElementById('phase');
+function setPhaseText(){ phaseEl.textContent = `phase: ${phase}`; }
+setPhaseText();
+
+function enterPhase(newPhase){
+  phase = newPhase;
+  phaseStartT = performance.now();
+  setPhaseText();
+  if (phase === 'GROW'){
+    clearStructure();
+    buildStructure();
+  } else if (phase === 'COLLAPSE'){
+    collapseStructure();
+  }
+}
+
+addEventListener('click', () => {
+  // pulse collapse early
+  if (phase === 'SOLID' || phase === 'GROW'){
+    enterPhase('COLLAPSE');
+  }
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// initial build
+enterPhase('GROW');
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.03, (now - lastT) / 1000);
+  lastT = now;
+
+  // phase transitions
+  const phaseT = now - phaseStartT;
+  if (phase === 'GROW' && phaseT > GROW_DUR){
+    enterPhase('SOLID');
+  } else if (phase === 'SOLID' && phaseT > SOLID_DUR){
+    enterPhase('COLLAPSE');
+  } else if (phase === 'COLLAPSE' && phaseT > COLLAPSE_DUR){
+    enterPhase('GROW');
+  }
+
+  // cube physics: falling
+  for (let i = cubes.length - 1; i >= 0; i--){
+    const c = cubes[i];
+    if (c.state === 'fall'){
+      c.vy -= 9.8 * dt;
+      const newY = c.mesh.position.y + c.vy * dt;
+      c.mesh.position.y = newY;
+      // remove if below ground
+      if (newY < -2 * VOXEL_SIZE){
+        removeCube(i);
+      }
+    }
+  }
+
+  // camera orbit
+  const ang = now * 0.0002;
+  camera.position.x = Math.sin(ang) * 14;
+  camera.position.z = Math.cos(ang) * 14;
+  camera.position.y = 12 + Math.sin(ang * 0.5) * 2;
+  camera.lookAt(0, 3, 0);
+
+  // code-flash emissive pulse
+  const pulse = 0.6 + 0.4 * Math.sin(now * 0.003);
+  matCode.emissiveIntensity = pulse;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
