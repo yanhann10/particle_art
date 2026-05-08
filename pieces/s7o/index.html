@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>slow spiral · patient unfolding</title>
+<!-- MOTION: emergence, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0f; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .breath { position:fixed; right:14px; bottom:12px; opacity:0.28; font-size: 10px; 
+            letter-spacing: 0.08em; color:#6a7a8f; }
+</style>
+</head>
+<body>
+<div class="id">s7o</div>
+<div class="breath">breath <span id="count">0</span></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// SLOW ART principle: the piece must appear static for first 30s, then reveal
+// transformation over 60-120s. No sudden motion. No loops. Scroll-past sees nothing;
+// patient viewer sees everything.
+//
+// Implementation: a differential-growth ribbon like ajo, but:
+// - growth paused at startup — form is pre-grown and frozen
+// - camera entirely static — no orbit controls
+// - first 30s: form is monochrome pale gray on dark ground, nearly invisible
+// - 30s-120s: color slowly migrates across ribbon segments from one anchor point,
+//   like a dye diffusing through fabric. Each segment receives color based on
+//   geodesic distance from the seed, delayed by real time.
+// - simultaneously, fog density decreases microscopically so form becomes clearer
+// - breath counter increments every 4.2 seconds (average human breath cycle)
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a0f, 0.062); // heavy fog at start
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 6.5, 11);
+camera.lookAt(0, 4, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0f, 1);
+document.body.appendChild(renderer.domElement);
+
+// single warm light from upper-left, extremely dim
+const lightKey = new THREE.DirectionalLight(0xfff8e0, 0.35);
+lightKey.position.set(4, 10, 3);
+scene.add(lightKey);
+scene.add(new THREE.AmbientLight(0x0e0e14, 0.25));
+
+// ─────────── pre-grow the differential ribbon
+const MAX_VERTS = 1100;
+const ATTRACT   = 0.07;
+const REPEL_R   = 0.50;
+const REPEL_STR = 0.12;
+const NOISE     = 0.003;
+const PRESSURE  = 0.0028;
+const RISE      = 0.0038;
+const MAX_D     = 0.38;
+const CELL = REPEL_R, grid = new Map();
+
+const verts = [];
+for (let i = 0; i < 12; i++){
+  const th = i / 12 * Math.PI * 2;
+  const r = 1.4 + (Math.random() - 0.5) * 0.08;
+  verts.push({ x: Math.cos(th)*r, y: 0.2, z: Math.sin(th)*r, age: 0 });
+}
+
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i];
+    const k = Math.floor(v.x/CELL)+','+Math.floor(v.y/CELL)+','+Math.floor(v.z/CELL);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++){
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+function step(){
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    for (const j of neighbors(v)){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d/REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x + b.x - 2*v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2*v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2*v.z) * ATTRACT;
+  }
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++){ cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x - cx, oy = verts[i].y - cy, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox/d) * PRESSURE;
+    dy[i] += (oy/d) * PRESSURE * 0.35;
+    dz[i] += (oz/d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[i].age;
+    const upward = RISE * (0.25 + 1.1 * Math.min(a * 1.4, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE;
+    verts[i].y += dy[i] + (Math.random()-0.5)*NOISE * 0.4 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE;
+    verts[i].age += 0.0012;
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if (ex*ex+ey*ey+ez*ez > MAX_D*MAX_D && verts.length + grown.length < MAX_VERTS){
+      grown.push({
+        x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5 - 0.04, z:(a.z+b.z)*0.5,
+        age: Math.max(a.age, b.age) * 0.5
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// pre-grow to final form
+for (let s = 0; s < 1300; s++) step();
+
+// ─────────── build ribbon geometry once
+const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.0);
+const N_SAMPLES = Math.min(1400, verts.length * 3);
+const positions = new Float32Array(N_SAMPLES * 2 * 3);
+const indices = [];
+const up = new THREE.Vector3(0, 1, 0);
+
+// also compute geodesic distance from sample 0 for color diffusion
+const geoDistances = new Float32Array(N_SAMPLES);
+let pathLength = 0;
+for (let i = 0; i < N_SAMPLES; i++){
+  const tt = i / N_SAMPLES;
+  const p = curve.getPointAt(tt);
+  const tangent = curve.getTangentAt(tt).normalize();
+  let lateral = new THREE.Vector3().crossVectors(tangent, up);
+  if (lateral.lengthSq() < 0.001) lateral.set(1, 0, 0);
+  lateral.normalize();
+  const width = 0.18 + 0.12 * Math.sin(tt * 28.0);
+  const left  = p.clone().addScaledVector(lateral, -width);
+  const right = p.clone().addScaledVector(lateral,  width);
+  positions[i*6]   = left.x;  positions[i*6+1] = left.y;  positions[i*6+2] = left.z;
+  positions[i*6+3] = right.x; positions[i*6+4] = right.y; positions[i*6+5] = right.z;
+
+  if (i > 0){
+    const prevP = curve.getPointAt((i-1) / N_SAMPLES);
+    pathLength += p.distanceTo(prevP);
+  }
+  geoDistances[i] = pathLength;
+}
+const maxGeoDist = geoDistances[N_SAMPLES - 1];
+// normalize
+for (let i = 0; i < N_SAMPLES; i++) geoDistances[i] /= maxGeoDist;
+
+for (let i = 0; i < N_SAMPLES; i++){
+  const ni = (i + 1) % N_SAMPLES;
+  const a = i * 2, b = i * 2 + 1;
+  const c = ni * 2, d = ni * 2 + 1;
+  indices.push(a, b, c);
+  indices.push(b, d, c);
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setIndex(indices);
+geom.computeVertexNormals();
+
+// per-vertex color attribute (initially pale gray)
+const colors = new Float32Array(N_SAMPLES * 2 * 3);
+for (let i = 0; i < N_SAMPLES * 2; i++){
+  colors[i*3]   = 0.20; // R
+  colors[i*3+1] = 0.22; // G
+  colors[i*3+2] = 0.24; // B
+}
+geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+const mat = new THREE.MeshStandardMaterial({
+  vertexColors: true,
+  roughness: 0.65,
+  metalness: 0.15,
+  side: THREE.DoubleSide,
+  emissive: 0x000000,
+});
+const ribbonMesh = new THREE.Mesh(geom, mat);
+scene.add(ribbonMesh);
+
+// ─────────── slow color diffusion over time
+// color wave starts at sample 0 at t=30s, reaches each sample based on geodesic distance
+// total wave travel time: 90s (so at t=120s the entire ribbon is colored)
+const COLOR_START_TIME = 30.0;
+const COLOR_WAVE_DURATION = 90.0;
+const targetColor = new THREE.Color(0xd4a574); // warm bronze
+const startColor = new THREE.Color(0.20, 0.22, 0.24);
+
+// breath counter
+const breathInterval = 4.2; // seconds
+let breathCount = 0;
+let lastBreathTime = 0;
+const countEl = document.getElementById('count');
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const startT = performance.now();
+function loop(){
+  const elapsed = (performance.now() - startT) / 1000;
+
+  // update breath counter
+  if (elapsed - lastBreathTime >= breathInterval){
+    breathCount++;
+    countEl.textContent = breathCount;
+    lastBreathTime = elapsed;
+  }
+
+  // update vertex colors based on wave front
+  if (elapsed >= COLOR_START_TIME){
+    const waveTime = elapsed - COLOR_START_TIME;
+    const waveFraction = Math.min(waveTime / COLOR_WAVE_DURATION, 1.0);
+    for (let i = 0; i < N_SAMPLES; i++){
+      const sampleGeoDist = geoDistances[i];
+      // color arrives at this sample when waveFraction >= sampleGeoDist
+      let colorMix = 0;
+      if (waveFraction >= sampleGeoDist){
+        // how long has color been here?
+        const localElapsed = (waveFraction - sampleGeoDist) * COLOR_WAVE_DURATION;
+        // smooth arrival over 3 seconds
+        colorMix = Math.min(localElapsed / 3.0, 1.0);
+        colorMix = colorMix * colorMix * (3 - 2*colorMix); // smoothstep
+      }
+      const finalCol = new THREE.Color().lerpColors(startColor, targetColor, colorMix);
+      // each sample has 2 verts (left, right edge)
+      colors[i*6]   = finalCol.r; colors[i*6+1] = finalCol.g; colors[i*6+2] = finalCol.b;
+      colors[i*6+3] = finalCol.r; colors[i*6+4] = finalCol.g; colors[i*6+5] = finalCol.b;
+    }
+    geom.attributes.color.needsUpdate = true;
+  }
+
+  // fog density decreases microscopically over 120s
+  const fogStart = 0.062, fogEnd = 0.018;
+  const fogFraction = Math.min(elapsed / 120.0, 1.0);
+  scene.fog.density = fogStart + (fogEnd - fogStart) * fogFraction;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
