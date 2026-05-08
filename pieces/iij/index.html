@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iij · Anadol — cosmic data torus</title>
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#020810; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">iij</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x020810);
+
+const camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, 0.1, 200);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+/* ── Torus parameters ── */
+const R = 5.5;   // major radius
+const r0 = 2.2;  // minor radius base
+
+/* ══════════════════════════════════════════
+   SURFACE PARTICLES — 70,000 flowing on torus
+   ══════════════════════════════════════════ */
+const NS = 70000;
+const sUArr = new Float32Array(NS);
+const sVArr = new Float32Array(NS);
+const sDataArr = new Float32Array(NS);
+const sDummy = new Float32Array(NS * 3);
+
+for (let i = 0; i < NS; i++) {
+  sUArr[i] = Math.random() * Math.PI * 2;
+  sVArr[i] = Math.random() * Math.PI * 2;
+  sDataArr[i] = Math.random();
+}
+
+const surfGeo = new THREE.BufferGeometry();
+surfGeo.setAttribute('position', new THREE.BufferAttribute(sDummy, 3));
+surfGeo.setAttribute('aU', new THREE.BufferAttribute(sUArr, 1));
+surfGeo.setAttribute('aV', new THREE.BufferAttribute(sVArr, 1));
+surfGeo.setAttribute('aData', new THREE.BufferAttribute(sDataArr, 1));
+surfGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 16);
+
+const surfVert = `
+uniform float uTime;
+attribute float aU;
+attribute float aV;
+attribute float aData;
+varying float vData;
+varying float vFogDepth;
+varying float vAlpha;
+
+void main() {
+  float flowU = aU + uTime * 0.025 + aData * 0.8;
+  float v = aV;
+
+  // Data-driven surface displacement — Anadol morphology
+  float disp = sin(flowU * 3.0 + uTime * 0.06) * 0.4
+             + sin(v * 4.0 + flowU * 2.0 + uTime * 0.03) * 0.2
+             + cos(flowU * 6.0 + v * 3.0 - uTime * 0.09) * 0.12;
+
+  float majorR = 5.5;
+  float minorR = 2.2 + disp;
+
+  vec3 pos;
+  pos.x = (majorR + minorR * cos(v)) * cos(flowU);
+  pos.y = minorR * sin(v);
+  pos.z = (majorR + minorR * cos(v)) * sin(flowU);
+
+  vData = aData + disp * 0.4;
+  vAlpha = 0.6 + disp * 0.35;
+
+  vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
+  vFogDepth = length(mvPos.xyz);
+  gl_Position = projectionMatrix * mvPos;
+  gl_PointSize = max(1.0, 3.2 * (1.0 - vFogDepth / 55.0));
+}
+`;
+
+const surfFrag = `
+varying float vData;
+varying float vFogDepth;
+varying float vAlpha;
+
+void main() {
+  vec2 c = gl_PointCoord - vec2(0.5);
+  float d = length(c);
+  if (d > 0.5) discard;
+  float soft = smoothstep(0.5, 0.12, d);
+
+  vec3 deep = vec3(0.035, 0.07, 0.16);
+  vec3 bright = vec3(0.22, 0.72, 0.95);
+  float t = clamp(vData * 0.55 + 0.25, 0.0, 1.0);
+  vec3 col = mix(deep, bright, t);
+
+  // Manual fog — deep ocean blue
+  vec3 fogCol = vec3(0.008, 0.025, 0.05);
+  float fog = exp(-vFogDepth * vFogDepth * 0.00035);
+  col = mix(fogCol, col, fog);
+
+  gl_FragColor = vec4(col, soft * vAlpha * 0.55);
+}
+`;
+
+const surfMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: surfVert,
+  fragmentShader: surfFrag,
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false
+});
+
+const surfPoints = new THREE.Points(surfGeo, surfMat);
+scene.add(surfPoints);
+
+/* ══════════════════════════════════════════
+   EMANATION PARTICLES — 10,000 data rising from surface
+   ══════════════════════════════════════════ */
+const NE = 10000;
+const eUArr = new Float32Array(NE);
+const eVArr = new Float32Array(NE);
+const eDataArr = new Float32Array(NE);
+const eDummy = new Float32Array(NE * 3);
+
+for (let i = 0; i < NE; i++) {
+  eUArr[i] = Math.random() * Math.PI * 2;
+  eVArr[i] = Math.random() * Math.PI * 2;
+  eDataArr[i] = Math.random();
+}
+
+const emGeo = new THREE.BufferGeometry();
+emGeo.setAttribute('position', new THREE.BufferAttribute(eDummy, 3));
+emGeo.setAttribute('aU', new THREE.BufferAttribute(eUArr, 1));
+emGeo.setAttribute('aV', new THREE.BufferAttribute(eVArr, 1));
+emGeo.setAttribute('aData', new THREE.BufferAttribute(eDataArr, 1));
+emGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 20);
+
+const emVert = `
+uniform float uTime;
+attribute float aU;
+attribute float aV;
+attribute float aData;
+varying float vFogDepth;
+varying float vFade;
+
+void main() {
+  float flowU = aU + uTime * 0.015;
+  float v = aV;
+
+  float disp = sin(flowU * 3.0 + uTime * 0.06) * 0.4
+             + sin(v * 4.0 + flowU * 2.0) * 0.2;
+
+  float majorR = 5.5;
+  float minorR = 2.2 + disp;
+
+  vec3 basePos;
+  basePos.x = (majorR + minorR * cos(v)) * cos(flowU);
+  basePos.y = minorR * sin(v);
+  basePos.z = (majorR + minorR * cos(v)) * sin(flowU);
+
+  // Outward normal from tube center
+  vec3 tubeCenter = vec3(majorR * cos(flowU), 0.0, majorR * sin(flowU));
+  vec3 normal = normalize(basePos - tubeCenter);
+
+  // Cyclic emanation
+  float phase = fract(uTime * 0.04 + aData);
+  float height = phase * 2.5;
+  vFade = 1.0 - phase;
+
+  vec3 pos = basePos + normal * height;
+
+  vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
+  vFogDepth = length(mvPos.xyz);
+  gl_Position = projectionMatrix * mvPos;
+  gl_PointSize = max(0.8, 2.0 * vFade * (1.0 - vFogDepth / 55.0));
+}
+`;
+
+const emFrag = `
+varying float vFogDepth;
+varying float vFade;
+
+void main() {
+  vec2 c = gl_PointCoord - vec2(0.5);
+  float d = length(c);
+  if (d > 0.5) discard;
+  float soft = smoothstep(0.5, 0.1, d);
+
+  vec3 col = vec3(0.3, 0.82, 1.0);
+
+  vec3 fogCol = vec3(0.008, 0.025, 0.05);
+  float fog = exp(-vFogDepth * vFogDepth * 0.0004);
+  col = mix(fogCol, col, fog);
+
+  gl_FragColor = vec4(col, soft * vFade * 0.28);
+}
+`;
+
+const emMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: emVert,
+  fragmentShader: emFrag,
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false
+});
+
+const emPoints = new THREE.Points(emGeo, emMat);
+scene.add(emPoints);
+
+/* ══════════════════════════════════════════
+   ARCHITECTURAL WIREFRAME — faint structural grid on the torus
+   (Shiota's room → Anadol's scaffold)
+   ══════════════════════════════════════════ */
+const gridMat = new THREE.LineBasicMaterial({
+  color: 0x1a3a5c,
+  transparent: true,
+  opacity: 0.07,
+  depthWrite: false
+});
+
+const gridSegs = 80;
+
+// Longitudinal lines (flow direction)
+for (let j = 0; j < 16; j++) {
+  const v = (j / 16) * Math.PI * 2;
+  const pts = [];
+  for (let i = 0; i <= gridSegs; i++) {
+    const u = (i / gridSegs) * Math.PI * 2;
+    pts.push(new THREE.Vector3(
+      (R + r0 * Math.cos(v)) * Math.cos(u),
+      r0 * Math.sin(v),
+      (R + r0 * Math.cos(v)) * Math.sin(u)
+    ));
+  }
+  scene.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(pts), gridMat
+  ));
+}
+
+// Meridional rings
+const ringMat = new THREE.LineBasicMaterial({
+  color: 0x1a3a5c,
+  transparent: true,
+  opacity: 0.05,
+  depthWrite: false
+});
+
+for (let i = 0; i < 32; i++) {
+  const u = (i / 32) * Math.PI * 2;
+  const pts = [];
+  for (let j = 0; j <= 40; j++) {
+    const v = (j / 40) * Math.PI * 2;
+    pts.push(new THREE.Vector3(
+      (R + r0 * Math.cos(v)) * Math.cos(u),
+      r0 * Math.sin(v),
+      (R + r0 * Math.cos(v)) * Math.sin(u)
+    ));
+  }
+  scene.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(pts), ringMat
+  ));
+}
+
+/* ══════════════════════════════════════════
+   DENSE DATA-STREAM FILAMENTS — 600 thread-like lines on the torus surface
+   (Shiota's red threads → Anadol's data streams)
+   ══════════════════════════════════════════ */
+const streamMat = new THREE.LineBasicMaterial({
+  color: 0x3090cc,
+  transparent: true,
+  opacity: 0.04,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false
+});
+
+for (let s = 0; s < 600; s++) {
+  const v0 = Math.random() * Math.PI * 2;
+  const u0 = Math.random() * Math.PI * 2;
+  const len = 8 + Math.floor(Math.random() * 16);
+  const drift = (Math.random() - 0.5) * 0.03;
+  const pts = [];
+  for (let k = 0; k < len; k++) {
+    const u = u0 + k * 0.06;
+    const v = v0 + k * drift;
+    pts.push(new THREE.Vector3(
+      (R + r0 * Math.cos(v)) * Math.cos(u),
+      r0 * Math.sin(v),
+      (R + r0 * Math.cos(v)) * Math.sin(u)
+    ));
+  }
+  scene.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(pts), streamMat
+  ));
+}
+
+/* ══════════════════════════════════════════
+   CORE GLOW — faint volumetric center presence
+   ══════════════════════════════════════════ */
+const glowGeo = new THREE.SphereGeometry(3.8, 16, 12);
+const glowMat = new THREE.MeshBasicMaterial({
+  color: 0x0a2a4a,
+  transparent: true,
+  opacity: 0.08,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  side: THREE.BackSide
+});
+scene.add(new THREE.Mesh(glowGeo, glowMat));
+
+/* ── Camera + render loop ── */
+const camDist = 16;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const t0 = performance.now();
+
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+
+  surfMat.uniforms.uTime.value = t;
+  emMat.uniforms.uTime.value = t;
+
+  // Slow orbit — camera tracks centroid
+  const angle = t * 0.028;
+  const camY = 3.0 + Math.sin(t * 0.013) * 5.0;
+  camera.position.set(
+    Math.cos(angle) * camDist,
+    camY,
+    Math.sin(angle) * camDist
+  );
+  camera.lookAt(0, Math.sin(t * 0.008) * 0.3, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
