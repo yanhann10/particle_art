@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hs5 · mohr hypercube pixel</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#080808; overflow:hidden;
+               color:#e0e0e0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size:11px; letter-spacing:0.04em; color:#cdd2dc; }
+  button.start { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+                 background:#111; color:#e0e0e0; border:1px solid #444;
+                 padding:12px 22px; border-radius:2px; cursor:pointer;
+                 font-family:inherit; font-size:13px; letter-spacing:0.06em; }
+  button.start:hover { background:#1a1a1a; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · audio drives 4D rotation</button>
+<div class="id">my7</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x080808, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- Tesseract geometry ---
+// 16 vertices of a 4D hypercube
+const verts4D = [];
+for (let i = 0; i < 16; i++) {
+  verts4D.push([
+    (i & 1) ? 1 : -1,
+    (i & 2) ? 1 : -1,
+    (i & 4) ? 1 : -1,
+    (i & 8) ? 1 : -1
+  ]);
+}
+// 32 edges: connect vertices differing in exactly one coordinate
+const edges = [];
+for (let i = 0; i < 16; i++) {
+  for (let j = i + 1; j < 16; j++) {
+    let diff = 0;
+    for (let k = 0; k < 4; k++) if (verts4D[i][k] !== verts4D[j][k]) diff++;
+    if (diff === 1) edges.push([i, j]);
+  }
+}
+
+const PER_EDGE = 625;
+const N = edges.length * PER_EDGE; // 32 * 625 = 20000
+const basePositions = new Float32Array(N * 4); // store 4D coords
+const edgeIdx = new Float32Array(N);
+const paramT = new Float32Array(N); // parameter along edge [0,1]
+
+for (let e = 0; e < edges.length; e++) {
+  const [a, b] = edges[e];
+  for (let i = 0; i < PER_EDGE; i++) {
+    const idx = e * PER_EDGE + i;
+    const t = i / (PER_EDGE - 1);
+    paramT[idx] = t;
+    edgeIdx[idx] = e;
+    for (let k = 0; k < 4; k++) {
+      basePositions[idx * 4 + k] = verts4D[a][k] * (1 - t) + verts4D[b][k] * t;
+    }
+  }
+}
+
+// We'll project 4D→3D on CPU each frame (Mohr's cube-rotation studies)
+const positions = new Float32Array(N * 3);
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('edgeIdx', new THREE.BufferAttribute(edgeIdx, 1));
+geom.setAttribute('paramT', new THREE.BufferAttribute(paramT, 1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uSnap:  { value: 0.0 }, // pixel-snap intensity
+  uBands: { value: new THREE.Vector4(0, 0, 0, 0) },
+  uTreble:{ value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec4  uBands;
+    uniform float uTreble;
+    attribute float edgeIdx;
+    attribute float paramT;
+    varying float vBright;
+    varying float vEdge;
+    void main(){
+      vec3 p = position;
+      vEdge = edgeIdx;
+
+      // brightness: vertices brighter than midpoints (Mohr emphasis on structure)
+      float vertProx = abs(paramT - 0.5) * 2.0; // 1 at ends, 0 at middle
+      float totalE = (uBands.x + uBands.y + uBands.z + uBands.w + uTreble) * 0.2;
+      vBright = 0.4 + 0.6 * vertProx + totalE * 0.5;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + totalE * 1.5) * uPixel * (42.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vBright;
+    varying float vEdge;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      // Mohr palette: predominantly white, slight warm accent on select edges
+      float edgeGroup = mod(vEdge, 8.0);
+      vec3 col;
+      if (edgeGroup < 2.0) {
+        col = vec3(0.95, 0.92, 0.85); // warm white
+      } else if (edgeGroup < 4.0) {
+        col = vec3(0.78, 0.82, 0.88); // cool steel
+      } else {
+        col = vec3(0.90, 0.90, 0.92); // neutral
+      }
+      float a = exp(-r * 16.0) * vBright * 0.85;
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// --- Audio setup (inherited from parent) ---
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+let analyser = null, freqData = null;
+async function startAudio() {
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting mic…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.72;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'live · audio → 4D rotation planes';
+  } catch (e) {
+    hint.textContent = 'mic denied — synthetic rotation mode';
+  }
+}
+startBtn.addEventListener('click', startAudio);
+
+function bandEnergy(arr, lo, hi) {
+  let s = 0;
+  for (let i = lo; i < hi; i++) s += arr[i];
+  return (s / (hi - lo)) / 255;
+}
+
+// --- 4D rotation: rotate in six planes, angles driven by audio bands ---
+function rot4D(p, angles) {
+  // angles: [XW, YW, ZW, XY, XZ, YZ]
+  let [x, y, z, w] = p;
+  // XW plane
+  let c = Math.cos(angles[0]), s = Math.sin(angles[0]);
+  let nx = x * c - w * s, nw = x * s + w * c; x = nx; w = nw;
+  // YW plane
+  c = Math.cos(angles[1]); s = Math.sin(angles[1]);
+  let ny = y * c - w * s; nw = y * s + w * c; y = ny; w = nw;
+  // ZW plane
+  c = Math.cos(angles[2]); s = Math.sin(angles[2]);
+  let nz = z * c - w * s; nw = z * s + w * c; z = nz; w = nw;
+  // XY plane
+  c = Math.cos(angles[3]); s = Math.sin(angles[3]);
+  nx = x * c - y * s; ny = x * s + y * c; x = nx; y = ny;
+  // XZ plane
+  c = Math.cos(angles[4]); s = Math.sin(angles[4]);
+  nx = x * c - z * s; nz = x * s + z * c; x = nx; z = nz;
+  // YZ plane
+  c = Math.cos(angles[5]); s = Math.sin(angles[5]);
+  ny = y * c - z * s; nz = y * s + z * c; y = ny; z = nz;
+  return [x, y, z, w];
+}
+
+// Perspective projection 4D→3D
+function project4Dto3D(x, y, z, w, d) {
+  const scale = d / (d - w);
+  return [x * scale, y * scale, z * scale];
+}
+
+// Pixel-snap: quantize to grid (Mohr's discrete/digital aesthetic)
+function pixelSnap(v, gridSize, intensity) {
+  return v * (1 - intensity) + Math.round(v / gridSize) * gridSize * intensity;
+}
+
+const uBands = uniforms.uBands.value;
+const start = performance.now();
+const centroid = new THREE.Vector3();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Audio bands
+  if (analyser) {
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    uBands.x = bandEnergy(freqData, 0, Math.floor(n * 0.04));
+    uBands.y = bandEnergy(freqData, Math.floor(n * 0.04), Math.floor(n * 0.12));
+    uBands.z = bandEnergy(freqData, Math.floor(n * 0.12), Math.floor(n * 0.30));
+    uBands.w = bandEnergy(freqData, Math.floor(n * 0.30), Math.floor(n * 0.55));
+    uniforms.uTreble.value = bandEnergy(freqData, Math.floor(n * 0.55), n);
+  } else {
+    uBands.x = 0.3 + 0.3 * Math.sin(t * 0.7);
+    uBands.y = 0.25 + 0.25 * Math.sin(t * 1.1 + 1.0);
+    uBands.z = 0.2 + 0.2 * Math.sin(t * 1.6 + 2.0);
+    uBands.w = 0.18 + 0.18 * Math.sin(t * 2.3 + 0.5);
+    uniforms.uTreble.value = 0.15 + 0.15 * Math.sin(t * 3.2);
+  }
+
+  // 4D rotation angles: slow base rotation + audio modulation
+  // Each audio band drives a different rotation plane (Mohr's systematic exploration)
+  const angles = [
+    t * 0.15 + uBands.x * 1.2,         // XW — bass
+    t * 0.11 + uBands.y * 0.9,         // YW — lo-mid
+    t * 0.09 + uBands.z * 0.7,         // ZW — mid
+    t * 0.07 + uBands.w * 0.5,         // XY — hi-mid
+    t * 0.05 + uniforms.uTreble.value * 0.6, // XZ — treble
+    t * 0.03                            // YZ — constant slow
+  ];
+
+  // Pixel snap intensity oscillates subtly
+  const snapI = 0.15 + 0.15 * Math.sin(t * 0.3);
+  const gridSize = 0.25;
+  const scale = 7.5; // scale up the unit hypercube
+
+  centroid.set(0, 0, 0);
+  const posAttr = geom.attributes.position;
+
+  for (let i = 0; i < N; i++) {
+    const p4 = [
+      basePositions[i * 4],
+      basePositions[i * 4 + 1],
+      basePositions[i * 4 + 2],
+      basePositions[i * 4 + 3]
+    ];
+    const rotated = rot4D(p4, angles);
+    const [px, py, pz] = project4Dto3D(rotated[0], rotated[1], rotated[2], rotated[3], 4.0);
+
+    // Scale and pixel-snap
+    const sx = pixelSnap(px * scale, gridSize, snapI);
+    const sy = pixelSnap(py * scale, gridSize, snapI);
+    const sz = pixelSnap(pz * scale, gridSize, snapI);
+
+    positions[i * 3]     = sx;
+    positions[i * 3 + 1] = sy;
+    positions[i * 3 + 2] = sz;
+
+    centroid.x += sx;
+    centroid.y += sy;
+    centroid.z += sz;
+  }
+  posAttr.needsUpdate = true;
+
+  // Camera tracks centroid
+  centroid.divideScalar(N);
+  camera.position.x += (centroid.x - camera.position.x) * 0.02;
+  camera.position.y += (centroid.y - camera.position.y) * 0.02;
+  camera.lookAt(centroid);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
