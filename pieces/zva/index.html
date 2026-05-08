@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>zva · lidar orchard · scan artifacts</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#060608; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#cdd2dc; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">zva</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ══════════════════════════════════════════════════════════════════
+   Quayola — Remains / Jardins d'Été mutation
+   A procedural tree skeleton converted to a LiDAR-style point cloud.
+   Scan errors are the aesthetic: Gaussian displacement grows with
+   depth-from-scanner, occlusion gaps erase random clusters, foliage
+   zones become soft halos of scattered dots. Near-monochrome
+   pale gray on near-black. Slow drift orbit.
+   ══════════════════════════════════════════════════════════════════ */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(18, 10, 22);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x060608, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.target.set(0, 6, 0);
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.25;
+
+// ─────────── seeded PRNG for deterministic tree
+let _seed = 73491;
+function srand(s){ _seed = s; }
+function rand(){ _seed = (_seed * 16807 + 0) % 2147483647; return (_seed & 0x7fffffff) / 0x7fffffff; }
+function randGauss(){ return Math.sqrt(-2*Math.log(rand()+1e-9)) * Math.cos(6.2832*rand()); }
+
+// ─────────── fractal tree generation
+// Each branch: {base: Vec3, end: Vec3, radius: number, depth: number, isFoliage: bool}
+const branches = [];
+const MAX_DEPTH = 7;
+
+function growTree(base, dir, radius, depth, lengthScale){
+  if (depth > MAX_DEPTH) return;
+  const len = (2.8 + rand() * 1.4) * lengthScale;
+  const end = new THREE.Vector3(
+    base.x + dir.x * len,
+    base.y + dir.y * len,
+    base.z + dir.z * len
+  );
+  const isFoliage = depth >= 5;
+  branches.push({ base: base.clone(), end: end.clone(), radius, depth, isFoliage });
+
+  if (depth >= MAX_DEPTH) return;
+
+  // branching: 2-3 children
+  const nChildren = depth < 3 ? 2 + (rand() > 0.6 ? 1 : 0) : 2 + (rand() > 0.4 ? 1 : 0);
+  for (let c = 0; c < nChildren; c++){
+    const spreadAngle = 0.3 + rand() * 0.45;
+    // random rotation axis perpendicular to dir
+    const perp = new THREE.Vector3(rand()-0.5, rand()-0.5, rand()-0.5);
+    perp.cross(dir).normalize();
+    if (perp.lengthSq() < 0.001) perp.set(1, 0, 0);
+    const childDir = dir.clone().applyAxisAngle(perp, spreadAngle);
+    // slight droop for realism
+    childDir.y -= 0.05 * depth;
+    childDir.normalize();
+    const childRadius = radius * (0.55 + rand() * 0.18);
+    growTree(end, childDir, childRadius, depth + 1, lengthScale * (0.72 + rand() * 0.12));
+  }
+}
+
+srand(42917);
+// main trunk
+growTree(
+  new THREE.Vector3(0, 0, 0),
+  new THREE.Vector3(0.02, 1, 0.01).normalize(),
+  0.45, 0, 1.0
+);
+// second smaller tree offset
+srand(88103);
+growTree(
+  new THREE.Vector3(-5, 0, 3),
+  new THREE.Vector3(-0.05, 1, 0.03).normalize(),
+  0.35, 0, 0.85
+);
+// third distant tree
+srand(19457);
+growTree(
+  new THREE.Vector3(7, 0, -4),
+  new THREE.Vector3(0.03, 1, -0.02).normalize(),
+  0.30, 0, 0.75
+);
+
+// ─────────── sample point cloud from branches
+// LiDAR simulation: points on cylinder surfaces + foliage halos
+// Noise increases with distance from a virtual scanner position
+const SCANNER_POS = new THREE.Vector3(20, 5, 20);
+const points = [];
+const alphas = [];
+const sizes = [];
+
+// palette: near-monochrome with subtle warmth variation
+// trunk: slightly warm gray, foliage: slightly cool gray, some pale green hints
+const colors = [];
+
+for (const br of branches){
+  const seg = new THREE.Vector3().subVectors(br.end, br.base);
+  const segLen = seg.length();
+  if (segLen < 0.01) continue;
+
+  // points per branch depends on depth (foliage gets more scattered points)
+  const density = br.isFoliage ? 28 + rand() * 20 : 14 + rand() * 10;
+  const nPts = Math.floor(density * segLen / 2.0);
+
+  // occlusion gap: randomly skip ~18% of branches entirely
+  if (rand() < 0.18) continue;
+
+  // secondary occlusion: random rectangular void zones
+  const hasVoid = rand() < 0.3;
+  const voidT0 = rand() * 0.6;
+  const voidT1 = voidT0 + 0.15 + rand() * 0.25;
+
+  for (let i = 0; i < nPts; i++){
+    const t = rand();
+
+    // skip points in void zone
+    if (hasVoid && t > voidT0 && t < voidT1) continue;
+
+    const posOnAxis = br.base.clone().addScaledVector(seg, t);
+    const r = br.radius * (1.0 - t * 0.3); // taper
+
+    // random direction perpendicular to segment
+    const tangent = seg.clone().normalize();
+    const randVec = new THREE.Vector3(rand()-0.5, rand()-0.5, rand()-0.5);
+    const perp = randVec.cross(tangent).normalize();
+    if (perp.lengthSq() < 0.001) continue;
+
+    let pt;
+    if (br.isFoliage){
+      // foliage: scattered halo, not tight cylinder
+      const spread = r * 2.5 + rand() * 1.8;
+      pt = posOnAxis.clone().addScaledVector(perp, (rand()-0.5) * spread * 2);
+      pt.y += (rand()-0.5) * spread;
+    } else {
+      // trunk/branch: points on cylinder surface
+      const angle = rand() * Math.PI * 2;
+      const perpB = new THREE.Vector3().crossVectors(tangent, perp).normalize();
+      pt = posOnAxis.clone()
+        .addScaledVector(perp, Math.cos(angle) * r)
+        .addScaledVector(perpB, Math.sin(angle) * r);
+    }
+
+    // LiDAR noise: grows with distance from scanner
+    const distFromScanner = pt.distanceTo(SCANNER_POS);
+    const noiseScale = 0.008 + 0.012 * (distFromScanner / 30.0);
+    pt.x += randGauss() * noiseScale * distFromScanner;
+    pt.y += randGauss() * noiseScale * distFromScanner * 0.7;
+    pt.z += randGauss() * noiseScale * distFromScanner;
+
+    points.push(pt.x, pt.y, pt.z);
+
+    // color: near-monochrome
+    let gray;
+    if (br.isFoliage){
+      // foliage: slightly cooler, brighter
+      gray = 0.55 + rand() * 0.25;
+      const g = gray + rand() * 0.04; // faint green tint
+      colors.push(gray * 0.95, g, gray * 0.93);
+    } else {
+      // wood: slightly warmer
+      gray = 0.40 + rand() * 0.20;
+      colors.push(gray * 1.02, gray, gray * 0.95);
+    }
+
+    // alpha: slightly transparent for distant points
+    const aFalloff = Math.max(0.3, 1.0 - distFromScanner / 50.0);
+    alphas.push(aFalloff * (0.6 + rand() * 0.4));
+
+    // size: attenuate with distance, foliage slightly larger
+    const baseSize = br.isFoliage ? 2.2 : 1.6;
+    sizes.push(baseSize * (0.7 + rand() * 0.6));
+  }
+}
+
+// ─────────── ground scatter: sparse ground-return points
+for (let i = 0; i < 3000; i++){
+  const x = (rand() - 0.5) * 30;
+  const z = (rand() - 0.5) * 30;
+  const y = (rand() - 0.5) * 0.15;
+  // skip if under a tree trunk area (some occlusion shadow)
+  const nearTrunk = Math.hypot(x, z) < 1.5 ||
+                    Math.hypot(x + 5, z - 3) < 1.2 ||
+                    Math.hypot(x - 7, z + 4) < 1.0;
+  if (nearTrunk && rand() < 0.7) continue;
+
+  const dist = new THREE.Vector3(x, y, z).distanceTo(SCANNER_POS);
+  const ns = 0.005 * dist;
+  points.push(x + randGauss()*ns, y + randGauss()*ns*0.3, z + randGauss()*ns);
+  const g = 0.22 + rand() * 0.12;
+  colors.push(g, g * 1.01, g * 0.98);
+  alphas.push(0.25 + rand() * 0.2);
+  sizes.push(1.0 + rand() * 0.5);
+}
+
+// ─────────── build geometry
+const N = points.length / 3;
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.Float32BufferAttribute(points, 3));
+geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+geo.setAttribute('alpha', new THREE.Float32BufferAttribute(alphas, 1));
+geo.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+
+// ─────────── custom shader for per-point alpha and size
+const pointMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    attribute float alpha;
+    attribute float size;
+    attribute vec3 color;
+    varying float vAlpha;
+    varying vec3 vColor;
+    void main(){
+      vAlpha = alpha;
+      vColor = color;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * (280.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying vec3 vColor;
+    void main(){
+      float d = length(gl_PointCoord - 0.5) * 2.0;
+      if (d > 1.0) discard;
+      // soft circular falloff
+      float a = vAlpha * smoothstep(1.0, 0.3, d);
+      gl_FragColor = vec4(vColor, a);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+
+const cloud = new THREE.Points(geo, pointMat);
+scene.add(cloud);
+
+// ─────────── subtle film grain overlay via post-processing noise
+// (done as a screen-space plane for photochemical imperfection)
+const grainMat = new THREE.ShaderMaterial({
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uTime;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+    void main(){
+      float n = hash(vUv * 800.0 + uTime * 3.7);
+      // very subtle grain
+      gl_FragColor = vec4(vec3(n), 0.035);
+    }
+  `,
+  uniforms: { uTime: { value: 0 } },
+  transparent: true,
+  depthTest: false,
+  depthWrite: false,
+});
+const grainQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), grainMat);
+const grainScene = new THREE.Scene();
+const grainCam = new THREE.Camera();
+grainScene.add(grainQuad);
+
+// ─────────── resize
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─────────── centroid tracking
+let cx = 0, cy = 6, cz = 0;
+{
+  let sx=0, sy=0, sz=0;
+  for (let i = 0; i < N; i++){
+    sx += points[i*3]; sy += points[i*3+1]; sz += points[i*3+2];
+  }
+  cx = sx/N; cy = sy/N; cz = sz/N;
+}
+controls.target.set(cx, Math.max(cy, 4), cz);
+
+// ─────────── animation loop
+const t0 = performance.now();
+function loop(){
+  const t = (performance.now() - t0) * 0.001;
+
+  // gentle vertical drift of the point cloud — scanner vibration artifact
+  const posArr = geo.attributes.position.array;
+  // we don't modify points each frame for perf; the drift is in the camera
+
+  controls.update();
+
+  // subtle camera height breathing
+  camera.position.y += Math.sin(t * 0.15) * 0.002;
+
+  renderer.render(scene, camera);
+
+  // grain overlay
+  grainMat.uniforms.uTime.value = t;
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
