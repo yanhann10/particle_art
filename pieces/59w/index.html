@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>59w · Halloran cyanotype cosmos</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#0d2c54; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">59w</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d2c54);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 0, 85);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ── Deterministic RNG
+let rngState = 471823;
+function rng(){ rngState |= 0; rngState = rngState + 0x6d2b79f5 | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// ── Star field particles — scattered along Milky Way band + halo
+const NUM_STARS = 18000;
+const positions = new Float32Array(NUM_STARS * 3);
+const sizes = new Float32Array(NUM_STARS);
+
+for (let i = 0; i < NUM_STARS; i++){
+  const i3 = i * 3;
+  
+  // 70% along Milky Way band, 30% in halo
+  if (rng() < 0.7){
+    // Galactic plane concentration — elliptical disk
+    const theta = rng() * Math.PI * 2;
+    const r = Math.pow(rng(), 0.7) * 60 + rng() * 15;
+    const bandHeight = 2.5 + rng() * 3;
+    positions[i3]   = Math.cos(theta) * r;
+    positions[i3+1] = (rng() - 0.5) * bandHeight;
+    positions[i3+2] = Math.sin(theta) * r * 0.4 - 15 + rng() * 8;
+  } else {
+    // Halo — spherical sparse scatter
+    const phi = Math.acos(2 * rng() - 1);
+    const theta = rng() * Math.PI * 2;
+    const r = 20 + Math.pow(rng(), 1.5) * 70;
+    positions[i3]   = Math.sin(phi) * Math.cos(theta) * r;
+    positions[i3+1] = Math.sin(phi) * Math.sin(theta) * r;
+    positions[i3+2] = Math.cos(phi) * r - 20;
+  }
+  
+  sizes[i] = 0.4 + rng() * 1.2;
+}
+
+// ── ShaderMaterial for star sprites with brushstroke SDF modulation
+const starMat = new THREE.ShaderMaterial({
+  uniforms: {
+    time: { value: 0 }
+  },
+  vertexShader: `
+    attribute float size;
+    varying float vZ;
+    void main(){
+      vZ = position.z;
+      vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * (300.0 / -mvPos.z);
+      gl_Position = projectionMatrix * mvPos;
+    }
+  `,
+  fragmentShader: `
+    uniform float time;
+    varying float vZ;
+    
+    // 3D simplex noise (Ashima / MIT license excerpt)
+    vec3 mod289(vec3 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
+    vec4 mod289(vec4 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
+    vec4 permute(vec4 x){ return mod289(((x*34.0)+1.0)*x); }
+    vec4 taylorInvSqrt(vec4 r){ return 1.79284291400159 - 0.85373472095314 * r; }
+    
+    float snoise(vec3 v){
+      const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+      const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+      vec3 i  = floor(v + dot(v, C.yyy));
+      vec3 x0 = v - i + dot(i, C.xxx);
+      vec3 g = step(x0.yzx, x0.xyz);
+      vec3 l = 1.0 - g;
+      vec3 i1 = min(g.xyz, l.zxy);
+      vec3 i2 = max(g.xyz, l.zxy);
+      vec3 x1 = x0 - i1 + C.xxx;
+      vec3 x2 = x0 - i2 + C.yyy;
+      vec3 x3 = x0 - D.yyy;
+      i = mod289(i);
+      vec4 p = permute(permute(permute(
+                i.z + vec4(0.0, i1.z, i2.z, 1.0))
+              + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+              + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+      float n_ = 0.142857142857;
+      vec3 ns = n_ * D.wyz - D.xzx;
+      vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+      vec4 x_ = floor(j * ns.z);
+      vec4 y_ = floor(j - 7.0 * x_);
+      vec4 x = x_ *ns.x + ns.yyyy;
+      vec4 y = y_ *ns.x + ns.yyyy;
+      vec4 h = 1.0 - abs(x) - abs(y);
+      vec4 b0 = vec4(x.xy, y.xy);
+      vec4 b1 = vec4(x.zw, y.zw);
+      vec4 s0 = floor(b0)*2.0 + 1.0;
+      vec4 s1 = floor(b1)*2.0 + 1.0;
+      vec4 sh = -step(h, vec4(0.0));
+      vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+      vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+      vec3 p0 = vec3(a0.xy, h.x);
+      vec3 p1 = vec3(a0.zw, h.y);
+      vec3 p2 = vec3(a1.xy, h.z);
+      vec3 p3 = vec3(a1.zw, h.w);
+      vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+      p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+      vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+      m = m * m;
+      return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+    }
+    
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      float d = length(uv);
+      
+      // Gaussian star glow
+      float core = exp(-d * d * 18.0);
+      float halo = exp(-d * d * 4.0) * 0.4;
+      float alpha = core + halo;
+      
+      // Brushstroke SDF — flowing horizontal bands that erode/grow
+      // Sample 3D noise at (world-x, world-y, time) to get a time-varying field
+      vec3 worldPos = vec3(gl_FragCoord.xy * 0.012, vZ * 0.008);
+      float brushNoise = snoise(vec3(worldPos.x * 0.6, worldPos.y * 1.2 + time * 0.15, worldPos.z + time * 0.08));
+      
+      // Threshold to create paint-drip boundaries
+      float brushMask = smoothstep(0.15, 0.25, brushNoise);
+      
+      // Brighten particles inside brushstroke regions
+      float brightness = 0.7 + brushMask * 0.3;
+      
+      // Cyanotype white on Prussian blue
+      vec3 col = vec3(0.95, 0.96, 0.98) * brightness;
+      
+      gl_FragColor = vec4(col, alpha * 0.85);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const starGeo = new THREE.BufferGeometry();
+starGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+starGeo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+const stars = new THREE.Points(starGeo, starMat);
+scene.add(stars);
+
+// ── Add faint orbital arcs — hand-drawn ellipses
+const NUM_ORBITS = 8;
+for (let i = 0; i < NUM_ORBITS; i++){
+  const a = 15 + rng() * 35; // semi-major
+  const b = a * (0.4 + rng() * 0.5); // semi-minor
+  const tilt = (rng() - 0.5) * Math.PI * 0.6;
+  const rot = rng() * Math.PI * 2;
+  
+  const points = [];
+  const segments = 80 + Math.floor(rng() * 40);
+  for (let j = 0; j <= segments; j++){
+    const t = (j / segments) * Math.PI * 2;
+    let x = Math.cos(t) * a;
+    let y = Math.sin(t) * b;
+    // rotate in XY plane
+    let rx = x * Math.cos(rot) - y * Math.sin(rot);
+    let ry = x * Math.sin(rot) + y * Math.cos(rot);
+    // tilt in XZ plane
+    let rz = ry * Math.sin(tilt);
+    ry = ry * Math.cos(tilt);
+    points.push(new THREE.Vector3(rx, ry, rz - 10 + rng() * 8));
+  }
+  
+  const orbitGeo = new THREE.BufferGeometry().setFromPoints(points);
+  const orbitMat = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.12 + rng() * 0.08,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  const orbit = new THREE.Line(orbitGeo, orbitMat);
+  scene.add(orbit);
+}
+
+// ── Add painterly drips — vertical streaks
+const NUM_DRIPS = 12;
+for (let i = 0; i < NUM_DRIPS; i++){
+  const x = (rng() - 0.5) * 120;
+  const z = -20 + rng() * 30;
+  const dripPoints = [];
+  const startY = 30 + rng() * 20;
+  const endY = -30 - rng() * 15;
+  const wobble = 1.5 + rng() * 2;
+  const steps = 30 + Math.floor(rng() * 20);
+  
+  for (let j = 0; j <= steps; j++){
+    const t = j / steps;
+    const y = startY + (endY - startY) * t;
+    const wx = x + Math.sin(t * Math.PI * 2 * (1 + rng())) * wobble;
+    dripPoints.push(new THREE.Vector3(wx, y, z));
+  }
+  
+  const dripGeo = new THREE.BufferGeometry().setFromPoints(dripPoints);
+  const dripMat = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.08 + rng() * 0.05,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  const drip = new THREE.Line(dripGeo, dripMat);
+  scene.add(drip);
+}
+
+// ── Comet trails — sparse white strokes with heads
+const NUM_COMETS = 5;
+for (let i = 0; i < NUM_COMETS; i++){
+  const headPos = new THREE.Vector3(
+    (rng() - 0.5) * 80,
+    (rng() - 0.5) * 50,
+    -10 + rng() * 20
+  );
+  
+  // Tail direction — mostly horizontal drift
+  const dir = new THREE.Vector3(
+    0.6 + rng() * 0.4,
+    (rng() - 0.5) * 0.3,
+    (rng() - 0.5) * 0.2
+  ).normalize();
+  
+  const tailPoints = [headPos.clone()];
+  const tailLen = 8 + rng() * 15;
+  const segments = 20;
+  for (let j = 1; j <= segments; j++){
+    const t = j / segments;
+    const dist = t * tailLen;
+    const fade = 1 - t;
+    const wobble = Math.sin(t * Math.PI * 3) * 0.8;
+    const p = headPos.clone().add(dir.clone().multiplyScalar(-dist));
+    p.x += wobble;
+    p.y += wobble * 0.5;
+    tailPoints.push(p);
+  }
+  
+  const cometGeo = new THREE.BufferGeometry().setFromPoints(tailPoints);
+  const cometMat = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.25,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  const comet = new THREE.Line(cometGeo, cometMat);
+  scene.add(comet);
+  
+  // Comet head — bright point
+  const headGeo = new THREE.SphereGeometry(0.6, 8, 8);
+  const headMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.8
+  });
+  const head = new THREE.Mesh(headGeo, headMat);
+  head.position.copy(headPos);
+  scene.add(head);
+}
+
+// ── Constellation figure — traced human silhouette (Halloran's body-as-space motif)
+// Simple stick-figure astronomer with arms raised toward stars
+const figurePoints = [
+  // head
+  new THREE.Vector3(0, 18, 5),
+  // torso
+  new THREE.Vector3(0, 15, 5),
+  new THREE.Vector3(0, 8, 5),
+  // left leg
+  new THREE.Vector3(0, 8, 5),
+  new THREE.Vector3(-2, 2, 5),
+  new THREE.Vector3(-3, -4, 5),
+  // back to torso, right leg
+  new THREE.Vector3(0, 8, 5),
+  new THREE.Vector3(2, 2, 5),
+  new THREE.Vector3(3, -4, 5),
+  // back to torso, left arm raised
+  new THREE.Vector3(0, 14, 5),
+  new THREE.Vector3(-4, 20, 5),
+  new THREE.Vector3(-6, 26, 5),
+  // back to torso, right arm raised
+  new THREE.Vector3(0, 14, 5),
+  new THREE.Vector3(4, 20, 5),
+  new THREE.Vector3(6, 26, 5)
+];
+
+const figGeo = new THREE.BufferGeometry().setFromPoints(figurePoints);
+const figMat = new THREE.LineBasicMaterial({
+  color: 0xffffff,
+  transparent: true,
+  opacity: 0.35,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  linewidth: 1
+});
+const figure = new THREE.Line(figGeo, figMat);
+scene.add(figure);
+
+// Add a few stars around figure joints
+figurePoints.forEach(p => {
+  if (rng() > 0.6){
+    const starGeo = new THREE.SphereGeometry(0.3, 6, 6);
+    const starMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.7
+    });
+    const star = new THREE.Mesh(starGeo, starMat);
+    star.position.copy(p);
+    star.position.x += (rng() - 0.5) * 0.5;
+    star.position.y += (rng() - 0.5) * 0.5;
+    scene.add(star);
+  }
+});
+
+// ── Resize
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Animate — gentle camera drift across the field
+const start = performance.now();
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+  
+  // Update shader time uniform for brushstroke animation
+  starMat.uniforms.time.value = elapsed;
+  
+  // Camera slow horizontal pan + subtle vertical oscillation
+  camera.position.x = Math.sin(elapsed * 0.08) * 12;
+  camera.position.y = Math.cos(elapsed * 0.05) * 6;
+  camera.position.z = 85 + Math.sin(elapsed * 0.03) * 4;
+  
+  // Look slightly ahead in drift direction
+  const lookTarget = new THREE.Vector3(
+    camera.position.x + Math.sin(elapsed * 0.08) * 8,
+    0,
+    0
+  );
+  camera.lookAt(lookTarget);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
