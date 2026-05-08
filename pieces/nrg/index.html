@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nrg · delivery dancer's sphere</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1d24; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">nrg · delivery dancer's sphere</div>
+<div class="hint">overhead city graph · courier trails accumulate</div>
+<div class="src">ayoung kim · speculative cartography · 2024</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+
+// ────────────── scene
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x1a1d24, 20, 80);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 32, 28);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1d24, 1);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── city graph generation
+// Voronoi-like cell centers → building footprints; edges = streets
+const CELLS = 85;
+const AREA = 50;
+const seeds = [];
+for (let i = 0; i < CELLS; i++){
+  seeds.push(new THREE.Vector2(
+    (Math.random() - 0.5) * AREA,
+    (Math.random() - 0.5) * AREA
+  ));
+}
+
+// build adjacency: connect each cell to its 3-6 nearest neighbors
+const edges = [];
+const graph = seeds.map(() => []);
+for (let i = 0; i < seeds.length; i++){
+  const dists = [];
+  for (let j = 0; j < seeds.length; j++){
+    if (i === j) continue;
+    dists.push({ j, d: seeds[i].distanceTo(seeds[j]) });
+  }
+  dists.sort((a,b) => a.d - b.d);
+  const neighbors = Math.min(5, Math.floor(3 + Math.random() * 3));
+  for (let k = 0; k < neighbors; k++){
+    const n = dists[k].j;
+    if (!graph[i].includes(n)){
+      graph[i].push(n);
+      graph[n].push(i);
+      edges.push([i, n]);
+    }
+  }
+}
+
+// ────────────── building wireframes
+// each cell is a rectangular extrusion with height proportional to distance from center
+const buildingGroup = new THREE.Group();
+seeds.forEach((s, idx) => {
+  const dist = s.length();
+  const h = 0.8 + 1.2 * (1 - Math.min(dist / (AREA * 0.5), 1));
+  const w = 0.4 + Math.random() * 0.6;
+  const d = 0.4 + Math.random() * 0.6;
+  const geom = new THREE.BoxGeometry(w, h, d);
+  const edges = new THREE.EdgesGeometry(geom);
+  const mat = new THREE.LineBasicMaterial({ 
+    color: 0x3a4a5a, 
+    transparent: true, 
+    opacity: 0.35,
+    fog: true
+  });
+  const box = new THREE.LineSegments(edges, mat);
+  box.position.set(s.x, h * 0.5, s.y);
+  buildingGroup.add(box);
+});
+scene.add(buildingGroup);
+
+// ────────────── street graph wireframe
+const streetGeom = new THREE.BufferGeometry();
+const streetPos = [];
+edges.forEach(([i, j]) => {
+  streetPos.push(seeds[i].x, 0.01, seeds[i].y);
+  streetPos.push(seeds[j].x, 0.01, seeds[j].y);
+});
+streetGeom.setAttribute('position', new THREE.Float32BufferAttribute(streetPos, 3));
+const streetMat = new THREE.LineBasicMaterial({ 
+  color: 0x4a5565, 
+  transparent: true, 
+  opacity: 0.25,
+  fog: true
+});
+const streets = new THREE.LineSegments(streetGeom, streetMat);
+scene.add(streets);
+
+// ────────────── ground plane (misty slate)
+const groundGeom = new THREE.PlaneGeometry(AREA * 1.5, AREA * 1.5, 40, 40);
+groundGeom.rotateX(-Math.PI / 2);
+const groundMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true,
+  fog: true,
+  vertexShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    varying float vElev;
+    void main(){
+      vUv = uv;
+      vec3 p = position;
+      float n = sin(p.x * 0.08 + uTime * 0.3) * cos(p.z * 0.08 - uTime * 0.2);
+      p.y += n * 0.3;
+      vElev = n;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    varying float vElev;
+    void main(){
+      float grid = max(
+        step(0.98, fract(vUv.x * 60.0)),
+        step(0.98, fract(vUv.y * 60.0))
+      );
+      vec3 base = vec3(0.12, 0.14, 0.17);
+      vec3 col = mix(base, vec3(0.18, 0.21, 0.25), vElev * 0.5 + 0.5);
+      col = mix(col, vec3(0.35, 0.42, 0.48), grid * 0.2);
+      gl_FragColor = vec4(col, 0.85);
+    }
+  `
+});
+const ground = new THREE.Mesh(groundGeom, groundMat);
+scene.add(ground);
+
+// ────────────── courier particles + trail system
+const COURIERS = 120;
+const couriers = [];
+const trailSegments = [];  // { points: [Vec3], color: Color, age: 0 }
+const MAX_TRAIL_AGE = 180;
+const TRAIL_LENGTH = 12;
+
+class Courier {
+  constructor(){
+    this.path = [];
+    this.currentIdx = 0;
+    this.progress = 0;
+    this.speed = 0.015 + Math.random() * 0.025;
+    this.color = new THREE.Color().setHSL(
+      Math.random() < 0.6 ? 0.28 + Math.random() * 0.08 : 0.85 + Math.random() * 0.1,
+      0.85,
+      0.55 + Math.random() * 0.25
+    );
+    this.trailHistory = [];
+    this.generatePath();
+  }
+  generatePath(){
+    // random walk across graph
+    const start = Math.floor(Math.random() * seeds.length);
+    const pathLength = 8 + Math.floor(Math.random() * 12);
+    this.path = [start];
+    let cur = start;
+    for (let i = 0; i < pathLength; i++){
+      const neighbors = graph[cur];
+      if (!neighbors.length) break;
+      const next = neighbors[Math.floor(Math.random() * neighbors.length)];
+      this.path.push(next);
+      cur = next;
+    }
+    this.currentIdx = 0;
+    this.progress = 0;
+  }
+  update(){
+    if (this.currentIdx >= this.path.length - 1){
+      this.generatePath();
+      return;
+    }
+    this.progress += this.speed;
+    if (this.progress >= 1){
+      this.progress = 0;
+      this.currentIdx++;
+      if (this.currentIdx >= this.path.length - 1){
+        this.generatePath();
+        return;
+      }
+    }
+    const idxA = this.path[this.currentIdx];
+    const idxB = this.path[this.currentIdx + 1];
+    const a = seeds[idxA];
+    const b = seeds[idxB];
+    const pos = new THREE.Vector3(
+      THREE.MathUtils.lerp(a.x, b.x, this.progress),
+      0.15,
+      THREE.MathUtils.lerp(a.y, b.y, this.progress)
+    );
+    this.trailHistory.push(pos.clone());
+    if (this.trailHistory.length > TRAIL_LENGTH){
+      this.trailHistory.shift();
+    }
+    // emit trail segment if we have enough points
+    if (this.trailHistory.length >= 2){
+      const seg = {
+        points: this.trailHistory.map(p => p.clone()),
+        color: this.color.clone(),
+        age: 0
+      };
+      trailSegments.push(seg);
+    }
+  }
+}
+
+for (let i = 0; i < COURIERS; i++){
+  couriers.push(new Courier());
+}
+
+// ────────────── trail rendering (fat lines)
+// we'll rebuild trails each frame — keep only young segments
+const trailLines = [];
+function updateTrails(){
+  // age and cull
+  for (let i = trailSegments.length - 1; i >= 0; i--){
+    trailSegments[i].age++;
+    if (trailSegments[i].age > MAX_TRAIL_AGE){
+      trailSegments.splice(i, 1);
+    }
+  }
+  // clear old line objects
+  trailLines.forEach(l => {
+    l.geometry.dispose();
+    l.material.dispose();
+    scene.remove(l);
+  });
+  trailLines.length = 0;
+  // batch segments by color (approx)
+  const colorBuckets = {};
+  trailSegments.forEach(seg => {
+    const key = seg.color.getHexString();
+    if (!colorBuckets[key]) colorBuckets[key] = [];
+    colorBuckets[key].push(seg);
+  });
+  for (const key in colorBuckets){
+    const segs = colorBuckets[key];
+    const positions = [];
+    const colors = [];
+    segs.forEach(seg => {
+      const alpha = 1 - (seg.age / MAX_TRAIL_AGE);
+      const c = seg.color.clone().multiplyScalar(alpha);
+      seg.points.forEach(p => {
+        positions.push(p.x, p.y, p.z);
+        colors.push(c.r, c.g, c.b);
+      });
+    });
+    if (positions.length < 6) continue;
+    const geom = new LineGeometry();
+    geom.setPositions(positions);
+    geom.setColors(colors);
+    const mat = new LineMaterial({
+      linewidth: 1.5,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.85,
+      fog: true,
+      dashed: false
+    });
+    mat.resolution.set(innerWidth, innerHeight);
+    const line = new Line2(geom, mat);
+    scene.add(line);
+    trailLines.push(line);
+  }
+}
+
+// ────────────── ambient particles (dust motes in fog)
+const dustCount = 800;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+const dustSeed = new Float32Array(dustCount);
+for (let i = 0; i < dustCount; i++){
+  dustPos[i*3]   = (Math.random() - 0.5) * AREA * 1.2;
+  dustPos[i*3+1] = Math.random() * 15;
+  dustPos[i*3+2] = (Math.random() - 0.5) * AREA * 1.2;
+  dustSeed[i] = Math.random();
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('seed', new THREE.BufferAttribute(dustSeed, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  fog: true,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.2 + seed * 6.28;
+      p.x += sin(t) * 0.5;
+      p.z += cos(t * 0.7) * 0.5;
+      p.y += sin(t * 0.5) * 0.3;
+      vAlpha = 0.15 + 0.1 * sin(t * 1.2);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * (30.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha;
+      gl_FragColor = vec4(vec3(0.7, 0.75, 0.8), a);
+    }
+  `
+});
+const dust = new THREE.Points(dustGeom, dustMat);
+scene.add(dust);
+
+// ────────────── lighting
+const ambient = new THREE.AmbientLight(0x3a4555, 0.6);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0x8a9aaa, 0.4);
+dirLight.position.set(10, 20, 15);
+scene.add(dirLight);
+
+// ────────────── camera orbit
+let angle = 0;
+const orbitRadius = 38;
+const orbitHeight = 32;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  trailLines.forEach(l => {
+    l.material.resolution.set(innerWidth, innerHeight);
+  });
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  groundMat.uniforms.uTime.value = t;
+  dustMat.uniforms.uTime.value = t;
+
+  couriers.forEach(c => c.update());
+  updateTrails();
+
+  angle += 0.003;
+  camera.position.x = Math.sin(angle) * orbitRadius;
+  camera.position.z = Math.cos(angle) * orbitRadius;
+  camera.position.y = orbitHeight + Math.sin(t * 0.1) * 2;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
