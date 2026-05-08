@@ -3,214 +3,322 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- MOTION: oscillation, intensity: gentle -->
-<title>fj2 · désordres · entropy gradient</title>
+<title>fj2 · streamline painting · Tyler Hobbs flow partitioning</title>
+<!-- MOTION: drift, intensity: gentle -->
 <style>
-html, body { margin:0; padding:0; height:100%; background:#efe8da; overflow:hidden; }
-canvas { display:block; }
-.id { position:fixed; left:14px; bottom:12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
-      color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:10; }
+  html, body { margin:0; padding:0; height:100%; background:#f4ece1; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#5a4a3a; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; color:#5a4a3a; }
 </style>
 </head>
 <body>
 <div class="id">fj2</div>
-
+<div class="src">Tyler Hobbs · non-crossing flow domains · oil painting method</div>
 <script type="importmap">
 { "imports": {
-    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
-} }
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
 </script>
 <script type="module">
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-
-/* ═══════════════════════════════════════════════════════════════════
-   Vera Molnár — Désordres (1976) / (Dés)Ordres series
-   32×32 grid of short line-segments on cream paper.
-   Row 0 (top): perfect orthogonal order.
-   Row 31 (bottom): full Gaussian disorder.
-   Entropy gradient is the subject — the eye descends from
-   certainty into noise. Cobalt ink on aged French cartridge paper.
-   Camera orbits slowly so the z-displacement of disordered
-   segments becomes visible — the flat drawing lifts into 3D relief.
-   ═══════════════════════════════════════════════════════════════════ */
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xefe8da); // warm cream — cartridge paper
-
-const camera = new THREE.PerspectiveCamera(34, innerWidth / innerHeight, 0.1, 100);
-camera.position.set(0, 0, 19);
-
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const camera = new THREE.OrthographicCamera(-25, 25, 25, -25, 0.1, 100);
+camera.position.set(0, 0, 20);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf4ece1, 1);
 document.body.appendChild(renderer.domElement);
 
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.04;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 0.15; // glacial contemplative orbit
-controls.target.set(0, 0, 0);
-controls.minDistance = 10;
-controls.maxDistance = 30;
+// Tyler Hobbs principle: domain partitioning for non-crossing flows
+// Define 7 distinct flow regions with hand-tuned centers and boundaries
+const domains = [
+  { cx: -14, cy: 12, r: 7, angle: 0.3, curl: 0.15, density: 0.85 },
+  { cx: 8, cy: 15, r: 6.5, angle: -0.6, curl: -0.12, density: 0.75 },
+  { cx: -18, cy: -8, r: 8, angle: 1.2, curl: 0.18, density: 0.9 },
+  { cx: 10, cy: -12, r: 7.5, angle: 2.1, curl: -0.1, density: 0.8 },
+  { cx: -5, cy: 0, r: 5, angle: 0.8, curl: 0.2, density: 0.65 },
+  { cx: 18, cy: 2, r: 6, angle: -1.4, curl: 0.14, density: 0.7 },
+  { cx: 2, cy: -22, r: 5.5, angle: 1.8, curl: -0.16, density: 0.6 }
+];
 
-// ─────────── grid parameters
-const COLS = 32, ROWS = 32;
-const SPACING = 0.31;
-const COUNT = COLS * ROWS;
+// Palette: warm earth tones + one cool accent (Prussian blue)
+const palette = [
+  new THREE.Color(0x6b4423), // raw umber
+  new THREE.Color(0xc1440e), // oxide red
+  new THREE.Color(0xd4a574), // ochre
+  new THREE.Color(0xa0522d), // terracotta
+  new THREE.Color(0x8b6f47), // burnt sienna
+  new THREE.Color(0x1a3a52), // Prussian blue (cool accent)
+  new THREE.Color(0x5c4033)  // dark umber
+];
 
-// segment geometry — thin flat box, plotter-pen cross-section
-// width 0.016 ≈ 1.5px at default distance; height 0.25 = the stroke
-const segGeo = new THREE.BoxGeometry(0.016, 0.25, 0.008);
+// Assign one palette color per domain
+const domainColors = domains.map((d, i) => palette[i % palette.length]);
 
-// deep cobalt-black — Molnár's plotter ink on paper
-const segMat = new THREE.MeshBasicMaterial({ color: 0x141832 });
+// Generate particles only within domains, with spacing to prevent overlap
+const N = 12000;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const colors = new Float32Array(N * 3);
+const sizes = new Float32Array(N);
+const ages = new Float32Array(N);
 
-const mesh = new THREE.InstancedMesh(segGeo, segMat, COUNT);
+let particleIndex = 0;
 
-// ─────────── Gaussian via Box-Muller
-function gaussian() {
-  let u, v, s;
-  do {
-    u = Math.random() * 2 - 1;
-    v = Math.random() * 2 - 1;
-    s = u * u + v * v;
-  } while (s >= 1 || s === 0);
-  return u * Math.sqrt(-2 * Math.log(s) / s);
-}
-
-// ─────────── per-instance seed data
-const baseData = new Array(COUNT);
-const dummy = new THREE.Object3D();
-
-for (let row = 0; row < ROWS; row++) {
-  for (let col = 0; col < COLS; col++) {
-    const idx = row * COLS + col;
-
-    // chaos grows quadratically from top to bottom
-    // pow 1.8 keeps the first ~5 rows almost perfectly ordered
-    const chaosAmount = Math.pow(row / (ROWS - 1), 1.8);
-
-    const baseX = (col - (COLS - 1) / 2) * SPACING;
-    const baseY = ((ROWS - 1) / 2 - row) * SPACING; // top = positive Y
-
-    baseData[idx] = {
-      baseX, baseY, chaosAmount,
-      rotSeed:  gaussian(),
-      oxSeed:   gaussian(),
-      oySeed:   gaussian(),
-      ozSeed:   gaussian(),
-      // slight per-segment length variation for handmade feel
-      scaleSeed: 0.85 + Math.random() * 0.3,
-      // phase offset for breathing wave
-      phase: baseX * 1.7 + baseY * 2.3 + Math.random() * 0.5
-    };
+for (let di = 0; di < domains.length; di++){
+  const d = domains[di];
+  const particlesInDomain = Math.floor(N * d.density / domains.reduce((sum, dd) => sum + dd.density, 0));
+  
+  // Poisson-like sampling with minimum spacing
+  const minSpacing = 0.4;
+  const attempts = particlesInDomain * 20;
+  const placed = [];
+  
+  for (let a = 0; a < attempts && placed.length < particlesInDomain; a++){
+    const angle = Math.random() * Math.PI * 2;
+    const rad = Math.sqrt(Math.random()) * d.r;
+    const px = d.cx + Math.cos(angle) * rad;
+    const py = d.cy + Math.sin(angle) * rad;
+    
+    // Check spacing from existing particles in this domain
+    let tooClose = false;
+    for (const p of placed){
+      const dx = p.x - px;
+      const dy = p.y - py;
+      if (dx*dx + dy*dy < minSpacing * minSpacing){
+        tooClose = true;
+        break;
+      }
+    }
+    
+    if (!tooClose && particleIndex < N){
+      placed.push({ x: px, y: py });
+      
+      positions[particleIndex * 3] = px;
+      positions[particleIndex * 3 + 1] = py;
+      positions[particleIndex * 3 + 2] = (Math.random() - 0.5) * 0.5;
+      
+      // Initial velocity aligned with domain flow angle
+      const speed = 0.015 + Math.random() * 0.01;
+      velocities[particleIndex * 3] = Math.cos(d.angle) * speed;
+      velocities[particleIndex * 3 + 1] = Math.sin(d.angle) * speed;
+      velocities[particleIndex * 3 + 2] = 0;
+      
+      const col = domainColors[di];
+      colors[particleIndex * 3] = col.r;
+      colors[particleIndex * 3 + 1] = col.g;
+      colors[particleIndex * 3 + 2] = col.b;
+      
+      sizes[particleIndex] = 0.3 + Math.random() * 0.4;
+      ages[particleIndex] = Math.random() * 1000;
+      
+      particleIndex++;
+    }
   }
 }
 
-// ─────────── update all instance matrices
-function updateInstances(t) {
-  for (let i = 0; i < COUNT; i++) {
-    const d = baseData[i];
-
-    // subtle breathing: chaos modulates ±6% with a slow spatial wave
-    const breath = 1.0 + 0.06 * Math.sin(t * 0.35 + d.phase);
-    const chaos = d.chaosAmount * breath;
-
-    // rotation around Z — up to ±81° at full chaos
-    const rot = d.rotSeed * chaos * Math.PI * 0.45;
-
-    // position offsets — proportional to spacing so segments
-    // never wander more than ~35% into a neighbor's cell
-    const ox = d.oxSeed * chaos * SPACING * 0.32;
-    const oy = d.oySeed * chaos * SPACING * 0.12;
-    // z-displacement gives the 3D relief visible on orbit
-    const oz = d.ozSeed * chaos * SPACING * 0.4;
-
-    dummy.position.set(d.baseX + ox, d.baseY + oy, oz);
-    dummy.rotation.set(0, 0, rot);
-    dummy.scale.set(1, d.scaleSeed, 1);
-    dummy.updateMatrix();
-    mesh.setMatrixAt(i, dummy.matrix);
-  }
-  mesh.instanceMatrix.needsUpdate = true;
+// Fill remaining slots if any
+while (particleIndex < N){
+  const d = domains[Math.floor(Math.random() * domains.length)];
+  const angle = Math.random() * Math.PI * 2;
+  const rad = Math.sqrt(Math.random()) * d.r;
+  positions[particleIndex * 3] = d.cx + Math.cos(angle) * rad;
+  positions[particleIndex * 3 + 1] = d.cy + Math.sin(angle) * rad;
+  positions[particleIndex * 3 + 2] = 0;
+  velocities[particleIndex * 3] = 0;
+  velocities[particleIndex * 3 + 1] = 0;
+  velocities[particleIndex * 3 + 2] = 0;
+  const col = domainColors[Math.floor(Math.random() * domainColors.length)];
+  colors[particleIndex * 3] = col.r;
+  colors[particleIndex * 3 + 1] = col.g;
+  colors[particleIndex * 3 + 2] = col.b;
+  sizes[particleIndex] = 0.3;
+  ages[particleIndex] = 0;
+  particleIndex++;
 }
 
-updateInstances(0);
-scene.add(mesh);
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
 
-// ─────────── paper grain + vignette overlay
-const grainScene = new THREE.Scene();
-const grainCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-
-const grainMat = new THREE.ShaderMaterial({
-  transparent: true,
-  depthTest: false,
-  depthWrite: false,
-  uniforms: { uTime: { value: 0 } },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = vec4(position.xy, 0.0, 1.0);
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float size;
+    attribute float age;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vCol = color;
+      float pulse = 0.7 + 0.3 * sin(age + uTime * 0.5);
+      vAlpha = 0.65 * pulse;
+      
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * 120.0 * uPixel;
+      gl_Position = projectionMatrix * mv;
     }
   `,
-  fragmentShader: /* glsl */ `
-    varying vec2 vUv;
-    uniform float uTime;
-
-    // paper-grain hash
-    float hash(vec2 p) {
-      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      
+      // Oil-paint texture: soft edge with radial opacity gradient
+      float edge = smoothstep(0.5, 0.3, r);
+      float core = smoothstep(0.4, 0.0, r);
+      float brush = edge * 0.5 + core * 0.5;
+      
+      float a = brush * vAlpha;
+      gl_FragColor = vec4(vCol * (0.8 + 0.2 * core), a);
     }
-
-    void main() {
-      // fine grain — shifts subtly over time like scanning a physical print
-      float grain = hash(vUv * 900.0 + fract(uTime * 0.15) * 137.0);
-      grain = (grain - 0.5) * 0.055;
-
-      // warm vignette — slight darkening at edges, aged print feel
-      vec2 c = vUv - 0.5;
-      float vig = dot(c, c);
-      float vigAlpha = smoothstep(0.06, 0.55, vig) * 0.14;
-
-      // combine: grain adds slight noise, vignette adds warmth at edges
-      float alpha = max(0.0, grain) + vigAlpha;
-      gl_FragColor = vec4(0.12, 0.08, 0.04, alpha);
-    }
-  `
+  `,
+  vertexColors: true
 });
-grainScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), grainMat));
 
-// ─────────── resize
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+geom.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+geom.setAttribute('age', new THREE.BufferAttribute(ages, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
 addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
+  const aspect = innerWidth / innerHeight;
+  const height = 50;
+  const width = height * aspect;
+  camera.left = -width / 2;
+  camera.right = width / 2;
+  camera.top = height / 2;
+  camera.bottom = -height / 2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+addEventListener('resize', () => {
+  const aspect = innerWidth / innerHeight;
+  const height = 50;
+  const width = height * aspect;
+  camera.left = -width / 2;
+  camera.right = width / 2;
+  camera.top = height / 2;
+  camera.bottom = -height / 2;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
 
-// ─────────── render loop
-const start = performance.now();
-
-function loop() {
-  const t = (performance.now() - start) / 1000;
-
-  updateInstances(t);
-  controls.update();
-
-  renderer.render(scene, camera);
-
-  // overlay grain pass
-  grainMat.uniforms.uTime.value = t;
-  renderer.autoClear = false;
-  renderer.render(grainScene, grainCam);
-  renderer.autoClear = true;
-
-  requestAnimationFrame(loop);
+// Flow field: each domain generates its own non-crossing streamlines
+function getFlowVector(x, y){
+  let fx = 0, fy = 0;
+  let totalWeight = 0;
+  
+  for (const d of domains){
+    const dx = x - d.cx;
+    const dy = y - d.cy;
+    const distSq = dx*dx + dy*dy;
+    const rSq = d.r * d.r;
+    
+    if (distSq < rSq){
+      // Inside domain: flow aligned with domain angle + curl
+      const weight = 1.0 - distSq / rSq;
+      const baseAngle = d.angle;
+      const curlAngle = Math.atan2(dy, dx) + Math.PI / 2;
+      const finalAngle = baseAngle + d.curl * curlAngle;
+      
+      fx += Math.cos(finalAngle) * weight;
+      fy += Math.sin(finalAngle) * weight;
+      totalWeight += weight;
+    }
+  }
+  
+  if (totalWeight > 0.01){
+    fx /= totalWeight;
+    fy /= totalWeight;
+  }
+  
+  return { x: fx, y: fy };
 }
 
+function updateParticles(dt){
+  for (let i = 0; i < N; i++){
+    const px = positions[i*3];
+    const py = positions[i*3+1];
+    
+    const flow = getFlowVector(px, py);
+    
+    // Gentle acceleration toward flow direction
+    velocities[i*3] += (flow.x * 0.02 - velocities[i*3]) * 0.05;
+    velocities[i*3+1] += (flow.y * 0.02 - velocities[i*3+1]) * 0.05;
+    
+    // Update position
+    positions[i*3] += velocities[i*3] * dt * 60;
+    positions[i*3+1] += velocities[i*3+1] * dt * 60;
+    
+    // Wrap particles that leave their domain back to domain center with fade
+    let inAnyDomain = false;
+    for (const d of domains){
+      const dx = positions[i*3] - d.cx;
+      const dy = positions[i*3+1] - d.cy;
+      if (dx*dx + dy*dy < d.r * d.r * 1.5){
+        inAnyDomain = true;
+        break;
+      }
+    }
+    
+    if (!inAnyDomain){
+      // Find closest domain and wrap back
+      let minDist = Infinity;
+      let closestDomain = domains[0];
+      for (const d of domains){
+        const dx = positions[i*3] - d.cx;
+        const dy = positions[i*3+1] - d.cy;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist < minDist){
+          minDist = dist;
+          closestDomain = d;
+        }
+      }
+      
+      const angle = Math.random() * Math.PI * 2;
+      const rad = Math.random() * closestDomain.r * 0.3;
+      positions[i*3] = closestDomain.cx + Math.cos(angle) * rad;
+      positions[i*3+1] = closestDomain.cy + Math.sin(angle) * rad;
+      velocities[i*3] = 0;
+      velocities[i*3+1] = 0;
+    }
+    
+    ages[i] += dt;
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+}
+
+let lastTime = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  const t = now / 1000;
+  
+  uniforms.uTime.value = t;
+  updateParticles(dt);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
 loop();
 </script>
 </body>
