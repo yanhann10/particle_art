@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>om7 · volumetric border clouds</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1512; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.50; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.38; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">om7 · volumetric border clouds</div>
+<div class="hint">drag to orbit · slow drift west-to-east</div>
+<div class="src">morakana · cumulus 2025 lumen prize · raymarched cloud volume</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ────────────── scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1512);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 48, 72);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 22, 0);
+controls.maxPolarAngle = Math.PI * 0.48;
+controls.minDistance = 30;
+controls.maxDistance = 150;
+
+// ────────────── terrain plane (earth tones, faint contour at border)
+// 200x200 subdivided plane, perlin-style heightmap, single red contour line at z=0
+const terrainGeom = new THREE.PlaneGeometry(240, 240, 180, 180);
+terrainGeom.rotateX(-Math.PI / 2);
+const pos = terrainGeom.attributes.position;
+// simple multi-octave noise for terrain relief
+function hash(x, y){
+  let h = (x * 374761393 + y * 668265263) | 0;
+  h = (h ^ (h >>> 13)) * 1274126177 | 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function noise(x, y){
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf);
+  const v = yf * yf * (3 - 2 * yf);
+  const a = hash(xi, yi);
+  const b = hash(xi + 1, yi);
+  const c = hash(xi, yi + 1);
+  const d = hash(xi + 1, yi + 1);
+  return a * (1 - u) * (1 - v) + b * u * (1 - v) + c * (1 - u) * v + d * u * v;
+}
+function fbm(x, y, oct){
+  let f = 0, a = 1, s = 1;
+  for (let i = 0; i < oct; i++){
+    f += a * noise(x * s, y * s);
+    a *= 0.5; s *= 2;
+  }
+  return f;
+}
+for (let i = 0; i < pos.count; i++){
+  const x = pos.getX(i), z = pos.getZ(i);
+  const h = fbm(x * 0.015, z * 0.015, 4) * 2.5 - 0.8;
+  pos.setY(i, h);
+}
+pos.needsUpdate = true;
+terrainGeom.computeVertexNormals();
+
+const terrainMat = new THREE.MeshStandardMaterial({
+  color: 0x3d2f24,
+  roughness: 0.88,
+  metalness: 0.05,
+  flatShading: false
+});
+const terrain = new THREE.Mesh(terrainGeom, terrainMat);
+scene.add(terrain);
+
+// border line: thin red LineSegments at z=0 (spans x=-120..120, y from terrain height)
+const borderPoints = [];
+for (let x = -120; x <= 120; x += 0.8){
+  const z = 0;
+  const h = fbm(x * 0.015, z * 0.015, 4) * 2.5 - 0.8 + 0.05;
+  borderPoints.push(new THREE.Vector3(x, h, z));
+}
+const borderGeom = new THREE.BufferGeometry().setFromPoints(borderPoints);
+const borderMat = new THREE.LineBasicMaterial({ color: 0x993322, opacity: 0.65, transparent: true });
+const borderLine = new THREE.Line(borderGeom, borderMat);
+scene.add(borderLine);
+
+// ────────────── volumetric cloud box (raymarched in fragment shader)
+// We render a large box (80 wide × 50 high × 80 deep) centered at (0, 25, 0).
+// The fragment shader raymarches through 3D worley+perlin noise to produce cloud volume.
+// Cloud density is highest in middle altitudes (y=20..35), dissipates below/above.
+const cloudBox = new THREE.Mesh(
+  new THREE.BoxGeometry(80, 50, 80),
+  new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uCamPos: { value: camera.position.clone() },
+      uBoxMin: { value: new THREE.Vector3(-40, 0, -40) },
+      uBoxMax: { value: new THREE.Vector3(40, 50, 40) },
+      uWindOffset: { value: new THREE.Vector2(0, 0) }
+    },
+    transparent: true,
+    depthWrite: false,
+    side: THREE.BackSide,
+    vertexShader: `
+      varying vec3 vWorldPos;
+      varying vec3 vViewDir;
+      void main(){
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        vViewDir = wp.xyz - cameraPosition;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform vec3 uCamPos;
+      uniform vec3 uBoxMin;
+      uniform vec3 uBoxMax;
+      uniform vec2 uWindOffset;
+      varying vec3 vWorldPos;
+      varying vec3 vViewDir;
+
+      // hash-based 3D noise (simple perlin-style)
+      float hash13(vec3 p3){
+        p3  = fract(p3 * 0.1031);
+        p3 += dot(p3, p3.yzx + 19.19);
+        return fract((p3.x + p3.y) * p3.z);
+      }
+      float noise3(vec3 p){
+        vec3 i = floor(p);
+        vec3 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        float a = hash13(i);
+        float b = hash13(i + vec3(1.0, 0.0, 0.0));
+        float c = hash13(i + vec3(0.0, 1.0, 0.0));
+        float d = hash13(i + vec3(1.0, 1.0, 0.0));
+        float e = hash13(i + vec3(0.0, 0.0, 1.0));
+        float ff = hash13(i + vec3(1.0, 0.0, 1.0));
+        float g = hash13(i + vec3(0.0, 1.0, 1.0));
+        float h = hash13(i + vec3(1.0, 1.0, 1.0));
+        return mix(
+          mix(mix(a, b, f.x), mix(c, d, f.x), f.y),
+          mix(mix(e, ff, f.x), mix(g, h, f.x), f.y),
+          f.z
+        );
+      }
+      float fbm3(vec3 p){
+        float f = 0.0;
+        float a = 0.5;
+        for (int i = 0; i < 4; i++){
+          f += a * noise3(p);
+          p *= 2.0;
+          a *= 0.5;
+        }
+        return f;
+      }
+
+      // worley-style cell noise for puffiness
+      float worley(vec3 p){
+        vec3 id = floor(p);
+        vec3 fd = fract(p);
+        float minDist = 10.0;
+        for (int x = -1; x <= 1; x++){
+          for (int y = -1; y <= 1; y++){
+            for (int z = -1; z <= 1; z++){
+              vec3 neighbor = vec3(float(x), float(y), float(z));
+              vec3 cellId = id + neighbor;
+              vec3 pt = vec3(
+                hash13(cellId),
+                hash13(cellId + vec3(7.31, 2.57, 9.13)),
+                hash13(cellId + vec3(4.19, 8.47, 1.33))
+              );
+              vec3 delta = neighbor + pt - fd;
+              float d = length(delta);
+              minDist = min(minDist, d);
+            }
+          }
+        }
+        return minDist;
+      }
+
+      float cloudDensity(vec3 p){
+        // apply wind drift
+        p.x += uWindOffset.x;
+        p.z += uWindOffset.y;
+        // altitude mask: clouds thickest at y=20..35, fade below/above
+        float altFade = smoothstep(0.0, 20.0, p.y) * (1.0 - smoothstep(35.0, 50.0, p.y));
+        if (altFade < 0.01) return 0.0;
+        // combine worley (puffiness) + fbm (turbulence)
+        float w = worley(p * 0.08);
+        float f = fbm3(p * 0.12);
+        float d = (1.0 - w) * 0.7 + f * 0.3;
+        d = smoothstep(0.35, 0.65, d);
+        return d * altFade * 1.2;
+      }
+
+      void main(){
+        vec3 rd = normalize(vViewDir);
+        vec3 ro = uCamPos;
+        // ray-box intersection
+        vec3 invDir = 1.0 / rd;
+        vec3 tbot = (uBoxMin - ro) * invDir;
+        vec3 ttop = (uBoxMax - ro) * invDir;
+        vec3 tmin = min(ttop, tbot);
+        vec3 tmax = max(ttop, tbot);
+        float tnear = max(max(tmin.x, tmin.y), tmin.z);
+        float tfar  = min(min(tmax.x, tmax.y), tmax.z);
+        if (tnear > tfar || tfar < 0.0) discard;
+        tnear = max(tnear, 0.0);
+
+        // raymarch
+        const int steps = 48;
+        float dt = (tfar - tnear) / float(steps);
+        vec3 p = ro + rd * tnear;
+        vec4 col = vec4(0.0);
+        for (int i = 0; i < steps; i++){
+          float d = cloudDensity(p);
+          if (d > 0.01){
+            // cloud color: warm whites with slight blue tint at altitude
+            float altTint = smoothstep(20.0, 35.0, p.y);
+            vec3 cloudCol = mix(vec3(0.92, 0.90, 0.88), vec3(0.88, 0.92, 0.96), altTint * 0.3);
+            float alpha = d * dt * 2.5;
+            alpha = clamp(alpha, 0.0, 1.0);
+            col.rgb += cloudCol * alpha * (1.0 - col.a);
+            col.a += alpha * (1.0 - col.a);
+            if (col.a > 0.95) break;
+          }
+          p += rd * dt;
+        }
+        if (col.a < 0.01) discard;
+        gl_FragColor = col;
+      }
+    `
+  })
+);
+cloudBox.position.set(0, 25, 0);
+scene.add(cloudBox);
+
+// ────────────── lighting (soft warm light from above-west, slight cool fill from east)
+const keyLight = new THREE.DirectionalLight(0xffe8d0, 1.2);
+keyLight.position.set(-50, 80, 30);
+scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0xafc8e0, 0.4);
+fillLight.position.set(40, 40, -20);
+scene.add(fillLight);
+const ambient = new THREE.AmbientLight(0x4a3d30, 0.3);
+scene.add(ambient);
+
+// ────────────── animation (slow wind drift west-to-east)
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  const windSpeed = 0.5;
+  cloudBox.material.uniforms.uTime.value = t;
+  cloudBox.material.uniforms.uWindOffset.value.set(t * windSpeed, t * windSpeed * 0.3);
+  cloudBox.material.uniforms.uCamPos.value.copy(camera.position);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
