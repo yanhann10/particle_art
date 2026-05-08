@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>z51 · monumental void · Kapoor</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#050306; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  #cam { position:fixed; right:14px; bottom:14px; width:240px; height:160px;
+         border:1px solid #1a1520; border-radius:4px; transform:scaleX(-1); opacity:0.75; }
+  #cam.hidden { display:none; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.6; font-size: 11px; letter-spacing: 0.04em; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #0f0a12; color:#cdd2dc; border:1px solid #2a2530;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; z-index:5; }
+  button.start:hover { background:#1a1520; }
+  .loading { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+             font-size: 13px; opacity: 0.5; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading form …</div>
+<button class="start" id="startBtn" style="display:none">grant camera · gesture into void</button>
+<video id="cam" class="hidden" autoplay playsinline muted></video>
+<div class="id">z51</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x050306, 15, 60);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 35);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050306, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 60000;
+const positions = new Float32Array(N * 3);
+const restPositions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uGesture: { value: 0.0 },
+  uHand: { value: new THREE.Vector3(0,0,0) },
+  uActive: { value: 0.0 },
+  uReady: { value: 0.0 },
+  fogColor: { value: scene.fog.color },
+  fogNear: { value: scene.fog.near },
+  fogFar: { value: scene.fog.far }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uGesture;
+    uniform vec3  uHand;
+    uniform float uActive;
+    uniform float uReady;
+    attribute vec3  rest;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vEnergy;
+    varying float vFogDepth;
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.3 + seed * 6.28;
+
+      // monumental stillness: only the void breathes
+      vec3 dir = normalize(p);
+      p += dir * sin(t * 0.5) * 0.03 * (1.0 + sin(seed*7.0)*0.5);
+
+      // gesture inverts form: hand opens a void, pulling particles inward
+      // creating negative space — the Kapoor signature
+      vec3 toHand = uHand - p;
+      float distToHand = length(toHand);
+      float voidPull = exp(-distToHand * 0.12) * uActive;
+      p += toHand * voidPull * 2.5;
+
+      // fist gesture: collapse toward centroid — the form disappears into itself
+      float collapse = smoothstep(0.0, 0.3, uGesture) * uActive;
+      p *= (1.0 - collapse * 0.85);
+
+      // reveal: particles emerge from absolute darkness at camera position
+      vec3 entry = vec3(0.0, 0.0, 35.0);
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      vEnergy = 0.2 + 0.8 * sin(t * 0.3 + seed * 3.14);
+
+      // Kapoor palette: void-black → deep crimson (Svayambh, My Red Homeland)
+      // monochrome blood-red pigment slowly emerging from black
+      vec3 voidCol = vec3(0.08, 0.05, 0.08);
+      vec3 bloodCol = vec3(0.52, 0.08, 0.12);
+      float reveal = smoothstep(0.3, 1.0, uReady);
+      vCol = mix(voidCol, bloodCol, vEnergy * reveal);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vFogDepth = -mv.z;
+      float dist = vFogDepth;
+      gl_PointSize = (0.8 + 1.2*vEnergy) * uPixel * (50.0/dist) * (0.2 + 0.8*uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 fogColor;
+    uniform float fogNear;
+    uniform float fogFar;
+    varying vec3 vCol;
+    varying float vEnergy;
+    varying float vFogDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float core = exp(-r * 20.0);
+      float a = core * (0.3 + 0.7*vEnergy);
+      vec3 col = vCol * a;
+      float fogFactor = smoothstep(fogNear, fogFar, vFogDepth);
+      col = mix(col, fogColor, fogFactor);
+      a *= (1.0 - fogFactor * 0.6);
+      gl_FragColor = vec4(col, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const loadingEl = document.getElementById('loading');
+const startBtn = document.getElementById('startBtn');
+const hintEl = document.getElementById('hint');
+const camEl = document.getElementById('cam');
+
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+const loader = new PLYLoader();
+loader.load(PLY_URL,
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scale = 18 / maxAxis;
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp = new THREE.Vector3();
+    for (let i = 0; i < N; i++){
+      sampler.sample(tmp);
+      restPositions[i*3]   = tmp.x;
+      restPositions[i*3+1] = tmp.y;
+      restPositions[i*3+2] = tmp.z;
+      seeds[i] = Math.random();
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('rest', new THREE.BufferAttribute(restPositions, 3));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+
+    loadingEl.style.display = 'none';
+    startBtn.style.display = 'inline-block';
+    revealStart = performance.now();
+  },
+  undefined,
+  (err) => {
+    loadingEl.textContent = 'load failed';
+    console.error(err);
+  });
+
+let revealStart = 0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let handsActive = false;
+async function loadMP(){
+  const load = (src) => new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = src; s.crossOrigin = 'anonymous';
+    s.onload = res; s.onerror = rej; document.head.appendChild(s);
+  });
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js');
+  await load('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js');
+}
+async function startHands(){
+  startBtn.style.display = 'none';
+  hintEl.textContent = 'requesting camera…';
+  try { await loadMP(); }
+  catch { hintEl.textContent = 'passive mode'; return; }
+  const hands = new window.Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}` });
+  hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+  hands.onResults((res) => {
+    if (!res.multiHandLandmarks || res.multiHandLandmarks.length === 0){
+      uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 0.0, 0.05);
+      return;
+    }
+    uniforms.uActive.value = THREE.MathUtils.lerp(uniforms.uActive.value, 1.0, 0.1);
+    const lm = res.multiHandLandmarks[0];
+    const dx = lm[4].x - lm[8].x, dy = lm[4].y - lm[8].y, dz = lm[4].z - lm[8].z;
+    const dist = Math.sqrt(dx*dx+dy*dy+dz*dz);
+    // inverted: pinch = low distance = high gesture value
+    const gesture = 1.0 - Math.min(1.0, dist * 5.0);
+    uniforms.uGesture.value = THREE.MathUtils.lerp(uniforms.uGesture.value, gesture, 0.15);
+    const palm = lm[9];
+    const wx = (0.5 - palm.x) * 24;
+    const wy = (0.5 - palm.y) * 16;
+    const wz = palm.z * -15;
+    uniforms.uHand.value.set(wx, wy, wz);
+    hintEl.textContent = `void · gesture=${gesture.toFixed(2)}`;
+  });
+  camEl.classList.remove('hidden');
+  const cam = new window.Camera(camEl, {
+    onFrame: async () => { await hands.send({ image: camEl }); },
+    width: 320, height: 240
+  });
+  cam.start();
+  handsActive = true;
+}
+startBtn.addEventListener('click', startHands);
+
+const start = performance.now();
+const centroid = new THREE.Vector3();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 4000);
+  }
+
+  if (!handsActive && uniforms.uReady.value > 0.95) {
+    uniforms.uGesture.value = 0.15 + 0.1 * Math.sin(t * 0.2);
+    uniforms.uActive.value = 0.25;
+  }
+
+  // monumental stillness: minimal rotation
+  points.rotation.y = t * 0.02;
+
+  // camera tracks centroid with inertia
+  if (geom.attributes.position && uniforms.uReady.value > 0.5) {
+    const pos = geom.attributes.position.array;
+    centroid.set(0, 0, 0);
+    for (let i = 0; i < N; i++){
+      centroid.x += pos[i*3];
+      centroid.y += pos[i*3+1];
+      centroid.z += pos[i*3+2];
+    }
+    centroid.divideScalar(N);
+    camera.position.lerp(new THREE.Vector3(centroid.x * 0.3, centroid.y * 0.3, 35 + centroid.z * 0.2), 0.02);
+    camera.lookAt(centroid);
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
