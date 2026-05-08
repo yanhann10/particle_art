@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ys7 · suminagashi marbling · fluid dye advection</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0d0d; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">ys7</div>
+<div class="hint">drag pointer to comb the surface · scroll to tilt</div>
+<div class="src">Amanda Ghassaei 'Digital Marbling' (2022) · Eulerian fluid advection with sharp dye boundaries</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Suminagashi paper marbling fluid dynamics — 2D semi-Lagrangian advection
+// with ZERO viscosity diffusion to preserve sharp ink boundaries. Camera drags
+// apply velocity impulses that comb the surface into feathered swirls.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xebe8df);
+const camera = new THREE.PerspectiveCamera(35, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 2.8, 6);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.enablePan = false;
+controls.minDistance = 3;
+controls.maxDistance = 12;
+controls.maxPolarAngle = Math.PI * 0.65;
+controls.target.set(0, 0, 0);
+
+// ─────────────────────────── 2D Eulerian fluid (ping-pong advection)
+const RES = 512;
+const rt1 = new THREE.WebGLRenderTarget(RES, RES, { format: THREE.RGBAFormat, type: THREE.FloatType });
+const rt2 = new THREE.WebGLRenderTarget(RES, RES, { format: THREE.RGBAFormat, type: THREE.FloatType });
+const velRT1 = new THREE.WebGLRenderTarget(RES, RES, { format: THREE.RGBAFormat, type: THREE.FloatType });
+const velRT2 = new THREE.WebGLRenderTarget(RES, RES, { format: THREE.RGBAFormat, type: THREE.FloatType });
+
+const orthoScene = new THREE.Scene();
+const orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const quadGeo = new THREE.PlaneGeometry(2, 2);
+
+// initialize dye field: 8 concentric rings from center, traditional indigo-on-cream palette
+const initDyeMat = new THREE.ShaderMaterial({
+  uniforms: { uSeed: { value: Math.random() * 100 } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+  `,
+  fragmentShader: `
+    uniform float uSeed;
+    varying vec2 vUv;
+    void main(){
+      vec2 p = (vUv - 0.5) * 2.0;
+      float d = length(p);
+      // 8 rings with slight noise
+      float ring = fract(d * 4.5 + sin(atan(p.y, p.x) * 3.0 + uSeed) * 0.08);
+      float threshold = 0.52;
+      bool ink = ring < threshold;
+      // palette: indigo ink on cream paper
+      vec3 paper = vec3(0.922, 0.910, 0.875);
+      vec3 indigo = vec3(0.11, 0.14, 0.26);
+      vec3 col = ink ? indigo : paper;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const initQuad = new THREE.Mesh(quadGeo, initDyeMat);
+orthoScene.add(initQuad);
+renderer.setRenderTarget(rt1);
+renderer.render(orthoScene, orthoCam);
+orthoScene.remove(initQuad);
+
+// initialize velocity field to zero
+const zeroVelMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+const zeroQuad = new THREE.Mesh(quadGeo, zeroVelMat);
+orthoScene.add(zeroQuad);
+renderer.setRenderTarget(velRT1);
+renderer.render(orthoScene, orthoCam);
+orthoScene.remove(zeroQuad);
+
+// advection shader — semi-Lagrangian backtrace with NO diffusion (sharp boundaries)
+const advectMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uField: { value: rt1.texture },
+    uVel: { value: velRT1.texture },
+    uDt: { value: 0.016 },
+    uRes: { value: RES }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D uField;
+    uniform sampler2D uVel;
+    uniform float uDt;
+    uniform float uRes;
+    varying vec2 vUv;
+    void main(){
+      vec2 vel = texture2D(uVel, vUv).xy;
+      vec2 backUv = vUv - vel * uDt;
+      backUv = fract(backUv);   // wrap at edges
+      gl_FragColor = texture2D(uField, backUv);
+    }
+  `
+});
+const advectQuad = new THREE.Mesh(quadGeo, advectMat);
+
+// velocity decay shader (slow friction, no diffusion — keeps velocity impulses alive)
+const velDecayMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uVel: { value: velRT1.texture },
+    uDecay: { value: 0.985 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D uVel;
+    uniform float uDecay;
+    varying vec2 vUv;
+    void main(){
+      vec2 vel = texture2D(uVel, vUv).xy;
+      gl_FragColor = vec4(vel * uDecay, 0.0, 1.0);
+    }
+  `
+});
+const velDecayQuad = new THREE.Mesh(quadGeo, velDecayMat);
+
+// velocity impulse shader — Gaussian splat when user drags
+const velImpulseMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uVel: { value: velRT1.texture },
+    uCenter: { value: new THREE.Vector2(0.5, 0.5) },
+    uDir: { value: new THREE.Vector2(0, 0) },
+    uRadius: { value: 0.08 },
+    uStrength: { value: 0.0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D uVel;
+    uniform vec2 uCenter;
+    uniform vec2 uDir;
+    uniform float uRadius;
+    uniform float uStrength;
+    varying vec2 vUv;
+    void main(){
+      vec2 vel = texture2D(uVel, vUv).xy;
+      vec2 d = vUv - uCenter;
+      float dist = length(d);
+      float gauss = exp(-dist * dist / (uRadius * uRadius));
+      vel += uDir * gauss * uStrength;
+      gl_FragColor = vec4(vel, 0.0, 1.0);
+    }
+  `
+});
+const velImpulseQuad = new THREE.Mesh(quadGeo, velImpulseMat);
+
+function swapRT(a, b){ const t = a.texture; a.texture = b.texture; b.texture = t; }
+
+// pointer tracking for drag impulses
+let pointerDown = false, lastPointerUv = null;
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  pointerDown = true;
+  pointer.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObject(marblingPlane);
+  if (hits.length > 0){
+    lastPointerUv = hits[0].uv.clone();
+  }
+});
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (!pointerDown) return;
+  pointer.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObject(marblingPlane);
+  if (hits.length > 0 && lastPointerUv){
+    const currentUv = hits[0].uv;
+    const delta = new THREE.Vector2(currentUv.x - lastPointerUv.x, currentUv.y - lastPointerUv.y);
+    if (delta.length() > 0.001){
+      // apply velocity impulse
+      orthoScene.add(velImpulseQuad);
+      velImpulseMat.uniforms.uVel.value = velRT1.texture;
+      velImpulseMat.uniforms.uCenter.value.copy(currentUv);
+      velImpulseMat.uniforms.uDir.value.copy(delta).normalize();
+      velImpulseMat.uniforms.uStrength.value = delta.length() * 2.2;
+      renderer.setRenderTarget(velRT2);
+      renderer.render(orthoScene, orthoCam);
+      orthoScene.remove(velImpulseQuad);
+      swapRT(velRT1, velRT2);
+    }
+    lastPointerUv.copy(currentUv);
+  }
+});
+renderer.domElement.addEventListener('pointerup', () => {
+  pointerDown = false;
+  lastPointerUv = null;
+});
+renderer.domElement.addEventListener('pointercancel', () => {
+  pointerDown = false;
+  lastPointerUv = null;
+});
+
+// ─────────────────────────── 3D marbling plane (textured with dye field)
+const planeGeo = new THREE.PlaneGeometry(5, 5, 1, 1);
+const planeMat = new THREE.MeshBasicMaterial({ map: rt1.texture, side: THREE.DoubleSide });
+const marblingPlane = new THREE.Mesh(planeGeo, planeMat);
+marblingPlane.rotation.x = -Math.PI * 0.5;
+scene.add(marblingPlane);
+
+// ambient light for soft visibility
+const ambient = new THREE.AmbientLight(0xffffff, 0.9);
+scene.add(ambient);
+const hemi = new THREE.HemisphereLight(0xffeedd, 0x444444, 0.5);
+scene.add(hemi);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let tiltPhase = 0;
+function loop(t){
+  // 1. decay velocity
+  orthoScene.add(velDecayQuad);
+  velDecayMat.uniforms.uVel.value = velRT1.texture;
+  renderer.setRenderTarget(velRT2);
+  renderer.render(orthoScene, orthoCam);
+  orthoScene.remove(velDecayQuad);
+  swapRT(velRT1, velRT2);
+
+  // 2. advect velocity (self-advect)
+  orthoScene.add(advectQuad);
+  advectMat.uniforms.uField.value = velRT1.texture;
+  advectMat.uniforms.uVel.value = velRT1.texture;
+  renderer.setRenderTarget(velRT2);
+  renderer.render(orthoScene, orthoCam);
+  orthoScene.remove(advectQuad);
+  swapRT(velRT1, velRT2);
+
+  // 3. advect dye field
+  orthoScene.add(advectQuad);
+  advectMat.uniforms.uField.value = rt1.texture;
+  advectMat.uniforms.uVel.value = velRT1.texture;
+  renderer.setRenderTarget(rt2);
+  renderer.render(orthoScene, orthoCam);
+  orthoScene.remove(advectQuad);
+  swapRT(rt1, rt2);
+
+  // update plane texture
+  planeMat.map = rt1.texture;
+  planeMat.needsUpdate = true;
+
+  // subtle tilt oscillation — the surface breathing
+  tiltPhase += 0.0012;
+  marblingPlane.rotation.z = Math.sin(tiltPhase) * 0.04;
+  marblingPlane.rotation.x = -Math.PI * 0.5 + Math.cos(tiltPhase * 0.7) * 0.03;
+
+  controls.update();
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
