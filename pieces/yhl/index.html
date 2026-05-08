@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>&lt;NEW_ID&gt; · topological cage (after Hatoum)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background:
+      radial-gradient(ellipse at 50% 48%, #ede4d0 0%, #d6c8a8 36%, #a08262 72%, #4a3218 100%),
+      #4a3218;
+    color: #2a1a08; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.14  0 0 0 0 0.08  0 0 0 0 0.03  0 0 0 0.26 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.45'/></svg>");
+    mix-blend-mode: multiply; opacity: 0.42;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background: radial-gradient(ellipse 80% 70% at 22% 24%, rgba(255,232,180,0.22), rgba(255,232,180,0) 50%);
+    mix-blend-mode: screen;
+  }
+  canvas { display:block; position: relative; z-index: 0; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; z-index:5; color:#cdd2dc; font-family:ui-monospace,monospace; }
+</style>
+</head>
+<body>
+<div class="id">yhl</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  Mona Hatoum × topological
+
+  The Riley-wave calyx from ere becomes a wire-mesh cage — a domestic
+  vessel (colander, lantern, crib) whose surface slowly undergoes
+  topological transformation: the torus twists, its cross-section
+  pinches into a figure-8, the genus shifts. Hatoum's language of
+  the cage rendered in particle wireframe on warm parchment.
+
+  Technique: particles placed on parametric grid lines of a torus;
+  vertex shader morphs the surface in real time (twist, pinch, breathe).
+  Reference: Hatoum's "Light Sentence" (1992) — wire-mesh lockers,
+  bare swinging bulb, shifting shadows on walls.
+*/
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(34, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 2, 11);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ─── Build parametric grid on torus ───
+const N = 80000;
+const TWO_PI = Math.PI * 2;
+const paramU = new Float32Array(N);
+const paramV = new Float32Array(N);
+const positions = new Float32Array(N * 3); // placeholder for BufferAttribute
+
+const N_U_LINES = 52;   // meridional wires (around tube cross-section)
+const N_V_LINES = 30;   // longitudinal wires (around the hole)
+
+let morphSeed = 0;
+
+function buildGrid(seed) {
+  let s = (seed * 1597 + 51749) >>> 0;
+  const rng = () => { s |= 0; s = s + 0x6d2b79f5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  let idx = 0;
+  // Slightly randomise grid spacing for organic feel (Hatoum's hand-welded mesh)
+  const uJitter = 0.012 + rng() * 0.008;
+  const vJitter = 0.012 + rng() * 0.008;
+
+  const halfN = Math.floor(N * 0.52);
+  const ptsPerU = Math.floor(halfN / N_U_LINES);
+  // u-lines: fixed u, sweep v
+  for (let i = 0; i < N_U_LINES && idx < N; i++) {
+    const u = (i / N_U_LINES) * TWO_PI + (rng() - 0.5) * uJitter;
+    for (let j = 0; j < ptsPerU && idx < N; j++) {
+      paramU[idx] = u;
+      paramV[idx] = (j / ptsPerU) * TWO_PI + (rng() - 0.5) * vJitter;
+      idx++;
+    }
+  }
+  // v-lines: fixed v, sweep u
+  const remaining = N - idx;
+  const ptsPerV = Math.floor(remaining / N_V_LINES);
+  for (let i = 0; i < N_V_LINES && idx < N; i++) {
+    const v = (i / N_V_LINES) * TWO_PI + (rng() - 0.5) * vJitter;
+    for (let j = 0; j < ptsPerV && idx < N; j++) {
+      paramU[idx] = (j / ptsPerV) * TWO_PI + (rng() - 0.5) * uJitter;
+      paramV[idx] = v;
+      idx++;
+    }
+  }
+  // Pad
+  while (idx < N) {
+    paramU[idx] = rng() * TWO_PI;
+    paramV[idx] = rng() * TWO_PI;
+    idx++;
+  }
+}
+buildGrid(morphSeed);
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('aU', new THREE.BufferAttribute(paramU, 1));
+geom.setAttribute('aV', new THREE.BufferAttribute(paramV, 1));
+
+const uniforms = {
+  uTime:    { value: 0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+  uPointer: { value: new THREE.Vector2(0, 0) },
+  uMorph:   { value: 0 }  // lerps toward target on click
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec2  uPointer;
+    uniform float uMorph;
+    attribute float aU;
+    attribute float aV;
+    varying float vDepth;
+    varying float vLocalCurv;
+
+    void main() {
+      float t = uTime;
+
+      // ── Topological parameters ──
+      // Twist: v offset proportional to u — partial Dehn twist
+      // At twist=1.0 it's a full twist (Klein-bottle immersion)
+      float twistAmt = 0.35 + 0.3 * sin(t * 0.04 + uMorph);
+      float v = aV + twistAmt * aU;
+      float u = aU;
+
+      // Pinch: cross-section deforms circle → figure-8
+      // This changes the effective topology (self-intersection)
+      float pinch = 0.32 * sin(t * 0.055 + uMorph * 2.3 + 0.7);
+
+      // Major and minor radii
+      float R = 2.6 + 0.08 * sin(t * 0.25);   // breathe
+      float r = 1.05;
+      float rLocal = r * (1.0 + pinch * cos(2.0 * v));
+
+      // ── Torus parametric surface ──
+      vec3 p;
+      p.x = (R + rLocal * cos(v)) * cos(u);
+      p.y = rLocal * sin(v);
+      p.z = (R + rLocal * cos(v)) * sin(u);
+
+      // ── Base tilt — domestic object resting at slight angle ──
+      float tiltAng = 0.28;
+      float ct = cos(tiltAng), st = sin(tiltAng);
+      p = vec3(p.x, p.y * ct - p.z * st, p.y * st + p.z * ct);
+
+      // ── Pointer-driven tilt — the cage responds to gaze ──
+      float tx = uPointer.y * 0.12;
+      float tz = -uPointer.x * 0.12;
+      float ca = cos(tx), sa = sin(tx);
+      vec3 q = vec3(p.x, p.y * ca - p.z * sa, p.y * sa + p.z * ca);
+      float cb = cos(tz), sb = sin(tz);
+      q = vec3(q.x * cb - q.y * sb, q.x * sb + q.y * cb, q.z);
+
+      // ── Slow rotation — walk around the cage ──
+      float rot = t * 0.06;
+      float cr = cos(rot), sr = sin(rot);
+      q = vec3(q.x * cr - q.z * sr, q.y, q.x * sr + q.z * cr);
+
+      // Local curvature hint (for fragment shading)
+      vLocalCurv = abs(rLocal / r);
+
+      vec4 mv = modelViewMatrix * vec4(q, 1.0);
+      vDepth = -mv.z;
+
+      // Fine wire points — small and even
+      gl_PointSize = (1.1 + 0.3 * vLocalCurv) * uPixel * (4.5 / vDepth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDepth;
+    varying float vLocalCurv;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      float a = exp(-r * 20.0);
+
+      // Iron wire — dark, slightly warm where curvature stretches
+      vec3 wireBase = vec3(0.11, 0.09, 0.07);
+      vec3 wireStressed = vec3(0.22, 0.14, 0.08);
+      float stress = smoothstep(0.7, 1.5, vLocalCurv);
+      vec3 col = mix(wireBase, wireStressed, stress);
+
+      // Depth haze toward parchment
+      float haze = clamp((vDepth - 7.0) / 9.0, 0.0, 0.65);
+      col = mix(col, vec3(0.80, 0.72, 0.56), haze);
+
+      gl_FragColor = vec4(col, a * 0.80 * (1.0 - haze * 0.45));
+    }
+  `
+});
+
+const cage = new THREE.Points(geom, mat);
+scene.add(cage);
+
+// ─── Shadow on floor plane — Light Sentence reference ───
+// A faint projected-shadow disc beneath the cage
+const shadowGeom = new THREE.PlaneGeometry(8, 8);
+const shadowMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: uniforms.uTime },
+  transparent: true, depthWrite: false,
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    void main() {
+      vec2 c = vUv - 0.5;
+      float d = length(c);
+      // Elliptical shadow, sways slightly (swinging bulb)
+      float sway = sin(uTime * 0.13) * 0.04;
+      vec2 shifted = c - vec2(sway, sway * 0.6);
+      float sd = length(shifted);
+      float shadow = exp(-sd * sd * 6.0);
+      // Grid pattern in shadow — wire mesh projected
+      float gridU = sin(shifted.x * 52.0) * sin(shifted.y * 32.0);
+      float gridMask = smoothstep(-0.1, 0.3, gridU);
+      shadow *= 0.4 + 0.6 * gridMask;
+      gl_FragColor = vec4(0.08, 0.05, 0.02, shadow * 0.25);
+    }
+  `
+});
+const shadowPlane = new THREE.Mesh(shadowGeom, shadowMat);
+shadowPlane.rotation.x = -Math.PI / 2;
+shadowPlane.position.y = -2.8;
+scene.add(shadowPlane);
+
+// ─── Dust motes — inherited from ere, the inhabited room ───
+const N_DUST = 180;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos = new Float32Array(N_DUST * 3);
+const dustSd = new Float32Array(N_DUST);
+for (let i = 0; i < N_DUST; i++) {
+  dustPos[i * 3]     = (Math.random() - 0.5) * 14;
+  dustPos[i * 3 + 1] = (Math.random() - 0.5) * 8;
+  dustPos[i * 3 + 2] = (Math.random() - 0.5) * 8;
+  dustSd[i] = Math.random();
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('seed', new THREE.BufferAttribute(dustSd, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: uniforms.uTime, uPixel: uniforms.uPixel },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vGlow;
+    void main() {
+      vec3 p = position;
+      float t = uTime * 0.10 + seed * 6.28;
+      p.x += sin(t * 1.3 + seed * 30.0) * 0.4;
+      p.y -= mod(uTime * 0.07 + seed * 7.0, 4.0) - 2.0;
+      p.z += cos(t * 1.1 + seed * 22.0) * 0.3;
+      float sx = -p.x / 7.0;
+      float sy =  p.y / 4.0;
+      vGlow = clamp(0.25 + 0.50 * smoothstep(-0.2, 0.6, sx + sy), 0.0, 1.0);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = (0.8 + 1.2 * vGlow) * uPixel * (3.5 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vGlow;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 24.0);
+      vec3 col = vec3(0.98, 0.92, 0.76) * vGlow;
+      gl_FragColor = vec4(col, a * 0.60 * vGlow);
+    }
+  `
+});
+const dust = new THREE.Points(dustGeom, dustMat);
+scene.add(dust);
+
+// ─── Interaction ───
+let morphTarget = 0;
+addEventListener('pointermove', (e) => {
+  uniforms.uPointer.value.set(
+    (e.clientX / innerWidth)  * 2 - 1,
+    (e.clientY / innerHeight) * 2 - 1
+  );
+});
+addEventListener('click', () => {
+  morphSeed++;
+  morphTarget += 1.0 + Math.random() * 2.0;
+  buildGrid(morphSeed);
+  geom.attributes.aU.needsUpdate = true;
+  geom.attributes.aV.needsUpdate = true;
+});
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─── Render loop ───
+const start = performance.now();
+let currentMorph = 0;
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Smooth lerp toward morph target
+  currentMorph += (morphTarget - currentMorph) * 0.015;
+  uniforms.uMorph.value = currentMorph;
+
+  // Camera: slow vertical drift, always looking at center
+  camera.position.x = Math.sin(t * 0.035) * 0.5;
+  camera.position.y = 1.8 + Math.sin(t * 0.028 + 0.8) * 0.6;
+  camera.position.z = 10.5 + Math.sin(t * 0.02) * 0.5;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
