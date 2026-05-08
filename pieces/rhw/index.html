@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: emerge, intensity: calm -->
+<title>rhw · slow web — presence through patience</title>
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#030303; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+.breath { position:fixed; right:16px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0; font-size:10px; letter-spacing:0.04em; z-index:5; transition: opacity 8s ease; }
+</style>
+</head>
+<body>
+<div class="id">rhw</div>
+<div class="breath" id="breath"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x030303);
+
+// Fog starts very dense — the room is nearly invisible
+const fogColor = new THREE.Color(0x030303);
+scene.fog = new THREE.FogExp2(fogColor, 0.12);
+
+const camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, 0.1, 120);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const ambLight = new THREE.AmbientLight(0x110808, 0.3);
+scene.add(ambLight);
+const dirLight = new THREE.DirectionalLight(0xffeedd, 0.15);
+dirLight.position.set(-3, 5, 2);
+scene.add(dirLight);
+
+// Deterministic RNG
+let rngState = 71629384;
+function rng(){ rngState |= 0; rngState = rngState + 0x6d2b79f5 | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// Sphere — barely visible at start
+const sphereRadius = 1.8;
+const sphereCenter = new THREE.Vector3(2.8, 0.6, -3.0);
+const sphereGeo = new THREE.SphereGeometry(sphereRadius, 24, 16);
+const sphereMat = new THREE.MeshStandardMaterial({
+  color: 0xf0e8dc, emissive: 0xf0e8dc, emissiveIntensity: 0.02,
+  roughness: 0.95, metalness: 0.0, transparent: true, opacity: 0.03
+});
+const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+sphere.position.copy(sphereCenter);
+scene.add(sphere);
+
+// Room and anchors
+const ROOM = { w: 18, h: 12, d: 28 };
+const anchors = [];
+
+function wallPoint(){
+  const face = Math.floor(rng() * 6);
+  let x, y, z;
+  const hw = ROOM.w/2, hh = ROOM.h/2, hd = ROOM.d/2;
+  switch(face){
+    case 0: x=-hw; y=(rng()-0.5)*ROOM.h; z=(rng()-0.5)*ROOM.d; break;
+    case 1: x= hw; y=(rng()-0.5)*ROOM.h; z=(rng()-0.5)*ROOM.d; break;
+    case 2: y=-hh; x=(rng()-0.5)*ROOM.w; z=(rng()-0.5)*ROOM.d; break;
+    case 3: y= hh; x=(rng()-0.5)*ROOM.w; z=(rng()-0.5)*ROOM.d; break;
+    case 4: z=-hd; x=(rng()-0.5)*ROOM.w; y=(rng()-0.5)*ROOM.h; break;
+    case 5: z= hd; x=(rng()-0.5)*ROOM.w; y=(rng()-0.5)*ROOM.h; break;
+  }
+  return new THREE.Vector3(x, y, z);
+}
+
+const NUM_ANCHORS = 600;
+for (let i = 0; i < NUM_ANCHORS; i++){
+  if (rng() < 0.35){
+    const dir = new THREE.Vector3(rng()-0.5, rng()-0.5, rng()-0.5).normalize();
+    const dist = sphereRadius + 0.1 + rng() * 2.5;
+    anchors.push(sphereCenter.clone().add(dir.multiplyScalar(dist)));
+  } else {
+    anchors.push(wallPoint());
+  }
+}
+
+// Thread system — 5 layers with different reveal times
+const NUM_LINES = 22000;
+const linePositions = new Float32Array(NUM_LINES * 6);
+// Per-line metadata: reveal time (seconds), distance to sphere, color phase
+const lineMeta = new Float32Array(NUM_LINES * 3); // [revealTime, distToSphere, colorPhase]
+let li = 0;
+
+function sphereSurfacePoint(from){
+  const dir = sphereCenter.clone().sub(from).normalize();
+  return sphereCenter.clone().add(dir.multiplyScalar(-sphereRadius * (0.98 + rng()*0.04)));
+}
+
+function midpointDist(idx){
+  const mx = (linePositions[idx] + linePositions[idx+3]) * 0.5;
+  const my = (linePositions[idx+1] + linePositions[idx+4]) * 0.5;
+  const mz = (linePositions[idx+2] + linePositions[idx+5]) * 0.5;
+  return Math.sqrt((mx-sphereCenter.x)**2 + (my-sphereCenter.y)**2 + (mz-sphereCenter.z)**2);
+}
+
+// Cat A: wall-to-wall (~35%)
+const catA = Math.floor(NUM_LINES * 0.35);
+for (let i = 0; i < catA && li < NUM_LINES; i++){
+  const a = wallPoint(), b = wallPoint();
+  const mid = a.clone().add(b).multiplyScalar(0.5);
+  if (mid.distanceTo(sphereCenter) > 12 && rng() > 0.3) { i--; continue; }
+  const idx = li * 6;
+  linePositions[idx]=a.x; linePositions[idx+1]=a.y; linePositions[idx+2]=a.z;
+  linePositions[idx+3]=b.x; linePositions[idx+4]=b.y; linePositions[idx+5]=b.z;
+  const d = midpointDist(idx);
+  // Further threads reveal later
+  lineMeta[li*3] = 15 + d * 3.5 + rng() * 20; // reveal between 15s-90s
+  lineMeta[li*3+1] = d;
+  lineMeta[li*3+2] = rng();
+  li++;
+}
+
+// Cat B: sphere-converging (~35%)
+const catB = Math.floor(NUM_LINES * 0.35);
+for (let i = 0; i < catB && li < NUM_LINES; i++){
+  const a = anchors[Math.floor(rng() * anchors.length)];
+  const nearSphere = sphereSurfacePoint(a);
+  nearSphere.x += (rng()-0.5)*0.5;
+  nearSphere.y += (rng()-0.5)*0.5;
+  nearSphere.z += (rng()-0.5)*0.5;
+  const idx = li * 6;
+  linePositions[idx]=a.x; linePositions[idx+1]=a.y; linePositions[idx+2]=a.z;
+  linePositions[idx+3]=nearSphere.x; linePositions[idx+4]=nearSphere.y; linePositions[idx+5]=nearSphere.z;
+  const d = midpointDist(idx);
+  // These reveal from sphere outward — closest first
+  lineMeta[li*3] = 5 + d * 2.0 + rng() * 15;
+  lineMeta[li*3+1] = d;
+  lineMeta[li*3+2] = rng();
+  li++;
+}
+
+// Cat C: local filaments (~30%)
+for (let i = 0; li < NUM_LINES; i++){
+  const ai = Math.floor(rng() * anchors.length);
+  const a = anchors[ai];
+  let best = null, bestDist = Infinity;
+  for (let j = 0; j < 8; j++){
+    const bi = Math.floor(rng() * anchors.length);
+    if (bi === ai) continue;
+    const d = a.distanceTo(anchors[bi]);
+    if (d < bestDist && d > 0.2){ bestDist = d; best = anchors[bi]; }
+  }
+  if (!best) best = wallPoint();
+  const idx = li * 6;
+  linePositions[idx]=a.x; linePositions[idx+1]=a.y; linePositions[idx+2]=a.z;
+  linePositions[idx+3]=best.x; linePositions[idx+4]=best.y; linePositions[idx+5]=best.z;
+  const d = midpointDist(idx);
+  lineMeta[li*3] = 10 + d * 2.5 + rng() * 18;
+  lineMeta[li*3+1] = d;
+  lineMeta[li*3+2] = rng();
+  li++;
+}
+
+const basePositions = new Float32Array(linePositions);
+
+// Per-vertex color for color drift
+const lineColors = new Float32Array(li * 6); // 2 verts × RGB
+// Initialize all to very dark crimson
+for (let i = 0; i < li * 6; i += 3){
+  lineColors[i]   = 0.15; // R
+  lineColors[i+1] = 0.005; // G
+  lineColors[i+2] = 0.01; // B
+}
+
+const lineGeo = new THREE.BufferGeometry();
+lineGeo.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+lineGeo.setAttribute('color', new THREE.BufferAttribute(lineColors, 3));
+lineGeo.setDrawRange(0, li * 2);
+
+const lineMat = new THREE.LineBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.0, // starts invisible
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  fog: true
+});
+const threads = new THREE.LineSegments(lineGeo, lineMat);
+scene.add(threads);
+
+// Hidden figure — a dress silhouette made of threads that emerge last
+// Simple dress form: trapezoid + neck
+const dressCenter = sphereCenter.clone().add(new THREE.Vector3(-0.3, -3.5, 0.5));
+const DRESS_LINES = 800;
+const dressPositions = new Float32Array(DRESS_LINES * 6);
+const dressColors = new Float32Array(DRESS_LINES * 6);
+let di = 0;
+
+function dressPoint(t){
+  // t: 0=top(neck), 1=bottom(hem)
+  const waist = 0.4 + t * 1.8; // widens downward
+  const angle = rng() * Math.PI * 2;
+  const r = waist * (0.7 + rng() * 0.3);
+  return new THREE.Vector3(
+    dressCenter.x + Math.cos(angle) * r,
+    dressCenter.y + t * 4.0 + (rng()-0.5)*0.15,
+    dressCenter.z + Math.sin(angle) * r
+  );
+}
+
+for (let i = 0; i < DRESS_LINES && di < DRESS_LINES; i++){
+  const t1 = rng(), t2 = t1 + (rng()-0.5) * 0.3;
+  const a = dressPoint(Math.max(0, Math.min(1, t1)));
+  const b = dressPoint(Math.max(0, Math.min(1, t2)));
+  const idx = di * 6;
+  dressPositions[idx]=a.x; dressPositions[idx+1]=a.y; dressPositions[idx+2]=a.z;
+  dressPositions[idx+3]=b.x; dressPositions[idx+4]=b.y; dressPositions[idx+5]=b.z;
+  // Dark color — will brighten late
+  for (let c = 0; c < 6; c += 3){
+    dressColors[idx+c]   = 0.06;
+    dressColors[idx+c+1] = 0.01;
+    dressColors[idx+c+2] = 0.015;
+  }
+  di++;
+}
+
+// Threads from dress to sphere — connection
+const CONN_LINES = 200;
+for (let i = 0; i < CONN_LINES && di < DRESS_LINES; i++){
+  const dp = dressPoint(rng() * 0.3); // upper dress
+  const sp = sphereSurfacePoint(dp);
+  sp.x += (rng()-0.5)*0.3; sp.y += (rng()-0.5)*0.3; sp.z += (rng()-0.5)*0.3;
+  const idx = di * 6;
+  dressPositions[idx]=dp.x; dressPositions[idx+1]=dp.y; dressPositions[idx+2]=dp.z;
+  dressPositions[idx+3]=sp.x; dressPositions[idx+4]=sp.y; dressPositions[idx+5]=sp.z;
+  for (let c = 0; c < 6; c += 3){
+    dressColors[idx+c]   = 0.08;
+    dressColors[idx+c+1] = 0.01;
+    dressColors[idx+c+2] = 0.02;
+  }
+  di++;
+}
+
+const dressGeo = new THREE.BufferGeometry();
+dressGeo.setAttribute('position', new THREE.BufferAttribute(dressPositions, 3));
+dressGeo.setAttribute('color', new THREE.BufferAttribute(dressColors, 3));
+dressGeo.setDrawRange(0, di * 2);
+
+const dressMat = new THREE.LineBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.0,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  fog: true
+});
+const dressThreads = new THREE.LineSegments(dressGeo, dressMat);
+scene.add(dressThreads);
+
+// Dark fragments
+const NUM_FRAGMENTS = 12;
+const fragments = [];
+for (let i = 0; i < NUM_FRAGMENTS; i++){
+  const size = 0.04 + rng() * 0.12;
+  const geo = rng() > 0.5
+    ? new THREE.BoxGeometry(size, size*(0.3+rng()*1.4), size*(0.3+rng()))
+    : new THREE.TetrahedronGeometry(size, 0);
+  const mat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(0.03+rng()*0.04, 0.015+rng()*0.02, 0.01+rng()*0.015),
+    transparent: true, opacity: 0.0
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  const t = rng();
+  const segIdx = Math.floor(rng() * li) * 6;
+  mesh.position.set(
+    basePositions[segIdx]*(1-t) + basePositions[segIdx+3]*t,
+    basePositions[segIdx+1]*(1-t) + basePositions[segIdx+4]*t,
+    basePositions[segIdx+2]*(1-t) + basePositions[segIdx+5]*t
+  );
+  mesh.rotation.set(rng()*Math.PI, rng()*Math.PI, rng()*Math.PI);
+  mesh.userData.revealTime = 25 + rng() * 50;
+  scene.add(mesh);
+  fragments.push(mesh);
+}
+
+// Camera — nearly static, imperceptible drift
+const cameraPath = { radius: 7.0, speed: 0.003, heightDrift: 0.0008 };
+
+// Breath counter
+const breathEl = document.getElementById('breath');
+let breathCount = 0;
+const BREATH_INTERVAL = 4.0; // seconds per breath
+let lastBreath = 0;
+
+// Palette zones for color drift over time:
+// 0-30s: near-black with faintest crimson
+// 30-60s: deep crimson emerges near sphere
+// 60-90s: warm amber creeps into sphere-adjacent threads
+// 90-120s: dress form threads shift to dusty rose
+// 120s+: subtle oscillation between states
+const palettes = {
+  dark:    { r: 0.10, g: 0.003, b: 0.008 },
+  crimson: { r: 0.45, g: 0.008, b: 0.025 },
+  amber:   { r: 0.50, g: 0.12,  b: 0.03 },
+  rose:    { r: 0.40, g: 0.08,  b: 0.10 }
+};
+
+function lerpColor(a, b, t){
+  return { r: a.r+(b.r-a.r)*t, g: a.g+(b.g-a.g)*t, b: a.b+(b.b-a.b)*t };
+}
+
+function smoothstep(a, b, x){
+  const t = Math.max(0, Math.min(1, (x-a)/(b-a)));
+  return t*t*(3-2*t);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+
+  // ── Breath counter
+  if (elapsed - lastBreath >= BREATH_INTERVAL){
+    breathCount++;
+    lastBreath = elapsed;
+    breathEl.textContent = breathCount + (breathCount === 1 ? ' breath' : ' breaths');
+    // Fade in the counter after 12 seconds
+    if (breathCount >= 3 && breathEl.style.opacity !== '0.35'){
+      breathEl.style.opacity = '0.35';
+    }
+  }
+
+  // ── Fog: very slowly thins (0.12 → 0.04 over 120s)
+  const fogDensity = 0.12 - smoothstep(0, 120, elapsed) * 0.08;
+  scene.fog.density = fogDensity;
+
+  // ── Background: ultra-slow warm shift (0x030303 → 0x050404)
+  const bgWarm = smoothstep(40, 100, elapsed) * 0.008;
+  scene.background.setRGB(0.012 + bgWarm, 0.012 + bgWarm * 0.5, 0.012);
+
+  // ── Sphere emergence
+  const sphereReveal = smoothstep(20, 80, elapsed);
+  sphereMat.opacity = 0.03 + sphereReveal * 0.55;
+  sphereMat.emissiveIntensity = 0.02 + sphereReveal * 0.30;
+
+  // ── Ambient light slowly warms
+  ambLight.intensity = 0.3 + smoothstep(30, 90, elapsed) * 0.5;
+  dirLight.intensity = 0.15 + smoothstep(40, 100, elapsed) * 0.35;
+
+  // ── Thread reveal + color drift
+  // Global opacity ramps very slowly
+  const globalOpacity = Math.min(0.09, smoothstep(5, 40, elapsed) * 0.09);
+  lineMat.opacity = globalOpacity;
+
+  // Per-vertex color evolution
+  const colorAttr = lineGeo.attributes.color;
+  const cols = colorAttr.array;
+  const posArr = lineGeo.attributes.position.array;
+
+  for (let i = 0; i < li; i++){
+    const revealT = lineMeta[i*3];
+    const distS = lineMeta[i*3+1];
+    const phase = lineMeta[i*3+2];
+
+    // How visible is this thread? (0 = hidden, 1 = fully revealed)
+    const visibility = smoothstep(revealT - 5, revealT + 10, elapsed);
+    if (visibility < 0.001) {
+      // Keep dark
+      const idx = i * 6;
+      cols[idx]=0; cols[idx+1]=0; cols[idx+2]=0;
+      cols[idx+3]=0; cols[idx+4]=0; cols[idx+5]=0;
+      continue;
+    }
+
+    // Color depends on distance to sphere and elapsed time
+    let col;
+    const nearSphere = distS < 4;
+    const midRange = distS >= 4 && distS < 9;
+
+    if (nearSphere){
+      // Near sphere: dark → crimson → amber over time
+      const toCrimson = smoothstep(15, 50, elapsed);
+      const toAmber = smoothstep(60, 120, elapsed) * 0.4;
+      col = lerpColor(palettes.dark, palettes.crimson, toCrimson);
+      col = lerpColor(col, palettes.amber, toAmber);
+      // Very slow oscillation unique to each thread
+      const osc = Math.sin(elapsed * 0.02 + phase * 6.28) * 0.05;
+      col.r += osc; col.g += osc * 0.2;
+    } else if (midRange){
+      const toCrimson = smoothstep(30, 70, elapsed) * 0.7;
+      col = lerpColor(palettes.dark, palettes.crimson, toCrimson);
+    } else {
+      // Far threads: stay very dark, faintest crimson tinge
+      const toCrimson = smoothstep(50, 100, elapsed) * 0.3;
+      col = lerpColor(palettes.dark, palettes.crimson, toCrimson);
+    }
+
+    const r = Math.max(0, col.r * visibility);
+    const g = Math.max(0, col.g * visibility);
+    const b = Math.max(0, col.b * visibility);
+    const idx = i * 6;
+    cols[idx]=r; cols[idx+1]=g; cols[idx+2]=b;
+    cols[idx+3]=r; cols[idx+4]=g; cols[idx+5]=b;
+  }
+  colorAttr.needsUpdate = true;
+
+  // ── Breathing: even subtler than parent — glacial
+  const breathAmp = 0.008;
+  const breathFreq = 0.15;
+  const posAttr = lineGeo.attributes.position;
+  const arr = posAttr.array;
+  for (let i = 0; i < li * 6; i += 3){
+    const bx = basePositions[i];
+    const by = basePositions[i+1];
+    const bz = basePositions[i+2];
+    const ph = bx * 0.7 + by * 1.1 + bz * 0.5;
+    const b = Math.sin(elapsed * breathFreq + ph) * breathAmp;
+    arr[i]   = bx + b;
+    arr[i+1] = by + b * 0.6;
+    arr[i+2] = bz + b * 0.4;
+  }
+  posAttr.needsUpdate = true;
+
+  // ── Dress form: emerges very late (60s+)
+  const dressReveal = smoothstep(60, 110, elapsed);
+  dressMat.opacity = dressReveal * 0.065;
+
+  // Dress color drift to rose
+  const dColAttr = dressGeo.attributes.color;
+  const dCols = dColAttr.array;
+  if (dressReveal > 0.01){
+    const toRose = smoothstep(80, 130, elapsed);
+    const dc = lerpColor(palettes.dark, palettes.rose, toRose);
+    for (let i = 0; i < di * 6; i += 3){
+      dCols[i]   = dc.r * dressReveal;
+      dCols[i+1] = dc.g * dressReveal;
+      dCols[i+2] = dc.b * dressReveal;
+    }
+    dColAttr.needsUpdate = true;
+  }
+
+  // ── Fragments: emerge over time
+  for (const f of fragments){
+    const fReveal = smoothstep(f.userData.revealTime, f.userData.revealTime + 20, elapsed);
+    f.material.opacity = fReveal * 0.55;
+  }
+
+  // ── Camera: barely perceptible orbit
+  const angle = elapsed * cameraPath.speed;
+  const cr = cameraPath.radius;
+  camera.position.set(
+    sphereCenter.x + Math.cos(angle) * cr,
+    sphereCenter.y + 0.4 + Math.sin(elapsed * cameraPath.heightDrift) * 0.8,
+    sphereCenter.z + Math.sin(angle) * cr
+  );
+  // Look toward a point between sphere and dress — shifts slowly toward dress
+  const dressWeight = smoothstep(50, 100, elapsed) * 0.35;
+  const lookTarget = new THREE.Vector3(
+    sphereCenter.x * (1 - dressWeight) + dressCenter.x * dressWeight,
+    sphereCenter.y * (1 - dressWeight) + (dressCenter.y + 2) * dressWeight,
+    sphereCenter.z * (1 - dressWeight) + dressCenter.z * dressWeight
+  );
+  lookTarget.x += Math.sin(elapsed * 0.008) * 0.3;
+  lookTarget.y += Math.cos(elapsed * 0.006) * 0.15;
+  camera.lookAt(lookTarget);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
