@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: flow, intensity: gentle -->
+<title>4jc · Riley–Robillard phase stream (truth / distortion)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               background: radial-gradient(ellipse at 50% 38%, #111a24, #0a0e14 72%); }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+</style>
+</head>
+<body>
+<div class="id">4jc</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+const frustum = 28;
+let aspect = innerWidth / innerHeight;
+const camera = new THREE.OrthographicCamera(
+  frustum * aspect / -2, frustum * aspect / 2,
+  frustum / 2, frustum / -2, 0.1, 100
+);
+camera.position.set(0, 0, 10);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0e14, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── constants ── */
+const N = 80000;
+const ROWS = 160;
+const COLS = 500;          // 160 × 500 = 80 000
+const W = 26, H = 22;     // world extents
+
+/* ── palette (hand-picked, justified) ──
+   Teal  #1a9e9e  — instrument-panel readout, Robillard's data-room cool
+   Amber #c97b4b  — warning-signal warmth, distortion heat
+   Ice   #b0d8d8  — phase-boundary luminance, in-between state
+   Ground #0a0e14 — near-black navy, Robillard exhibit darkness          */
+
+/* ── uniforms ── */
+const uniforms = {
+  uTime:  { value: 0 },
+  uPx:    { value: renderer.getPixelRatio() },
+  uNodeA: { value: new THREE.Vector2(-4.0, 2.0) },   // truth (liquid)
+  uNodeB: { value: new THREE.Vector2( 5.0,-1.0) },   // distortion (particle)
+};
+
+/* ── material ── */
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+
+  vertexShader: /* glsl */`
+    uniform float uTime;
+    uniform float uPx;
+    uniform vec2  uNodeA;
+    uniform vec2  uNodeB;
+
+    attribute vec2  gridPos;
+    attribute float seed;
+
+    varying float vPhase;
+    varying float vBright;
+
+    void main(){
+      vec2 gp = gridPos;
+
+      /* ── phase field: 0 = liquid (near A), 1 = particle (near B) ── */
+      float dA = length(gp - uNodeA);
+      float dB = length(gp - uNodeB);
+      float infA = exp(-dA * dA * 0.012);
+      float infB = exp(-dB * dB * 0.012);
+      float phase = clamp(0.5 - infA * 0.55 + infB * 0.55, 0.0, 1.0);
+
+      /* ── Riley wave displacement ── */
+      float bFreq = 1.35;
+      float amp   = mix(0.10, 0.72, phase);
+
+      // primary horizontal bands
+      float w1 = sin(gp.y * bFreq * 3.2 + uTime * 0.32) * amp;
+      // secondary diagonal interference
+      float w2 = sin((gp.x * 1.6 + gp.y * 0.55) * bFreq + uTime * 0.22) * amp * 0.35;
+
+      /* ── turbulence near distortion node ── */
+      float t1 = infB * sin(gp.x * 3.8 + gp.y * 2.9 + uTime * 1.1) * 0.55;
+      float t2 = infB * cos(gp.x * 2.3 - gp.y * 3.3 + uTime * 0.75) * 0.38;
+
+      /* ── coherence tightening near truth node ── */
+      float coh = infA * sin(gp.y * bFreq * 6.4 + uTime * 0.18) * 0.06;
+
+      vec3 p = vec3(gp.x + w1 + t1 + coh,
+                     gp.y + w2 + t2,
+                     0.0);
+
+      /* ── banding intensity (Riley stripe visibility) ── */
+      float band = sin(gp.y * bFreq * 6.4 + uTime * 0.32);
+      float bandGate = smoothstep(0.15, 0.65, abs(band));
+
+      // liquid: show only where band is strong → continuous stripes
+      // particle: show everything, scattered
+      vBright = mix(bandGate * 0.92, 0.45 + seed * 0.45, phase);
+
+      /* ── point size ── */
+      float sz = mix(1.7, 3.4, phase);
+      // liquid-phase modulation: peaks wider, troughs vanish
+      sz *= mix(mix(0.55, 1.35, abs(band)), 1.0, phase);
+
+      vPhase = phase;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = uPx * sz;
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+
+  fragmentShader: /* glsl */`
+    varying float vPhase;
+    varying float vBright;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+      if(r2 > 0.25) discard;
+
+      float edge = smoothstep(0.25, 0.08, r2);
+      float alpha = edge * vBright;
+      if(alpha < 0.015) discard;
+
+      /* palette */
+      vec3 teal  = vec3(0.102, 0.620, 0.620);   // #1a9e9e
+      vec3 amber = vec3(0.788, 0.482, 0.294);   // #c97b4b
+      vec3 ice   = vec3(0.690, 0.847, 0.847);   // #b0d8d8
+
+      vec3 col = mix(teal, amber, vPhase);
+      // phase-boundary highlight
+      float bnd = 1.0 - abs(vPhase - 0.5) * 2.0;
+      col = mix(col, ice, bnd * bnd * 0.35);
+
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+/* ── geometry ── */
+function buildGrid(){
+  const pos  = new Float32Array(N * 3);
+  const gpos = new Float32Array(N * 2);
+  const sd   = new Float32Array(N);
+
+  let s = 7919 >>> 0;                       // fixed seed for determinism
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  let idx = 0;
+  for(let r = 0; r < ROWS && idx < N; r++){
+    for(let c = 0; c < COLS && idx < N; c++){
+      const x = (c / COLS - 0.5) * W + (rng() - 0.5) * (W / COLS) * 0.75;
+      const y = (r / ROWS - 0.5) * H + (rng() - 0.5) * (H / ROWS) * 0.75;
+
+      pos[idx * 3]     = x;
+      pos[idx * 3 + 1] = y;
+      pos[idx * 3 + 2] = 0;
+      gpos[idx * 2]     = x;
+      gpos[idx * 2 + 1] = y;
+      sd[idx] = rng();
+      idx++;
+    }
+  }
+  return { pos, gpos, sd };
+}
+
+const { pos, gpos, sd } = buildGrid();
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('gridPos',  new THREE.BufferAttribute(gpos, 2));
+geom.setAttribute('seed',     new THREE.BufferAttribute(sd, 1));
+
+const pts = new THREE.Points(geom, mat);
+scene.add(pts);
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  aspect = innerWidth / innerHeight;
+  camera.left   = frustum * aspect / -2;
+  camera.right  = frustum * aspect /  2;
+  camera.top    = frustum / 2;
+  camera.bottom = frustum / -2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPx.value = renderer.getPixelRatio();
+});
+
+/* ── loop ── */
+const t0 = performance.now();
+
+function loop(){
+  const t = (performance.now() - t0) * 0.001;
+  uniforms.uTime.value = t;
+
+  // nodes drift on slow Lissajous paths
+  uniforms.uNodeA.value.set(
+    -4.0 + Math.sin(t * 0.067) * 3.5,
+     2.0 + Math.cos(t * 0.083) * 2.5
+  );
+  uniforms.uNodeB.value.set(
+     5.0 + Math.cos(t * 0.058) * 3.8,
+    -1.0 + Math.sin(t * 0.074) * 2.8
+  );
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
