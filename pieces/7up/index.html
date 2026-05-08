@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7up · abracadabra lorenz</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06070b; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">7up · abracadabra lorenz</div>
+<div class="hint">mirrored attractor · particles vanish and reappear</div>
+<div class="src">strange attractor · 100k GPGPU particles</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// SURPRISE: Instead of one Lorenz attractor, we run TWO mirrored attractors that particles teleport between.
+// Particles fade out as they approach a spatial "vanishing point" in each lobe, then instantly reappear 
+// in the mirrored lobe with opposite color family—a continuous spatial magic trick, not a timed event.
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06070b, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// init: scatter in box, assign each particle to LEFT (-x) or RIGHT (+x) lobe randomly
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  const lobe = Math.random() < 0.5 ? -1.0 : 1.0; // which side
+  init[i*4]   = lobe * (Math.random()*6 + 4);
+  init[i*4+1] = (Math.random()*2-1) * 8.0;
+  init[i*4+2] = (Math.random()*2-1) * 8.0 + 25.0;
+  init[i*4+3] = Math.random();   // age
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// simulation: Lorenz + teleportation logic when particle crosses x=±3 threshold
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt:    { value: 0.005 },
+  uSigma: { value: 10.0 },
+  uRho:   { value: 28.0 },
+  uBeta:  { value: 8.0/3.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uSigma;
+    uniform float uRho;
+    uniform float uBeta;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      
+      // Mirror the dynamics: if particle is on left (x<0), run normal Lorenz;
+      // if on right (x>0), mirror x in the vector field so it spirals symmetrically
+      float side = sign(p.x);
+      vec3 pEval = vec3(abs(p.x), p.y, p.z); // evaluate field on positive side always
+      
+      vec3 dp = vec3(
+        uSigma * (pEval.y - pEval.x),
+        pEval.x * (uRho - pEval.z) - pEval.y,
+        pEval.x * pEval.y - uBeta * pEval.z
+      );
+      dp.x *= side; // mirror dx back to correct side
+      
+      p += dp * uDt;
+      age = mod(age + uDt * 0.05, 1.0);
+      
+      // TELEPORTATION: if particle drifts toward center (|x| < 3), vanish & reappear on opposite lobe
+      if (abs(p.x) < 3.0) {
+        p.x = -sign(p.x) * (8.0 + fract(age * 17.43) * 6.0); // jump to opposite side
+        age = fract(age + 0.5); // phase shift age so color flips
+      }
+      
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// render points
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 80);
+camera.lookAt(0, 0, 25);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uTime;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vFade;
+    varying float vSide;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      vSide = sign(p.x);
+      
+      // fade out particles near the vanishing zone (|x| < 5)
+      vFade = smoothstep(3.0, 8.0, abs(p.x));
+      
+      p.z -= 25.0;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 1.5 * uPixel * (60.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vFade;
+    varying float vSide;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vFade;
+      
+      // LEFT lobe = cool colors (cyan→violet), RIGHT lobe = warm colors (gold→magenta)
+      vec3 leftA  = vec3(0.16, 0.82, 0.88); // cyan
+      vec3 leftB  = vec3(0.52, 0.28, 0.82); // violet
+      vec3 rightA = vec3(0.98, 0.78, 0.32); // gold
+      vec3 rightB = vec3(0.92, 0.28, 0.62); // magenta
+      
+      vec3 col;
+      if (vSide < 0.0) {
+        col = mix(leftA, leftB, vAge);
+      } else {
+        col = mix(rightA, rightB, vAge);
+      }
+      
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const target = { sigma: 10.0, rho: 28.0 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth)  - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.rho   = 28.0 + ny * 6.0;
+  target.sigma = 10.0 + nx * 2.5;
+});
+
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  lastTime = now;
+  
+  simUniforms.uSigma.value += (target.sigma - simUniforms.uSigma.value) * 0.05;
+  simUniforms.uRho.value   += (target.rho   - simUniforms.uRho.value)   * 0.05;
+
+  for (let i = 0; i < 4; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = now / 1000;
+  
+  const ang = now * 0.00012;
+  camera.position.x = Math.sin(ang) * 80;
+  camera.position.z = Math.cos(ang) * 80;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
