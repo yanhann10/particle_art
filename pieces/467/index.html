@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>467 · process compendium</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#fafaf8; overflow:hidden;
+               color:#1a1a1a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; 
+          letter-spacing: 0.06em; color:#2a2a2a; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; 
+          letter-spacing: 0.04em; color:#2a2a2a; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; 
+          letter-spacing: 0.04em; color:#2a2a2a; }
+</style>
+</head>
+<body>
+<div class="id">467 · process compendium</div>
+<div class="hint">emergence from touch</div>
+<div class="src">casey reas · software 3 (process 18)</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const N = 360;
+const EPSILON = 0.18;
+const MAX_QUADS = 8000;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xfafaf8, 1);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 40);
+camera.position.set(0, 0, 8);
+camera.lookAt(0, 0, 0);
+
+// Elements — N agents on a torus surface, each moving in a circular path
+const elements = [];
+const R_major = 2.2;
+const R_minor = 0.85;
+
+for (let i = 0; i < N; i++){
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.random() * Math.PI * 2;
+  // position on torus
+  const cx = (R_major + R_minor * Math.cos(phi)) * Math.cos(theta);
+  const cy = (R_major + R_minor * Math.cos(phi)) * Math.sin(theta);
+  const cz = R_minor * Math.sin(phi);
+  
+  // tangent vectors for circular motion — rotate around torus normal
+  const nx = -Math.sin(theta);
+  const ny =  Math.cos(theta);
+  const nz = 0;
+  
+  const speed = 0.0008 + Math.random() * 0.0005;
+  const radius = 0.12 + Math.random() * 0.08;
+  
+  elements.push({
+    center: new THREE.Vector3(cx, cy, cz),
+    normal: new THREE.Vector3(nx, ny, nz),
+    tangent: new THREE.Vector3(-ny, nx, 0),
+    phase: Math.random() * Math.PI * 2,
+    speed,
+    radius,
+    pos: new THREE.Vector3()
+  });
+}
+
+// Update element positions
+function updateElements(t){
+  for (let el of elements){
+    const angle = el.phase + t * el.speed;
+    const offset = new THREE.Vector3()
+      .copy(el.tangent).multiplyScalar(Math.cos(angle) * el.radius)
+      .add(new THREE.Vector3().crossVectors(el.normal, el.tangent).multiplyScalar(Math.sin(angle) * el.radius));
+    el.pos.copy(el.center).add(offset);
+  }
+}
+
+// Quad connection geometry
+const quadGeom = new THREE.BufferGeometry();
+const posArr = new Float32Array(MAX_QUADS * 4 * 3);
+const alphaArr = new Float32Array(MAX_QUADS * 4);
+quadGeom.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+quadGeom.setAttribute('alpha', new THREE.BufferAttribute(alphaArr, 1));
+const idxArr = [];
+for (let i = 0; i < MAX_QUADS; i++){
+  const base = i * 4;
+  idxArr.push(base, base+1, base+2, base, base+2, base+3);
+}
+quadGeom.setIndex(idxArr);
+
+const quadMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.CustomBlending,
+  blendEquation: THREE.AddEquation,
+  blendSrc: THREE.SrcAlphaFactor,
+  blendDst: THREE.OneMinusSrcAlphaFactor,
+  vertexShader: `
+    attribute float alpha;
+    varying float vAlpha;
+    void main(){
+      vAlpha = alpha;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      vec3 col = vec3(0.08, 0.08, 0.10);
+      gl_FragColor = vec4(col, vAlpha * 0.035);
+    }
+  `
+});
+
+const quadMesh = new THREE.Mesh(quadGeom, quadMat);
+scene.add(quadMesh);
+
+// Connection tracking
+const connections = new Map();
+let quadCount = 0;
+
+function getKey(i, j){ return i < j ? `${i}_${j}` : `${j}_${i}`; }
+
+function updateConnections(t){
+  const pairs = [];
+  for (let i = 0; i < N; i++){
+    for (let j = i+1; j < N; j++){
+      const d = elements[i].pos.distanceTo(elements[j].pos);
+      if (d < EPSILON){
+        pairs.push([i, j, d]);
+      }
+    }
+  }
+  
+  // Fade out missing connections
+  for (let [key, conn] of connections){
+    const present = pairs.some(p => getKey(p[0], p[1]) === key);
+    if (!present){
+      conn.alpha *= 0.92;
+      if (conn.alpha < 0.005){
+        connections.delete(key);
+      }
+    }
+  }
+  
+  // Add or strengthen present connections
+  for (let [i, j, dist] of pairs){
+    const key = getKey(i, j);
+    if (!connections.has(key)){
+      connections.set(key, { i, j, alpha: 0, quadIdx: quadCount++ % MAX_QUADS });
+    }
+    const conn = connections.get(key);
+    conn.alpha = Math.min(1.0, conn.alpha + 0.015);
+  }
+  
+  // Write quads to geometry
+  for (let [key, conn] of connections){
+    const ei = elements[conn.i];
+    const ej = elements[conn.j];
+    
+    const dir = new THREE.Vector3().subVectors(ej.pos, ei.pos).normalize();
+    const perp = new THREE.Vector3().crossVectors(dir, ei.normal).normalize().multiplyScalar(0.015);
+    
+    const base = conn.quadIdx * 4;
+    const p1 = ei.pos.clone().add(perp);
+    const p2 = ei.pos.clone().sub(perp);
+    const p3 = ej.pos.clone().sub(perp);
+    const p4 = ej.pos.clone().add(perp);
+    
+    posArr[base*3]   = p1.x; posArr[base*3+1] = p1.y; posArr[base*3+2] = p1.z;
+    posArr[base*3+3] = p2.x; posArr[base*3+4] = p2.y; posArr[base*3+5] = p2.z;
+    posArr[base*3+6] = p3.x; posArr[base*3+7] = p3.y; posArr[base*3+8] = p3.z;
+    posArr[base*3+9] = p4.x; posArr[base*3+10]= p4.y; posArr[base*3+11]= p4.z;
+    
+    for (let k = 0; k < 4; k++){
+      alphaArr[base + k] = conn.alpha;
+    }
+  }
+  
+  quadGeom.attributes.position.needsUpdate = true;
+  quadGeom.attributes.alpha.needsUpdate = true;
+}
+
+// Agent spheres (subtle presence)
+const agentGeom = new THREE.SphereGeometry(0.018, 8, 6);
+const agentMat = new THREE.MeshBasicMaterial({ color: 0x1a1a1a, transparent: true, opacity: 0.25 });
+const agentMesh = new THREE.InstancedMesh(agentGeom, agentMat, N);
+scene.add(agentMesh);
+
+const dummy = new THREE.Object3D();
+function updateAgentInstances(){
+  for (let i = 0; i < N; i++){
+    dummy.position.copy(elements[i].pos);
+    dummy.updateMatrix();
+    agentMesh.setMatrixAt(i, dummy.matrix);
+  }
+  agentMesh.instanceMatrix.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let t0 = performance.now();
+let lastClear = t0;
+function loop(){
+  const now = performance.now();
+  const t = now - t0;
+  
+  // Slow fade-clear every 120 seconds
+  if (now - lastClear > 120000){
+    renderer.clear();
+    lastClear = now;
+  }
+  
+  updateElements(t);
+  updateConnections(t);
+  updateAgentInstances();
+  
+  // Slow camera orbit
+  const angle = t * 0.00008;
+  camera.position.x = Math.sin(angle) * 8;
+  camera.position.z = Math.cos(angle) * 8;
+  camera.position.y = Math.sin(angle * 0.4) * 1.2;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+renderer.clear();
+loop();
+</script>
+</body>
+</html>
