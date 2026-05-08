@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: pulse, intensity: gentle -->
+<title>l6m · seismic wreath · earthquake-driven growth</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#08080d;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;opacity:0.55;font-size:11px;letter-spacing:0.06em}
+.data{position:fixed;right:14px;bottom:12px;font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;opacity:0.4;font-size:10px;text-align:right;line-height:1.6;letter-spacing:0.04em}
+.hint{position:fixed;left:14px;top:14px;font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;opacity:0.4;font-size:10px;letter-spacing:0.04em}
+</style>
+</head>
+<body>
+<div class="id">l6m</div>
+<div class="data" id="dataLabel">data: USGS seismic feed<br>connecting…</div>
+<div class="hint">drag to orbit · click to pause · seismic data refreshes every 30 s</div>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+
+/* ── Concept: Neri Oxman "material ecology" ──
+   Differential-growth ribbon (from parent ajo) becomes a seismographic wreath.
+   USGS earthquake data maps onto the form: each quake spawns a leaf (basic unit)
+   along the ribbon. Magnitude → leaf scale & ribbon bulge. Depth → leaf color
+   (shallow terracotta #d4824a → abyssal teal #2a7a6a). Aggregate seismic energy
+   modulates growth pressure. The wreath is a living record of the earth's trembling.
+
+   Palette (5 colors, hand-picked):
+     #c9a45a  antique gold leaf — ribbon body, calm earth
+     #d4824a  terracotta — shallow quakes, warm earth surface
+     #2a7a6a  abyssal teal — deep quakes, mantle cold
+     #08080d  deep midnight — void, geological time
+     #d8c895  warm parchment — dust motes, atmosphere
+*/
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x08080d, 0.018);
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(10, 10, 16);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080d);
+document.body.appendChild(renderer.domElement);
+
+const keyLight = new THREE.DirectionalLight(0xfff0c0, 1.2);
+keyLight.position.set(5, 14, 6);
+scene.add(keyLight);
+scene.add(new THREE.AmbientLight(0x0c0815, 0.4));
+const fillLight = new THREE.DirectionalLight(0x304868, 0.35);
+fillLight.position.set(-8, 4, -6);
+scene.add(fillLight);
+const rimLight = new THREE.PointLight(0xd4824a, 0.6, 30);
+rimLight.position.set(0, 18, -4);
+scene.add(rimLight);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+/* ── earthquake data ── */
+let quakes = [];
+let dataReady = false;
+let maxMagSeen = 2.0;
+
+function fallbackQuakes() {
+  const out = [];
+  for (let i = 0; i < 10; i++) {
+    out.push({
+      lon: Math.random() * 360 - 180,
+      mag: 0.5 + Math.random() * 3.0,
+      depth: Math.random() * 200,
+      t: i / 10
+    });
+  }
+  return out;
+}
+
+async function fetchQuakes() {
+  try {
+    const r = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson');
+    const j = await r.json();
+    const features = j.features || [];
+    if (features.length === 0) { quakes = fallbackQuakes(); }
+    else {
+      quakes = features.map(f => ({
+        lon: f.geometry.coordinates[0],
+        mag: Math.max(f.properties.mag || 0.1, 0.1),
+        depth: Math.max(f.geometry.coordinates[2] || 0, 0),
+        t: ((f.geometry.coordinates[0] + 180) / 360) % 1
+      }));
+    }
+    maxMagSeen = Math.max(2, ...quakes.map(q => q.mag));
+    document.getElementById('dataLabel').innerHTML =
+      `data: USGS seismic feed<br>${quakes.length} events · last hour<br>max M${maxMagSeen.toFixed(1)}`;
+  } catch (e) {
+    if (!quakes.length) quakes = fallbackQuakes();
+    document.getElementById('dataLabel').innerHTML =
+      `data: USGS seismic feed<br>offline · fallback`;
+  }
+  dataReady = true;
+  rebuildLeaves();
+}
+fetchQuakes();
+setInterval(fetchQuakes, 30000);
+
+/* ── differential growth (inherited from ajo → 5gm) ── */
+const MAX_VERTS = 1200, ATTRACT = 0.06, REPEL_R = 0.55, REPEL_STR = 0.14;
+const NOISE = 0.003, BASE_PRESSURE = 0.003, RISE = 0.004, MAX_D = 0.42;
+const verts = [];
+for (let i = 0; i < 14; i++) {
+  const th = i / 14 * Math.PI * 2, r = 1.6 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th) * r, y: 0, z: Math.sin(th) * r, age: 0 });
+}
+const CELL = REPEL_R, grid = new Map();
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i];
+    const k = Math.floor(v.x / CELL) + ',' + Math.floor(v.y / CELL) + ',' + Math.floor(v.z / CELL);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function gridNbrs(v) {
+  const cx = Math.floor(v.x / CELL), cy = Math.floor(v.y / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cy + dy) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+function step() {
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const fx = new Float32Array(n), fy = new Float32Array(n), fz = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of gridNbrs(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex * ex + ey * ey + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      fx[i] += ex * f; fy[i] += ey * f; fz[i] += ez * f;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const a = verts[(i - 1 + n) % n], b = verts[(i + 1) % n], v = verts[i];
+    fx[i] += (a.x + b.x - 2 * v.x) * ATTRACT;
+    fy[i] += (a.y + b.y - 2 * v.y) * ATTRACT;
+    fz[i] += (a.z + b.z - 2 * v.z) * ATTRACT;
+  }
+  let mx = 0, my = 0, mz = 0;
+  for (let i = 0; i < n; i++) { mx += verts[i].x; my += verts[i].y; mz += verts[i].z; }
+  mx /= n; my /= n; mz /= n;
+  const eMod = dataReady ? Math.min(quakes.reduce((s, q) => s + q.mag, 0) / 15, 2.5) : 1.0;
+  const PRESSURE = BASE_PRESSURE * (0.6 + 0.4 * eMod);
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - mx, oy = verts[i].y - my, oz = verts[i].z - mz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    fx[i] += (ox / d) * PRESSURE;
+    fy[i] += (oy / d) * PRESSURE * 0.4;
+    fz[i] += (oz / d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++) {
+    const a = verts[i].age;
+    const up = RISE * (0.3 + 1.2 * Math.min(a * 1.5, 1.0));
+    verts[i].x += fx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].y += fy[i] + (Math.random() - 0.5) * NOISE * 0.5 + up;
+    verts[i].z += fz[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].age += 0.0014;
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    grown.push(a);
+    const ex = b.x - a.x, ey = b.y - a.y, ez = b.z - a.z;
+    if (ex * ex + ey * ey + ez * ez > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({ x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 - 0.05, z: (a.z + b.z) * 0.5, age: Math.max(a.age, b.age) * 0.5 });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+for (let s = 0; s < 1200; s++) step();
+addEventListener('click', () => { paused = !paused; });
+
+/* ── ribbon mesh ── */
+let ribbonMesh = null;
+const ribbonMat = new THREE.MeshStandardMaterial({
+  color: 0xc9a45a, emissive: 0x1a1206, roughness: 0.35, metalness: 0.65, side: THREE.DoubleSide
+});
+
+/* ── leaf instances ── */
+function makeLeafGeo() {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, -0.5);
+  shape.bezierCurveTo(0.25, -0.28, 0.30, 0.08, 0.10, 0.42);
+  shape.quadraticCurveTo(0.03, 0.50, 0, 0.52);
+  shape.quadraticCurveTo(-0.03, 0.50, -0.10, 0.42);
+  shape.bezierCurveTo(-0.30, 0.08, -0.25, -0.28, 0, -0.5);
+  return new THREE.ShapeGeometry(shape, 5);
+}
+const leafGeo = makeLeafGeo();
+
+function depthColor(depth) {
+  const t = Math.min(depth / 150, 1);
+  const c = new THREE.Color();
+  c.lerpColors(new THREE.Color(0xd4824a), new THREE.Color(0x2a7a6a), t);
+  return c;
+}
+
+const MAX_LEAVES = 100;
+const leafMat = new THREE.MeshStandardMaterial({
+  color: 0xffffff, emissive: 0x080604, roughness: 0.5, metalness: 0.25, side: THREE.DoubleSide,
+  vertexColors: false
+});
+let leafIM = new THREE.InstancedMesh(leafGeo, leafMat, MAX_LEAVES);
+leafIM.count = 0;
+leafIM.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_LEAVES * 3), 3);
+scene.add(leafIM);
+const dummy = new THREE.Object3D();
+let leafMeta = [];
+
+function rebuildLeaves() {
+  if (!quakes.length || !verts.length) return;
+  const n = verts.length;
+  const count = Math.min(quakes.length, MAX_LEAVES);
+  leafMeta = [];
+  for (let i = 0; i < count; i++) {
+    const q = quakes[i];
+    const vi = Math.floor(q.t * n) % n;
+    const scale = 0.35 + (q.mag / Math.max(maxMagSeen, 1)) * 0.9;
+    const col = depthColor(q.depth);
+    leafIM.instanceColor.setXYZ(i, col.r, col.g, col.b);
+    leafMeta.push({ vi, scale, phase: i * 1.618 * Math.PI, mag: q.mag });
+  }
+  leafIM.count = count;
+  leafIM.instanceColor.needsUpdate = true;
+}
+
+/* ── dust motes (atmosphere) ── */
+const DUST = 400;
+const dustPos = new Float32Array(DUST * 3);
+const dustVel = new Float32Array(DUST);
+for (let i = 0; i < DUST; i++) {
+  dustPos[i * 3] = (Math.random() - 0.5) * 28;
+  dustPos[i * 3 + 1] = Math.random() * 24;
+  dustPos[i * 3 + 2] = (Math.random() - 0.5) * 28;
+  dustVel[i] = 0.002 + Math.random() * 0.004;
+}
+const dustGeo = new THREE.BufferGeometry();
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({ color: 0xd8c895, size: 0.04, transparent: true, opacity: 0.22 });
+scene.add(new THREE.Points(dustGeo, dustMat));
+
+/* ── subtle ground plane glow ── */
+const glowGeo = new THREE.PlaneGeometry(20, 20);
+const glowMat = new THREE.MeshBasicMaterial({ color: 0x0e0c08, transparent: true, opacity: 0.15 });
+const glowPlane = new THREE.Mesh(glowGeo, glowMat);
+glowPlane.rotation.x = -Math.PI / 2;
+glowPlane.position.y = -0.2;
+scene.add(glowPlane);
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── render loop ── */
+const t0 = performance.now();
+const upVec = new THREE.Vector3(0, 1, 0);
+
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+  for (let s = 0; s < 4; s++) step();
+
+  /* rebuild ribbon each frame */
+  if (verts.length > 8) {
+    const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.0);
+    const NS = Math.min(900, verts.length * 3);
+    const pos = new Float32Array(NS * 6);
+    const idx = [];
+
+    for (let i = 0; i < NS; i++) {
+      const tt = i / NS;
+      const p = curve.getPointAt(tt);
+      const tan = curve.getTangentAt(tt).normalize();
+      let lat = new THREE.Vector3().crossVectors(tan, upVec);
+      if (lat.lengthSq() < 0.001) lat.set(1, 0, 0);
+      lat.normalize();
+      let w = 0.18 + 0.12 * Math.sin(tt * 28 + t * 0.3);
+      /* seismic bulge: quakes widen ribbon locally */
+      if (dataReady) {
+        for (let qi = 0; qi < quakes.length; qi++) {
+          const d = Math.abs(tt - quakes[qi].t);
+          const wrap = Math.min(d, 1 - d);
+          if (wrap < 0.06) {
+            const inf = (1 - wrap / 0.06) * quakes[qi].mag * 0.07;
+            w += inf * (1 + 0.25 * Math.sin(t * 1.8 + quakes[qi].mag * 2));
+          }
+        }
+      }
+      const lx = p.x - lat.x * w, ly = p.y - lat.y * w, lz = p.z - lat.z * w;
+      const rx = p.x + lat.x * w, ry = p.y + lat.y * w, rz = p.z + lat.z * w;
+      pos[i * 6] = lx; pos[i * 6 + 1] = ly; pos[i * 6 + 2] = lz;
+      pos[i * 6 + 3] = rx; pos[i * 6 + 4] = ry; pos[i * 6 + 5] = rz;
+    }
+    for (let i = 0; i < NS; i++) {
+      const ni = (i + 1) % NS;
+      const a = i * 2, b = i * 2 + 1, c = ni * 2, d = ni * 2 + 1;
+      idx.push(a, b, c, b, d, c);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    if (ribbonMesh) { scene.remove(ribbonMesh); ribbonMesh.geometry.dispose(); }
+    ribbonMesh = new THREE.Mesh(g, ribbonMat);
+    scene.add(ribbonMesh);
+  }
+
+  /* animate leaves */
+  if (leafMeta.length && verts.length > 1) {
+    const n = verts.length;
+    for (let i = 0; i < leafMeta.length; i++) {
+      const lm = leafMeta[i];
+      const v = verts[lm.vi % n];
+      const breathe = 1 + 0.12 * Math.sin(t * 1.4 + lm.phase);
+      const s = lm.scale * breathe;
+      dummy.position.set(v.x, v.y + 0.25 + 0.08 * Math.sin(t * 0.7 + lm.phase), v.z);
+      /* orient leaf outward from ring center, tilted up */
+      const outX = v.x, outZ = v.z;
+      const outLen = Math.hypot(outX, outZ) + 1e-6;
+      const nx = outX / outLen, nz = outZ / outLen;
+      dummy.lookAt(v.x + nx * 3, v.y + 1.5, v.z + nz * 3);
+      dummy.rotateZ(Math.sin(t * 0.5 + lm.phase) * 0.18);
+      dummy.rotateX(0.25);
+      dummy.scale.set(s, s, s * 0.6);
+      dummy.updateMatrix();
+      leafIM.setMatrixAt(i, dummy.matrix);
+    }
+    leafIM.instanceMatrix.needsUpdate = true;
+  }
+
+  /* dust drift */
+  for (let i = 0; i < DUST; i++) {
+    dustPos[i * 3 + 1] += dustVel[i];
+    if (dustPos[i * 3 + 1] > 24) {
+      dustPos[i * 3 + 1] = 0;
+      dustPos[i * 3] = (Math.random() - 0.5) * 28;
+      dustPos[i * 3 + 2] = (Math.random() - 0.5) * 28;
+    }
+  }
+  dustGeo.attributes.position.needsUpdate = true;
+
+  /* camera track centroid */
+  let yMean = 0;
+  for (const v of verts) yMean += v.y;
+  yMean /= Math.max(verts.length, 1);
+  const targetY = Math.max(yMean, 2.0);
+  controls.target.y += (targetY - controls.target.y) * 0.04;
+  camera.position.y += (targetY + 4 - camera.position.y) * 0.04;
+
+  /* gentle pulse on rim light intensity from aggregate energy */
+  if (dataReady) {
+    const pulse = 0.4 + 0.4 * Math.sin(t * 0.8) * Math.min(quakes.length / 10, 1);
+    rimLight.intensity = pulse;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
