@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nza · (Dés)Ordres — 1% de Désordre</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#ebe8dc; overflow:hidden;
+               color:#2a2a2a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; 
+        letter-spacing: 0.06em; color:#2a2a2a; }
+</style>
+</head>
+<body>
+<div class="id">nza · vera molnar · désordres 1976</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xebe8dc);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── grid parameters
+const ROWS = 32;
+const COLS = 32;
+const CELL_SIZE = 0.60;
+const GRID_W = COLS * CELL_SIZE;
+const GRID_H = ROWS * CELL_SIZE;
+
+// each cell contains one "nested square" motif rendered as four line segments
+// that form a square with slightly offset corners
+const SQUARE_SIZE = 0.42;
+
+// seeded RNG for repeatability (Molnar's work is deterministic per composition)
+function makeRNG(seed) {
+  let s = seed;
+  return () => {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// Gaussian approximation (Box-Muller lite)
+function gaussian(rng) {
+  return (rng() + rng() + rng() + rng() + rng() + rng() - 3.0) / 1.5;
+}
+
+// ────────────── build geometry: one tube per line segment
+// each cell generates 4 segments (square), chaos increases top→bottom
+const segments = [];
+const rng = makeRNG(0xDE507D7E);
+
+for (let row = 0; row < ROWS; row++) {
+  for (let col = 0; col < COLS; col++) {
+    // cell center in grid space
+    const cx = -GRID_W / 2 + (col + 0.5) * CELL_SIZE;
+    const cy = GRID_H / 2 - (row + 0.5) * CELL_SIZE;   // y increases downward in rows
+    
+    // chaos amount: 0 at top (row=0), 1 at bottom (row=ROWS-1)
+    const chaos = smoothstep(0, 1, row / (ROWS - 1));
+    
+    // base square corners (unperturbed)
+    const hs = SQUARE_SIZE / 2;
+    const corners = [
+      [-hs, -hs],
+      [ hs, -hs],
+      [ hs,  hs],
+      [-hs,  hs]
+    ];
+    
+    // perturb each corner: position + rotation
+    const perturbed = corners.map(([x, y]) => {
+      // position offset
+      const dx = gaussian(rng) * 0.025 * chaos * CELL_SIZE;
+      const dy = gaussian(rng) * 0.025 * chaos * CELL_SIZE;
+      // rotation around cell center
+      const angle = gaussian(rng) * 0.08 * chaos;
+      const cos_a = Math.cos(angle);
+      const sin_a = Math.sin(angle);
+      const rx = x * cos_a - y * sin_a;
+      const ry = x * sin_a + y * cos_a;
+      return [cx + rx + dx, cy + ry + dy];
+    });
+    
+    // create 4 line segments forming the perturbed square
+    for (let i = 0; i < 4; i++) {
+      const [x0, y0] = perturbed[i];
+      const [x1, y1] = perturbed[(i + 1) % 4];
+      segments.push({ x0, y0, x1, y1, chaos });
+    }
+  }
+}
+
+function smoothstep(a, b, t) {
+  const x = Math.max(0, Math.min(1, (t - a) / (b - a)));
+  return x * x * (3 - 2 * x);
+}
+
+// build tube geometry for each segment
+const group = new THREE.Group();
+const tubeRadius = 0.010;
+const tubeMat = new THREE.MeshBasicMaterial({ color: 0x1a1a1a });
+
+segments.forEach(seg => {
+  const path = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(seg.x0, seg.y0, 0),
+    new THREE.Vector3(seg.x1, seg.y1, 0)
+  ]);
+  const geom = new THREE.TubeGeometry(path, 1, tubeRadius, 8, false);
+  const mesh = new THREE.Mesh(geom, tubeMat);
+  group.add(mesh);
+});
+
+scene.add(group);
+
+// ────────────── subtle 3D wave: segments at high chaos lift slightly in Z
+// (makes the disorder gradient readable in 3D when camera orbits)
+group.children.forEach((mesh, i) => {
+  const seg = segments[i];
+  const lift = seg.chaos * 0.5;
+  mesh.position.z = lift * (Math.sin(seg.x0 * 0.3) * 0.3 + Math.cos(seg.y0 * 0.3) * 0.3);
+});
+
+// ────────────── animation
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  
+  // slow orbit: camera circles the grid, viewing disorder gradient from changing angles
+  const radius = 28;
+  const angle = t * 0.08;
+  camera.position.x = Math.sin(angle) * radius;
+  camera.position.z = Math.cos(angle) * radius;
+  camera.position.y = Math.sin(t * 0.03) * 2;   // gentle vertical oscillation
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
