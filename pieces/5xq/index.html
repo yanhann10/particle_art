@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5xq · cartwheel attractor</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06070b; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">5xq · cartwheel attractor</div>
+<div class="hint">σ ρ β · move pointer to nudge · watch for the cartwheel</div>
+<div class="src">zs4 → surprise · Lorenz GPGPU 100k</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06070b, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 8.0;
+  init[i*4+1] = (Math.random()*2-1) * 8.0;
+  init[i*4+2] = (Math.random()*2-1) * 8.0 + 25.0;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt:    { value: 0.005 },
+  uSigma: { value: 10.0 },
+  uRho:   { value: 28.0 },
+  uBeta:  { value: 8.0/3.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uSigma;
+    uniform float uRho;
+    uniform float uBeta;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vec3 dp = vec3(
+        uSigma * (p.y - p.x),
+        p.x * (uRho - p.z) - p.y,
+        p.x * p.y - uBeta * p.z
+      );
+      p += dp * uDt;
+      age = mod(age + uDt * 0.05, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// ---- render pass ----
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 80);
+camera.lookAt(0, 0, 25);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+// Cartwheel surprise: every ~11s the attractor does a full 360° cartwheel
+// over ~1.8s, with a brief color flash. Eased with smoothstep for Calder-like timing.
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:      { value: rtB.texture },
+    uPixel:     { value: renderer.getPixelRatio() },
+    uTime:      { value: 0 },
+    uCartwheel: { value: 0.0 }  // 0..1 during cartwheel, 0 otherwise
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uTime;
+    uniform float uCartwheel;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vSpeed;
+    varying float vFlip;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+
+      float speed = length(vec3(
+        10.0 * (p.y - p.x),
+        p.x * 28.0 - p.y - p.x*p.z,
+        p.x * p.y - (8.0/3.0) * p.z
+      )) * 0.005;
+      vSpeed = clamp(speed, 0.0, 1.0);
+      vAge = s.w;
+      vFlip = uCartwheel;
+
+      // center the attractor
+      p.z -= 25.0;
+
+      // THE CARTWHEEL: rotate the entire form around the lateral (X) axis
+      // full 360° = 2π over the flip duration
+      float angle = uCartwheel * 6.28318;
+      float ca = cos(angle);
+      float sa = sin(angle);
+      vec3 q;
+      q.x = p.x;
+      q.y = p.y * ca - p.z * sa;
+      q.z = p.y * sa + p.z * ca;
+      p = q;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // particles puff up slightly mid-cartwheel (centrifugal whimsy)
+      float puff = 1.0 + sin(uCartwheel * 3.14159) * 0.8;
+      gl_PointSize = (1.1 + 1.6 * vSpeed) * puff * uPixel * (60.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vSpeed;
+    varying float vFlip;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0);
+
+      // normal palette: deep indigo → magenta → warm gold
+      vec3 a_col = vec3(0.20, 0.32, 0.78);
+      vec3 b_col = vec3(0.85, 0.32, 0.62);
+      vec3 c_col = vec3(0.98, 0.86, 0.50);
+      float k = mod(vAge + vSpeed * 0.4, 1.0);
+      vec3 col = mix(a_col, b_col, smoothstep(0.0, 0.5, k));
+      col = mix(col, c_col, smoothstep(0.5, 1.0, k));
+
+      // surprise color: mid-cartwheel, flash to a cool teal-white
+      // peaks at the halfway point of the flip, fades gracefully
+      float flashIntensity = sin(vFlip * 3.14159);
+      flashIntensity = flashIntensity * flashIntensity; // sharpen
+      vec3 flashCol = vec3(0.55, 0.95, 0.90);
+      col = mix(col, flashCol, flashIntensity * 0.6);
+
+      // brief brightness bump during cartwheel
+      float bright = 0.45 + vSpeed * 0.9 + flashIntensity * 0.35;
+      gl_FragColor = vec4(col * a * bright, a);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const target = { sigma: 10.0, rho: 28.0, beta: 8.0/3.0 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth)  - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.rho   = 28.0 + ny * 6.0;
+  target.sigma = 10.0 + nx * 2.5;
+});
+
+// Cartwheel timing — Alexander Calder mobile timing:
+// long stillness, quick graceful tumble, recover
+const CYCLE    = 11.0;   // seconds between cartwheels
+const FLIP_DUR = 1.8;    // cartwheel duration in seconds
+const PAUSE    = CYCLE - FLIP_DUR; // ~9.2s of calm
+
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  lastTime = now;
+  const tSec = now / 1000.0;
+
+  // ease params
+  simUniforms.uSigma.value += (target.sigma - simUniforms.uSigma.value) * 0.05;
+  simUniforms.uRho.value   += (target.rho   - simUniforms.uRho.value)   * 0.05;
+
+  // step sim 4 substeps
+  for (let i = 0; i < 4; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  // compute cartwheel phase
+  const cycleT = tSec % CYCLE;
+  let cartwheel = 0.0;
+  if (cycleT > PAUSE) {
+    // we're in the flip window
+    const raw = (cycleT - PAUSE) / FLIP_DUR; // 0..1
+    // smoothstep easing: slow start, quick middle, slow landing
+    cartwheel = raw * raw * (3.0 - 2.0 * raw);
+  }
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = tSec;
+  pointsMat.uniforms.uCartwheel.value = cartwheel;
+
+  // slow camera orbit — slightly wider during cartwheel for framing
+  const ang = now * 0.00012;
+  const orbitR = 80 + Math.sin(cartwheel * Math.PI) * 15;
+  camera.position.x = Math.sin(ang) * orbitR;
+  camera.position.z = Math.cos(ang) * orbitR;
+  camera.position.y = Math.sin(cartwheel * Math.PI) * 12; // lift slightly to see the tumble
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
