@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8i3 · speculative scaffold</title>
+<!-- MOTION: construction, intensity: vigorous -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1a1a; overflow:hidden;
+               color:#e5d6f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size: 11px; letter-spacing: 0.04em; color:#999; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #2a2a2a; color:#e5d6f0; border:1px solid #4a4a4a;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; }
+  button.start:hover { background:#3a3a3a; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · build with sound</button>
+<div class="id">8i3</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x1a1a1a, 25, 80);
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(28, 22, 28);
+camera.lookAt(0, 8, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1a1a, 1);
+document.body.appendChild(renderer.domElement);
+
+// stochastic L-system for room assembly
+// state: list of {pos:[x,y,z], dir:Vector3, age:float, state:'grow'|'solid'|'falling'}
+const GRID = 1.2;
+const MAX_BLOCKS = 800;
+let blocks = [];
+let nextSpawnTime = 0;
+
+// instanced cube mesh — rebar gray base, neon code-flash highlight
+const cubeGeo = new THREE.BoxGeometry(GRID*0.92, GRID*0.92, GRID*0.92);
+const cubeMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uBass: { value: 0 },
+    uMid: { value: 0 },
+    uTreble: { value: 0 }
+  },
+  vertexShader: `
+    uniform float uTime;
+    uniform float uBass;
+    uniform float uMid;
+    uniform float uTreble;
+    varying vec3 vPos;
+    varying float vEnergy;
+    varying vec3 vNormal;
+    void main(){
+      vPos = (instanceMatrix * vec4(position, 1.0)).xyz;
+      vNormal = normalize((instanceMatrix * vec4(normal, 0.0)).xyz);
+      // energy from age encoded in matrix scale
+      float age = instanceMatrix[0][0] / ${GRID*0.92};
+      vEnergy = uBass + uMid * 0.5;
+      gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uBass;
+    uniform float uMid;
+    uniform float uTreble;
+    varying vec3 vPos;
+    varying float vEnergy;
+    varying vec3 vNormal;
+    void main(){
+      // rebar gray: #5a5a5a, cinder: #3a3a3a, neon code: #00ff88
+      vec3 gray = vec3(0.35, 0.35, 0.35);
+      vec3 cinder = vec3(0.23, 0.23, 0.23);
+      vec3 neon = vec3(0.0, 1.0, 0.53);
+      
+      float gridSnap = step(0.92, fract(vPos.x / ${GRID}) * ${GRID}) +
+                       step(0.92, fract(vPos.y / ${GRID}) * ${GRID}) +
+                       step(0.92, fract(vPos.z / ${GRID}) * ${GRID});
+      
+      vec3 col = mix(cinder, gray, 0.6);
+      
+      // neon flash on bass hits (edges)
+      float edgeGlow = smoothstep(0.4, 1.0, uBass) * gridSnap;
+      col = mix(col, neon, edgeGlow * 0.8);
+      
+      // directional shading
+      vec3 lightDir = normalize(vec3(0.4, 1.0, 0.3));
+      float ndl = max(0.0, dot(vNormal, lightDir));
+      col *= 0.4 + 0.6 * ndl;
+      
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+
+const instancedMesh = new THREE.InstancedMesh(cubeGeo, cubeMat, MAX_BLOCKS);
+instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(instancedMesh);
+
+// occupied grid cells for collision
+const occupied = new Set();
+function gridKey(x,y,z){ return `${x},${y},${z}`; }
+function snapGrid(v){ return Math.round(v/GRID)*GRID; }
+
+// L-system rules: grow vertically, branch horizontally with probability
+function trySpawn(parentPos, parentDir, age, energy){
+  if (blocks.length >= MAX_BLOCKS) return;
+  
+  // vertical growth with high energy
+  let candidates = [];
+  if (energy > 0.3 && Math.random() < 0.7){
+    candidates.push({ dx:0, dy:GRID, dz:0 });
+  }
+  // horizontal branching (rooms)
+  if (Math.random() < 0.4 + energy * 0.3){
+    const dirs = [[GRID,0,0], [-GRID,0,0], [0,0,GRID], [0,0,-GRID]];
+    const pick = dirs[Math.floor(Math.random()*dirs.length)];
+    candidates.push({ dx:pick[0], dy:pick[1], dz:pick[2] });
+  }
+  
+  candidates.forEach(c => {
+    const nx = snapGrid(parentPos[0] + c.dx);
+    const ny = snapGrid(parentPos[1] + c.dy);
+    const nz = snapGrid(parentPos[2] + c.dz);
+    const key = gridKey(nx,ny,nz);
+    if (!occupied.has(key) && ny >= 0 && ny < 24*GRID){
+      occupied.add(key);
+      blocks.push({
+        pos: [nx,ny,nz],
+        dir: new THREE.Vector3(c.dx, c.dy, c.dz).normalize(),
+        age: 0,
+        state: 'grow',
+        vel: new THREE.Vector3(0,0,0)
+      });
+    }
+  });
+}
+
+// downbeat collapse: turn solid blocks to falling on bass spike
+let lastBass = 0;
+function collapseOnDownbeat(bass){
+  if (bass > 0.65 && lastBass < 0.5){
+    // select 20-40% of solid blocks to fall
+    const toFall = blocks.filter(b => b.state === 'solid' && Math.random() < 0.3);
+    toFall.forEach(b => {
+      b.state = 'falling';
+      b.vel.set((Math.random()-0.5)*0.02, 0, (Math.random()-0.5)*0.02);
+      const key = gridKey(snapGrid(b.pos[0]), snapGrid(b.pos[1]), snapGrid(b.pos[2]));
+      occupied.delete(key);
+    });
+  }
+  lastBass = bass;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// audio
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+let analyser = null, freqData = null;
+async function startAudio(){
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting mic…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.75;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'live · speak/clap to build & collapse';
+  } catch (e) {
+    hint.textContent = 'mic denied — synthetic build cycle';
+  }
+}
+startBtn.addEventListener('click', startAudio);
+
+function bandEnergy(arr, lo, hi){
+  let s = 0;
+  for (let i = lo; i < hi; i++) s += arr[i];
+  return (s / (hi-lo)) / 255;
+}
+
+let bass = 0, mid = 0, treble = 0;
+const start = performance.now();
+const dummy = new THREE.Object3D();
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  cubeMat.uniforms.uTime.value = t;
+  
+  if (analyser){
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    bass = bandEnergy(freqData, 0, Math.floor(n*0.08));
+    mid = bandEnergy(freqData, Math.floor(n*0.08), Math.floor(n*0.35));
+    treble = bandEnergy(freqData, Math.floor(n*0.35), n);
+  } else {
+    // synthetic envelopes
+    bass = 0.35 + 0.35 * Math.sin(t*1.1);
+    mid = 0.30 + 0.30 * Math.sin(t*1.9 + 1.2);
+    treble = 0.25 + 0.25 * Math.sin(t*3.2 + 0.7);
+  }
+  
+  cubeMat.uniforms.uBass.value = bass;
+  cubeMat.uniforms.uMid.value = mid;
+  cubeMat.uniforms.uTreble.value = treble;
+  
+  // spawn foundation blocks or grow from existing
+  const spawnRate = 0.15 + mid * 0.25;
+  if (t > nextSpawnTime && blocks.length < MAX_BLOCKS){
+    nextSpawnTime = t + spawnRate;
+    if (blocks.length === 0){
+      // seed foundation
+      const fx = snapGrid((Math.random()-0.5)*4*GRID);
+      const fz = snapGrid((Math.random()-0.5)*4*GRID);
+      occupied.add(gridKey(fx,0,fz));
+      blocks.push({
+        pos: [fx, 0, fz],
+        dir: new THREE.Vector3(0,1,0),
+        age: 0,
+        state: 'grow',
+        vel: new THREE.Vector3(0,0,0)
+      });
+    } else {
+      // grow from random solid block
+      const solids = blocks.filter(b => b.state === 'solid' && b.age > 0.5);
+      if (solids.length > 0){
+        const parent = solids[Math.floor(Math.random()*solids.length)];
+        trySpawn(parent.pos, parent.dir, parent.age, bass + mid*0.5);
+      }
+    }
+  }
+  
+  // downbeat collapse check
+  collapseOnDownbeat(bass);
+  
+  // update block states
+  const dt = 1/60;
+  const gravity = -0.15;
+  blocks = blocks.filter(b => {
+    if (b.state === 'grow'){
+      b.age += dt * 2.0;
+      if (b.age > 1.0){
+        b.age = 1.0;
+        b.state = 'solid';
+      }
+    } else if (b.state === 'falling'){
+      b.vel.y += gravity * dt;
+      b.pos[0] += b.vel.x;
+      b.pos[1] += b.vel.y;
+      b.pos[2] += b.vel.z;
+      if (b.pos[1] < -GRID*2) return false; // cull
+    }
+    return true;
+  });
+  
+  // render instances
+  let count = 0;
+  blocks.forEach(b => {
+    if (count >= MAX_BLOCKS) return;
+    dummy.position.set(b.pos[0], b.pos[1], b.pos[2]);
+    const s = b.state === 'grow' ? b.age * GRID * 0.92 : GRID * 0.92;
+    dummy.scale.set(s,s,s);
+    dummy.updateMatrix();
+    instancedMesh.setMatrixAt(count, dummy.matrix);
+    count++;
+  });
+  instancedMesh.count = count;
+  instancedMesh.instanceMatrix.needsUpdate = true;
+  
+  // camera orbit
+  const camRadius = 28 + Math.sin(t*0.3)*4;
+  camera.position.x = camRadius * Math.cos(t*0.12);
+  camera.position.z = camRadius * Math.sin(t*0.12);
+  camera.position.y = 18 + Math.sin(t*0.2)*6;
+  
+  // track centroid
+  if (blocks.length > 0){
+    let cx=0, cy=0, cz=0;
+    blocks.forEach(b => { cx+=b.pos[0]; cy+=b.pos[1]; cz+=b.pos[2]; });
+    cx /= blocks.length; cy /= blocks.length; cz /= blocks.length;
+    camera.lookAt(cx, cy, cz);
+  } else {
+    camera.lookAt(0,8,0);
+  }
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
