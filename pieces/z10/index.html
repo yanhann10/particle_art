@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>z10 · Substrate — Jared Tarbell city-growth</title>
+<!-- MOTION: branching, intensity: gentle -->
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#f8f6f0; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">z10</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf8f6f0);
+scene.fog = new THREE.FogExp2(0xf8f6f0, 0.008);
+
+const camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 45, 95);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const ambLight = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambLight);
+const dirLight = new THREE.DirectionalLight(0xffeedd, 0.5);
+dirLight.position.set(10, 30, 15);
+scene.add(dirLight);
+
+// ── Deterministic RNG
+let rngState = 48201;
+function rng(){ 
+  rngState |= 0; 
+  rngState = rngState + 0x6d2b79f5 | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// ── Substrate algorithm — Jared Tarbell's cracked line-growth
+const CANVAS_SIZE = 120;
+const STEP_SIZE = 0.35;
+const INITIAL_LINES = 6;
+const MAX_ITERATIONS = 15000;
+
+// Grid for collision detection
+const GRID_RES = 240;
+const CELL_SIZE = CANVAS_SIZE / GRID_RES;
+const grid = Array(GRID_RES).fill(null).map(() => Array(GRID_RES).fill(null).map(() => []));
+
+function toGrid(x, y){
+  const gx = Math.floor((x + CANVAS_SIZE/2) / CELL_SIZE);
+  const gy = Math.floor((y + CANVAS_SIZE/2) / CELL_SIZE);
+  return [Math.max(0, Math.min(GRID_RES-1, gx)), Math.max(0, Math.min(GRID_RES-1, gy))];
+}
+
+function inBounds(x, y){
+  return Math.abs(x) < CANVAS_SIZE/2 && Math.abs(y) < CANVAS_SIZE/2;
+}
+
+// Line segment storage
+const segments = [];
+class Segment {
+  constructor(x1, y1, x2, y2, generation){
+    this.x1 = x1; this.y1 = y1;
+    this.x2 = x2; this.y2 = y2;
+    this.generation = generation;
+    // Add to grid
+    const [gx1, gy1] = toGrid(x1, y1);
+    const [gx2, gy2] = toGrid(x2, y2);
+    grid[gx1][gy1].push(this);
+    if (gx2 !== gx1 || gy2 !== gy1) grid[gx2][gy2].push(this);
+  }
+}
+
+// Active lines that are still growing
+class ActiveLine {
+  constructor(x, y, angle, generation){
+    this.x = x;
+    this.y = y;
+    this.angle = angle;
+    this.generation = generation;
+    this.alive = true;
+  }
+  step(){
+    if (!this.alive) return null;
+    const nx = this.x + Math.cos(this.angle) * STEP_SIZE;
+    const ny = this.y + Math.sin(this.angle) * STEP_SIZE;
+    
+    // Check bounds
+    if (!inBounds(nx, ny)){
+      this.alive = false;
+      return null;
+    }
+    
+    // Check collision with existing segments
+    const [gx, gy] = toGrid(nx, ny);
+    const nearby = grid[gx][gy];
+    for (let seg of nearby){
+      // Simple distance check to segment
+      const dx = seg.x2 - seg.x1;
+      const dy = seg.y2 - seg.y1;
+      const len2 = dx*dx + dy*dy;
+      if (len2 < 0.01) continue;
+      const t = Math.max(0, Math.min(1, ((nx - seg.x1)*dx + (ny - seg.y1)*dy) / len2));
+      const px = seg.x1 + t * dx;
+      const py = seg.y1 + t * dy;
+      const dist = Math.sqrt((nx-px)*(nx-px) + (ny-py)*(ny-py));
+      if (dist < STEP_SIZE * 1.5){
+        // Collision — create segment up to collision point
+        const seg_new = new Segment(this.x, this.y, px, py, this.generation);
+        segments.push(seg_new);
+        this.alive = false;
+        // Spawn perpendicular line
+        const perpAngle = this.angle + Math.PI/2 * (rng() > 0.5 ? 1 : -1);
+        return new ActiveLine(px, py, perpAngle, this.generation + 1);
+      }
+    }
+    
+    // No collision, advance
+    const seg_new = new Segment(this.x, this.y, nx, ny, this.generation);
+    segments.push(seg_new);
+    this.x = nx;
+    this.y = ny;
+    return null;
+  }
+}
+
+// Seed initial lines from canvas edges
+const activeLines = [];
+for (let i = 0; i < INITIAL_LINES; i++){
+  const edge = Math.floor(rng() * 4);
+  let x, y, angle;
+  const hw = CANVAS_SIZE / 2;
+  switch(edge){
+    case 0: // top
+      x = (rng()-0.5) * CANVAS_SIZE;
+      y = hw;
+      angle = Math.PI * 1.5 + (rng()-0.5) * 0.6;
+      break;
+    case 1: // right
+      x = hw;
+      y = (rng()-0.5) * CANVAS_SIZE;
+      angle = Math.PI + (rng()-0.5) * 0.6;
+      break;
+    case 2: // bottom
+      x = (rng()-0.5) * CANVAS_SIZE;
+      y = -hw;
+      angle = Math.PI * 0.5 + (rng()-0.5) * 0.6;
+      break;
+    case 3: // left
+      x = -hw;
+      y = (rng()-0.5) * CANVAS_SIZE;
+      angle = 0 + (rng()-0.5) * 0.6;
+      break;
+  }
+  activeLines.push(new ActiveLine(x, y, angle, 0));
+}
+
+// Run substrate algorithm
+let iter = 0;
+while (activeLines.length > 0 && iter < MAX_ITERATIONS){
+  iter++;
+  const line = activeLines.shift();
+  if (!line.alive) continue;
+  const spawn = line.step();
+  if (line.alive) activeLines.push(line);
+  if (spawn) activeLines.push(spawn);
+}
+
+// ── Convert segments to particle clusters
+// Each segment gets N particles distributed along its length
+// Color varies by generation
+const PARTICLES_PER_SEGMENT = 8;
+const MAX_GEN = Math.max(...segments.map(s => s.generation));
+
+const palettes = [
+  new THREE.Color(0x2a1810), // dark brown
+  new THREE.Color(0x4a3020), // medium brown
+  new THREE.Color(0x6a4830), // warm brown
+  new THREE.Color(0x8a6040), // light brown
+  new THREE.Color(0xaa7850), // tan
+  new THREE.Color(0xca9060)  // pale tan
+];
+
+function colorForGen(gen){
+  const t = gen / (MAX_GEN + 1);
+  const idx = Math.min(palettes.length - 1, Math.floor(t * palettes.length));
+  return palettes[idx];
+}
+
+const particlePositions = [];
+const particleColors = [];
+
+for (let seg of segments){
+  const dx = seg.x2 - seg.x1;
+  const dy = seg.y2 - seg.y1;
+  const len = Math.sqrt(dx*dx + dy*dy);
+  if (len < 0.01) continue;
+  
+  const baseColor = colorForGen(seg.generation);
+  const numPts = Math.max(2, Math.ceil(len / STEP_SIZE * PARTICLES_PER_SEGMENT));
+  
+  for (let i = 0; i < numPts; i++){
+    const t = i / (numPts - 1);
+    const x = seg.x1 + dx * t;
+    const y = seg.y1 + dy * t;
+    // slight perpendicular jitter
+    const perpX = -dy / len;
+    const perpY = dx / len;
+    const jit = (rng() - 0.5) * 0.15;
+    particlePositions.push(x + perpX * jit, 0.1 + rng() * 0.3, y + perpY * jit);
+    
+    // color variation
+    const c = baseColor.clone();
+    c.offsetHSL(0, 0, (rng()-0.5) * 0.1);
+    particleColors.push(c.r, c.g, c.b);
+  }
+}
+
+const particleGeo = new THREE.BufferGeometry();
+particleGeo.setAttribute('position', new THREE.Float32BufferAttribute(particlePositions, 3));
+particleGeo.setAttribute('color', new THREE.Float32BufferAttribute(particleColors, 3));
+
+const particleMat = new THREE.PointsMaterial({
+  size: 0.35,
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.85,
+  depthWrite: false,
+  sizeAttenuation: true,
+  fog: true
+});
+
+const points = new THREE.Points(particleGeo, particleMat);
+scene.add(points);
+
+// ── Floor plane — subtle paper texture via noise
+const floorGeo = new THREE.PlaneGeometry(CANVAS_SIZE * 1.4, CANVAS_SIZE * 1.4, 80, 80);
+const floorPos = floorGeo.attributes.position;
+for (let i = 0; i < floorPos.count; i++){
+  const x = floorPos.getX(i);
+  const y = floorPos.getY(i);
+  const noise = (Math.sin(x * 0.3) * Math.cos(y * 0.4) + Math.sin(x * 0.7) * Math.cos(y * 0.5)) * 0.3;
+  floorPos.setZ(i, noise - 0.8);
+}
+floorPos.needsUpdate = true;
+floorGeo.computeVertexNormals();
+
+const floorMat = new THREE.MeshLambertMaterial({
+  color: 0xeae6dc,
+  side: THREE.DoubleSide,
+  fog: true
+});
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+
+// ── Camera tracking
+const centroid = new THREE.Vector3();
+if (particlePositions.length > 0){
+  for (let i = 0; i < particlePositions.length; i += 3){
+    centroid.x += particlePositions[i];
+    centroid.y += particlePositions[i+1];
+    centroid.z += particlePositions[i+2];
+  }
+  centroid.multiplyScalar(3 / particlePositions.length);
+}
+
+// ── Resize
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Animate
+const start = performance.now();
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+  
+  // Slow rotation around centroid
+  const angle = elapsed * 0.04;
+  const radius = 95;
+  camera.position.set(
+    centroid.x + Math.cos(angle) * radius,
+    45 + Math.sin(elapsed * 0.03) * 5,
+    centroid.z + Math.sin(angle) * radius
+  );
+  camera.lookAt(centroid.x, 0, centroid.z);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
