@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wel · désordre plotter gradient (vera molnar 1976)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  /* Molnar signature: cream paper ground, subtle texture */
+  body {
+    background: #f4f0e8;
+    background-image:
+      repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.012) 2px, rgba(0,0,0,0.012) 4px),
+      repeating-linear-gradient(90deg, transparent, transparent 2px, rgba(0,0,0,0.012) 2px, rgba(0,0,0,0.012) 4px);
+  }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#2a2520; }
+</style>
+</head>
+<body>
+<div class="id">wel · désordre plotter gradient (vera molnar 1976)</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// VERA MOLNAR — Désordres (1976) / (Dés)Ordres series
+// Visual signature: A grid of line segments, each perturbed by increasing
+// amounts of rotation/offset as you move from top to bottom. The eye reads:
+// order → chaos gradient. Black plotter ink on cream paper.
+//
+// Implementation: 32×32 instanced line segments in a flat 3D grid.
+// Each segment is a thin black tube. Per-instance chaos_amount = y_normalized.
+// Vertex shader applies Gaussian noise * chaos_amount to rotation and endpoints.
+// Camera orbits slowly, tilting to see the wave of disorder in perspective.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf4f0e8);
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 2, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── grid of perturbed line segments
+const GRID = 32;
+const SPACING = 0.42;
+const SEGMENT_LEN = 0.28;
+const COUNT = GRID * GRID;
+
+// seed per cell — fixed at init, Gaussian noise derived from this
+const seeds = new Float32Array(COUNT);
+for (let i = 0; i < COUNT; i++) seeds[i] = Math.random();
+
+// base geometry: a thin tube representing one line segment
+// we'll instance this and transform in vertex shader
+const tubePoints = [
+  new THREE.Vector3(-SEGMENT_LEN * 0.5, 0, 0),
+  new THREE.Vector3( SEGMENT_LEN * 0.5, 0, 0)
+];
+const tubePath = new THREE.CatmullRomCurve3(tubePoints);
+const tubeGeom = new THREE.TubeGeometry(tubePath, 1, 0.008, 4, false);
+
+// instanced mesh
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    uniform float uTime;
+    attribute float chaos;
+    attribute float seedA;
+    attribute float seedB;
+    attribute vec3 offset;
+
+    // simple hash → Gaussian-ish noise
+    float hash(float n){ return fract(sin(n)*43758.5453); }
+    float gnoise(float seed, float idx){
+      float u1 = hash(seed + idx * 0.173);
+      float u2 = hash(seed + idx * 0.317 + 7.77);
+      return sqrt(-2.0 * log(u1 + 1e-6)) * cos(6.28318 * u2);
+    }
+
+    void main(){
+      vec3 p = position;
+      
+      // per-instance rotation perturbation: chaos increases down the grid
+      float rotAngle = gnoise(seedA, 1.0) * chaos * 1.2;
+      float c = cos(rotAngle);
+      float s = sin(rotAngle);
+      float px = p.x * c - p.y * s;
+      float py = p.x * s + p.y * c;
+      p.x = px; p.y = py;
+
+      // endpoint offset perturbation — Molnar's segments shift AND rotate
+      vec2 posNoise = vec2(
+        gnoise(seedB, 2.0) * chaos * 0.12,
+        gnoise(seedB, 3.0) * chaos * 0.12
+      );
+
+      // apply instance offset + perturbation
+      p += offset;
+      p.x += posNoise.x;
+      p.y += posNoise.y;
+
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    void main(){
+      // plotter black ink — slightly warm to match cream ground
+      gl_FragColor = vec4(0.08, 0.08, 0.10, 1.0);
+    }
+  `
+});
+
+const mesh = new THREE.InstancedMesh(tubeGeom, mat, COUNT);
+scene.add(mesh);
+
+// per-instance attributes: offset, chaos, seeds
+const offsetArr = new Float32Array(COUNT * 3);
+const chaosArr = new Float32Array(COUNT);
+const seedAArr = new Float32Array(COUNT);
+const seedBArr = new Float32Array(COUNT);
+
+let idx = 0;
+for (let row = 0; row < GRID; row++){
+  for (let col = 0; col < GRID; col++){
+    const x = (col - GRID * 0.5 + 0.5) * SPACING;
+    const y = (row - GRID * 0.5 + 0.5) * SPACING;
+    offsetArr[idx * 3]     = x;
+    offsetArr[idx * 3 + 1] = y;
+    offsetArr[idx * 3 + 2] = 0;
+    
+    // chaos gradient: 0 at top (row=0), 1 at bottom (row=GRID-1)
+    // apply smoothstep for visual clarity
+    const rawChaos = row / (GRID - 1);
+    chaosArr[idx] = rawChaos * rawChaos; // quadratic makes gradient more legible
+    
+    seedAArr[idx] = seeds[idx];
+    seedBArr[idx] = seeds[idx] * 7.331 + 0.441;
+    idx++;
+  }
+}
+
+tubeGeom.setAttribute('offset', new THREE.InstancedBufferAttribute(offsetArr, 3));
+tubeGeom.setAttribute('chaos', new THREE.InstancedBufferAttribute(chaosArr, 1));
+tubeGeom.setAttribute('seedA', new THREE.InstancedBufferAttribute(seedAArr, 1));
+tubeGeom.setAttribute('seedB', new THREE.InstancedBufferAttribute(seedBArr, 1));
+
+// subtle directional light for depth on tubes
+const light = new THREE.DirectionalLight(0xffffff, 0.6);
+light.position.set(2, 3, 4);
+scene.add(light);
+const ambient = new THREE.AmbientLight(0xf4f0e8, 0.8);
+scene.add(ambient);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(t){
+  mat.uniforms.uTime.value = t * 0.001;
+  
+  // slow orbit with slight vertical tilt to reveal the disorder gradient as a 3D wave
+  const angle = t * 0.00008;
+  camera.position.x = Math.sin(angle) * 22;
+  camera.position.z = Math.cos(angle) * 22;
+  camera.position.y = 2 + Math.sin(angle * 0.7) * 1.2;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop(0);
+</script>
+</body>
+</html>
