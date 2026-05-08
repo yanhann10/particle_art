@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: pulse, intensity: vigorous -->
+<title>bqf · cypress ↔ art-deco tower · audio-reactive</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06070a; overflow:hidden;
+               color:#d6cab2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,monospace; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .label { position:fixed; right:14px; bottom:12px; opacity:0.65; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">bqf</div>
+<div class="hint">click for mic · drag to orbit · auto-morphs on bass</div>
+<div class="label" id="phaseLabel">cypress 100%</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ═══════════════ audio ═══════════════ */
+let analyser = null, freqData = null, audioActive = false;
+let bassEnergy = 0, bassPeak = 0, shockwave = 0, shockOrigin = 0;
+const BASS_THRESHOLD = 0.62, BASS_DECAY = 0.92, SHOCK_DECAY = 0.94;
+
+async function initAudio(){
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    const ctx = new AudioContext();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.7;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    audioActive = true;
+  } catch(e){ /* no mic — piece still works */ }
+}
+document.addEventListener('click', () => { if(!audioActive) initAudio(); }, { once:true });
+
+function updateAudio(){
+  if(!analyser) return;
+  analyser.getByteFrequencyData(freqData);
+  // bass: bins 1-6 (~86-520Hz at 48kHz sample rate)
+  let sum = 0;
+  for(let i=1;i<7;i++) sum += freqData[i];
+  const raw = sum / (6*255);
+  bassEnergy = bassEnergy * BASS_DECAY + raw * (1-BASS_DECAY);
+  // detect hit
+  if(raw > BASS_THRESHOLD && raw > bassPeak * 1.3){
+    shockwave = 1.0;
+    shockOrigin = performance.now()/1000;
+    bassPeak = raw;
+  }
+  bassPeak *= 0.995;
+  shockwave *= SHOCK_DECAY;
+}
+
+/* ═══════════════ scene ═══════════════ */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x06070a, 0.018);
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(14, 6, 22);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06070a, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 8, 0);
+
+/* ═══════════════ render target for post-processing ═══════════════ */
+let rt = new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType });
+const postScene = new THREE.Scene();
+const postCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const postUniforms = {
+  tDiffuse:    { value: rt.texture },
+  uShockwave:  { value: 0 },
+  uShockTime:  { value: 0 },
+  uBass:       { value: 0 },
+  uResolution: { value: new THREE.Vector2(innerWidth, innerHeight) },
+  uAudioOn:    { value: 0 }
+};
+const postMat = new THREE.ShaderMaterial({
+  uniforms: postUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float uShockwave;
+    uniform float uShockTime;
+    uniform float uBass;
+    uniform float uAudioOn;
+    uniform vec2 uResolution;
+    varying vec2 vUv;
+    void main(){
+      vec2 center = vec2(0.5);
+      vec2 dir = vUv - center;
+      float dist = length(dir);
+      // shockwave distortion — radial ripple from center
+      float wave = uShockwave * sin(dist*28.0 - uShockTime*12.0) * exp(-dist*4.0) * 0.035;
+      vec2 offset = normalize(dir+0.001) * wave;
+      // chromatic aberration — scales with bass energy
+      float aberr = (0.001 + uBass * 0.012) * uAudioOn;
+      vec2 uvR = vUv + offset + dir * aberr;
+      vec2 uvG = vUv + offset;
+      vec2 uvB = vUv + offset - dir * aberr;
+      float r = texture2D(tDiffuse, uvR).r;
+      float g = texture2D(tDiffuse, uvG).g;
+      float b = texture2D(tDiffuse, uvB).b;
+      // vignette tightens on bass
+      float vig = 1.0 - (0.3 + uBass*0.25*uAudioOn) * dist * dist;
+      gl_FragColor = vec4(vec3(r,g,b)*vig, 1.0);
+    }
+  `
+});
+const postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2,2), postMat);
+postScene.add(postQuad);
+
+/* ═══════════════ L-system cypress (pose A) ═══════════════ */
+const RULES = {
+  'F': [
+    { p:0.55, s:'F[+f][-f]F' },
+    { p:0.25, s:'FF[/f]\\F' },
+    { p:0.20, s:'F[+f-f][/f\\f]F' },
+  ],
+  'f': [
+    { p:0.6, s:'f[+f][-f]' },
+    { p:0.4, s:'f' },
+  ]
+};
+const ANGLE = THREE.MathUtils.degToRad(13);
+const STEP_BASE = 0.55;
+
+function expand(axiom, depth, rng){
+  let s = axiom;
+  for(let d=0;d<depth;d++){
+    let out='';
+    for(const ch of s){
+      if(ch in RULES){
+        const r=rng(); let acc=0;
+        for(const opt of RULES[ch]){ acc+=opt.p; if(r<=acc){ out+=opt.s; break; } }
+      } else out+=ch;
+    }
+    s=out;
+  }
+  return s;
+}
+
+function turtle(str){
+  const stack=[], segments=[];
+  let pos=new THREE.Vector3(), h=new THREE.Vector3(0,1,0),
+      l=new THREE.Vector3(-1,0,0), u=new THREE.Vector3(0,0,1), gen=0;
+  const rot=(axis,ang)=>{
+    const q=new THREE.Quaternion().setFromAxisAngle(axis,ang);
+    h.applyQuaternion(q); l.applyQuaternion(q); u.applyQuaternion(q);
+  };
+  for(const ch of str){
+    switch(ch){
+      case 'F': case 'f': {
+        const step=STEP_BASE*Math.pow(0.85,gen);
+        const next=pos.clone().addScaledVector(h,step);
+        segments.push({from:pos.clone(),to:next.clone(),gen});
+        pos=next; break;
+      }
+      case '+': rot(u,+ANGLE); break;
+      case '-': rot(u,-ANGLE); break;
+      case '&': rot(l,+ANGLE); break;
+      case '^': rot(l,-ANGLE); break;
+      case '/': rot(h,+ANGLE*1.5); break;
+      case '\\': rot(h,-ANGLE*1.5); break;
+      case '[': stack.push({pos:pos.clone(),h:h.clone(),l:l.clone(),u:u.clone(),gen}); gen++; break;
+      case ']': { const f=stack.pop(); pos=f.pos;h=f.h;l=f.l;u=f.u;gen=f.gen; break; }
+    }
+  }
+  return segments;
+}
+
+const rng=(()=>{let s=0xC0FFEE;return()=>{s=(s+0x6D2B79F5)|0;
+  let t=Math.imul(s^s>>>15,1|s);t=t+Math.imul(t^t>>>7,61|t)^t;
+  return((t^t>>>14)>>>0)/4294967296;};})();
+
+const cypressSegs = turtle(expand('F',6,rng));
+
+/* ═══════════════ art-deco tower (pose B) ═══════════════ */
+function sampleArtDeco(N){
+  const out=new Float32Array(N*3), pos=new THREE.Vector3();
+  const tiers=[
+    {hw:4.5,y0:0,y1:4,ridges:14},{hw:3.4,y0:4,y1:7.5,ridges:12},
+    {hw:2.4,y0:7.5,y1:10.5,ridges:10},{hw:1.5,y0:10.5,y1:13,ridges:8},
+    {hw:0.85,y0:13,y1:15,ridges:6},
+  ];
+  const spireBase=0.6,spireTop=18.5,spireApex=20.5;
+  const W=Math.floor(N*0.55),B=Math.floor(N*0.25),S=Math.floor(N*0.12),C=N-W-B-S;
+  let i=0;
+  const tierW=tiers.map(t=>8*t.hw*(t.y1-t.y0));
+  const twT=tierW.reduce((a,b)=>a+b,0);
+  for(let ti=0;ti<tiers.length;ti++){
+    const t=tiers[ti];
+    const count=ti===tiers.length-1?(W-tierW.slice(0,ti).reduce((a,b)=>a+(b/twT*W),0)):Math.floor(tierW[ti]/twT*W);
+    for(let k=0;k<count;k++){
+      const face=Math.floor(Math.random()*4);
+      const r=Math.floor(Math.random()*t.ridges);
+      const rf=(r+0.5)/t.ridges, along=(rf*2-1)*t.hw;
+      const y=t.y0+Math.random()*(t.y1-t.y0), j=0.04;
+      switch(face){
+        case 0:pos.set(t.hw+(Math.random()-.5)*j,y,along);break;
+        case 1:pos.set(-t.hw+(Math.random()-.5)*j,y,along);break;
+        case 2:pos.set(along,y,t.hw+(Math.random()-.5)*j);break;
+        case 3:pos.set(along,y,-t.hw+(Math.random()-.5)*j);break;
+      }
+      out[i*3]=pos.x;out[i*3+1]=pos.y;out[i*3+2]=pos.z;i++;
+    }
+  }
+  for(let k=0;k<B;k++){
+    const ti=Math.floor(Math.random()*tiers.length), t=tiers[ti];
+    const edge=Math.random()<0.6?t.y1:t.y0, face=Math.floor(Math.random()*4);
+    const along=(Math.random()*2-1)*t.hw, j=0.02;
+    switch(face){
+      case 0:pos.set(t.hw,edge+(Math.random()-.5)*j,along);break;
+      case 1:pos.set(-t.hw,edge+(Math.random()-.5)*j,along);break;
+      case 2:pos.set(along,edge+(Math.random()-.5)*j,t.hw);break;
+      case 3:pos.set(along,edge+(Math.random()-.5)*j,-t.hw);break;
+    }
+    out[i*3]=pos.x;out[i*3+1]=pos.y;out[i*3+2]=pos.z;i++;
+  }
+  for(let k=0;k<S;k++){
+    const t=Math.random(),y=spireTop+t*(spireApex-spireTop),r=spireBase*(1-t);
+    const th=Math.random()*Math.PI*2;
+    pos.set(Math.cos(th)*r,y,Math.sin(th)*r);
+    out[i*3]=pos.x;out[i*3+1]=pos.y;out[i*3+2]=pos.z;i++;
+  }
+  const chevrons=16;
+  for(let k=0;k<C;k++){
+    const ch=Math.floor(Math.random()*chevrons);
+    const th=(ch+0.5)/chevrons*Math.PI*2;
+    const along=Math.random(), inner=0.7, outer=2.0;
+    const r=inner+along*(outer-inner);
+    const y=spireTop-0.4+along*0.8+(Math.random()-.5)*0.05;
+    pos.set(Math.cos(th)*r,y,Math.sin(th)*r);
+    out[i*3]=pos.x;out[i*3+1]=pos.y;out[i*3+2]=pos.z;i++;
+  }
+  return out;
+}
+
+/* ═══════════════ build particle correspondence ═══════════════ */
+const N = 70000;
+const treePos = new Float32Array(N*3);
+const towerPos = sampleArtDeco(N);
+const seeds = new Float32Array(N);
+
+const lens=cypressSegs.map(s=>s.from.distanceTo(s.to));
+const totalLen=lens.reduce((a,b)=>a+b,0);
+const N_SKEL=Math.floor(N*0.55), N_FOL=N-N_SKEL;
+let written=0;
+const v=new THREE.Vector3();
+
+for(let i=0;i<cypressSegs.length;i++){
+  const share=i===cypressSegs.length-1?(N_SKEL-written):Math.max(1,Math.floor(N_SKEL*lens[i]/totalLen));
+  for(let k=0;k<share&&written<N_SKEL;k++){
+    const t=Math.random();
+    v.lerpVectors(cypressSegs[i].from,cypressSegs[i].to,t);
+    const j=0.05*Math.pow(0.85,cypressSegs[i].gen);
+    treePos[written*3]=v.x+(Math.random()-.5)*j;
+    treePos[written*3+1]=v.y+(Math.random()-.5)*j;
+    treePos[written*3+2]=v.z+(Math.random()-.5)*j;
+    seeds[written]=Math.random(); written++;
+  }
+}
+{
+  let yMin=Infinity,yMax=-Infinity;
+  for(const s of cypressSegs){yMin=Math.min(yMin,s.from.y,s.to.y);yMax=Math.max(yMax,s.from.y,s.to.y);}
+  const trunkH=yMax-yMin, haloYStart=yMin+trunkH*0.16;
+  const RIDGES=8,SPIRAL=0.9,TUFT_COUNT=24;
+  const tuftYs=[],tuftThs=[];
+  for(let i=0;i<TUFT_COUNT;i++){
+    tuftYs.push(haloYStart+((i+.5)/TUFT_COUNT)*(yMax-haloYStart));
+    tuftThs.push(Math.random()*Math.PI*2);
+  }
+  const N_R=Math.floor(N_FOL*0.60), N_T=N_FOL-N_R;
+  for(let k=0;k<N_R&&written<N;k++){
+    const yt=Math.random(), y=haloYStart+yt*(yMax-haloYStart);
+    const taper=Math.max(0.18,1-1.5*Math.pow(yt-0.45,2));
+    const baseR=0.05+0.95*taper;
+    const ridge=Math.floor(Math.random()*RIDGES);
+    const ridgeTh=(ridge/RIDGES)*Math.PI*2+y*SPIRAL;
+    const th=ridgeTh+(Math.random()-.5)*0.30;
+    const r=baseR*(0.55+0.45*Math.random());
+    treePos[written*3]=Math.cos(th)*r;
+    treePos[written*3+1]=y+(Math.random()-.5)*0.05;
+    treePos[written*3+2]=Math.sin(th)*r;
+    seeds[written]=Math.random(); written++;
+  }
+  for(let k=0;k<N_T&&written<N;k++){
+    const t=Math.floor(Math.random()*TUFT_COUNT);
+    const tuftY=tuftYs[t], tuftTh=tuftThs[t];
+    const yt=(tuftY-haloYStart)/(yMax-haloYStart);
+    const taper=Math.max(0.18,1-1.5*Math.pow(yt-0.45,2));
+    const baseR=0.05+0.95*taper;
+    const reach=baseR+0.1+Math.random()*0.35;
+    treePos[written*3]=Math.cos(tuftTh+(Math.random()-.5)*0.4)*(reach+(Math.random()-.5)*0.18);
+    treePos[written*3+1]=tuftY+(Math.random()-.5)*0.4;
+    treePos[written*3+2]=Math.sin(tuftTh+(Math.random()-.5)*0.4)*(reach+(Math.random()-.5)*0.18);
+    seeds[written]=Math.random(); written++;
+  }
+}
+while(written<N){ treePos[written*3]=0;treePos[written*3+1]=0;treePos[written*3+2]=0;seeds[written]=Math.random();written++; }
+
+function fitToHeight(arr,targetH){
+  let minY=Infinity,maxY=-Infinity,cx=0,cz=0;
+  for(let i=0;i<arr.length/3;i++){
+    minY=Math.min(minY,arr[i*3+1]);maxY=Math.max(maxY,arr[i*3+1]);
+    cx+=arr[i*3];cz+=arr[i*3+2];
+  }
+  cx/=arr.length/3;cz/=arr.length/3;
+  const h=maxY-minY,s=targetH/h;
+  for(let i=0;i<arr.length/3;i++){
+    arr[i*3]=(arr[i*3]-cx)*s;
+    arr[i*3+1]=(arr[i*3+1]-minY)*s;
+    arr[i*3+2]=(arr[i*3+2]-cz)*s;
+  }
+}
+fitToHeight(treePos,16);
+fitToHeight(towerPos,16);
+
+/* ═══════════════ particle shader ═══════════════ */
+const uniforms = {
+  uTime:  {value:0}, uPixel: {value:renderer.getPixelRatio()},
+  uMix:   {value:0}, uBass:  {value:0}, uShock: {value:0}
+};
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(treePos.slice(),3));
+geom.setAttribute('treePos',  new THREE.BufferAttribute(treePos,3));
+geom.setAttribute('towerPos', new THREE.BufferAttribute(towerPos,3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds,1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime, uPixel, uMix, uBass, uShock;
+    attribute vec3 treePos, towerPos;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vEnergy, vMix;
+    void main(){
+      float m = smoothstep(0.0,1.0,uMix);
+      vec3 p = mix(treePos, towerPos, m);
+      float t = uTime*0.55 + seed*6.28;
+      // sway: organic at m=0, rigid at m=1, amplified by bass
+      float swayAmt = (1.0-m)*0.06*(p.y/16.0) + uBass*0.15;
+      p.x += swayAmt*sin(t);
+      p.z += swayAmt*cos(t*0.9);
+      // bass pulse: radial expansion from center
+      float radial = length(p.xz);
+      float pulsePhase = uShock * sin(radial*3.0 - uTime*8.0) * 0.4;
+      p.xz *= 1.0 + pulsePhase * 0.08;
+      p.y  *= 1.0 + uBass*0.06;
+      vMix = m;
+      vEnergy = 0.5 + 0.5*sin(t*0.8) + uBass*0.8;
+      // palette: greens ↔ bronze, with bass-hot highlights
+      vec3 treeA=vec3(0.18,0.36,0.20), treeB=vec3(0.55,0.78,0.35), treeC=vec3(0.85,0.92,0.55);
+      vec3 deco_a=vec3(0.42,0.30,0.18), deco_b=vec3(0.92,0.72,0.40), deco_c=vec3(0.99,0.94,0.84);
+      vec3 hotCol = vec3(1.0,0.35,0.12); // bass-hit ember
+      float hk = clamp(p.y/16.0,0.0,1.0);
+      vec3 treeCol = mix(treeA,treeB,hk);
+      treeCol = mix(treeCol,treeC,smoothstep(0.7,1.0,hk)*0.6);
+      vec3 decoCol = mix(deco_a,deco_b,hk);
+      decoCol = mix(decoCol,deco_c,smoothstep(0.85,1.0,hk)*0.7);
+      vCol = mix(treeCol, decoCol, m);
+      vCol = mix(vCol, hotCol, uShock*0.35*smoothstep(0.3,0.9,hk));
+      vec4 mv = modelViewMatrix * vec4(p,1.0);
+      float dist = -mv.z;
+      float sizeBoost = 1.0 + uBass*0.6;
+      gl_PointSize = (0.9+0.7*vEnergy)*uPixel*(50.0/dist)*sizeBoost;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader:`
+    varying vec3 vCol;
+    varying float vEnergy, vMix;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r>0.25) discard;
+      float a = exp(-r*18.0)*(0.45+0.55*vEnergy);
+      gl_FragColor = vec4(vCol*a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ═══════════════ interaction + loop ═══════════════ */
+let target=0, phase=0;
+addEventListener('click',()=>{ target=1-target; });
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+  rt.setSize(innerWidth,innerHeight);
+  postUniforms.uResolution.value.set(innerWidth,innerHeight);
+});
+
+const phaseLabel=document.getElementById('phaseLabel');
+const start=performance.now();
+
+function loop(){
+  const t=(performance.now()-start)/1000;
+  updateAudio();
+
+  uniforms.uTime.value=t;
+  uniforms.uBass.value=bassEnergy;
+  uniforms.uShock.value=shockwave;
+
+  // morph: auto-toggle ~12s, bass hits force a flip (2x dramatic)
+  const autoRate = audioActive ? 8 : 12; // faster cycle with audio
+  const auto=(Math.floor(t/autoRate)%2===1)?1:0;
+  let desired = target ^ auto;
+  // bass hit overrides: slam to opposite pose
+  if(shockwave > 0.7 && audioActive) desired = 1 - Math.round(phase);
+  const morphSpeed = audioActive ? 0.05 : 0.02; // 2x faster with audio
+  phase += (desired-phase) * morphSpeed;
+  uniforms.uMix.value=phase;
+
+  const pct=Math.round((1-phase)*100);
+  phaseLabel.textContent = phase<0.5?`cypress ${pct}%`:`art-deco ${100-pct}%`;
+
+  // camera orbit — subtle shake on bass
+  const ang=t*0.05;
+  const shake = audioActive ? bassEnergy*0.8 : 0;
+  camera.position.x = Math.sin(ang)*22 + Math.sin(t*7.3)*shake;
+  camera.position.z = Math.cos(ang)*22 + Math.cos(t*6.1)*shake;
+  camera.position.y = 6 + Math.sin(t*0.3)*0.5 + shockwave*1.5;
+  camera.lookAt(0,8,0);
+  controls.update();
+
+  // pass 1: render scene to RT
+  renderer.setRenderTarget(rt);
+  renderer.render(scene,camera);
+
+  // pass 2: post-process to screen
+  postUniforms.uShockwave.value = shockwave;
+  postUniforms.uShockTime.value = t - shockOrigin;
+  postUniforms.uBass.value = bassEnergy;
+  postUniforms.uAudioOn.value = audioActive?1:0;
+  renderer.setRenderTarget(null);
+  renderer.render(postScene, postCam);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
