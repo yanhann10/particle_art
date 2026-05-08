@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8ya · eidolon scaffold</title>
+<!-- MOTION: construction + spectral echo, intensity: vigorous -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#111318; overflow:hidden;
+               color:#c8cfe0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size: 11px; letter-spacing: 0.04em; color:#778; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #1e2028; color:#c8cfe0; border:1px solid #3a3e4a;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; }
+  button.start:hover { background:#2a2e38; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · summon eidolon</button>
+<div class="id">8ya</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(28, 22, 28);
+camera.lookAt(0, 8, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x111318, 1);
+document.body.appendChild(renderer.domElement);
+
+const GRID = 1.2;
+const MAX_BLOCKS = 800;
+const MAX_GHOSTS = 600;
+let blocks = [];
+let ghosts = []; // eidolons: spectral afterimages
+let nextSpawnTime = 0;
+
+const cubeGeo = new THREE.BoxGeometry(GRID*0.92, GRID*0.92, GRID*0.92);
+
+// solid blocks — cold steel with spectral blue edge glow
+const cubeMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uBass: { value: 0 },
+    uMid: { value: 0 },
+    uTreble: { value: 0 }
+  },
+  vertexShader: `
+    uniform float uTime;
+    uniform float uBass;
+    varying vec3 vPos;
+    varying vec3 vNormal;
+    varying float vAge;
+    void main(){
+      vPos = (instanceMatrix * vec4(position, 1.0)).xyz;
+      vNormal = normalize((instanceMatrix * vec4(normal, 0.0)).xyz);
+      vAge = instanceMatrix[3][3];
+      gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uBass;
+    uniform float uMid;
+    uniform float uTreble;
+    varying vec3 vPos;
+    varying vec3 vNormal;
+    varying float vAge;
+    void main(){
+      vec3 steel = vec3(0.28, 0.30, 0.34);
+      vec3 dark = vec3(0.14, 0.15, 0.18);
+      vec3 spectral = vec3(0.55, 0.70, 0.95);
+
+      vec3 col = mix(dark, steel, 0.55);
+
+      // spectral edge glow on bass
+      float edgeFactor = 1.0 - abs(dot(vNormal, normalize(vec3(0.3, 0.8, 0.4))));
+      float glow = smoothstep(0.35, 1.0, uBass) * pow(edgeFactor, 2.0);
+      col = mix(col, spectral, glow * 0.7);
+
+      // directional shading
+      vec3 lightDir = normalize(vec3(0.4, 1.0, 0.3));
+      float ndl = max(0.0, dot(vNormal, lightDir));
+      col *= 0.35 + 0.65 * ndl;
+
+      // slight fog by distance
+      float dist = length(vPos);
+      float fogF = smoothstep(20.0, 70.0, dist);
+      col = mix(col, vec3(0.067, 0.075, 0.094), fogF);
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+
+const instancedMesh = new THREE.InstancedMesh(cubeGeo, cubeMat, MAX_BLOCKS);
+instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(instancedMesh);
+
+// ghost (eidolon) mesh — translucent spectral afterimages
+const ghostMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uBass: { value: 0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    varying vec3 vPos;
+    varying vec3 vNormal;
+    varying float vAlpha;
+    void main(){
+      vPos = (instanceMatrix * vec4(position, 1.0)).xyz;
+      vNormal = normalize((instanceMatrix * vec4(normal, 0.0)).xyz);
+      // alpha encoded in w of 4th column
+      vAlpha = instanceMatrix[3][3];
+      gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uBass;
+    varying vec3 vPos;
+    varying vec3 vNormal;
+    varying float vAlpha;
+    void main(){
+      vec3 spectral = vec3(0.45, 0.58, 0.85);
+      vec3 pale = vec3(0.7, 0.78, 0.92);
+
+      float edgeFactor = 1.0 - abs(dot(vNormal, normalize(vec3(0.0, 1.0, 0.0))));
+      vec3 col = mix(spectral, pale, pow(edgeFactor, 1.5));
+
+      // pulse faintly
+      col += 0.06 * sin(uTime * 2.0 + vPos.y * 0.8);
+
+      // fog
+      float dist = length(vPos);
+      float fogF = smoothstep(20.0, 65.0, dist);
+      col = mix(col, vec3(0.067, 0.075, 0.094), fogF);
+
+      float a = vAlpha * (0.15 + 0.1 * edgeFactor);
+      gl_FragColor = vec4(col, a);
+    }
+  `
+});
+
+const ghostMesh = new THREE.InstancedMesh(cubeGeo, ghostMat, MAX_GHOSTS);
+ghostMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(ghostMesh);
+
+// occupied grid
+const occupied = new Set();
+function gridKey(x,y,z){ return `${x},${y},${z}`; }
+function snapGrid(v){ return Math.round(v/GRID)*GRID; }
+
+function spawnGhost(pos, life){
+  if (ghosts.length >= MAX_GHOSTS) {
+    // recycle oldest
+    ghosts.shift();
+  }
+  ghosts.push({
+    pos: [pos[0], pos[1], pos[2]],
+    life: life || 1.0,
+    maxLife: life || 1.0,
+    drift: [(Math.random()-0.5)*0.003, 0.004 + Math.random()*0.006, (Math.random()-0.5)*0.003]
+  });
+}
+
+function trySpawn(parentPos, parentDir, age, energy){
+  if (blocks.length >= MAX_BLOCKS) return;
+  let candidates = [];
+  if (energy > 0.3 && Math.random() < 0.7){
+    candidates.push({ dx:0, dy:GRID, dz:0 });
+  }
+  if (Math.random() < 0.4 + energy * 0.3){
+    const dirs = [[GRID,0,0], [-GRID,0,0], [0,0,GRID], [0,0,-GRID]];
+    const pick = dirs[Math.floor(Math.random()*dirs.length)];
+    candidates.push({ dx:pick[0], dy:pick[1], dz:pick[2] });
+  }
+  candidates.forEach(c => {
+    const nx = snapGrid(parentPos[0] + c.dx);
+    const ny = snapGrid(parentPos[1] + c.dy);
+    const nz = snapGrid(parentPos[2] + c.dz);
+    const key = gridKey(nx,ny,nz);
+    if (!occupied.has(key) && ny >= 0 && ny < 24*GRID){
+      occupied.add(key);
+      blocks.push({
+        pos: [nx,ny,nz],
+        dir: new THREE.Vector3(c.dx, c.dy, c.dz).normalize(),
+        age: 0,
+        state: 'grow',
+        vel: new THREE.Vector3(0,0,0)
+      });
+    }
+  });
+}
+
+let lastBass = 0;
+function collapseOnDownbeat(bass){
+  if (bass > 0.65 && lastBass < 0.5){
+    const toFall = blocks.filter(b => b.state === 'solid' && Math.random() < 0.3);
+    toFall.forEach(b => {
+      // spawn eidolon at block's last solid position
+      spawnGhost(b.pos, 4.0 + Math.random() * 3.0);
+      b.state = 'falling';
+      b.vel.set((Math.random()-0.5)*0.02, 0, (Math.random()-0.5)*0.02);
+      const key = gridKey(snapGrid(b.pos[0]), snapGrid(b.pos[1]), snapGrid(b.pos[2]));
+      occupied.delete(key);
+    });
+  }
+  lastBass = bass;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+let analyser = null, freqData = null;
+async function startAudio(){
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting mic…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.75;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'live · sound builds — silence haunts';
+  } catch (e) {
+    hint.textContent = 'mic denied — synthetic eidolons';
+  }
+}
+startBtn.addEventListener('click', startAudio);
+
+function bandEnergy(arr, lo, hi){
+  let s = 0;
+  for (let i = lo; i < hi; i++) s += arr[i];
+  return (s / (hi-lo)) / 255;
+}
+
+let bass = 0, mid = 0, treble = 0;
+const start = performance.now();
+const dummy = new THREE.Object3D();
+
+// ambient eidolon spawner: periodically create ghosts near solid blocks
+// even without collapse — the structure sheds phantoms
+let nextAmbientGhost = 0;
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  cubeMat.uniforms.uTime.value = t;
+  ghostMat.uniforms.uTime.value = t;
+
+  if (analyser){
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    bass = bandEnergy(freqData, 0, Math.floor(n*0.08));
+    mid = bandEnergy(freqData, Math.floor(n*0.08), Math.floor(n*0.35));
+    treble = bandEnergy(freqData, Math.floor(n*0.35), n);
+  } else {
+    bass = 0.35 + 0.35 * Math.sin(t*1.1);
+    mid = 0.30 + 0.30 * Math.sin(t*1.9 + 1.2);
+    treble = 0.25 + 0.25 * Math.sin(t*3.2 + 0.7);
+  }
+
+  cubeMat.uniforms.uBass.value = bass;
+  cubeMat.uniforms.uMid.value = mid;
+  cubeMat.uniforms.uTreble.value = treble;
+  ghostMat.uniforms.uBass.value = bass;
+
+  // spawn / grow
+  const spawnRate = 0.15 + mid * 0.25;
+  if (t > nextSpawnTime && blocks.length < MAX_BLOCKS){
+    nextSpawnTime = t + spawnRate;
+    if (blocks.length === 0){
+      const fx = snapGrid((Math.random()-0.5)*4*GRID);
+      const fz = snapGrid((Math.random()-0.5)*4*GRID);
+      occupied.add(gridKey(fx,0,fz));
+      blocks.push({
+        pos: [fx, 0, fz],
+        dir: new THREE.Vector3(0,1,0),
+        age: 0,
+        state: 'grow',
+        vel: new THREE.Vector3(0,0,0)
+      });
+    } else {
+      const solids = blocks.filter(b => b.state === 'solid' && b.age > 0.5);
+      if (solids.length > 0){
+        const parent = solids[Math.floor(Math.random()*solids.length)];
+        trySpawn(parent.pos, parent.dir, parent.age, bass + mid*0.5);
+      }
+    }
+  }
+
+  collapseOnDownbeat(bass);
+
+  // ambient ghost shedding — the structure exhales phantoms
+  if (t > nextAmbientGhost && blocks.length > 10){
+    nextAmbientGhost = t + 0.6 + Math.random() * 1.2;
+    const solids = blocks.filter(b => b.state === 'solid');
+    if (solids.length > 0){
+      const src = solids[Math.floor(Math.random()*solids.length)];
+      const offset = [(Math.random()-0.5)*GRID*0.3, GRID*0.2, (Math.random()-0.5)*GRID*0.3];
+      spawnGhost(
+        [src.pos[0]+offset[0], src.pos[1]+offset[1], src.pos[2]+offset[2]],
+        2.5 + Math.random() * 2.5
+      );
+    }
+  }
+
+  // update blocks
+  const dt = 1/60;
+  const gravity = -0.15;
+  blocks = blocks.filter(b => {
+    if (b.state === 'grow'){
+      b.age += dt * 2.0;
+      if (b.age > 1.0){
+        b.age = 1.0;
+        b.state = 'solid';
+      }
+    } else if (b.state === 'falling'){
+      b.vel.y += gravity * dt;
+      b.pos[0] += b.vel.x;
+      b.pos[1] += b.vel.y;
+      b.pos[2] += b.vel.z;
+      if (b.pos[1] < -GRID*2) return false;
+    }
+    return true;
+  });
+
+  // update ghosts — drift upward, fade
+  ghosts = ghosts.filter(g => {
+    g.life -= dt;
+    g.pos[0] += g.drift[0];
+    g.pos[1] += g.drift[1];
+    g.pos[2] += g.drift[2];
+    return g.life > 0;
+  });
+
+  // render solid instances
+  let count = 0;
+  blocks.forEach(b => {
+    if (count >= MAX_BLOCKS) return;
+    dummy.position.set(b.pos[0], b.pos[1], b.pos[2]);
+    const s = b.state === 'grow' ? b.age * GRID * 0.92 : GRID * 0.92;
+    dummy.scale.set(s, s, s);
+    dummy.updateMatrix();
+    // encode age in [3][3] for shader
+    dummy.matrix.elements[15] = b.age;
+    instancedMesh.setMatrixAt(count, dummy.matrix);
+    count++;
+  });
+  instancedMesh.count = count;
+  instancedMesh.instanceMatrix.needsUpdate = true;
+
+  // render ghost instances
+  let gCount = 0;
+  ghosts.forEach(g => {
+    if (gCount >= MAX_GHOSTS) return;
+    dummy.position.set(g.pos[0], g.pos[1], g.pos[2]);
+    const fade = g.life / g.maxLife;
+    const s = GRID * 0.92 * (0.6 + 0.4 * fade);
+    dummy.scale.set(s, s, s);
+    dummy.updateMatrix();
+    // encode alpha in [3][3]
+    dummy.matrix.elements[15] = fade;
+    ghostMesh.setMatrixAt(gCount, dummy.matrix);
+    gCount++;
+  });
+  ghostMesh.count = gCount;
+  ghostMesh.instanceMatrix.needsUpdate = true;
+
+  // camera orbit — slightly wider, slower for haunted feel
+  const camRadius = 30 + Math.sin(t*0.22)*5;
+  camera.position.x = camRadius * Math.cos(t*0.09);
+  camera.position.z = camRadius * Math.sin(t*0.09);
+  camera.position.y = 20 + Math.sin(t*0.15)*7;
+
+  // track centroid
+  if (blocks.length > 0){
+    let cx=0, cy=0, cz=0, n=0;
+    blocks.forEach(b => { cx+=b.pos[0]; cy+=b.pos[1]; cz+=b.pos[2]; n++; });
+    // include ghosts in centroid for spectral pull
+    ghosts.forEach(g => { cx+=g.pos[0]; cy+=g.pos[1]; cz+=g.pos[2]; n++; });
+    cx /= n; cy /= n; cz /= n;
+    camera.lookAt(cx, cy, cz);
+  } else {
+    camera.lookAt(0, 8, 0);
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
