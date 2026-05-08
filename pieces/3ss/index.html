@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>judd stack · specificity of object</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">3ss</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 8, 28);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf0ece6, 1);
+document.body.appendChild(renderer.domElement);
+
+/* --- Judd stack parameters --- */
+const NUM_BOXES = 8;
+const BOX_W = 5.0;
+const BOX_H = 1.2;
+const BOX_D = 4.0;
+const GAP = 1.8;
+const WALL_THICKNESS = 0.12;
+const TOTAL_HEIGHT = NUM_BOXES * (BOX_H + GAP) - GAP;
+const STACK_BASE = -TOTAL_HEIGHT * 0.5;
+
+/* --- Particle budget --- */
+const N = 80000;
+const positions = new Float32Array(N * 3);
+const normals = new Float32Array(N * 3);
+const faceTypes = new Float32Array(N); // 0=exterior, 1=interior bottom, 2=interior wall, 3=top (sparse)
+
+/* Deterministic RNG */
+let seed = 71;
+const rng = () => {
+  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+  return seed / 0x7fffffff;
+};
+
+/* Distribute particles across box surfaces with area weighting */
+function emitBoxParticles(startIdx, count, boxCenterY) {
+  const hw = BOX_W * 0.5, hh = BOX_H * 0.5, hd = BOX_D * 0.5;
+  const wt = WALL_THICKNESS;
+
+  // Surface areas for weighting
+  const aFront = BOX_W * BOX_H;
+  const aBack = aFront;
+  const aLeft = BOX_D * BOX_H;
+  const aRight = aLeft;
+  const aBottom = BOX_W * BOX_D;        // exterior bottom
+  const aIntBottom = (BOX_W - 2*wt) * (BOX_D - 2*wt); // interior bottom (amber)
+  const aIntWallFB = (BOX_W - 2*wt) * (BOX_H - wt) * 2; // interior front+back walls
+  const aIntWallLR = (BOX_D - 2*wt) * (BOX_H - wt) * 2; // interior left+right walls
+  // Top face: very sparse (partial transparency effect)
+  const aTop = BOX_W * BOX_D * 0.15; // only 15% coverage — peer through
+
+  const totalArea = aFront + aBack + aLeft + aRight + aBottom + aTop +
+                    aIntBottom + aIntWallFB + aIntWallLR;
+
+  let idx = startIdx;
+  const end = Math.min(startIdx + count, N);
+
+  while (idx < end) {
+    const r = rng() * totalArea;
+    let cumul = 0;
+    let px, py, pz, nx, ny, nz, ft;
+
+    // Exterior front
+    cumul += aFront;
+    if (r < cumul) {
+      px = (rng() - 0.5) * BOX_W;
+      py = boxCenterY + (rng() - 0.5) * BOX_H;
+      pz = hd;
+      nx = 0; ny = 0; nz = 1; ft = 0;
+    }
+    // Exterior back
+    else if (r < (cumul += aBack)) {
+      px = (rng() - 0.5) * BOX_W;
+      py = boxCenterY + (rng() - 0.5) * BOX_H;
+      pz = -hd;
+      nx = 0; ny = 0; nz = -1; ft = 0;
+    }
+    // Exterior left
+    else if (r < (cumul += aLeft)) {
+      px = -hw;
+      py = boxCenterY + (rng() - 0.5) * BOX_H;
+      pz = (rng() - 0.5) * BOX_D;
+      nx = -1; ny = 0; nz = 0; ft = 0;
+    }
+    // Exterior right
+    else if (r < (cumul += aRight)) {
+      px = hw;
+      py = boxCenterY + (rng() - 0.5) * BOX_H;
+      pz = (rng() - 0.5) * BOX_D;
+      nx = 1; ny = 0; nz = 0; ft = 0;
+    }
+    // Exterior bottom
+    else if (r < (cumul += aBottom)) {
+      px = (rng() - 0.5) * BOX_W;
+      py = boxCenterY - hh;
+      pz = (rng() - 0.5) * BOX_D;
+      nx = 0; ny = -1; nz = 0; ft = 0;
+    }
+    // Top face — sparse for see-through
+    else if (r < (cumul += aTop)) {
+      px = (rng() - 0.5) * BOX_W;
+      py = boxCenterY + hh;
+      pz = (rng() - 0.5) * BOX_D;
+      nx = 0; ny = 1; nz = 0; ft = 3;
+    }
+    // Interior bottom (amber)
+    else if (r < (cumul += aIntBottom)) {
+      px = (rng() - 0.5) * (BOX_W - 2*wt);
+      py = boxCenterY - hh + wt;
+      pz = (rng() - 0.5) * (BOX_D - 2*wt);
+      nx = 0; ny = 1; nz = 0; ft = 1;
+    }
+    // Interior walls front+back
+    else if (r < (cumul += aIntWallFB)) {
+      const side = rng() < 0.5 ? 1 : -1;
+      px = (rng() - 0.5) * (BOX_W - 2*wt);
+      py = boxCenterY - hh + wt + rng() * (BOX_H - wt);
+      pz = side * (hd - wt);
+      nx = 0; ny = 0; nz = -side; ft = 2;
+    }
+    // Interior walls left+right
+    else {
+      const side = rng() < 0.5 ? 1 : -1;
+      px = side * (hw - wt);
+      py = boxCenterY - hh + wt + rng() * (BOX_H - wt);
+      pz = (rng() - 0.5) * (BOX_D - 2*wt);
+      nx = -side; ny = 0; nz = 0; ft = 2;
+    }
+
+    positions[idx * 3] = px;
+    positions[idx * 3 + 1] = py;
+    positions[idx * 3 + 2] = pz;
+    normals[idx * 3] = nx;
+    normals[idx * 3 + 1] = ny;
+    normals[idx * 3 + 2] = nz;
+    faceTypes[idx] = ft;
+    idx++;
+  }
+}
+
+/* Build the stack */
+const perBox = Math.floor(N / NUM_BOXES);
+for (let i = 0; i < NUM_BOXES; i++) {
+  const cy = STACK_BASE + i * (BOX_H + GAP) + BOX_H * 0.5;
+  const count = (i === NUM_BOXES - 1) ? N - i * perBox : perBox;
+  emitBoxParticles(i * perBox, count, cy);
+}
+
+/* --- Shader --- */
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uLightDir: { value: new THREE.Vector3(0.5, 0.6, 0.8) },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec3 uLightDir;
+
+    attribute vec3 aNormal;
+    attribute float aFaceType;
+
+    varying float vLight;
+    varying float vFaceType;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = position;
+
+      // Very subtle breathing — Judd's boxes are still, but particles can drift
+      // Micro-vibration along normal, like metal thermal expansion
+      float breath = sin(uTime * 0.3 + p.y * 0.8 + p.x * 0.5) * 0.008;
+      p += aNormal * breath;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // Lighting: directional + ambient
+      float ndotl = dot(aNormal, normalize(uLightDir));
+      vLight = 0.3 + 0.7 * max(ndotl, 0.0);
+
+      // Interior faces catch less direct light
+      if (aFaceType > 0.5 && aFaceType < 2.5) {
+        // Interior: dimmer base, light entering from top
+        float topLight = max(dot(aNormal, vec3(0.0, 1.0, 0.0)), 0.0);
+        vLight = 0.15 + 0.5 * topLight + 0.35 * max(ndotl, 0.0);
+      }
+
+      vFaceType = aFaceType;
+
+      // Top face particles: reduced alpha for see-through effect
+      vAlpha = aFaceType > 2.5 ? 0.25 : 0.88;
+
+      gl_PointSize = uPixel * max(1.4, 3.0 - dist * 0.06);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vLight;
+    varying float vFaceType;
+    varying float vAlpha;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+      if (r2 > 0.25) discard;
+
+      // Aluminum mill finish: cool silver-gray
+      vec3 aluminum = vec3(0.72, 0.73, 0.74);
+      vec3 aluminumDark = vec3(0.38, 0.39, 0.40);
+      vec3 col = mix(aluminumDark, aluminum, vLight);
+
+      // Interior bottom: amber / cadmium yellow (Judd's colored plexiglass)
+      if (vFaceType > 0.5 && vFaceType < 1.5) {
+        vec3 amberDark = vec3(0.55, 0.32, 0.08);
+        vec3 amberLight = vec3(0.82, 0.58, 0.14);
+        col = mix(amberDark, amberLight, vLight);
+      }
+      // Interior walls: tinted by amber reflection
+      else if (vFaceType > 1.5 && vFaceType < 2.5) {
+        vec3 tinted = vec3(0.52, 0.48, 0.42);
+        vec3 tintedLit = vec3(0.68, 0.63, 0.55);
+        col = mix(tinted, tintedLit, vLight);
+      }
+      // Top face: same aluminum but faded
+      else if (vFaceType > 2.5) {
+        col = mix(aluminumDark * 0.9, aluminum * 0.95, vLight);
+      }
+
+      float alpha = vAlpha * (1.0 - smoothstep(0.12, 0.25, r2));
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('aNormal', new THREE.BufferAttribute(normals, 3));
+geom.setAttribute('aFaceType', new THREE.BufferAttribute(faceTypes, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* --- Gallery wall background --- */
+const bgGeom = new THREE.PlaneGeometry(100, 100);
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false,
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      vec3 wall = vec3(0.94, 0.93, 0.91);
+      wall *= 0.96 + 0.04 * vUv.y;
+      gl_FragColor = vec4(wall, 1.0);
+    }
+  `
+});
+const bgMesh = new THREE.Mesh(bgGeom, bgMat);
+bgMesh.position.set(0, 0, -15);
+scene.add(bgMesh);
+
+/* --- Orbit controls --- */
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 0.45;
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi = Math.max(0.1, Math.min(1.3, orbitPhi - (e.clientY - prevY) * 0.005));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+/* --- Animation loop --- */
+const start = performance.now();
+const centroidY = STACK_BASE + TOTAL_HEIGHT * 0.5;
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Slow orbiting light — ~50s full rotation, Judd's specificity revealed by light
+  const lightAngle = t * 0.126;
+  uniforms.uLightDir.value.set(
+    Math.cos(lightAngle) * 0.6,
+    0.55,
+    Math.sin(lightAngle) * 0.6
+  ).normalize();
+
+  // Very slow auto-orbit + manual drag
+  const autoTheta = t * 0.035;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 26;
+
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    centroidY + radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, centroidY, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
