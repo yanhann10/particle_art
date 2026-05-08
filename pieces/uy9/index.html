@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uy9 · Process 18 · 3D drawing system</title>
+<!-- MOTION: accumulation, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f8f8f6; overflow:hidden;
+               color:#1a1a1a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">uy9</div>
+<div class="hint">drag to rotate · scroll to zoom</div>
+<div class="src">Casey Reas · Process 18 (Software 3) · agent-drawing on sphere</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Process 18 lifted to 3D: 400 Elements move on the surface of a sphere,
+// each tracing a circular orbit. When two agents come within contact distance,
+// we draw a quad connecting their positions + directions as a record of their
+// meeting. Over time the sphere accumulates a dense interlocking tessellation
+// of these contact-quads — the drawing emerges from interaction, not form.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf8f8f6);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.3;
+
+// ───────────────────────────────────── agent system
+const N = 400;
+const RADIUS = 4.5;
+const CONTACT_DIST = 0.35;
+const MOVE_SPEED = 0.008;
+
+class Element {
+  constructor(){
+    // random point on sphere
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    this.theta = theta;
+    this.phi = phi;
+    // circular motion parameters: axis of rotation (random tangent plane)
+    this.orbitSpeed = MOVE_SPEED * (0.6 + Math.random() * 0.8);
+    this.orbitPhase = Math.random() * Math.PI * 2;
+    this.orbitRadius = 0.12 + Math.random() * 0.15;
+    // random axis perpendicular to radial vector
+    const r = this.getPos();
+    const t = new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5);
+    t.cross(r).normalize();
+    this.axis = t;
+    this.contacts = [];
+  }
+  getPos(){
+    const x = RADIUS * Math.sin(this.phi) * Math.cos(this.theta);
+    const y = RADIUS * Math.sin(this.phi) * Math.sin(this.theta);
+    const z = RADIUS * Math.cos(this.phi);
+    return new THREE.Vector3(x, y, z);
+  }
+  update(time){
+    // move in small circle on sphere surface
+    const angle = time * this.orbitSpeed + this.orbitPhase;
+    const base = this.getPos();
+    // offset within tangent plane
+    const t2 = new THREE.Vector3().crossVectors(base, this.axis).normalize();
+    const offset = new THREE.Vector3()
+      .addScaledVector(this.axis, Math.cos(angle) * this.orbitRadius)
+      .addScaledVector(t2, Math.sin(angle) * this.orbitRadius);
+    const pos = base.clone().add(offset);
+    pos.normalize().multiplyScalar(RADIUS);
+    return pos;
+  }
+}
+
+const elements = [];
+for (let i=0; i<N; i++) elements.push(new Element());
+
+// ───────────────────────────────────── contact-quad geometry
+// We'll build an InstancedMesh for quads, each quad drawn when two agents are within contact dist.
+// The quad connects the two agent positions + their previous positions (to show directionality).
+// We'll pre-allocate a large pool and add quads over time.
+const MAX_QUADS = 50000;
+let quadCount = 0;
+const quadGeom = new THREE.PlaneGeometry(1, 1);
+const quadMat = new THREE.ShaderMaterial({
+  transparent: true,
+  side: THREE.DoubleSide,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    attribute vec3 offset;
+    attribute vec4 corners; // encode 2 positions: xy=A, zw=B (we'll compute in JS and pass as attribute)
+    // actually we'll do this differently: store 4 corners as a mat4 in instanceMatrix
+    varying float vAlpha;
+    uniform float uFade;
+    void main(){
+      // instanceMatrix encodes the quad transform
+      vec3 transformed = (instanceMatrix * vec4(position, 1.0)).xyz;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+      vAlpha = uFade;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      // sumi-ink black with accumulating alpha
+      gl_FragColor = vec4(0.05, 0.05, 0.08, vAlpha * 0.028);
+    }
+  `,
+  uniforms: {
+    uFade: { value: 1.0 }
+  }
+});
+const quadMesh = new THREE.InstancedMesh(quadGeom, quadMat, MAX_QUADS);
+quadMesh.count = 0;
+scene.add(quadMesh);
+
+// Store previous positions for each element
+const prevPos = elements.map(e => e.update(0));
+
+// ───────────────────────────────────── contact detection + quad creation
+function checkContacts(time){
+  const positions = elements.map(e => e.update(time));
+  for (let i=0; i<N; i++){
+    for (let j=i+1; j<N; j++){
+      const d = positions[i].distanceTo(positions[j]);
+      if (d < CONTACT_DIST && quadCount < MAX_QUADS){
+        // draw quad: corners are posA, prevA, prevB, posB
+        const A = positions[i];
+        const B = positions[j];
+        const A0 = prevPos[i];
+        const B0 = prevPos[j];
+        // build a quad in local space and transform to world
+        // we'll compute a plane containing these 4 points (approximately)
+        const center = new THREE.Vector3()
+          .addScaledVector(A, 0.25)
+          .addScaledVector(B, 0.25)
+          .addScaledVector(A0, 0.25)
+          .addScaledVector(B0, 0.25);
+        // edges
+        const e1 = new THREE.Vector3().subVectors(B, A);
+        const e2 = new THREE.Vector3().subVectors(A0, A);
+        const normal = new THREE.Vector3().crossVectors(e1, e2).normalize();
+        // basis for quad plane
+        const u = e1.clone().normalize();
+        const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+        // project corners onto this plane (approx)
+        const m = new THREE.Matrix4();
+        m.makeBasis(u, v, normal);
+        m.setPosition(center);
+        // scale to fit the quad: we'll measure extents
+        const corners = [A, B, B0, A0];
+        let minU=Infinity, maxU=-Infinity, minV=Infinity, maxV=-Infinity;
+        const inv = m.clone().invert();
+        for (const c of corners){
+          const local = c.clone().applyMatrix4(inv);
+          if (local.x < minU) minU = local.x;
+          if (local.x > maxU) maxU = local.x;
+          if (local.y < minV) minV = local.y;
+          if (local.y > maxV) maxV = local.y;
+        }
+        const scaleU = maxU - minU;
+        const scaleV = maxV - minV;
+        const offsetU = (minU + maxU) / 2;
+        const offsetV = (minV + maxV) / 2;
+        m.scale(new THREE.Vector3(scaleU, scaleV, 1));
+        m.setPosition(center.x + u.x*offsetU + v.x*offsetV,
+                      center.y + u.y*offsetU + v.y*offsetV,
+                      center.z + u.z*offsetU + v.z*offsetV);
+        quadMesh.setMatrixAt(quadCount, m);
+        quadCount++;
+      }
+    }
+  }
+  quadMesh.count = quadCount;
+  quadMesh.instanceMatrix.needsUpdate = true;
+  // update prev
+  for (let i=0; i<N; i++) prevPos[i].copy(positions[i]);
+}
+
+// ───────────────────────────────────── reference sphere (faint wireframe)
+const sphereGeom = new THREE.SphereGeometry(RADIUS, 32, 24);
+const sphereMat = new THREE.MeshBasicMaterial({ color: 0x000000, wireframe: true, opacity: 0.04, transparent: true });
+const sphere = new THREE.Mesh(sphereGeom, sphereMat);
+scene.add(sphere);
+
+// ───────────────────────────────────── agent markers (tiny dots)
+const agentGeom = new THREE.BufferGeometry();
+const agentPos = new Float32Array(N * 3);
+agentGeom.setAttribute('position', new THREE.BufferAttribute(agentPos, 3));
+const agentMat = new THREE.PointsMaterial({ color: 0x0a0a0c, size: 0.06, sizeAttenuation: true, transparent: true, opacity: 0.7 });
+const agentPoints = new THREE.Points(agentGeom, agentMat);
+scene.add(agentPoints);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+  // update agent positions
+  for (let i=0; i<N; i++){
+    const p = elements[i].update(elapsed);
+    agentPos[i*3] = p.x;
+    agentPos[i*3+1] = p.y;
+    agentPos[i*3+2] = p.z;
+  }
+  agentGeom.attributes.position.needsUpdate = true;
+  // check contacts every few frames to avoid slowdown
+  if (Math.floor(elapsed * 60) % 2 === 0) checkContacts(elapsed);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
