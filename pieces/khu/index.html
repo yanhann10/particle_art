@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>khu · Frankenthaler soak-stain — fluid geological flow</title>
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#f8f5f0; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">khu</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf8f5f0);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 50);
+camera.position.set(0, 0, 18);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ── Deterministic RNG
+let rngState = 827364;
+function rng(){ rngState |= 0; rngState = rngState + 0x6d2b79f5 | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// ── FBM noise helper for organic boundary displacement
+function fbm(x, y, octaves = 4){
+  let sum = 0, amp = 1, freq = 1, maxVal = 0;
+  for (let i = 0; i < octaves; i++){
+    sum += amp * (Math.sin(x * freq + 17.3) * Math.cos(y * freq + 23.1) + 
+                   Math.sin((x + y) * freq * 0.7 + 41.9));
+    maxVal += amp;
+    amp *= 0.5;
+    freq *= 2.0;
+  }
+  return sum / maxVal;
+}
+
+// ── Curl flow field (2D potential gradient → perpendicular flow)
+function curlFlow(x, y, t){
+  const scale = 0.08;
+  const speed = 0.05;
+  const sx = x * scale, sy = y * scale, st = t * speed;
+  // Potential function (arbitrary smooth field)
+  const pot = Math.sin(sx + st) * Math.cos(sy * 1.3 + st * 0.7) + 
+              Math.sin((sx + sy) * 0.5 + st * 1.1) * 0.6;
+  // Curl: rotate gradient 90°
+  const eps = 0.01;
+  const dx = (Math.sin((x + eps) * scale + st) * Math.cos(sy * 1.3 + st * 0.7) - pot) / eps;
+  const dy = (Math.sin(sx + st) * Math.cos((y + eps) * scale * 1.3 + st * 0.7) - pot) / eps;
+  return { vx: -dy * 0.4, vy: dx * 0.4 };
+}
+
+// ── Particle system: three stain pools with organic boundaries, persistent flow, wet-on-wet mixing
+const NUM_PARTICLES = 70000;
+const positions = new Float32Array(NUM_PARTICLES * 3);
+const colors = new Float32Array(NUM_PARTICLES * 3);
+const velocities = new Float32Array(NUM_PARTICLES * 2);
+const poolAssignment = new Uint8Array(NUM_PARTICLES); // which pool this particle belongs to
+const baseColors = [
+  new THREE.Color(0.15, 0.22, 0.38), // indigo-blue
+  new THREE.Color(0.62, 0.18, 0.21), // brick-red
+  new THREE.Color(0.78, 0.68, 0.32)  // ochre-yellow
+];
+
+// Stain pool centers
+const pools = [
+  { x: -4.5, y: 1.2, r: 3.8 },
+  { x: 2.8, y: -0.8, r: 4.2 },
+  { x: -0.5, y: 3.5, r: 3.5 }
+];
+
+for (let i = 0; i < NUM_PARTICLES; i++){
+  const pool = pools[Math.floor(rng() * pools.length)];
+  const poolIdx = pools.indexOf(pool);
+  
+  // Generate point inside pool with FBM-warped boundary
+  let angle = rng() * Math.PI * 2;
+  let dist = Math.sqrt(rng()) * pool.r;
+  
+  // Warp the boundary with FBM noise for organic silhouette
+  const noiseAmp = pool.r * 0.35;
+  const noiseFreq = 3.0;
+  const warp = fbm(Math.cos(angle) * noiseFreq, Math.sin(angle) * noiseFreq, 3) * noiseAmp;
+  dist += warp;
+  
+  const px = pool.x + Math.cos(angle) * dist;
+  const py = pool.y + Math.sin(angle) * dist;
+  
+  positions[i * 3] = px;
+  positions[i * 3 + 1] = py;
+  positions[i * 3 + 2] = (rng() - 0.5) * 0.1; // tiny z spread
+  
+  // Base color from pool
+  const col = baseColors[poolIdx];
+  colors[i * 3] = col.r;
+  colors[i * 3 + 1] = col.g;
+  colors[i * 3 + 2] = col.b;
+  
+  poolAssignment[i] = poolIdx;
+  
+  // Initial velocity: slight outward bias + noise
+  velocities[i * 2] = (px - pool.x) * 0.002 + (rng() - 0.5) * 0.01;
+  velocities[i * 2 + 1] = (py - pool.y) * 0.002 + (rng() - 0.5) * 0.01;
+}
+
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+const material = new THREE.PointsMaterial({
+  size: 0.12,
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.25,
+  blending: THREE.NormalBlending,
+  depthWrite: false
+});
+
+const points = new THREE.Points(geometry, material);
+scene.add(points);
+
+// ── Overlap mixing: subtractive blend where stain pools meet
+function updateColorMixing(){
+  const posAttr = geometry.attributes.position;
+  const colAttr = geometry.attributes.color;
+  
+  for (let i = 0; i < NUM_PARTICLES; i++){
+    const px = posAttr.array[i * 3];
+    const py = posAttr.array[i * 3 + 1];
+    const myPool = poolAssignment[i];
+    
+    // Check proximity to other pools
+    let mixColor = baseColors[myPool].clone();
+    let mixCount = 1;
+    
+    for (let p = 0; p < pools.length; p++){
+      if (p === myPool) continue;
+      const pool = pools[p];
+      const dx = px - pool.x;
+      const dy = py - pool.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      // If within overlap zone (extended radius for bleeding)
+      if (dist < pool.r * 1.2){
+        const influence = Math.max(0, 1 - dist / (pool.r * 1.2));
+        // Subtractive mixing: multiply RGB channels
+        mixColor.r *= (1 - influence + influence * baseColors[p].r);
+        mixColor.g *= (1 - influence + influence * baseColors[p].g);
+        mixColor.b *= (1 - influence + influence * baseColors[p].b);
+        mixCount++;
+      }
+    }
+    
+    // Apply mixed color
+    colAttr.array[i * 3] = mixColor.r;
+    colAttr.array[i * 3 + 1] = mixColor.g;
+    colAttr.array[i * 3 + 2] = mixColor.b;
+  }
+  colAttr.needsUpdate = true;
+}
+
+// Initial mixing pass
+updateColorMixing();
+
+// ── Camera gentle drift (Frankenthaler viewed her stains from above, but we give slight motion)
+const cameraBase = { x: 0, y: 0, z: 18 };
+
+// ── Resize
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Animate: persistent slow flow, color re-mixing
+const start = performance.now();
+let lastMixTime = 0;
+
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+  
+  const posAttr = geometry.attributes.position;
+  
+  // Update particle positions with persistent curl flow
+  for (let i = 0; i < NUM_PARTICLES; i++){
+    const px = posAttr.array[i * 3];
+    const py = posAttr.array[i * 3 + 1];
+    
+    // Flow field contribution
+    const flow = curlFlow(px, py, elapsed);
+    velocities[i * 2] += flow.vx * 0.02;
+    velocities[i * 2 + 1] += flow.vy * 0.02;
+    
+    // Light damping (keep flow alive, not frozen)
+    velocities[i * 2] *= 0.995;
+    velocities[i * 2 + 1] *= 0.995;
+    
+    // Update position
+    posAttr.array[i * 3] += velocities[i * 2];
+    posAttr.array[i * 3 + 1] += velocities[i * 2 + 1];
+  }
+  posAttr.needsUpdate = true;
+  
+  // Re-compute color mixing every ~0.5s (overlap zones change as pigment spreads)
+  if (elapsed - lastMixTime > 0.5){
+    updateColorMixing();
+    lastMixTime = elapsed;
+  }
+  
+  // Camera subtle drift
+  camera.position.x = cameraBase.x + Math.sin(elapsed * 0.08) * 0.8;
+  camera.position.y = cameraBase.y + Math.cos(elapsed * 0.06) * 0.6;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
