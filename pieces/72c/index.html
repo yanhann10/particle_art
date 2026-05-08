@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>72c · streamlines through ochre valleys</title>
+<!-- MOTION: flow, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background: #1a1612;
+  }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; 
+        letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">72c · streamlines through ochre valleys</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Tyler Hobbs: structure, negative space, oil-painting materiality.
+// Flow field where streams DON'T cross — domain partitioning into 8 channels.
+// Each channel owns a vertical slice of canvas; particles flow through their
+// assigned lane. Color regions cluster by lane. Warm earth palette (umber, 
+// terracotta, ochre, oxide red) + one cool accent (slate blue).
+//
+// Composition: 40% negative space, deliberately empty lanes at edges.
+// Particle shape: thick, textured, soft-edged — oil paint dabs, not pixels.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1612);
+const camera = new THREE.OrthographicCamera(-16, 16, 9, -9, 0.1, 100);
+camera.position.set(0, 0, 10);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── flow field structure
+// 8 vertical channels spanning x: [-16, 16] → each 4 units wide
+// channels 0, 7 are EMPTY (negative space edges)
+// channels 1-6 are active, each with unique vertical flow + color region
+const CHANNELS = 8;
+const CHANNEL_WIDTH = 32 / CHANNELS;
+const activeChannels = [1, 2, 3, 4, 5, 6];
+
+// palette: warm earth tones + one cool accent
+const palette = [
+  new THREE.Color(0x5e4a3a), // raw umber
+  new THREE.Color(0x9f6a4a), // terracotta
+  new THREE.Color(0xc89a5e), // ochre
+  new THREE.Color(0xa85442), // oxide red
+  new THREE.Color(0xd4a574), // light ochre
+  new THREE.Color(0x4a5f72)  // slate blue (cool accent)
+];
+
+// per-channel flow definition
+// each channel has: baseY (starting region), flowAngle, speed, waveAmplitude, color
+const channelDefs = [
+  null, // 0: empty
+  { baseY: 6.0,  flowAngle: -0.4,  speed: 0.25, waveAmp: 0.8,  waveFreq: 0.18, colorIdx: 0 },
+  { baseY: 3.5,  flowAngle: -0.2,  speed: 0.30, waveAmp: 1.2,  waveFreq: 0.22, colorIdx: 1 },
+  { baseY: 0.5,  flowAngle:  0.1,  speed: 0.20, waveAmp: 0.6,  waveFreq: 0.15, colorIdx: 2 },
+  { baseY: -2.0, flowAngle:  0.3,  speed: 0.28, waveAmp: 1.0,  waveFreq: 0.25, colorIdx: 3 },
+  { baseY: -5.0, flowAngle: -0.15, speed: 0.22, waveAmp: 0.9,  waveFreq: 0.20, colorIdx: 4 },
+  { baseY: 2.0,  flowAngle:  0.5,  speed: 0.18, waveAmp: 1.4,  waveFreq: 0.28, colorIdx: 5 },
+  null  // 7: empty
+];
+
+// particle system
+const N = 620;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 2); // 2D flow
+const channelID = new Float32Array(N);
+const colorIdx = new Float32Array(N);
+const seed = new Float32Array(N);
+const size = new Float32Array(N);
+
+for (let i = 0; i < N; i++){
+  // assign to a random active channel
+  const ch = activeChannels[Math.floor(Math.random() * activeChannels.length)];
+  channelID[i] = ch;
+  const def = channelDefs[ch];
+  
+  // initial position: scattered within channel bounds, near baseY
+  const chLeft = -16 + ch * CHANNEL_WIDTH;
+  pos[i*3]     = chLeft + Math.random() * CHANNEL_WIDTH;
+  pos[i*3 + 1] = def.baseY + (Math.random() - 0.5) * 3.0;
+  pos[i*3 + 2] = (Math.random() - 0.5) * 0.4; // slight z variation
+  
+  // initial velocity: flow direction
+  const angle = def.flowAngle;
+  vel[i*2]     = Math.cos(angle) * def.speed;
+  vel[i*2 + 1] = Math.sin(angle) * def.speed;
+  
+  colorIdx[i] = def.colorIdx;
+  seed[i] = Math.random();
+  // particle size: variation for oil-paint texture
+  size[i] = 0.22 + Math.random() * 0.18;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('channelID', new THREE.BufferAttribute(channelID, 1));
+geom.setAttribute('colorIdx', new THREE.BufferAttribute(colorIdx, 1));
+geom.setAttribute('seed', new THREE.BufferAttribute(seed, 1));
+geom.setAttribute('psize', new THREE.BufferAttribute(size, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uPalette: { value: palette }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec3 uPalette[6];
+    attribute float channelID;
+    attribute float colorIdx;
+    attribute float seed;
+    attribute float psize;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vSeed;
+    void main(){
+      vec3 p = position;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_Position = projectionMatrix * mv;
+      
+      // size: large, oil-paint dab scale
+      float baseSize = psize * 42.0;
+      gl_PointSize = baseSize * uPixel;
+      
+      // color: fetch from palette, add per-particle variation
+      int idx = int(colorIdx);
+      vec3 base = uPalette[idx];
+      // slight hue shift per seed
+      float hueShift = (seed - 0.5) * 0.08;
+      vCol = base + vec3(hueShift, hueShift * 0.5, -hueShift * 0.3);
+      vCol = clamp(vCol, 0.0, 1.0);
+      
+      // alpha: particles fade at canvas edges (y bounds)
+      float edgeFade = smoothstep(-9.5, -8.0, p.y) * smoothstep(9.5, 8.0, p.y);
+      vAlpha = 0.85 * edgeFade;
+      vSeed = seed;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vSeed;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      
+      // oil-paint texture: soft edge + internal grain
+      float edge = smoothstep(0.5, 0.3, r);
+      float grain = fract(sin(dot(gl_PointCoord * 43.12 + vSeed, vec2(12.9898, 78.233))) * 43758.5453);
+      float tex = edge * (0.88 + grain * 0.12);
+      
+      gl_FragColor = vec4(vCol, vAlpha * tex);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── flow field update
+// particles follow their channel's flow vector + sinusoidal vertical wave
+// collision detection: if a particle crosses channel boundary, wrap or clamp
+function updateFlow(dt){
+  for (let i = 0; i < N; i++){
+    const ch = channelID[i];
+    const def = channelDefs[ch];
+    if (!def) continue;
+    
+    const x = pos[i*3];
+    const y = pos[i*3 + 1];
+    
+    // flow vector: base angle + sinusoidal vertical wave
+    const wavePhase = x * def.waveFreq + uniforms.uTime.value * 0.3;
+    const waveOffset = Math.sin(wavePhase) * def.waveAmp;
+    
+    const angle = def.flowAngle;
+    const vx = Math.cos(angle) * def.speed;
+    const vy = Math.sin(angle) * def.speed + waveOffset * 0.04;
+    
+    vel[i*2] = vx;
+    vel[i*2 + 1] = vy;
+    
+    // integrate
+    pos[i*3]     += vel[i*2] * dt;
+    pos[i*3 + 1] += vel[i*2 + 1] * dt;
+    
+    // channel bounds enforcement (collision with lane walls)
+    const chLeft = -16 + ch * CHANNEL_WIDTH;
+    const chRight = chLeft + CHANNEL_WIDTH;
+    if (pos[i*3] < chLeft){
+      pos[i*3] = chLeft;
+      vel[i*2] = Math.abs(vel[i*2]); // bounce right
+    }
+    if (pos[i*3] > chRight){
+      pos[i*3] = chRight;
+      vel[i*2] = -Math.abs(vel[i*2]); // bounce left
+    }
+    
+    // vertical wrapping: particles exit top/bottom, re-enter opposite side
+    if (pos[i*3 + 1] > 10.0){
+      pos[i*3 + 1] = -10.0;
+      // re-scatter x within channel on wrap
+      pos[i*3] = chLeft + Math.random() * CHANNEL_WIDTH;
+    }
+    if (pos[i*3 + 1] < -10.0){
+      pos[i*3 + 1] = 10.0;
+      pos[i*3] = chLeft + Math.random() * CHANNEL_WIDTH;
+    }
+  }
+  geom.attributes.position.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  const aspect = innerWidth / innerHeight;
+  const h = 9;
+  const w = h * aspect;
+  camera.left = -w;
+  camera.right = w;
+  camera.top = h;
+  camera.bottom = -h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+addEventListener('resize', ()=>{});
+window.dispatchEvent(new Event('resize'));
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.03, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = now / 1000;
+  
+  updateFlow(dt);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
