@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: undulate, intensity: mesmerising -->
+<title>6r1 · op-dot field · Bridget Riley</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+</style>
+</head>
+<body>
+<div class="id">6r1</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 500);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- Build a flat grid of dots, Riley-style ---
+// Dense rectangular grid on the XY plane
+const cols = 120;
+const rows = 80;
+const spacing = 0.28;
+const N = cols * rows;
+
+const positions = new Float32Array(N * 3);
+const gridUV = new Float32Array(N * 2); // normalised grid coords for wave calc
+
+const originX = -(cols - 1) * spacing * 0.5;
+const originY = -(rows - 1) * spacing * 0.5;
+
+let idx = 0;
+for (let r = 0; r < rows; r++) {
+  for (let c = 0; c < cols; c++) {
+    const x = originX + c * spacing;
+    const y = originY + r * spacing;
+    positions[idx * 3]     = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = 0;
+    gridUV[idx * 2]     = c / (cols - 1);
+    gridUV[idx * 2 + 1] = r / (rows - 1);
+    idx++;
+  }
+}
+
+// Centroid is origin
+const centroid = new THREE.Vector3(0, 0, 0);
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPx:   { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: false,
+  depthWrite: true,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPx;
+    attribute vec2 gridUV;
+    varying float vShow;
+
+    void main() {
+      vec3 p = position;
+      float gx = gridUV.x;
+      float gy = gridUV.y;
+
+      // --- Riley wave fields ---
+      // Multiple interfering sine waves displace dots and modulate size
+      // Wave 1: horizontal undulation (classic "Current" / "Fall" feel)
+      float t = uTime * 0.15;
+      float wave1 = sin(gy * 25.0 + sin(gx * 6.0 + t) * 3.0 + t * 0.7);
+
+      // Wave 2: diagonal interference band
+      float wave2 = sin((gx + gy) * 18.0 - t * 0.5 + cos(gy * 4.0 + t * 0.3) * 2.0);
+
+      // Wave 3: concentric ripple from centre
+      float cx = gx - 0.5;
+      float cy = gy - 0.5;
+      float dist = sqrt(cx * cx + cy * cy);
+      float wave3 = sin(dist * 35.0 - t * 1.2);
+
+      // Composite field — mix waves
+      float field = wave1 * 0.45 + wave2 * 0.3 + wave3 * 0.25;
+
+      // Displace position slightly in Z for subtle depth parallax
+      p.z = field * 0.15;
+
+      // Lateral displacement — dots shift along x like Riley's "Hesitate"
+      p.x += sin(gy * 20.0 + t * 0.4) * 0.04 * field;
+      p.y += cos(gx * 15.0 + t * 0.3) * 0.03 * field;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float camDist = -mv.z;
+
+      // Size modulation: hard threshold — dots are either full or nearly gone
+      // This gives Riley's crisp optical contrast
+      float raw = field * 0.5 + 0.5; // 0..1
+      // Sharpen with step-like function
+      float sharp = smoothstep(0.28, 0.35, raw) * (1.0 - smoothstep(0.65, 0.72, raw));
+      // Add a base size so we get the band pattern: big dots in wave peaks, small in troughs
+      float dotScale = mix(0.5, 3.2, sharp);
+
+      // Secondary band: full dots in different phase
+      float band2 = smoothstep(0.7, 0.78, raw);
+      dotScale = max(dotScale, mix(0.5, 2.8, band2));
+
+      gl_PointSize = dotScale * uPx * (30.0 / max(camDist, 1.0));
+
+      // Alpha: opaque where dot is big, invisible where tiny
+      vShow = step(0.8, dotScale);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vShow;
+
+    void main() {
+      if (vShow < 0.5) discard;
+
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+      // Hard circle edge — no soft falloff, Riley-crisp
+      if (r2 > 0.20) discard;
+
+      // Pure white on black — maximum optical contrast
+      gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('gridUV', new THREE.BufferAttribute(gridUV, 2));
+const cloud = new THREE.Points(geom, mat);
+scene.add(cloud);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Camera: gentle breathing orbit that tracks centroid
+  const orbitR = 18;
+  const angle = t * 0.04;
+  const camY = centroid.y + Math.sin(t * 0.05) * 1.5;
+  const camZ = orbitR * Math.cos(angle * 0.3);
+  const camX = Math.sin(angle) * 3.0;
+  camera.position.set(
+    centroid.x + camX,
+    camY,
+    centroid.z + orbitR + Math.sin(t * 0.02) * 2.0
+  );
+  camera.lookAt(centroid.x, centroid.y, centroid.z);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
