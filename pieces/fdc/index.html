@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fdc · leaf-swarm tessellation · 120k particles</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0f; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+<!-- MOTION: drift, intensity: gentle -->
+</head>
+<body>
+<div class="id">fdc</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// LEAF AS BASIC UNIT — 120k leaves filling a differential-growth scaffold.
+// The growth topology remains from 2iy but instead of rendering it as an ink
+// tube, we TESSELLATE the swept ribbon with thousands of tiny leaves that:
+// (1) follow the local tangent/normal frame of the curve
+// (2) orient perpendicular to the ribbon surface (standing upright along edge)
+// (3) vary in size/color per segment-curvature (dense-packed where curve folds)
+// (4) drift slowly in local wind (subtle vertex displacement)
+//
+// The form is a column of densely-packed autumn foliage climbing into volume.
+// Palette: dried ochre, burnt sienna, rust red, dark olive — seasonal decay.
+// Camera orbits slowly, no user input. Fog integrates depth.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a0f, 0.018);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(10, 9, 16);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0f, 1);
+document.body.appendChild(renderer.domElement);
+
+// ─────────── differential growth (3D, inherited from 2iy)
+const MAX_VERTS = 1800;
+const ATTRACT   = 0.06;
+const REPEL_R   = 0.46;
+const REPEL_STR = 0.13;
+const NOISE     = 0.003;
+const PRESSURE  = 0.0028;
+const RISE      = 0.0042;
+const MAX_D     = 0.36;
+
+const verts = [];
+for (let i = 0; i < 18; i++){
+  const th = i / 18 * Math.PI * 2;
+  const r = 1.4 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+}
+
+const CELL = REPEL_R, grid = new Map();
+function key3(x, y, z){ return Math.floor(x/CELL)+','+Math.floor(y/CELL)+','+Math.floor(z/CELL); }
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i]; const k = key3(v.x, v.y, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++){
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+function step(){
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    for (const j of neighbors(v)){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d/REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x + b.x - 2*v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2*v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2*v.z) * ATTRACT;
+  }
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++){ cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x - cx, oy = verts[i].y - cy, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox/d) * PRESSURE;
+    dy[i] += (oy/d) * PRESSURE * 0.4;
+    dz[i] += (oz/d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[i].age;
+    const upward = RISE * (0.3 + 1.2 * Math.min(a * 1.5, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE;
+    verts[i].y += dy[i] + (Math.random()-0.5)*NOISE * 0.5 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE;
+    verts[i].age += 0.0014;
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if (ex*ex + ey*ey + ez*ez > MAX_D*MAX_D && verts.length + grown.length < MAX_VERTS){
+      grown.push({
+        x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5 - 0.05, z:(a.z+b.z)*0.5,
+        age: Math.max(a.age, b.age) * 0.5
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+for (let s = 0; s < 700; s++) step();
+
+// ─────────── leaf tessellation
+// Build CatmullRom, sample 500 segments, and for each segment place ~240 leaves
+// standing perpendicular to the ribbon surface. Total ~120k leaves.
+// Each leaf is a tiny rotated quad (billboard-ish but locked to tangent frame).
+
+const N_SEGMENTS = 500;
+const LEAVES_PER_SEGMENT = 240;
+const LEAF_COUNT = N_SEGMENTS * LEAVES_PER_SEGMENT;
+
+const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+
+// palette: dried ochre (#c9a961), burnt sienna (#a0522d), rust red (#8b3626), dark olive (#4a4a2a)
+const palette = [0xc9a961, 0xa0522d, 0x8b3626, 0x4a4a2a];
+
+const leafGeom = new THREE.BufferGeometry();
+const positions = new Float32Array(LEAF_COUNT * 6 * 3);  // 2 tris per leaf
+const colors = new Float32Array(LEAF_COUNT * 6 * 3);
+let idx = 0;
+
+const up = new THREE.Vector3(0, 1, 0);
+for (let i = 0; i < N_SEGMENTS; i++){
+  const t = i / N_SEGMENTS;
+  const p = curve.getPointAt(t);
+  const tangent = curve.getTangentAt(t).normalize();
+  
+  // local frame
+  const normal = new THREE.Vector3().crossVectors(tangent, up).normalize();
+  if (normal.lengthSq() < 0.001) normal.set(1, 0, 0);
+  const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+  
+  // curvature proxy
+  const dt = 1 / N_SEGMENTS;
+  const t1 = curve.getTangent(Math.max(0, t - dt));
+  const t2 = curve.getTangent(t);
+  const t3 = curve.getTangent(Math.min(1, t + dt));
+  const cosAB = t1.dot(t2);
+  const cosBC = t2.dot(t3);
+  const curvature = (2 - cosAB - cosBC) * 0.5;
+  
+  // leaf size: smaller at straight sections (0.008), larger at folds (0.018)
+  const baseSize = 0.008 + 0.010 * Math.min(1, curvature * 6);
+  
+  // color: select from palette based on segment index + curvature
+  const colorIdx = Math.floor((i * 0.618 + curvature * 3) % palette.length);
+  const col = new THREE.Color(palette[colorIdx]);
+  
+  for (let j = 0; j < LEAVES_PER_SEGMENT; j++){
+    // distribute leaves around the ribbon cross-section
+    const ang = (j / LEAVES_PER_SEGMENT) * Math.PI * 2;
+    const rad = 0.02 + Math.random() * 0.08;  // scatter radially
+    const offset = new THREE.Vector3()
+      .copy(normal).multiplyScalar(Math.cos(ang) * rad)
+      .add(binormal.clone().multiplyScalar(Math.sin(ang) * rad));
+    
+    const center = p.clone().add(offset);
+    
+    // leaf orientation: stand perpendicular to ribbon surface (point outward)
+    const outward = offset.clone().normalize();
+    const leafRight = new THREE.Vector3().crossVectors(tangent, outward).normalize();
+    const leafUp = outward;
+    
+    // leaf size variation
+    const sz = baseSize * (0.7 + Math.random() * 0.6);
+    
+    // quad vertices
+    const v0 = center.clone().add(leafRight.clone().multiplyScalar(-sz)).add(leafUp.clone().multiplyScalar(-sz));
+    const v1 = center.clone().add(leafRight.clone().multiplyScalar(sz)).add(leafUp.clone().multiplyScalar(-sz));
+    const v2 = center.clone().add(leafRight.clone().multiplyScalar(sz)).add(leafUp.clone().multiplyScalar(sz));
+    const v3 = center.clone().add(leafRight.clone().multiplyScalar(-sz)).add(leafUp.clone().multiplyScalar(sz));
+    
+    // triangle 1
+    positions[idx++] = v0.x; positions[idx++] = v0.y; positions[idx++] = v0.z;
+    positions[idx++] = v1.x; positions[idx++] = v1.y; positions[idx++] = v1.z;
+    positions[idx++] = v2.x; positions[idx++] = v2.y; positions[idx++] = v2.z;
+    // triangle 2
+    positions[idx++] = v0.x; positions[idx++] = v0.y; positions[idx++] = v0.z;
+    positions[idx++] = v2.x; positions[idx++] = v2.y; positions[idx++] = v2.z;
+    positions[idx++] = v3.x; positions[idx++] = v3.y; positions[idx++] = v3.z;
+  }
+}
+
+// fill colors
+for (let i = 0; i < LEAF_COUNT; i++){
+  const segIdx = Math.floor(i / LEAVES_PER_SEGMENT);
+  const t = segIdx / N_SEGMENTS;
+  const curvature = Math.abs(Math.sin(t * Math.PI * 8)) * 0.5;
+  const colorIdx = Math.floor((segIdx * 0.618 + curvature * 3) % palette.length);
+  const col = new THREE.Color(palette[colorIdx]);
+  
+  // slight color variation per leaf
+  col.offsetHSL(0, 0, (Math.random() - 0.5) * 0.15);
+  
+  for (let v = 0; v < 6; v++){
+    colors[(i * 6 + v) * 3] = col.r;
+    colors[(i * 6 + v) * 3 + 1] = col.g;
+    colors[(i * 6 + v) * 3 + 2] = col.b;
+  }
+}
+
+leafGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+leafGeom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+const leafMat = new THREE.MeshBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.85,
+  side: THREE.DoubleSide,
+  depthWrite: false,
+  blending: THREE.NormalBlending
+});
+
+const leafMesh = new THREE.Mesh(leafGeom, leafMat);
+scene.add(leafMesh);
+
+// warm ambient light from above-right
+const light = new THREE.DirectionalLight(0xffddaa, 0.4);
+light.position.set(5, 12, 8);
+scene.add(light);
+scene.add(new THREE.AmbientLight(0x2a2a3a, 0.3));
+
+// camera follow centroid
+let yMean = 0; for (const v of verts) yMean += v.y; yMean /= Math.max(verts.length, 1);
+const targetY = Math.max(yMean, 2.0);
+camera.lookAt(0, targetY, 0);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(t){
+  const elapsed = (t - start) * 0.001;
+  
+  // slow camera orbit
+  const orbitSpeed = 0.08;
+  const radius = 16;
+  camera.position.x = Math.cos(elapsed * orbitSpeed) * radius;
+  camera.position.z = Math.sin(elapsed * orbitSpeed) * radius;
+  camera.position.y = targetY + 8;
+  camera.lookAt(0, targetY, 0);
+  
+  // subtle leaf drift (wind simulation via vertex displacement)
+  const pos = leafGeom.attributes.position.array;
+  for (let i = 0; i < pos.length; i += 3){
+    const x = pos[i], y = pos[i+1], z = pos[i+2];
+    const drift = Math.sin(elapsed * 1.2 + x * 0.5 + z * 0.3) * 0.002;
+    pos[i] += drift;
+    pos[i+2] += drift * 0.7;
+  }
+  leafGeom.attributes.position.needsUpdate = true;
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop(start);
+</script>
+</body>
+</html>
