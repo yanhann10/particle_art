@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4xr · voronoi shatter · pointer dispersion</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0c12; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">4xr · voronoi shatter</div>
+<div class="hint">move pointer to shatter · distance drives dispersion</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// A bird point-cloud (12k particles) in rest pose. Pointer interaction shatters it
+// along voronoi cell boundaries: each cell gets a unique dispersion vector perpendicular
+// to the nearest voronoi edge. Distance from pointer controls magnitude.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0c12, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0c12, 0.04);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 50);
+camera.position.set(0, 0.4, 7);
+camera.lookAt(0, 0, 0);
+
+// procedural bird point-cloud: body ellipsoid + two wings
+function generateBirdCloud(count){
+  const pos = [];
+  const bodyCount = Math.floor(count * 0.4);
+  const wingCount = Math.floor(count * 0.3);
+
+  // body: ellipsoid centered at origin, stretched along x
+  for (let i = 0; i < bodyCount; i++){
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const r = 0.6 + Math.random() * 0.2;
+    const x = r * 1.4 * Math.sin(phi) * Math.cos(theta);
+    const y = r * 0.8 * Math.sin(phi) * Math.sin(theta);
+    const z = r * 0.9 * Math.cos(phi);
+    pos.push(x, y, z);
+  }
+
+  // left wing: flat triangle in xz plane, y slightly offset
+  for (let i = 0; i < wingCount; i++){
+    const u = Math.random();
+    const v = Math.random();
+    const a = 1.0 - Math.sqrt(u);
+    const b = Math.sqrt(u) * (1.0 - v);
+    const c = Math.sqrt(u) * v;
+    const x = a * (-0.8) + b * (-2.8) + c * (-1.2);
+    const y = 0.15 + (Math.random() - 0.5) * 0.12;
+    const z = a * (-0.2) + b * 0.4 + c * 1.0;
+    pos.push(x, y, z);
+  }
+
+  // right wing: mirror
+  for (let i = 0; i < wingCount; i++){
+    const u = Math.random();
+    const v = Math.random();
+    const a = 1.0 - Math.sqrt(u);
+    const b = Math.sqrt(u) * (1.0 - v);
+    const c = Math.sqrt(u) * v;
+    const x = a * 0.8 + b * 2.8 + c * 1.2;
+    const y = 0.15 + (Math.random() - 0.5) * 0.12;
+    const z = a * (-0.2) + b * 0.4 + c * 1.0;
+    pos.push(x, y, z);
+  }
+
+  return new Float32Array(pos);
+}
+
+const N = 12000;
+const restPos = generateBirdCloud(N);
+
+// voronoi sites: 24 random points in a sphere slightly larger than the bird
+const NUM_SITES = 24;
+const sites = [];
+for (let i = 0; i < NUM_SITES; i++){
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const r = 1.5 + Math.random() * 1.0;
+  sites.push(new THREE.Vector3(
+    r * Math.sin(phi) * Math.cos(theta),
+    r * Math.sin(phi) * Math.sin(theta),
+    r * Math.cos(phi)
+  ));
+}
+
+// per-particle: assign voronoi cell (nearest site), compute dispersion direction
+// (perpendicular to the edge toward second-nearest site)
+const cellAssignment = new Uint8Array(N);
+const dispersionDir = new Float32Array(N * 3);
+
+for (let i = 0; i < N; i++){
+  const px = restPos[i*3], py = restPos[i*3+1], pz = restPos[i*3+2];
+  let minDist = Infinity, minIdx = 0;
+  let minDist2 = Infinity, minIdx2 = 0;
+
+  for (let j = 0; j < NUM_SITES; j++){
+    const dx = sites[j].x - px, dy = sites[j].y - py, dz = sites[j].z - pz;
+    const d = dx*dx + dy*dy + dz*dz;
+    if (d < minDist){
+      minDist2 = minDist; minIdx2 = minIdx;
+      minDist = d; minIdx = j;
+    } else if (d < minDist2){
+      minDist2 = d; minIdx2 = j;
+    }
+  }
+
+  cellAssignment[i] = minIdx;
+
+  // dispersion = vector perpendicular to the bisector plane between site1 and site2
+  // i.e., direction FROM site1 TOWARD site2, normalized
+  const s1 = sites[minIdx], s2 = sites[minIdx2];
+  let dx = s2.x - s1.x, dy = s2.y - s1.y, dz = s2.z - s1.z;
+  const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  if (len > 0.001){ dx /= len; dy /= len; dz /= len; }
+  // add slight radial push outward from origin for visual clarity
+  const rx = px, ry = py, rz = pz;
+  const rlen = Math.sqrt(rx*rx + ry*ry + rz*rz);
+  if (rlen > 0.001){
+    dx += (rx/rlen) * 0.3;
+    dy += (ry/rlen) * 0.3;
+    dz += (rz/rlen) * 0.3;
+  }
+  const nlen = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  if (nlen > 0.001){ dx /= nlen; dy /= nlen; dz /= nlen; }
+
+  dispersionDir[i*3]   = dx;
+  dispersionDir[i*3+1] = dy;
+  dispersionDir[i*3+2] = dz;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+geom.setAttribute('restPos', new THREE.BufferAttribute(restPos, 3));
+geom.setAttribute('dispDir', new THREE.BufferAttribute(dispersionDir, 3));
+geom.setAttribute('cellId',  new THREE.BufferAttribute(cellAssignment, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uPointer: { value: new THREE.Vector3(999, 999, 999) },
+    uPixel:   { value: renderer.getPixelRatio() },
+    uTime:    { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform vec3 uPointer;
+    uniform float uPixel;
+    uniform float uTime;
+    attribute vec3 restPos;
+    attribute vec3 dispDir;
+    attribute float cellId;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      // distance from pointer to rest position
+      vec3 toPointer = uPointer - restPos;
+      float dist = length(toPointer);
+      float influence = smoothstep(4.0, 0.0, dist);
+
+      // disperse along precomputed direction
+      vec3 disp = restPos + dispDir * influence * 3.5;
+
+      // palette per cell (8 hues cycled)
+      float hue = mod(cellId / 8.0, 1.0);
+      vec3 col;
+      if (hue < 0.33) col = mix(vec3(0.82, 0.55, 0.28), vec3(0.95, 0.78, 0.45), hue / 0.33);
+      else if (hue < 0.66) col = mix(vec3(0.95, 0.78, 0.45), vec3(0.45, 0.72, 0.88), (hue - 0.33) / 0.33);
+      else col = mix(vec3(0.45, 0.72, 0.88), vec3(0.82, 0.55, 0.28), (hue - 0.66) / 0.34);
+
+      vCol = col;
+      vAlpha = 1.0 - influence * 0.3;
+
+      vec4 mv = modelViewMatrix * vec4(disp, 1.0);
+      float fogDepth = -mv.z;
+      gl_PointSize = 2.2 * uPixel * (3.0 / fogDepth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// pointer tracking (project into world at z=0 plane)
+const pointerNDC = new THREE.Vector2(999, 999);
+const raycaster = new THREE.Raycaster();
+
+addEventListener('pointermove', e => {
+  pointerNDC.x = (e.clientX / innerWidth) * 2 - 1;
+  pointerNDC.y = -(e.clientY / innerHeight) * 2 + 1;
+});
+
+addEventListener('pointerleave', () => {
+  pointerNDC.set(999, 999);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = (now - lastT) / 1000;
+  lastT = now;
+
+  mat.uniforms.uTime.value = now / 1000;
+
+  // project pointer to world coords at z=0
+  if (pointerNDC.x < 900){
+    raycaster.setFromCamera(pointerNDC, camera);
+    const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+    const target = new THREE.Vector3();
+    raycaster.ray.intersectPlane(plane, target);
+    mat.uniforms.uPointer.value.copy(target);
+  } else {
+    mat.uniforms.uPointer.value.set(999, 999, 999);
+  }
+
+  // slow orbit
+  const ang = now * 0.00012;
+  camera.position.x = Math.sin(ang) * 7;
+  camera.position.z = Math.cos(ang) * 7;
+  camera.position.y = 0.4 + Math.sin(ang * 0.5) * 0.3;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
