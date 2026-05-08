@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>m2t · phototropic DLA coral · emergent growth</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0e12; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; color:#6a8fa0; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; color:#6a8fa0; }
+</style>
+</head>
+<body>
+<div class="id">m2t</div>
+<div class="hint">growth via diffusion-limited aggregation · phototropic bias</div>
+<div class="src">80k particles · Turrell light gradient · Andy Goldsworthy substrate</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 28, 45);
+camera.lookAt(0, 8, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0e12, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- Substrate plane: textured seafloor ---
+const substrate = new THREE.Mesh(
+  new THREE.PlaneGeometry(80, 80, 32, 32),
+  new THREE.MeshStandardMaterial({
+    color: 0x1a1614,
+    roughness: 0.95,
+    metalness: 0.05,
+    side: THREE.DoubleSide,
+  })
+);
+substrate.rotation.x = -Math.PI / 2;
+substrate.position.y = 0;
+substrate.receiveShadow = true;
+
+// Add perlin-like displacement to substrate
+const posArr = substrate.geometry.attributes.position.array;
+let s = 12345;
+const rng = () => {
+  s |= 0; s = s + 0x6D2B79F5 | 0;
+  let t = Math.imul(s ^ s >>> 15, 1 | s);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+};
+for (let i = 0; i < posArr.length; i += 3){
+  const x = posArr[i], z = posArr[i+1];
+  const n = Math.sin(x * 0.08) * Math.cos(z * 0.08) + Math.sin(x * 0.15 + z * 0.12) * 0.5;
+  posArr[i+2] = n * 0.6 + rng() * 0.3;
+}
+substrate.geometry.attributes.position.needsUpdate = true;
+substrate.geometry.computeVertexNormals();
+scene.add(substrate);
+
+// --- Turrell-style gradient light: warm top, cool base ---
+const topLight = new THREE.DirectionalLight(0xffd4a3, 1.2);
+topLight.position.set(12, 40, 8);
+scene.add(topLight);
+
+const fillLight = new THREE.DirectionalLight(0x5a7a8f, 0.4);
+fillLight.position.set(-8, 5, -10);
+scene.add(fillLight);
+
+const ambientLight = new THREE.AmbientLight(0x1a2228, 0.6);
+scene.add(ambientLight);
+
+// --- Fog for volumetric depth ---
+scene.fog = new THREE.Fog(0x0a0e12, 30, 120);
+
+// --- DLA colony state ---
+const MAX_PARTICLES = 80000;
+const colonyPositions = new Float32Array(MAX_PARTICLES * 3);
+const colonyColors = new Float32Array(MAX_PARTICLES * 3);
+const colonySeeds = new Float32Array(MAX_PARTICLES);
+let colonyCount = 0;
+
+// Spatial grid for fast neighbor lookup (cell size ~1.5)
+const CELL_SIZE = 1.5;
+const GRID_EXTENT = 50;
+const gridMap = new Map();
+
+function gridKey(x, y, z){
+  const gx = Math.floor(x / CELL_SIZE);
+  const gy = Math.floor(y / CELL_SIZE);
+  const gz = Math.floor(z / CELL_SIZE);
+  return `${gx},${gy},${gz}`;
+}
+
+function addToGrid(idx, x, y, z){
+  const key = gridKey(x, y, z);
+  if (!gridMap.has(key)) gridMap.set(key, []);
+  gridMap.get(key).push(idx);
+}
+
+function nearbyParticles(x, y, z){
+  const nearby = [];
+  const gx = Math.floor(x / CELL_SIZE);
+  const gy = Math.floor(y / CELL_SIZE);
+  const gz = Math.floor(z / CELL_SIZE);
+  for (let dx = -1; dx <= 1; dx++){
+    for (let dy = -1; dy <= 1; dy++){
+      for (let dz = -1; dz <= 1; dz++){
+        const key = `${gx+dx},${gy+dy},${gz+dz}`;
+        if (gridMap.has(key)) nearby.push(...gridMap.get(key));
+      }
+    }
+  }
+  return nearby;
+}
+
+// Initialize first seed colony
+function seedColony(){
+  const seedCount = 5;
+  for (let i = 0; i < seedCount; i++){
+    const angle = (i / seedCount) * Math.PI * 2;
+    const radius = 2.0;
+    const x = Math.cos(angle) * radius;
+    const z = Math.sin(angle) * radius;
+    const y = 0.3;
+    colonyPositions[colonyCount * 3] = x;
+    colonyPositions[colonyCount * 3 + 1] = y;
+    colonyPositions[colonyCount * 3 + 2] = z;
+    colonyColors[colonyCount * 3] = 0.85;
+    colonyColors[colonyCount * 3 + 1] = 0.72;
+    colonyColors[colonyCount * 3 + 2] = 0.60;
+    colonySeeds[colonyCount] = rng();
+    addToGrid(colonyCount, x, y, z);
+    colonyCount++;
+  }
+}
+seedColony();
+
+// Walker pool for DLA
+const WALKER_POOL_SIZE = 600;
+const walkers = [];
+
+function spawnWalker(){
+  const angle = rng() * Math.PI * 2;
+  const radius = 15 + rng() * 5;
+  return {
+    x: Math.cos(angle) * radius,
+    y: 2 + rng() * 8,
+    z: Math.sin(angle) * radius,
+    age: 0,
+  };
+}
+
+for (let i = 0; i < WALKER_POOL_SIZE; i++) walkers.push(spawnWalker());
+
+// Phototropic bias: particles prefer to aggregate toward the light gradient (upward + toward topLight)
+const LIGHT_DIR = new THREE.Vector3(12, 40, 8).normalize();
+
+function tryAggregate(walker){
+  const nearby = nearbyParticles(walker.x, walker.y, walker.z);
+  if (nearby.length === 0) return false;
+
+  for (let idx of nearby){
+    const dx = walker.x - colonyPositions[idx * 3];
+    const dy = walker.y - colonyPositions[idx * 3 + 1];
+    const dz = walker.z - colonyPositions[idx * 3 + 2];
+    const distSq = dx * dx + dy * dy + dz * dz;
+    if (distSq < 1.8 * 1.8){
+      // Aggregate: place particle slightly offset toward light
+      const norm = Math.sqrt(distSq);
+      const offsetX = (dx / norm) * 0.8 + LIGHT_DIR.x * 0.3;
+      const offsetY = (dy / norm) * 0.8 + LIGHT_DIR.y * 0.3;
+      const offsetZ = (dz / norm) * 0.8 + LIGHT_DIR.z * 0.3;
+      const newX = colonyPositions[idx * 3] + offsetX;
+      const newY = colonyPositions[idx * 3 + 1] + offsetY;
+      const newZ = colonyPositions[idx * 3 + 2] + offsetZ;
+
+      colonyPositions[colonyCount * 3] = newX;
+      colonyPositions[colonyCount * 3 + 1] = newY;
+      colonyPositions[colonyCount * 3 + 2] = newZ;
+
+      // Color variation: higher particles get lighter (sun-bleached tips)
+      const heightFactor = Math.max(0, Math.min(1, newY / 20));
+      const baseR = 0.75 + heightFactor * 0.15;
+      const baseG = 0.60 + heightFactor * 0.25;
+      const baseB = 0.50 + heightFactor * 0.35;
+      colonyColors[colonyCount * 3] = baseR + (rng() - 0.5) * 0.1;
+      colonyColors[colonyCount * 3 + 1] = baseG + (rng() - 0.5) * 0.1;
+      colonyColors[colonyCount * 3 + 2] = baseB + (rng() - 0.5) * 0.1;
+
+      colonySeeds[colonyCount] = rng();
+      addToGrid(colonyCount, newX, newY, newZ);
+      colonyCount++;
+      return true;
+    }
+  }
+  return false;
+}
+
+function updateWalkers(){
+  const STEPS_PER_FRAME = 4;
+  for (let step = 0; step < STEPS_PER_FRAME; step++){
+    for (let i = 0; i < walkers.length && colonyCount < MAX_PARTICLES; i++){
+      const w = walkers[i];
+
+      // Brownian step with phototropic bias
+      const stepSize = 0.5;
+      w.x += (rng() - 0.5) * stepSize + LIGHT_DIR.x * 0.08;
+      w.y += (rng() - 0.5) * stepSize + LIGHT_DIR.y * 0.08;
+      w.z += (rng() - 0.5) * stepSize + LIGHT_DIR.z * 0.08;
+
+      // Floor bounce
+      if (w.y < 0.2) w.y = 0.2 + rng() * 0.5;
+
+      w.age++;
+
+      // Attempt aggregation
+      if (tryAggregate(w)){
+        walkers[i] = spawnWalker();
+        continue;
+      }
+
+      // Respawn if too old or too far
+      const distFromOrigin = Math.sqrt(w.x * w.x + w.y * w.y + w.z * w.z);
+      if (w.age > 800 || distFromOrigin > 40){
+        walkers[i] = spawnWalker();
+      }
+    }
+  }
+}
+
+// Particle system
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(colonyPositions, 3));
+geom.setAttribute('color', new THREE.BufferAttribute(colonyColors, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(colonySeeds, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() },
+  },
+  vertexColors: true,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying vec3 vColor;
+    varying float vSeed;
+
+    void main(){
+      vColor = color;
+      vSeed = seed;
+
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+
+      // Particle size varies by height (taller = smaller = finer tips)
+      float heightFactor = position.y / 20.0;
+      float baseSize = mix(3.5, 2.0, heightFactor);
+      gl_PointSize = uPixel * max(1.0, baseSize - dist * 0.04);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vSeed;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // Soft particle falloff
+      float alpha = 1.0 - smoothstep(0.15, 0.25, r);
+      alpha *= 0.85 + vSeed * 0.15;
+
+      gl_FragColor = vec4(vColor, alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Camera orbit
+let orbitTheta = 0.0, orbitPhi = 0.7;
+let isDragging = false, prevX = 0, prevY = 0;
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY; e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.004;
+  orbitPhi = Math.max(0.2, Math.min(1.3, orbitPhi - (e.clientY - prevY) * 0.004));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  mat.uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+let frameCount = 0;
+
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  mat.uniforms.uTime.value = t;
+
+  // Grow colony
+  if (colonyCount < MAX_PARTICLES){
+    updateWalkers();
+
+    // Update geometry every 8 frames for performance
+    if (frameCount % 8 === 0){
+      geom.setDrawRange(0, colonyCount);
+      geom.attributes.position.needsUpdate = true;
+      geom.attributes.color.needsUpdate = true;
+      geom.attributes.seed.needsUpdate = true;
+      geom.computeBoundingSphere();
+    }
+  }
+
+  // Track colony centroid
+  if (colonyCount > 0 && frameCount % 60 === 0){
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < colonyCount; i++){
+      cx += colonyPositions[i * 3];
+      cy += colonyPositions[i * 3 + 1];
+      cz += colonyPositions[i * 3 + 2];
+    }
+    cx /= colonyCount; cy /= colonyCount; cz /= colonyCount;
+
+    // Slowly move camera to follow growth
+    const targetY = Math.max(8, cy + 6);
+    camera.position.y += (targetY - camera.position.y) * 0.01;
+  }
+
+  // Slow auto-orbit
+  const autoTheta = t * 0.04;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 45;
+
+  const lookY = colonyCount > 0 ? Math.max(4, colonyPositions[1] * 0.5) : 8;
+
+  camera.position.x = radius * Math.sin(theta) * Math.sin(phi);
+  camera.position.z = radius * Math.cos(theta) * Math.sin(phi);
+  camera.lookAt(0, lookY, 0);
+
+  renderer.render(scene, camera);
+  frameCount++;
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
