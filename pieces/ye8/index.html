@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ye8 · lissajous knot</title>
+<!-- MOTION: flow, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08090b; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">ye8</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  Lissajous knot — 100k GPGPU particles flowing along a (2,3,5) knot curve.
+  Technique ref: Jim Hoste & Mark Kidwell's Lissajous knot classification.
+  Palette: copper → verdigris → silver (aged-metal patina narrative).
+  Particles are spring-attracted to the curve, creating a volumetric tube
+  that breathes with gentle flow-speed modulation.
+*/
+
+const W = 320, H = 320, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08090b, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = {
+  type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false
+};
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// Lissajous knot: x=cos(2t), y=cos(3t+0.8), z=cos(5t+1.6), scale 1.6
+const KNX = 2, KNY = 3, KNZ = 5;
+const PHX = 0.0, PHY = 0.8, PHZ = 1.6;
+const SCALE = 1.6;
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  const phase = (i / N) * Math.PI * 2 + Math.random() * 0.01;
+  const rx = (Math.random() - 0.5) * 0.15;
+  const ry = (Math.random() - 0.5) * 0.15;
+  const rz = (Math.random() - 0.5) * 0.15;
+  init[i * 4]     = Math.cos(KNX * phase + PHX) * SCALE + rx;
+  init[i * 4 + 1] = Math.cos(KNY * phase + PHY) * SCALE + ry;
+  init[i * 4 + 2] = Math.cos(KNZ * phase + PHZ) * SCALE + rz;
+  init[i * 4 + 3] = phase; // store phase as w
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv;
+    void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), blitMat));
+renderer.setRenderTarget(rtA);
+renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.008 },
+  uTime: { value: 0.0 },
+  uSpring: { value: 2.8 },
+  uDamp: { value: 0.92 },
+  uFlowSpeed: { value: 0.35 }
+};
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uTime, uSpring, uDamp, uFlowSpeed;
+    varying vec2 vUv;
+
+    const float PI2 = 6.283185307;
+    const float SCALE = 1.6;
+
+    vec3 lissajous(float t) {
+      return vec3(
+        cos(2.0 * t) * SCALE,
+        cos(3.0 * t + 0.8) * SCALE,
+        cos(5.0 * t + 1.6) * SCALE
+      );
+    }
+
+    vec3 lissajousTangent(float t) {
+      return normalize(vec3(
+        -2.0 * sin(2.0 * t) * SCALE,
+        -3.0 * sin(3.0 * t + 0.8) * SCALE,
+        -5.0 * sin(5.0 * t + 1.6) * SCALE
+      ));
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 pos = s.xyz;
+      float phase = s.w;
+
+      // gentle breathing modulation
+      float breath = 1.0 + 0.15 * sin(uTime * 0.4);
+      float flow = uFlowSpeed * breath;
+
+      // advance phase along knot
+      phase += uDt * flow;
+      phase = mod(phase, PI2);
+
+      // target on curve
+      vec3 target = lissajous(phase);
+      vec3 tang = lissajousTangent(phase);
+
+      // spring attraction toward curve
+      vec3 toTarget = target - pos;
+      // decompose: keep tangential motion free, attract radially
+      float tangComp = dot(toTarget, tang);
+      vec3 radial = toTarget - tangComp * tang;
+
+      // apply spring to radial + gentle tangential pull
+      pos += radial * uDt * uSpring + tang * uDt * flow * SCALE * 0.6;
+
+      // soft damping toward curve
+      pos = mix(pos, target, uDt * 1.2);
+
+      gl_FragColor = vec4(pos, phase);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), simMat));
+
+// Render points
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.05, 60);
+camera.position.set(0, 0, 6);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = y * W + x;
+  idxArr[i * 2]     = (x + 0.5) / W;
+  idxArr[i * 2 + 1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+pointsGeom.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state: { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime: { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vPhase;
+    varying float vDepth;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vPhase = s.w;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = clamp(-mv.z * 0.12, 0.0, 1.0);
+      float dist = max(-mv.z, 0.3);
+      gl_PointSize = (1.0 + 0.6 * (1.0 - vDepth)) * uPixel * (7.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying float vPhase;
+    varying float vDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0);
+
+      // copper → verdigris → silver palette
+      vec3 copper   = vec3(0.77, 0.47, 0.20);
+      vec3 verdigris = vec3(0.29, 0.55, 0.48);
+      vec3 silver    = vec3(0.83, 0.86, 0.90);
+
+      float PI2 = 6.283185;
+      float k = mod(vPhase / PI2 + vDepth * 0.3, 1.0);
+
+      vec3 col = mix(copper, verdigris, smoothstep(0.0, 0.45, k));
+      col = mix(col, silver, smoothstep(0.55, 1.0, k));
+
+      // depth fog: distant particles dimmer and cooler
+      col = mix(col, vec3(0.12, 0.14, 0.18), vDepth * 0.55);
+
+      float alpha = a * (0.35 + 0.5 * (1.0 - vDepth));
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// Subtle fog plane — warm amber gradient at top, teal at bottom
+const fogGeo = new THREE.PlaneGeometry(30, 30);
+const fogMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      float g = vUv.y;
+      vec3 warm = vec3(0.12, 0.06, 0.02);
+      vec3 cool = vec3(0.02, 0.05, 0.07);
+      vec3 c = mix(cool, warm, g);
+      float edge = smoothstep(0.0, 0.3, vUv.x) * smoothstep(1.0, 0.7, vUv.x);
+      edge *= smoothstep(0.0, 0.3, vUv.y) * smoothstep(1.0, 0.7, vUv.y);
+      gl_FragColor = vec4(c, 0.04 * edge);
+    }
+  `
+});
+const fogPlane = new THREE.Mesh(fogGeo, fogMat);
+fogPlane.position.z = -3;
+scene.add(fogPlane);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Pointer nudge: tilt knot viewing angle
+const tilt = { x: 0, y: 0 };
+addEventListener('pointermove', (e) => {
+  tilt.x = ((e.clientX / innerWidth) - 0.5) * 0.6;
+  tilt.y = ((e.clientY / innerHeight) - 0.5) * 0.4;
+});
+
+const t0 = performance.now();
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+  simUniforms.uTime.value = elapsed;
+  pointsMat.uniforms.uTime.value = elapsed;
+
+  // GPGPU integration — 3 substeps
+  for (let i = 0; i < 3; i++) {
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+
+  // Camera: slow orbit with pointer tilt
+  const ang = elapsed * 0.12;
+  const r = 5.2 + 0.4 * Math.sin(elapsed * 0.15);
+  camera.position.x = Math.sin(ang) * r + tilt.x * 1.5;
+  camera.position.z = Math.cos(ang) * r;
+  camera.position.y = Math.sin(ang * 0.37) * 1.2 + tilt.y * 1.2;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
