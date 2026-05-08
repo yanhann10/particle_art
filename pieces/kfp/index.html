@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<!-- CROSS-POLLINATION: sibling 7ea (differential growth)
+     Borrowing differential growth's line-network rendering: boid neighbor
+     connections form a living connective mesh that thickens and thins as
+     the flock breathes — organic tissue over swarm skeleton.
+     Parent form (Reynolds murmuration) remains structurally readable. -->
+<title>kfp · flocking tissue · Reynolds × differential growth</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+</style>
+</head>
+<body>
+<div class="id">kfp</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── setup ─────────────────────────────────────────────────── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 600);
+camera.position.set(0, 0, 55);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080a, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── boids ─────────────────────────────────────────────────── */
+const N = 1400;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+
+for (let i = 0; i < N; i++){
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.acos(2 * Math.random() - 1);
+  const r = 6 + Math.random() * 10;
+  pos[i*3]   = r * Math.sin(ph) * Math.cos(th);
+  pos[i*3+1] = r * Math.sin(ph) * Math.sin(th);
+  pos[i*3+2] = r * Math.cos(ph);
+  const vt = Math.random() * Math.PI * 2;
+  const vp = Math.acos(2 * Math.random() - 1);
+  const sp = 0.7 + Math.random() * 0.5;
+  vel[i*3]   = sp * Math.sin(vp) * Math.cos(vt);
+  vel[i*3+1] = sp * Math.sin(vp) * Math.sin(vt);
+  vel[i*3+2] = sp * Math.cos(vp);
+  seeds[i] = Math.random();
+}
+
+/* ── flocking constants ────────────────────────────────────── */
+const PERCEPT = 3.8;
+const SEP_DIST = 1.3;
+const COH_F = 0.022;
+const ALI_F = 0.09;
+const SEP_F = 0.16;
+const BND_F = 0.28;
+const MAX_SPD = 1.6;
+const MIN_SPD = 0.5;
+const BOUND = 24;
+
+/* ── spatial hash ──────────────────────────────────────────── */
+const CELL = PERCEPT * 1.4;
+let grid = new Map();
+
+function hashKey(x, y, z){
+  return ((Math.floor(x/CELL)*73856093) ^ (Math.floor(y/CELL)*19349663) ^
+          (Math.floor(z/CELL)*83492791)) | 0;
+}
+
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < N; i++){
+    const k = hashKey(pos[i*3], pos[i*3+1], pos[i*3+2]);
+    let b = grid.get(k);
+    if (!b){ b = []; grid.set(k, b); }
+    b.push(i);
+  }
+}
+
+function neighborCells(x, y, z){
+  const out = [];
+  const cx = Math.floor(x/CELL), cy = Math.floor(y/CELL), cz = Math.floor(z/CELL);
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++){
+    const k = ((cx+dx)*73856093 ^ (cy+dy)*19349663 ^ (cz+dz)*83492791) | 0;
+    const b = grid.get(k);
+    if (b) for (const j of b) out.push(j);
+  }
+  return out;
+}
+
+/* ── line buffer for differential-growth mesh ──────────────── */
+const MAX_LINES = 28000;
+const linePos = new Float32Array(MAX_LINES * 6); // 2 verts × 3
+const lineCol = new Float32Array(MAX_LINES * 6); // 2 verts × 3 color
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
+lineGeom.setAttribute('color', new THREE.BufferAttribute(lineCol, 3));
+lineGeom.setDrawRange(0, 0);
+
+const lineMat = new THREE.LineBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.28,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false
+});
+const lineMesh = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lineMesh);
+
+/* ── node points (small, differential-growth node aesthetic) ── */
+const nodeUniforms = { uTime: { value: 0 }, uPx: { value: renderer.getPixelRatio() } };
+
+const nodeMat = new THREE.ShaderMaterial({
+  uniforms: nodeUniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPx;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      float phase = seed * 6.2831 + uTime * 0.25;
+      float pulse = 0.5 + 0.5 * sin(phase);
+
+      // palette: lichen / moss / bone — Andy Lomas morphogenetic tones
+      vec3 c0 = vec3(0.18, 0.28, 0.16); // deep moss
+      vec3 c1 = vec3(0.62, 0.72, 0.42); // lichen green
+      vec3 c2 = vec3(0.82, 0.76, 0.60); // warm bone
+      vec3 c3 = vec3(0.40, 0.55, 0.50); // sage
+
+      float t = fract(seed * 3.7 + pulse * 0.3);
+      vCol = t < 0.33 ? mix(c0, c1, t*3.0)
+           : t < 0.66 ? mix(c1, c3, (t-0.33)*3.0)
+                       : mix(c3, c2, (t-0.66)*3.0);
+
+      vA = 0.55 + 0.35 * pulse;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = (2.0 + 1.0*pulse) * uPx * (55.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vA;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const nodeGeom = new THREE.BufferGeometry();
+nodeGeom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+nodeGeom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+const nodePoints = new THREE.Points(nodeGeom, nodeMat);
+scene.add(nodePoints);
+
+/* ── atmospheric dust motes (environmental texture) ────────── */
+const DUST = 400;
+const dustPos = new Float32Array(DUST * 3);
+const dustSeed = new Float32Array(DUST);
+for (let i = 0; i < DUST; i++){
+  dustPos[i*3]   = (Math.random() - 0.5) * 80;
+  dustPos[i*3+1] = (Math.random() - 0.5) * 80;
+  dustPos[i*3+2] = (Math.random() - 0.5) * 80;
+  dustSeed[i] = Math.random();
+}
+const dustGeom = new THREE.BufferGeometry();
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('seed', new THREE.BufferAttribute(dustSeed, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: nodeUniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPx;
+    attribute float seed;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      p.y += sin(uTime * 0.12 + seed * 20.0) * 0.4;
+      p.x += cos(uTime * 0.08 + seed * 15.0) * 0.3;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = (0.6 + seed * 0.4) * uPx * (40.0 / -mv.z);
+      vA = 0.08 + 0.06 * sin(uTime * 0.3 + seed * 6.28);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 10.0) * vA;
+      gl_FragColor = vec4(vec3(0.55, 0.62, 0.50) * a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+/* ── resize ────────────────────────────────────────────────── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── simulation ────────────────────────────────────────────── */
+const steer = new THREE.Vector3();
+const aPos = new THREE.Vector3();
+const aVel = new THREE.Vector3();
+
+function updateBoids(dt){
+  rebuildGrid();
+  for (let i = 0; i < N; i++){
+    const px = pos[i*3], py = pos[i*3+1], pz = pos[i*3+2];
+    aPos.set(0,0,0); aVel.set(0,0,0); steer.set(0,0,0);
+    let cn = 0, an = 0;
+    const nb = neighborCells(px, py, pz);
+    for (const j of nb){
+      if (i === j) continue;
+      const dx = pos[j*3]-px, dy = pos[j*3+1]-py, dz = pos[j*3+2]-pz;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 < PERCEPT*PERCEPT && d2 > 0.01){
+        const d = Math.sqrt(d2);
+        aPos.x += pos[j*3]; aPos.y += pos[j*3+1]; aPos.z += pos[j*3+2]; cn++;
+        aVel.x += vel[j*3]; aVel.y += vel[j*3+1]; aVel.z += vel[j*3+2]; an++;
+        if (d < SEP_DIST){
+          const f = (SEP_DIST - d) / SEP_DIST;
+          steer.x -= (dx/d)*f*SEP_F; steer.y -= (dy/d)*f*SEP_F; steer.z -= (dz/d)*f*SEP_F;
+        }
+      }
+    }
+    if (cn > 0){
+      aPos.multiplyScalar(1/cn);
+      steer.x += (aPos.x-px)*COH_F; steer.y += (aPos.y-py)*COH_F; steer.z += (aPos.z-pz)*COH_F;
+    }
+    if (an > 0){
+      aVel.multiplyScalar(1/an);
+      steer.x += (aVel.x-vel[i*3])*ALI_F;
+      steer.y += (aVel.y-vel[i*3+1])*ALI_F;
+      steer.z += (aVel.z-vel[i*3+2])*ALI_F;
+    }
+    const dc = Math.sqrt(px*px + py*py + pz*pz);
+    if (dc > BOUND * 0.7){
+      const f = Math.pow((dc - BOUND*0.7)/(BOUND*0.3), 2);
+      steer.x -= (px/dc)*f*BND_F; steer.y -= (py/dc)*f*BND_F; steer.z -= (pz/dc)*f*BND_F;
+    }
+    vel[i*3] += steer.x*dt; vel[i*3+1] += steer.y*dt; vel[i*3+2] += steer.z*dt;
+    const sp = Math.sqrt(vel[i*3]*vel[i*3]+vel[i*3+1]*vel[i*3+1]+vel[i*3+2]*vel[i*3+2]);
+    if (sp > MAX_SPD){ const s=MAX_SPD/sp; vel[i*3]*=s; vel[i*3+1]*=s; vel[i*3+2]*=s; }
+    else if (sp < MIN_SPD && sp > 0.01){ const s=MIN_SPD/sp; vel[i*3]*=s; vel[i*3+1]*=s; vel[i*3+2]*=s; }
+    pos[i*3] += vel[i*3]*dt; pos[i*3+1] += vel[i*3+1]*dt; pos[i*3+2] += vel[i*3+2]*dt;
+  }
+  nodeGeom.attributes.position.needsUpdate = true;
+  nodeGeom.computeBoundingSphere();
+}
+
+/* ── build differential-growth mesh lines from neighbor pairs ─ */
+// palette for lines — depth-coded lichen tones
+const LC0 = new THREE.Color(0.14, 0.24, 0.13); // deep moss
+const LC1 = new THREE.Color(0.42, 0.56, 0.30); // mid lichen
+const LC2 = new THREE.Color(0.70, 0.66, 0.48); // bone edge
+const tmpC = new THREE.Color();
+
+function buildLines(){
+  let seg = 0;
+  const p2 = PERCEPT * PERCEPT;
+  // connect threshold slightly tighter than perception for denser, more organic look
+  const CONNECT = PERCEPT * 0.85;
+  const c2 = CONNECT * CONNECT;
+
+  for (let i = 0; i < N && seg < MAX_LINES; i++){
+    const px = pos[i*3], py = pos[i*3+1], pz = pos[i*3+2];
+    const nb = neighborCells(px, py, pz);
+    for (const j of nb){
+      if (j <= i) continue; // avoid duplicates
+      if (seg >= MAX_LINES) break;
+      const dx = pos[j*3]-px, dy = pos[j*3+1]-py, dz = pos[j*3+2]-pz;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 < c2 && d2 > 0.04){
+        const d = Math.sqrt(d2);
+        // fade line by distance — closer = brighter (differential growth: dense connections)
+        const t = 1.0 - d / CONNECT;
+        // color by height-ish for depth read
+        const ht = (py + pos[j*3+1]) * 0.5;
+        const hn = (ht + 25) / 50; // normalize roughly
+        tmpC.copy(LC0).lerp(LC1, Math.min(1, hn * 1.5));
+        tmpC.lerp(LC2, Math.max(0, (hn - 0.6) * 2.5));
+        const bright = 0.4 + 0.6 * t;
+
+        const o = seg * 6;
+        linePos[o]   = px; linePos[o+1] = py; linePos[o+2] = pz;
+        linePos[o+3] = pos[j*3]; linePos[o+4] = pos[j*3+1]; linePos[o+5] = pos[j*3+2];
+        lineCol[o]   = tmpC.r*bright; lineCol[o+1] = tmpC.g*bright; lineCol[o+2] = tmpC.b*bright;
+        lineCol[o+3] = tmpC.r*bright; lineCol[o+4] = tmpC.g*bright; lineCol[o+5] = tmpC.b*bright;
+        seg++;
+      }
+    }
+  }
+  lineGeom.attributes.position.needsUpdate = true;
+  lineGeom.attributes.color.needsUpdate = true;
+  lineGeom.setDrawRange(0, seg * 2);
+  lineGeom.computeBoundingSphere();
+}
+
+/* ── camera ────────────────────────────────────────────────── */
+const centroid = new THREE.Vector3();
+const camTarget = new THREE.Vector3();
+const camPos = new THREE.Vector3();
+
+function updateCamera(t){
+  centroid.set(0,0,0);
+  for (let i = 0; i < N; i++){
+    centroid.x += pos[i*3]; centroid.y += pos[i*3+1]; centroid.z += pos[i*3+2];
+  }
+  centroid.multiplyScalar(1/N);
+
+  // slow, breathing orbit — drift, not rotation
+  const r = 48 + Math.sin(t * 0.04) * 6;
+  const a = t * 0.012;
+  const targetX = centroid.x + Math.cos(a) * r;
+  const targetZ = centroid.z + Math.sin(a) * r;
+  const targetY = centroid.y + Math.sin(a * 0.7) * 10 + 5;
+
+  // smooth follow
+  camPos.set(targetX, targetY, targetZ);
+  camera.position.lerp(camPos, 0.02);
+  camTarget.lerp(centroid, 0.04);
+  camera.lookAt(camTarget);
+}
+
+/* ── main loop ─────────────────────────────────────────────── */
+let lastT = performance.now();
+const t0 = lastT;
+let frame = 0;
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastT) / 1000, 0.05);
+  lastT = now;
+  const t = (now - t0) / 1000;
+
+  nodeUniforms.uTime.value = t;
+  updateBoids(dt * 55);
+
+  // rebuild lines every 2 frames for performance
+  if (frame % 2 === 0) buildLines();
+
+  // animate line opacity — breathing
+  lineMat.opacity = 0.22 + 0.08 * Math.sin(t * 0.15);
+
+  updateCamera(t);
+  renderer.render(scene, camera);
+  frame++;
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
