@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: dispersal, intensity: gentle -->
+<title>rbo · vessel flock</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08070e; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; letter-spacing:0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px;
+          font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#8a8494; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">rbo</div>
+<div class="hint" id="hint">click for mic · voice scatters the vessel</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 2, 30);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08070e, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── amphora profile ── */
+const N = 3200;
+const FLOCK_SIZE = 32;
+const FLOCKS = Math.floor(N / FLOCK_SIZE);
+
+function amphoraR(t) {
+  if (t < 0.07) return 1.0 + (t / 0.07) * 0.6;
+  if (t < 0.14) return 1.6 + ((t - 0.07) / 0.07) * 2.2;
+  if (t < 0.55) { const s = (t - 0.14) / 0.41; return 3.8 + 0.7 * Math.sin(s * Math.PI); }
+  if (t < 0.72) { const s = (t - 0.55) / 0.17; return 4.5 - s * 3.1; }
+  if (t < 0.88) return 1.4 + 0.25 * Math.sin(((t - 0.72) / 0.16) * Math.PI);
+  const s = (t - 0.88) / 0.12;
+  return 1.65 + s * 0.9;
+}
+
+const restPos = new Float32Array(N * 3);
+const curPos  = new Float32Array(N * 3);
+const vel     = new Float32Array(N * 3);
+const seeds   = new Float32Array(N);
+const disp    = new Float32Array(N);
+
+const HT = 13, Y0 = -HT * 0.5;
+for (let i = 0; i < N; i++) {
+  const t = Math.random();
+  const r = amphoraR(t);
+  const th = Math.random() * Math.PI * 2;
+  const y = Y0 + t * HT;
+  restPos[i*3]   = curPos[i*3]   = r * Math.cos(th);
+  restPos[i*3+1] = curPos[i*3+1] = y;
+  restPos[i*3+2] = curPos[i*3+2] = r * Math.sin(th);
+  seeds[i] = Math.random();
+}
+
+/* ── geometry ── */
+const geom = new THREE.BufferGeometry();
+const posAttr  = new THREE.BufferAttribute(curPos, 3); posAttr.usage  = THREE.DynamicDrawUsage;
+const dispAttr = new THREE.BufferAttribute(disp, 1);   dispAttr.usage = THREE.DynamicDrawUsage;
+geom.setAttribute('position', posAttr);
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('dispersal', dispAttr);
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uEnergy:{ value: 0 }
+};
+
+/* ── leaf material — Cornelia Parker-inspired: matter suspended between form and flight ── */
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uEnergy;
+    attribute float seed;
+    attribute float dispersal;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vSeed;
+    void main(){
+      vec3 p = position;
+      // terracotta clay → ivory / Prussian sky
+      vec3 c1 = vec3(0.77, 0.44, 0.25);
+      vec3 c2 = vec3(0.54, 0.27, 0.10);
+      vec3 c3 = vec3(0.94, 0.91, 0.83);
+      vec3 c4 = vec3(0.38, 0.58, 0.66);
+      vec3 restC = mix(c2, c1, seed);
+      vec3 flyC  = mix(c3, c4, seed * 0.6 + 0.2);
+      float d = dispersal;
+      vCol = mix(restC, flyC, d);
+      vCol *= 0.65 + 0.55 * d;
+      vAlpha = 0.55 + 0.35 * d;
+      vSeed = seed;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (2.2 + 1.8 * d) * uPixel * (42.0 / max(dist, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vSeed;
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      float a0 = vSeed * 3.14159;
+      float ca = cos(a0), sa = sin(a0);
+      vec2 r = vec2(ca*uv.x - sa*uv.y, sa*uv.x + ca*uv.y);
+      // leaf: tapered ellipse with midrib
+      float ex = r.x * 2.0;
+      float ey = r.y * 3.6;
+      float shape = ex*ex + ey*ey;
+      if (shape > 0.25) discard;
+      float vein = exp(-abs(r.x) * 50.0) * 0.12;
+      float edge = smoothstep(0.25, 0.10, shape);
+      float a = edge * vAlpha;
+      gl_FragColor = vec4(vCol * (a + vein), a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── dust motes for atmosphere ── */
+const DUST = 400;
+const dustPos = new Float32Array(DUST * 3);
+for (let i = 0; i < DUST; i++) {
+  dustPos[i*3]   = (Math.random() - 0.5) * 60;
+  dustPos[i*3+1] = (Math.random() - 0.5) * 40;
+  dustPos[i*3+2] = (Math.random() - 0.5) * 60;
+}
+const dustGeom = new THREE.BufferGeometry();
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({
+  color: 0x8a7a6a, size: 0.15, transparent: true, opacity: 0.12,
+  blending: THREE.AdditiveBlending, depthWrite: false
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+/* ── warm-to-cold vertical light gradient — Olafur Eliasson-inspired ── */
+const fogGeo = new THREE.PlaneGeometry(180, 120);
+const fogMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      vec3 top = vec3(0.14, 0.07, 0.02);
+      vec3 bot = vec3(0.01, 0.03, 0.07);
+      vec3 c = mix(bot, top, vUv.y);
+      float a = 0.12 * smoothstep(0.0, 0.5, 1.0 - abs(vUv.y - 0.45));
+      gl_FragColor = vec4(c, a);
+    }
+  `
+});
+const fog = new THREE.Mesh(fogGeo, fogMat);
+fog.position.z = -18;
+scene.add(fog);
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── audio ── */
+const hint = document.getElementById('hint');
+let analyser = null, freqData = null;
+
+async function startAudio() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.72;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'mic live · sing, clap, hum';
+  } catch (e) {
+    hint.textContent = 'mic denied · synthetic mode';
+  }
+}
+document.body.addEventListener('click', () => { if (!analyser) startAudio(); }, { once: true });
+
+function micEnergy() {
+  if (!analyser) return null;
+  analyser.getByteFrequencyData(freqData);
+  let s = 0;
+  for (let i = 0; i < freqData.length; i++) s += freqData[i];
+  return s / (freqData.length * 255);
+}
+
+/* ── boid simulation (flock-local) ── */
+const SEP_R = 2.2, ALI_R = 5.0, COH_R = 6.5;
+const SEP_W = 2.8, ALI_W = 1.2, COH_W = 0.9;
+const MAX_SPD = 9.0, MAX_F = 3.5;
+
+function clamp3(x, y, z, m) {
+  const l = Math.sqrt(x*x + y*y + z*z);
+  if (l > m && l > 0.001) { const s = m/l; return [x*s, y*s, z*s]; }
+  return [x, y, z];
+}
+
+function stepBoids(dt, energy) {
+  const retK = 14.0;
+  for (let f = 0; f < FLOCKS; f++) {
+    const s0 = f * FLOCK_SIZE, s1 = Math.min(s0 + FLOCK_SIZE, N);
+    for (let i = s0; i < s1; i++) {
+      const ix = i*3, iy = ix+1, iz = ix+2;
+      const px = curPos[ix], py = curPos[iy], pz = curPos[iz];
+      let sx=0,sy=0,sz=0,sc=0, ax=0,ay=0,az=0,ac=0, cx=0,cy=0,cz=0,cc=0;
+
+      for (let j = s0; j < s1; j++) {
+        if (i === j) continue;
+        const jx = j*3;
+        const dx = px-curPos[jx], dy = py-curPos[jx+1], dz = pz-curPos[jx+2];
+        const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (d < SEP_R && d > 0.01) { const id=1/(d*d); sx+=dx*id; sy+=dy*id; sz+=dz*id; sc++; }
+        if (d < ALI_R) { ax+=vel[jx]; ay+=vel[jx+1]; az+=vel[jx+2]; ac++; }
+        if (d < COH_R) { cx+=curPos[jx]; cy+=curPos[jx+1]; cz+=curPos[jx+2]; cc++; }
+      }
+
+      let fx=0, fy=0, fz=0;
+      if (sc > 0) { let[a,b,c]=clamp3(sx/sc,sy/sc,sz/sc,MAX_F); fx+=a*SEP_W*energy; fy+=b*SEP_W*energy; fz+=c*SEP_W*energy; }
+      if (ac > 0) { let[a,b,c]=clamp3(ax/ac,ay/ac,az/ac,MAX_F); fx+=a*ALI_W*energy; fy+=b*ALI_W*energy; fz+=c*ALI_W*energy; }
+      if (cc > 0) { let[a,b,c]=clamp3(cx/cc-px,cy/cc-py,cz/cc-pz,MAX_F); fx+=a*COH_W*energy; fy+=b*COH_W*energy; fz+=c*COH_W*energy; }
+
+      // return to rest
+      const rest = 1.0 - energy;
+      fx += (restPos[ix]-px) * retK * rest;
+      fy += (restPos[iy]-py) * retK * rest;
+      fz += (restPos[iz]-pz) * retK * rest;
+
+      // scatter impulse — upward bias like startled birds
+      if (energy > 0.25) {
+        const dist = Math.sqrt(px*px + py*py + pz*pz) + 0.1;
+        const k = (energy - 0.25) * 5.0 * (0.5 + seeds[i]);
+        fx += (px/dist) * k;
+        fy += (py/dist + 0.7) * k;
+        fz += (pz/dist) * k;
+      }
+
+      const damp = 0.95;
+      vel[ix] = (vel[ix] + fx*dt) * damp;
+      vel[iy] = (vel[iy] + fy*dt) * damp;
+      vel[iz] = (vel[iz] + fz*dt) * damp;
+      [vel[ix],vel[iy],vel[iz]] = clamp3(vel[ix],vel[iy],vel[iz], MAX_SPD);
+
+      curPos[ix] += vel[ix]*dt;
+      curPos[iy] += vel[iy]*dt;
+      curPos[iz] += vel[iz]*dt;
+      disp[i] += (energy - disp[i]) * 0.06;
+    }
+  }
+}
+
+/* ── centroid ── */
+function centroid() {
+  let x=0,y=0,z=0;
+  for (let i=0; i<N; i++) { x+=curPos[i*3]; y+=curPos[i*3+1]; z+=curPos[i*3+2]; }
+  return [x/N, y/N, z/N];
+}
+
+/* ── main loop ── */
+const t0 = performance.now();
+let prev = t0, smoothE = 0;
+
+(function loop() {
+  const now = performance.now();
+  const t = (now - t0) / 1000;
+  const dt = Math.min((now - prev) / 1000, 0.05);
+  prev = now;
+  uniforms.uTime.value = t;
+
+  let raw;
+  const mic = micEnergy();
+  if (mic !== null) {
+    raw = mic;
+  } else {
+    // synthetic: slow breathing with occasional startle
+    raw = 0.12 + 0.22 * Math.max(0, Math.sin(t * 0.35)) * Math.max(0, Math.sin(t * 0.13));
+    if (Math.sin(t * 0.19 + 1.0) > 0.88) raw += 0.35;
+  }
+  smoothE += (raw - smoothE) * 0.07;
+  const energy = Math.min(smoothE, 1.0);
+  uniforms.uEnergy.value = energy;
+
+  stepBoids(dt, energy);
+  posAttr.needsUpdate = true;
+  dispAttr.needsUpdate = true;
+
+  // camera: slow orbit tracking centroid, pulls back when dispersed
+  const [cx, cy, cz] = centroid();
+  const cd = 27 + energy * 10;
+  const ca = t * 0.055;
+  camera.position.x = cx + Math.sin(ca) * cd;
+  camera.position.y = cy + 3.5 + Math.sin(t * 0.07) * 1.8;
+  camera.position.z = cz + Math.cos(ca) * cd;
+  camera.lookAt(cx, cy, cz);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
