@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: swarming, intensity: vigorous -->
+<title>3fd · glitch murmuration · Rosa Menkman</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a080c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">3fd</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 50);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a080c, 1);
+document.body.appendChild(renderer.domElement);
+
+// Render target for post-processing
+let rt = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter
+});
+
+const N = 3200;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const trails = new Float32Array(N);
+
+for (let i = 0; i < N; i++){
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const r = 8 + Math.random() * 12;
+  positions[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+  positions[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+  positions[i*3+2] = r * Math.cos(phi);
+  const vt = Math.random() * Math.PI * 2;
+  const vp = Math.acos(2 * Math.random() - 1);
+  const sp = 0.8 + Math.random() * 0.4;
+  velocities[i*3]   = sp * Math.sin(vp) * Math.cos(vt);
+  velocities[i*3+1] = sp * Math.sin(vp) * Math.sin(vt);
+  velocities[i*3+2] = sp * Math.cos(vp);
+  seeds[i] = Math.random();
+  trails[i] = Math.random() * 0.3;
+}
+
+const boidMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: {value:0}, uPixel: {value: renderer.getPixelRatio()} },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float trail;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      float phase = seed * 6.28 + uTime * 0.3;
+      float pulse = 0.5 + 0.5 * sin(phase);
+      // Posterize-ready palette: hot signal colors
+      vec3 c0 = vec3(0.06, 0.88, 0.72); // cyan-green
+      vec3 c1 = vec3(1.0, 0.0, 0.4);    // hot magenta
+      vec3 c2 = vec3(0.85, 0.82, 0.72); // dirty white
+      float blend = smoothstep(0.3, 0.7, pulse);
+      vCol = mix(c0, c1, blend);
+      vCol = mix(vCol, c2, smoothstep(0.75, 1.0, pulse) * 0.5);
+      vAlpha = 0.55 + 0.45 * pulse + trail * 0.35;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (2.0 + 1.5*pulse + trail*2.5) * uPixel * (60.0/dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('trail', new THREE.BufferAttribute(trails, 1));
+scene.add(new THREE.Points(geom, boidMat));
+
+// ─── Fullscreen glitch post-process ───
+const glitchScene = new THREE.Scene();
+const glitchCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const glitchMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tScene: { value: rt.texture },
+    uTime: { value: 0 },
+    uRes: { value: new THREE.Vector2(innerWidth, innerHeight) },
+    uJolt: { value: 0 },       // frame-jitter burst intensity
+    uStretch: { value: 0 }     // vertical stretch event
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tScene;
+    uniform float uTime;
+    uniform vec2 uRes;
+    uniform float uJolt;
+    uniform float uStretch;
+    varying vec2 vUv;
+
+    // Hash for pseudo-random
+    float hash(float n){ return fract(sin(n)*43758.5453); }
+    float hash2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+
+    // Posterize to 5-color palette
+    vec3 posterize(vec3 c){
+      // Palette: black, cyan, magenta, dirty-white, electric-blue
+      vec3 pal[5];
+      pal[0] = vec3(0.04, 0.03, 0.05);  // near-black
+      pal[1] = vec3(0.06, 0.88, 0.72);  // cyan
+      pal[2] = vec3(1.0, 0.0, 0.4);     // magenta
+      pal[3] = vec3(0.84, 0.80, 0.70);  // dirty white
+      pal[4] = vec3(0.20, 0.26, 1.0);   // electric blue
+
+      float minD = 100.0;
+      vec3 best = pal[0];
+      for(int i=0; i<5; i++){
+        float d = distance(c, pal[i]);
+        if(d < minD){ minD = d; best = pal[i]; }
+      }
+      return best;
+    }
+
+    void main(){
+      vec2 uv = vUv;
+      float t = uTime;
+      vec2 px = 1.0 / uRes;
+
+      // ── 8x8 JPEG block quantization in bands ──
+      float blockSize = 8.0;
+      vec2 blockUV = uv;
+      // Block artifact zones: horizontal bands that drift
+      float bandY = sin(uv.y * 4.0 + t * 0.7) * 0.5 + 0.5;
+      float bandStrength = smoothstep(0.55, 0.75, bandY);
+      // Near the flock center, more blocking
+      float centerDist = length(uv - 0.5);
+      bandStrength *= smoothstep(0.45, 0.15, centerDist);
+      if(bandStrength > 0.1){
+        vec2 blockCoord = floor(uv * uRes / blockSize) * blockSize / uRes;
+        blockUV = mix(uv, blockCoord, bandStrength * 0.85);
+      }
+
+      // ── Frame jolt: sudden UV displacement ──
+      float joltOffset = 0.0;
+      if(uJolt > 0.1){
+        float row = floor(uv.y * 40.0);
+        joltOffset = (hash(row + floor(t * 13.0)) - 0.5) * uJolt * 0.08;
+      }
+
+      // ── Vertical pixel-stretch (zalgo) ──
+      float stretchUV = 0.0;
+      if(uStretch > 0.1){
+        float stretchBand = step(0.4, hash(floor(uv.x * 60.0) + floor(t * 7.0)));
+        stretchUV = stretchBand * uStretch * 0.03;
+      }
+
+      vec2 uvR = blockUV + vec2(joltOffset, stretchUV);
+      vec2 uvG = blockUV + vec2(joltOffset * 0.3, stretchUV * 0.5);
+      vec2 uvB = blockUV + vec2(joltOffset * -0.5, stretchUV * -0.3);
+
+      // ── Chromatic aberration: RGB channel separation ──
+      float caBase = 0.003 + 0.004 * sin(t * 1.1);
+      float caBoost = caBase + uJolt * 0.012;
+      // Aberration increases from center
+      float caR = caBoost * (1.0 + centerDist * 2.0);
+      vec2 caDir = normalize(uv - 0.5 + 0.001);
+
+      float r = texture2D(tScene, uvR + caDir * caR).r;
+      float g = texture2D(tScene, uvG).g;
+      float b = texture2D(tScene, uvB - caDir * caR * 0.7).b;
+      vec3 col = vec3(r, g, b);
+
+      // ── Posterization ──
+      // Partial posterize: blend between raw and posterized
+      float postMix = 0.45 + 0.25 * sin(t * 0.4);
+      // Stronger posterization in block zones
+      postMix = mix(postMix, 0.9, bandStrength);
+      vec3 poster = posterize(col);
+      col = mix(col, poster, postMix);
+
+      // ── Scanline overlay ──
+      float scan = 0.92 + 0.08 * sin(uv.y * uRes.y * 1.5 + t * 2.0);
+      col *= scan;
+
+      // ── Block edge highlight: thin lines at 8x8 boundaries in glitch zones ──
+      if(bandStrength > 0.3){
+        vec2 blockFrac = fract(uv * uRes / blockSize);
+        float edge = 1.0 - smoothstep(0.0, 0.08, min(blockFrac.x, blockFrac.y));
+        col += vec3(0.06, 0.88, 0.72) * edge * bandStrength * 0.3;
+      }
+
+      // ── Film grain ──
+      float grain = (hash2(uv * uRes + t * 100.0) - 0.5) * 0.06;
+      col += grain;
+
+      // ── Vignette: dark corners ──
+      float vig = 1.0 - smoothstep(0.3, 0.85, centerDist);
+      col *= 0.7 + 0.3 * vig;
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2,2), glitchMat);
+glitchScene.add(quad);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  rt.setSize(innerWidth, innerHeight);
+  glitchMat.uniforms.uRes.value.set(innerWidth, innerHeight);
+});
+
+// ─── Boids simulation (Reynolds 1986) ───
+const PERCEPTION = 3.5, SEPARATION_DIST = 1.2;
+const COHESION_F = 0.02, ALIGNMENT_F = 0.08, SEPARATION_F = 0.15;
+const BOUNDARY_F = 0.25, MAX_SPEED = 1.8, MIN_SPEED = 0.6, BOUNDARY = 25;
+const CELL_SIZE = PERCEPTION * 1.5;
+let spatialGrid = new Map();
+const avgPos = new THREE.Vector3(), avgVel = new THREE.Vector3(), steer = new THREE.Vector3();
+
+function getSK(x,y,z){
+  return `${Math.floor(x/CELL_SIZE)},${Math.floor(y/CELL_SIZE)},${Math.floor(z/CELL_SIZE)}`;
+}
+function rebuildGrid(){
+  spatialGrid.clear();
+  for(let i=0;i<N;i++){
+    const k=getSK(positions[i*3],positions[i*3+1],positions[i*3+2]);
+    if(!spatialGrid.has(k)) spatialGrid.set(k,[]);
+    spatialGrid.get(k).push(i);
+  }
+}
+function neighbors(x,y,z){
+  const r=[], cx=Math.floor(x/CELL_SIZE), cy=Math.floor(y/CELL_SIZE), cz=Math.floor(z/CELL_SIZE);
+  for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++) for(let dz=-1;dz<=1;dz++){
+    const k=`${cx+dx},${cy+dy},${cz+dz}`;
+    if(spatialGrid.has(k)) r.push(...spatialGrid.get(k));
+  }
+  return r;
+}
+
+// Jolt/stretch event scheduling
+let joltValue = 0, stretchValue = 0;
+let nextJoltTime = 2 + Math.random() * 4;
+let nextStretchTime = 5 + Math.random() * 6;
+
+function updateBoids(dt){
+  rebuildGrid();
+  for(let i=0;i<N;i++){
+    const px=positions[i*3], py=positions[i*3+1], pz=positions[i*3+2];
+    avgPos.set(0,0,0); avgVel.set(0,0,0); steer.set(0,0,0);
+    let cc=0, ac=0;
+    for(const j of neighbors(px,py,pz)){
+      if(i===j) continue;
+      const dx=positions[j*3]-px, dy=positions[j*3+1]-py, dz=positions[j*3+2]-pz;
+      const dSq=dx*dx+dy*dy+dz*dz;
+      if(dSq<PERCEPTION*PERCEPTION && dSq>0.01){
+        const d=Math.sqrt(dSq);
+        avgPos.x+=positions[j*3]; avgPos.y+=positions[j*3+1]; avgPos.z+=positions[j*3+2]; cc++;
+        avgVel.x+=velocities[j*3]; avgVel.y+=velocities[j*3+1]; avgVel.z+=velocities[j*3+2]; ac++;
+        if(d<SEPARATION_DIST){
+          const f=(SEPARATION_DIST-d)/SEPARATION_DIST;
+          steer.x-=(dx/d)*f*SEPARATION_F; steer.y-=(dy/d)*f*SEPARATION_F; steer.z-=(dz/d)*f*SEPARATION_F;
+        }
+      }
+    }
+    if(cc>0){ avgPos.multiplyScalar(1/cc); steer.x+=(avgPos.x-px)*COHESION_F; steer.y+=(avgPos.y-py)*COHESION_F; steer.z+=(avgPos.z-pz)*COHESION_F; }
+    if(ac>0){ avgVel.multiplyScalar(1/ac); steer.x+=(avgVel.x-velocities[i*3])*ALIGNMENT_F; steer.y+=(avgVel.y-velocities[i*3+1])*ALIGNMENT_F; steer.z+=(avgVel.z-velocities[i*3+2])*ALIGNMENT_F; }
+    const dfc=Math.sqrt(px*px+py*py+pz*pz);
+    if(dfc>BOUNDARY*0.7){
+      const f=Math.pow((dfc-BOUNDARY*0.7)/(BOUNDARY*0.3),2);
+      steer.x-=(px/dfc)*f*BOUNDARY_F; steer.y-=(py/dfc)*f*BOUNDARY_F; steer.z-=(pz/dfc)*f*BOUNDARY_F;
+    }
+    velocities[i*3]+=steer.x*dt; velocities[i*3+1]+=steer.y*dt; velocities[i*3+2]+=steer.z*dt;
+    const sp=Math.sqrt(velocities[i*3]**2+velocities[i*3+1]**2+velocities[i*3+2]**2);
+    if(sp>MAX_SPEED){ velocities[i*3]*=MAX_SPEED/sp; velocities[i*3+1]*=MAX_SPEED/sp; velocities[i*3+2]*=MAX_SPEED/sp; }
+    else if(sp<MIN_SPEED&&sp>0.01){ velocities[i*3]*=MIN_SPEED/sp; velocities[i*3+1]*=MIN_SPEED/sp; velocities[i*3+2]*=MIN_SPEED/sp; }
+    positions[i*3]+=velocities[i*3]*dt; positions[i*3+1]+=velocities[i*3+1]*dt; positions[i*3+2]+=velocities[i*3+2]*dt;
+    trails[i]=THREE.MathUtils.lerp(trails[i], sp/MAX_SPEED, 0.1);
+  }
+  geom.attributes.position.needsUpdate=true;
+  geom.attributes.trail.needsUpdate=true;
+  geom.computeBoundingSphere();
+}
+
+const centroid = new THREE.Vector3();
+function updateCamera(){
+  centroid.set(0,0,0);
+  for(let i=0;i<N;i++){ centroid.x+=positions[i*3]; centroid.y+=positions[i*3+1]; centroid.z+=positions[i*3+2]; }
+  centroid.multiplyScalar(1/N);
+  const a=performance.now()*0.000006;
+  camera.position.x=centroid.x+Math.cos(a)*42;
+  camera.position.z=centroid.z+Math.sin(a)*42;
+  camera.position.y=centroid.y+Math.sin(a*0.5)*10;
+  camera.lookAt(centroid);
+}
+
+let lastTime=performance.now();
+const start=performance.now();
+
+function loop(){
+  const now=performance.now();
+  const dt=Math.min((now-lastTime)/1000, 0.05);
+  lastTime=now;
+  const t=(now-start)/1000;
+
+  boidMat.uniforms.uTime.value=t;
+  updateBoids(dt*60);
+  updateCamera();
+
+  // ── Jolt / stretch event triggers ──
+  if(t > nextJoltTime){
+    joltValue = 0.6 + Math.random() * 0.4;
+    nextJoltTime = t + 3 + Math.random() * 8;
+  }
+  if(t > nextStretchTime){
+    stretchValue = 0.5 + Math.random() * 0.5;
+    nextStretchTime = t + 4 + Math.random() * 10;
+  }
+  // Decay events
+  joltValue *= 0.92;
+  stretchValue *= 0.94;
+  if(joltValue < 0.01) joltValue = 0;
+  if(stretchValue < 0.01) stretchValue = 0;
+
+  glitchMat.uniforms.uTime.value = t;
+  glitchMat.uniforms.uJolt.value = joltValue;
+  glitchMat.uniforms.uStretch.value = stretchValue;
+
+  // Render scene to target, then post-process to screen
+  renderer.setRenderTarget(rt);
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+  renderer.render(glitchScene, glitchCam);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
