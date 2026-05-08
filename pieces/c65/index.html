@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: pulse, intensity: gentle -->
+<title>c65 · two shells breathing as one</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#a8b8d0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background:
+      linear-gradient(to bottom,
+        #141420 0%,
+        #1c1828 22%,
+        #2a2030 45%,
+        #3a2a30 68%,
+        #4a3530 88%,
+        #564038 100%);
+  }
+  canvas { display:block; position:absolute; top:0; left:0; }
+  #stars { z-index:0; pointer-events:none; }
+  #main  { z-index:1; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:2; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px; letter-spacing:0.04em; z-index:2; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.6; font-size:10px; letter-spacing:0.06em;
+          color:#b08060; z-index:2; }
+</style>
+</head>
+<body>
+<canvas id="stars"></canvas>
+<div class="id">c65</div>
+<div class="hint">two shells — one lost bird moves between them</div>
+<div class="arc" id="arc">together · 100%</div>
+<script>
+// starfield + paper grain on background canvas
+(function(){
+  const c = document.getElementById('stars');
+  const ctx = c.getContext('2d');
+  function resize(){ c.width = innerWidth; c.height = innerHeight; draw(); }
+  function draw(){
+    ctx.clearRect(0,0,c.width,c.height);
+    // starfield specks
+    const rng = (function(s){return function(){s=(s*9301+49297)%233280;return s/233280;};})(7717);
+    for(let i=0;i<280;i++){
+      const x = rng()*c.width, y = rng()*c.height;
+      const b = 0.08 + rng()*0.14;
+      const sz = 0.5 + rng()*1.2;
+      ctx.fillStyle = `rgba(200,210,230,${b})`;
+      ctx.beginPath(); ctx.arc(x,y,sz,0,Math.PI*2); ctx.fill();
+    }
+    // paper grain overlay
+    const img = ctx.createImageData(c.width, c.height);
+    const d = img.data;
+    for(let i=0;i<d.length;i+=4){
+      const n = (rng()-0.5)*12;
+      d[i]=d[i+1]=d[i+2]=128+n; d[i+3]=4;
+    }
+    ctx.putImageData(img,0,0);
+  }
+  resize();
+  addEventListener('resize', resize);
+})();
+</script>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Two interpenetrating spherical shells of boids. The straggler drifts
+// between shells — belonging to neither, drawn to both. The flock's
+// emotional arc persists: TOGETHER → LOSS → SEEKING → RETURN.
+//
+// Shell A center offset (-1.8, 0, -0.5), radius ~4.2
+// Shell B center offset (+1.8, 0, +0.5), radius ~3.8
+// They overlap in the middle — birds in the overlap zone belong to both.
+// The straggler orbits outside both shells, then is pulled back.
+//
+// Palette: desaturated twilight. Warm ochre shell A, cool indigo shell B,
+// straggler burns copper-white. Background gradient dialed down per feedback.
+// Starfield + paper grain added on background canvas.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x141420, 0.014);
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 30);
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true, canvas: null });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+const mainCanvas = renderer.domElement;
+mainCanvas.id = 'main';
+document.body.appendChild(mainCanvas);
+
+const N = 481;
+const STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const shellId = new Float32Array(N); // 0 = shell A, 1 = shell B, 0.5 = straggler
+
+// shell geometry
+const SHELL_A = { cx:-1.8, cy:0, cz:-0.5, r:4.2 };
+const SHELL_B = { cx: 1.8, cy:0, cz: 0.5, r:3.8 };
+
+function rng(){ return Math.random(); }
+
+// init: distribute on two shells
+for (let i = 1; i < N; i++){
+  const shell = (i % 2 === 0) ? SHELL_A : SHELL_B;
+  shellId[i] = (shell === SHELL_A) ? 0.0 : 1.0;
+  const th = rng() * Math.PI * 2;
+  const ph = Math.acos(2 * rng() - 1) - Math.PI * 0.5;
+  const jitter = 0.85 + rng() * 0.3;
+  pos[i*3]   = shell.cx + Math.cos(th)*Math.cos(ph)*shell.r*jitter;
+  pos[i*3+1] = shell.cy + Math.sin(ph)*shell.r*jitter;
+  pos[i*3+2] = shell.cz + Math.sin(th)*Math.cos(ph)*shell.r*jitter;
+  vel[i*3]   = (rng()-0.5)*0.5;
+  vel[i*3+1] = (rng()-0.5)*0.4;
+  vel[i*3+2] = (rng()-0.5)*0.5;
+}
+// straggler starts between shells
+shellId[STRAGGLER] = 0.5;
+pos[0] = 0; pos[1] = 2.5; pos[2] = 0;
+vel[0] = 0.2; vel[1] = -0.1; vel[2] = 0.15;
+
+// boid parameters
+const PERCEPTION_R = 4.5;
+const SEPARATION_R = 0.85;
+const W_COH = 0.016;
+const W_ALI = 0.055;
+const W_SEP = 0.075;
+const W_SHELL = 0.008; // shell-surface attraction
+const MAX_SPEED = 1.3;
+const MAX_FORCE = 0.028;
+
+let cohesion = 1.0;
+let arcStage = 'together';
+const arcEl = document.getElementById('arc');
+
+function shellForce(i, shell){
+  const dx = pos[i*3]-shell.cx, dy = pos[i*3+1]-shell.cy, dz = pos[i*3+2]-shell.cz;
+  const dist = Math.sqrt(dx*dx+dy*dy+dz*dz)+1e-4;
+  const diff = shell.r - dist;
+  // pull toward shell surface
+  return { x: dx/dist * diff * W_SHELL, y: dy/dist * diff * W_SHELL, z: dz/dist * diff * W_SHELL };
+}
+
+function step(dt){
+  // flock centroid (excluding straggler)
+  let cx=0,cy=0,cz=0;
+  for(let i=1;i<N;i++){ cx+=pos[i*3]; cy+=pos[i*3+1]; cz+=pos[i*3+2]; }
+  cx/=(N-1); cy/=(N-1); cz/=(N-1);
+
+  const sx=pos[0]-cx, sy=pos[1]-cy, sz=pos[2]-cz;
+  const stragDist=Math.sqrt(sx*sx+sy*sy+sz*sz);
+  const targetCoh=Math.max(0,Math.min(1, 1-stragDist/10));
+  cohesion+=(targetCoh-cohesion)*dt*0.4;
+
+  if(cohesion>0.82) arcStage='together';
+  else if(cohesion>0.5 && stragDist>5) arcStage='loss';
+  else if(cohesion<0.5) arcStage='seeking';
+  else if(arcStage==='seeking' && cohesion>0.6) arcStage='return';
+  arcEl.textContent=`${arcStage} · ${Math.round(cohesion*100)}%`;
+
+  const acc = new Float32Array(N*3);
+
+  for(let i=0;i<N;i++){
+    let cohX=0,cohY=0,cohZ=0,cohN=0;
+    let aliX=0,aliY=0,aliZ=0,aliN=0;
+    let sepX=0,sepY=0,sepZ=0;
+    const px=pos[i*3],py=pos[i*3+1],pz=pos[i*3+2];
+    const isStrag=(i===STRAGGLER);
+    const pR=isStrag? PERCEPTION_R*0.5 : PERCEPTION_R;
+
+    for(let j=0;j<N;j++){
+      if(i===j) continue;
+      const dx=pos[j*3]-px, dy=pos[j*3+1]-py, dz=pos[j*3+2]-pz;
+      const d2=dx*dx+dy*dy+dz*dz;
+      if(d2>pR*pR||d2<1e-6) continue;
+      cohX+=pos[j*3]; cohY+=pos[j*3+1]; cohZ+=pos[j*3+2]; cohN++;
+      aliX+=vel[j*3]; aliY+=vel[j*3+1]; aliZ+=vel[j*3+2]; aliN++;
+      if(d2<SEPARATION_R*SEPARATION_R){
+        const inv=1/Math.sqrt(d2);
+        sepX-=dx*inv; sepY-=dy*inv; sepZ-=dz*inv;
+      }
+    }
+
+    // shell surface attraction — keeps birds on their shell
+    if(!isStrag){
+      const shell = shellId[i]<0.5 ? SHELL_A : SHELL_B;
+      const sf = shellForce(i, shell);
+      acc[i*3]+=sf.x; acc[i*3+1]+=sf.y; acc[i*3+2]+=sf.z;
+
+      // breathing: shells pulsate radius gently
+      const t = performance.now()*0.001;
+      const breathA = Math.sin(t*0.4)*0.15;
+      const breathB = Math.sin(t*0.4+Math.PI*0.7)*0.15;
+      if(shellId[i]<0.5){
+        const dx=pos[i*3]-SHELL_A.cx, dy=pos[i*3+1]-SHELL_A.cy, dz=pos[i*3+2]-SHELL_A.cz;
+        const d=Math.sqrt(dx*dx+dy*dy+dz*dz)+1e-4;
+        acc[i*3]+=dx/d*breathA*0.006; acc[i*3+1]+=dy/d*breathA*0.006; acc[i*3+2]+=dz/d*breathA*0.006;
+      } else {
+        const dx=pos[i*3]-SHELL_B.cx, dy=pos[i*3+1]-SHELL_B.cy, dz=pos[i*3+2]-SHELL_B.cz;
+        const d=Math.sqrt(dx*dx+dy*dy+dz*dz)+1e-4;
+        acc[i*3]+=dx/d*breathB*0.006; acc[i*3+1]+=dy/d*breathB*0.006; acc[i*3+2]+=dz/d*breathB*0.006;
+      }
+    }
+
+    // straggler wanders between shells
+    if(isStrag){
+      const t=performance.now()*0.001;
+      // oscillates attraction between shell A and shell B
+      const phase = Math.sin(t*0.12)*0.5+0.5; // 0→A, 1→B
+      const tgtShell = phase<0.5 ? SHELL_A : SHELL_B;
+      const dx=tgtShell.cx-px, dy=tgtShell.cy-py, dz=tgtShell.cz-pz;
+      const d=Math.sqrt(dx*dx+dy*dy+dz*dz)+1e-3;
+      // weak pull toward current target shell
+      acc[0]+=dx/d*0.008; acc[1]+=dy/d*0.008; acc[2]+=dz/d*0.008;
+      // drift perpendicular — the wandering
+      acc[0]+=Math.sin(t*0.3)*0.018;
+      acc[1]+=Math.cos(t*0.25)*0.012;
+      acc[2]+=Math.sin(t*0.35+1.0)*0.015;
+    }
+
+    // seeking/return: flock birds pull toward straggler
+    if(!isStrag && (arcStage==='seeking'||arcStage==='return')){
+      const tx=pos[0]-px, ty=pos[1]-py, tz=pos[2]-pz;
+      const td=Math.sqrt(tx*tx+ty*ty+tz*tz)+1e-3;
+      const seek=arcStage==='seeking'?0.018:0.010;
+      acc[i*3]+=tx/td*seek; acc[i*3+1]+=ty/td*seek; acc[i*3+2]+=tz/td*seek;
+    }
+
+    if(cohN>0){
+      cohX=cohX/cohN-px; cohY=cohY/cohN-py; cohZ=cohZ/cohN-pz;
+      acc[i*3]+=cohX*W_COH; acc[i*3+1]+=cohY*W_COH; acc[i*3+2]+=cohZ*W_COH;
+    }
+    if(aliN>0){
+      aliX=aliX/aliN-vel[i*3]; aliY=aliY/aliN-vel[i*3+1]; aliZ=aliZ/aliN-vel[i*3+2];
+      acc[i*3]+=aliX*W_ALI; acc[i*3+1]+=aliY*W_ALI; acc[i*3+2]+=aliZ*W_ALI;
+    }
+    acc[i*3]+=sepX*W_SEP; acc[i*3+1]+=sepY*W_SEP; acc[i*3+2]+=sepZ*W_SEP;
+
+    // soft world bounds
+    const d2c=px*px+py*py+pz*pz;
+    if(d2c>120){
+      const inv=0.015/Math.sqrt(d2c);
+      acc[i*3]+=-px*inv; acc[i*3+1]+=-py*inv; acc[i*3+2]+=-pz*inv;
+    }
+  }
+
+  const speedMul = (arcStage==='loss'||arcStage==='seeking')?0.55
+                 : arcStage==='return'?0.82:1.0;
+  for(let i=0;i<N;i++){
+    let ax=acc[i*3],ay=acc[i*3+1],az=acc[i*3+2];
+    const af=Math.sqrt(ax*ax+ay*ay+az*az);
+    if(af>MAX_FORCE){ax*=MAX_FORCE/af;ay*=MAX_FORCE/af;az*=MAX_FORCE/af;}
+    vel[i*3]+=ax; vel[i*3+1]+=ay; vel[i*3+2]+=az;
+    let vx=vel[i*3],vy=vel[i*3+1],vz=vel[i*3+2];
+    const sp=Math.sqrt(vx*vx+vy*vy+vz*vz);
+    if(sp>MAX_SPEED){vx*=MAX_SPEED/sp;vy*=MAX_SPEED/sp;vz*=MAX_SPEED/sp;vel[i*3]=vx;vel[i*3+1]=vy;vel[i*3+2]=vz;}
+    pos[i*3]+=vel[i*3]*dt*speedMul;
+    pos[i*3+1]+=vel[i*3+1]*dt*speedMul;
+    pos[i*3+2]+=vel[i*3+2]*dt*speedMul;
+  }
+}
+
+// ────────────── render
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+const seedArr = new Float32Array(N);
+for(let i=0;i<N;i++) seedArr[i]=Math.random();
+geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+const isStragArr = new Float32Array(N);
+isStragArr[STRAGGLER]=1.0;
+geom.setAttribute('strag', new THREE.BufferAttribute(isStragArr, 1));
+geom.setAttribute('shell', new THREE.BufferAttribute(shellId, 1));
+
+const uniforms = {
+  uTime:     {value:0},
+  uPixel:    {value:renderer.getPixelRatio()},
+  uCohesion: {value:1.0}
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent:true, depthWrite:false,
+  blending: THREE.AdditiveBlending, fog:false,
+  vertexShader:`
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uCohesion;
+    attribute float seed;
+    attribute float strag;
+    attribute float shell;
+    varying vec3  vCol;
+    varying float vFade;
+    void main(){
+      vec3 p = position;
+      float t = uTime*0.5 + seed*6.28;
+      vec4 mv = modelViewMatrix * vec4(p,1.0);
+      float dist = -mv.z;
+
+      float baseSize = 1.4 + 0.6*sin(t);
+      float stragSize = strag*2.8;
+      gl_PointSize = (baseSize+stragSize)*uPixel*(18.0/dist);
+      vFade = clamp(1.0-(dist-26.0)/30.0, 0.0, 1.0);
+
+      // Shell A: warm ochre-amber   Shell B: cool slate-indigo
+      // Straggler: copper-white glow
+      vec3 shellAWarm = vec3(0.88, 0.58, 0.28);  // ochre
+      vec3 shellACool = vec3(0.50, 0.40, 0.32);   // muted brown when lost
+      vec3 shellBWarm = vec3(0.38, 0.50, 0.72);  // slate blue
+      vec3 shellBCool = vec3(0.30, 0.28, 0.55);   // deeper indigo when lost
+      vec3 stragCol   = vec3(1.0, 0.82, 0.55);    // copper white
+
+      vec3 colA = mix(shellACool, shellAWarm, smoothstep(0.0,1.0,uCohesion));
+      vec3 colB = mix(shellBCool, shellBWarm, smoothstep(0.0,1.0,uCohesion));
+
+      // per-bird variation
+      float vary = sin(seed*47.3+t*0.3)*0.12;
+      vec3 birdCol = mix(colA, colB, smoothstep(0.0,1.0,shell));
+      birdCol += vary;
+
+      // straggler override
+      vCol = mix(birdCol, stragCol, strag*0.85);
+      vCol *= (1.0 + strag*0.5);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader:`
+    varying vec3 vCol;
+    varying float vFade;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r>0.25) discard;
+      float a = exp(-r*12.0)*vFade;
+      gl_FragColor = vec4(vCol*a*0.9, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// subtle atmospheric dust motes — a few dim static particles in the mid-ground
+const dustN = 60;
+const dustPos = new Float32Array(dustN*3);
+for(let i=0;i<dustN;i++){
+  dustPos[i*3]   = (Math.random()-0.5)*40;
+  dustPos[i*3+1] = (Math.random()-0.5)*30;
+  dustPos[i*3+2] = (Math.random()-0.5)*40;
+}
+const dustGeom = new THREE.BufferGeometry();
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos,3));
+const dustMat = new THREE.PointsMaterial({
+  size:0.08, color:0x887766, transparent:true, opacity:0.12,
+  blending:THREE.AdditiveBlending, depthWrite:false
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+// faint horizon line — ground reference
+const horizGeo = new THREE.PlaneGeometry(120, 0.02);
+const horizMat = new THREE.MeshBasicMaterial({color:0x443322, transparent:true, opacity:0.08, side:THREE.DoubleSide});
+const horizon = new THREE.Mesh(horizGeo, horizMat);
+horizon.position.y = -8;
+horizon.rotation.x = 0;
+scene.add(horizon);
+
+addEventListener('resize', ()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+// pre-warm to show shells formed
+for(let s=0;s<300;s++) step(0.04);
+
+let lastT=performance.now();
+function loop(){
+  const now=performance.now();
+  const dt=Math.min(0.06,(now-lastT)/1000);
+  lastT=now;
+  uniforms.uTime.value=now/1000;
+  uniforms.uCohesion.value=cohesion;
+  step(dt);
+  geom.attributes.position.needsUpdate=true;
+
+  // camera: slow orbit tracking centroid of both shells
+  const ang=now*0.00008;
+  const midX=(SHELL_A.cx+SHELL_B.cx)*0.5;
+  const midZ=(SHELL_A.cz+SHELL_B.cz)*0.5;
+  camera.position.x = midX + Math.sin(ang)*28;
+  camera.position.z = midZ + Math.cos(ang)*28;
+  camera.position.y = Math.sin(now*0.00005)*3 + 2;
+  camera.lookAt(midX, 0, midZ);
+
+  renderer.render(scene,camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
