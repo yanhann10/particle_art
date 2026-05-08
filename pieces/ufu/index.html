@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ufu · deep-time particle drift</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden;
+               color:#8a8378; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .counter { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em;
+             line-height: 1.6; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">ufu · 542mya → present</div>
+<div class="counter" id="counter">
+  epoch: cambrian<br>
+  years elapsed: 0<br>
+  particles culled: 0 / 70000<br>
+  atmospheric CO₂: 4500 ppm
+</div>
+<div class="src">timothy morton · dark ecology<br>geological time at human scale</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ────────────── deep-time trajectory: 542 million years (Cambrian → present)
+// geological epochs, mass extinctions, atmospheric CO₂ curve
+const EPOCHS = [
+  { name: 'cambrian',     start: -542, end: -485, co2: 4500 },
+  { name: 'ordovician',   start: -485, end: -444, co2: 4200, extinction: { at: -444, kill: 0.86 } },
+  { name: 'silurian',     start: -444, end: -419, co2: 4500 },
+  { name: 'devonian',     start: -419, end: -359, co2: 2200, extinction: { at: -375, kill: 0.75 } },
+  { name: 'carboniferous',start: -359, end: -299, co2: 800 },
+  { name: 'permian',      start: -299, end: -252, co2: 900, extinction: { at: -252, kill: 0.96 } },
+  { name: 'triassic',     start: -252, end: -201, co2: 1750, extinction: { at: -201, kill: 0.80 } },
+  { name: 'jurassic',     start: -201, end: -145, co2: 1950 },
+  { name: 'cretaceous',   start: -145, end: -66,  co2: 1700, extinction: { at: -66, kill: 0.75 } },
+  { name: 'paleogene',    start: -66,  end: -23,  co2: 500 },
+  { name: 'neogene',      start: -23,  end: -2.6, co2: 280 },
+  { name: 'quaternary',   start: -2.6, end: 0,    co2: 280 },
+  { name: 'anthropocene', start: 0,    end: 0.27, co2: 420 }  // 1750 → 2024 = 274 years
+];
+const TOTAL_SPAN = 542 + 0.27;  // million years
+const REALTIME_SCALE = 120;     // entire 542my in 120 seconds of realtime
+
+function getEpochAt(mya){
+  for (const e of EPOCHS) if (mya >= e.start && mya <= e.end) return e;
+  return EPOCHS[EPOCHS.length - 1];
+}
+
+function co2At(mya){
+  const e = getEpochAt(mya);
+  if (!e) return 280;
+  if (mya >= 0){
+    // anthropocene: exponential rise 280 → 420 over 274 years
+    const t = mya / 0.27;  // [0..1]
+    return 280 * Math.exp(t * Math.log(420 / 280));
+  }
+  return e.co2;
+}
+
+// ────────────── scene
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0908, 0.015);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 12, 38);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── geometry: stromatolite-to-forest morphology
+// pose A (cambrian): stromatolite mounds — bacterial biofilms, oldest fossil life
+// pose B (present): sparse forest canopy — what remains after sixth extinction
+const N = 70000;
+const poseA = new Float32Array(N * 3);
+const poseB = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const extinctionFlags = new Float32Array(N);  // 0 = alive, 1 = culled by extinction
+
+// stromatolites: 8 domed mounds, particles cluster on surface + interior laminae
+const MOUNDS = 8;
+const moundCenters = [];
+for (let i = 0; i < MOUNDS; i++){
+  const angle = (i / MOUNDS) * Math.PI * 2;
+  const r = 6 + Math.random() * 3;
+  moundCenters.push({
+    x: Math.cos(angle) * r,
+    z: Math.sin(angle) * r,
+    hw: 1.2 + Math.random() * 0.8,   // half-width
+    h: 2.5 + Math.random() * 1.5     // height
+  });
+}
+
+for (let i = 0; i < N; i++){
+  const m = moundCenters[Math.floor(Math.random() * MOUNDS)];
+  // sample within dome: x² + z² + (y/aspect)² ≤ r²
+  const aspect = m.h / m.hw;
+  let x, y, z, r2;
+  do {
+    x = (Math.random() - 0.5) * 2 * m.hw;
+    z = (Math.random() - 0.5) * 2 * m.hw;
+    y = Math.random() * m.h;
+    r2 = (x*x + z*z) / (m.hw * m.hw) + (y*y) / (m.h * m.h);
+  } while (r2 > 1);
+  // bias toward surface (layered biofilm structure)
+  const shell = Math.pow(Math.random(), 0.4);
+  poseA[i*3]   = m.x + x * shell;
+  poseA[i*3+1] = y * shell;
+  poseA[i*3+2] = m.z + z * shell;
+  seeds[i] = Math.random();
+  extinctionFlags[i] = 0;
+}
+
+// forest canopy: sparse vertical tree trunks with minimal foliage
+const TREES = 12;
+for (let i = 0; i < N; i++){
+  const t = Math.floor(Math.random() * TREES);
+  const angle = (t / TREES) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+  const r = 5 + Math.random() * 4;
+  const baseX = Math.cos(angle) * r;
+  const baseZ = Math.sin(angle) * r;
+  const h = 8 + Math.random() * 6;
+  const y = Math.random() * h;
+  // trunk width tapers with height
+  const taper = 1.0 - 0.7 * (y / h);
+  const trunk_r = 0.15 * taper;
+  const th = Math.random() * Math.PI * 2;
+  poseB[i*3]   = baseX + Math.cos(th) * trunk_r;
+  poseB[i*3+1] = y;
+  poseB[i*3+2] = baseZ + Math.sin(th) * trunk_r;
+}
+
+// ────────────── particle culling by mass extinction
+// each particle assigned to a random species-group; extinctions cull groups
+const speciesGroup = new Float32Array(N);
+for (let i = 0; i < N; i++) speciesGroup[i] = Math.random();
+
+let totalCulled = 0;
+function cullExtinction(killFrac){
+  const threshold = 1.0 - killFrac;
+  let culled = 0;
+  for (let i = 0; i < N; i++){
+    if (extinctionFlags[i] === 0 && speciesGroup[i] > threshold){
+      extinctionFlags[i] = 1;
+      culled++;
+    }
+  }
+  totalCulled += culled;
+  return culled;
+}
+
+// ────────────── shader + uniforms
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uMya:    { value: -542 },       // current time in millions of years ago
+  uCO2:    { value: 4500 },       // current atmospheric CO₂ ppm
+  uMorph:  { value: 0 }           // 0 = stromatolite, 1 = forest
+};
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position',  new THREE.BufferAttribute(poseA.slice(), 3));
+geom.setAttribute('poseA',     new THREE.BufferAttribute(poseA, 3));
+geom.setAttribute('poseB',     new THREE.BufferAttribute(poseB, 3));
+geom.setAttribute('seed',      new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('extinct',   new THREE.BufferAttribute(extinctionFlags, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uMya;
+    uniform float uCO2;
+    uniform float uMorph;
+    attribute vec3 poseA;
+    attribute vec3 poseB;
+    attribute float seed;
+    attribute float extinct;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      if (extinct > 0.5){
+        gl_Position = vec4(0.0, 0.0, -1000.0, 1.0);
+        gl_PointSize = 0.0;
+        return;
+      }
+      float m = smoothstep(0.0, 1.0, uMorph);
+      vec3 p = mix(poseA, poseB, m);
+
+      // CO₂-driven deformation field: high CO₂ pushes particles upward + outward (warming/expansion)
+      float co2_norm = (uCO2 - 280.0) / (4500.0 - 280.0);
+      float uplift = co2_norm * (p.y / 14.0) * 1.2;
+      p.y += uplift;
+      float spread = co2_norm * 0.3;
+      p.x += p.x * spread;
+      p.z += p.z * spread;
+
+      // slow drift: geological time as particle advection (imperceptibly slow even at 542my/120s)
+      float drift_t = uTime * 0.008 + seed * 6.28;
+      p.x += sin(drift_t) * 0.02 * (1.0 - m);
+      p.z += cos(drift_t * 0.7) * 0.02 * (1.0 - m);
+
+      // palette: muted earth tones → dead grey as we approach anthropocene
+      // cambrian: ochre/sienna (ancient sea-floor sediment)
+      // present: ash grey (post-extinction bleach)
+      vec3 ancient = vec3(0.48, 0.38, 0.26);  // warm ochre
+      vec3 dead    = vec3(0.32, 0.30, 0.28);  // cold ash
+      float grey_t = smoothstep(-100.0, 0.0, uMya);  // fade to grey over last 100my
+      vCol = mix(ancient, dead, grey_t);
+
+      // height-based darkening (sediment depth in cambrian, canopy shadow in present)
+      float shade = 0.5 + 0.5 * clamp(p.y / 14.0, 0.0, 1.0);
+      vCol *= shade;
+
+      vAlpha = 0.4 + 0.3 * sin(drift_t * 0.5);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 0.7 * uPixel * (60.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── camera tracking centroid of live particles
+function computeCentroid(){
+  let cx = 0, cy = 0, cz = 0, count = 0;
+  const pos = geom.attributes.position.array;
+  const ext = geom.attributes.extinct.array;
+  for (let i = 0; i < N; i++){
+    if (ext[i] < 0.5){
+      cx += pos[i*3]; cy += pos[i*3+1]; cz += pos[i*3+2]; count++;
+    }
+  }
+  if (count === 0) return new THREE.Vector3(0, 8, 0);
+  return new THREE.Vector3(cx / count, cy / count, cz / count);
+}
+
+// ────────────── animation loop
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastExtinctionCheck = -1000;
+const counter = document.getElementById('counter');
+const start = performance.now();
+
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  // map realtime → deep time
+  const mya = -542 + (elapsed / REALTIME_SCALE) * TOTAL_SPAN;
+  uniforms.uMya.value = mya;
+  const co2 = co2At(mya);
+  uniforms.uCO2.value = co2;
+
+  // morph parameter: stromatolite → forest over entire span
+  const morph = (mya + 542) / TOTAL_SPAN;
+  uniforms.uMorph.value = Math.pow(morph, 1.5);  // slower early, faster late
+
+  // check for mass extinctions
+  const epoch = getEpochAt(mya);
+  if (epoch && epoch.extinction){
+    const ext = epoch.extinction;
+    if (mya >= ext.at && lastExtinctionCheck < ext.at){
+      const culled = cullExtinction(ext.kill);
+      geom.attributes.extinct.needsUpdate = true;
+      lastExtinctionCheck = ext.at;
+    }
+  }
+
+  // update counter display
+  const years = Math.round(Math.abs(mya) * 1e6);
+  const epochName = epoch ? epoch.name : 'unknown';
+  counter.innerHTML = `epoch: ${epochName}<br>years elapsed: ${years.toLocaleString()}<br>particles culled: ${totalCulled.toLocaleString()} / ${N.toLocaleString()}<br>atmospheric CO₂: ${Math.round(co2)} ppm`;
+
+  // camera: slow orbit around centroid, rising slightly over time
+  const centroid = computeCentroid();
+  const ang = elapsed * 0.04;
+  const camR = 38 - morph * 10;  // camera moves inward as we approach present
+  camera.position.x = centroid.x + Math.sin(ang) * camR;
+  camera.position.z = centroid.z + Math.cos(ang) * camR;
+  camera.position.y = centroid.y + 12 + morph * 4;
+  camera.lookAt(centroid);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
