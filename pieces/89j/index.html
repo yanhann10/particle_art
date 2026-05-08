@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: sway, intensity: gentle -->
+<title>89j · human unreadable · hash-seeded choreography</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#0a0706;overflow:hidden}
+  canvas{display:block}
+  .id{position:fixed;left:14px;bottom:12px;font-family:ui-monospace,"SF Mono",Menlo,monospace;
+      color:#cdd2dc;opacity:0.55;font-size:11px;letter-spacing:0.06em;z-index:10}
+  .seed{position:fixed;bottom:34px;left:14px;font-family:ui-monospace,"SF Mono",Menlo,monospace;
+        color:#b8845a;opacity:0.28;font-size:8.5px;letter-spacing:0.14em;word-break:break-all;
+        max-width:340px;line-height:1.5;z-index:10}
+</style>
+</head>
+<body>
+<div class="id">89j</div>
+<div class="seed" id="seedLabel"></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── 256-bit seed ── */
+const seed = Array.from({length:64},()=>'0123456789abcdef'[Math.random()*16|0]).join('');
+document.getElementById('seedLabel').textContent = '0x'+seed;
+function seedByte(i){ return parseInt(seed.substr((i*2)%62,2),16)/255; }
+function seedInt(i){ return parseInt(seed.substr((i*2)%62,2),16); }
+
+/* ── renderer ── */
+const W=innerWidth, H=innerHeight;
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(W,H);
+renderer.setClearColor(0x0a0706,1);
+document.body.appendChild(renderer.domElement);
+
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(36,W/H,0.1,200);
+camera.position.set(0,4.5,18);
+camera.lookAt(0,3.5,0);
+
+/* ── warm stage cyc gradient ── */
+const cycGeo=new THREE.PlaneGeometry(60,30,1,32);
+const cycPos=cycGeo.attributes.position;
+const cycCol=new Float32Array(cycPos.count*3);
+for(let i=0;i<cycPos.count;i++){
+  const y=(cycPos.getY(i)+15)/30;
+  const r=0.06+0.16*y*y, g=0.03+0.08*y*y, b=0.02+0.03*y*y;
+  cycCol[i*3]=r; cycCol[i*3+1]=g; cycCol[i*3+2]=b;
+}
+cycGeo.setAttribute('color',new THREE.BufferAttribute(cycCol,3));
+const cycMat=new THREE.MeshBasicMaterial({vertexColors:true,side:THREE.DoubleSide});
+const cyc=new THREE.Mesh(cycGeo,cycMat);
+cyc.position.set(0,5,-8);
+scene.add(cyc);
+
+/* ── floor ── */
+const floorGeo=new THREE.PlaneGeometry(40,20,1,1);
+const floorMat=new THREE.MeshBasicMaterial({color:0x0d0a08,transparent:true,opacity:0.6});
+const floor=new THREE.Mesh(floorGeo,floorMat);
+floor.rotation.x=-Math.PI/2;
+floor.position.y=-0.02;
+scene.add(floor);
+
+/* ── lighting ── */
+const keyLight=new THREE.PointLight(0xffcb8e,1.8,40);
+keyLight.position.set(4,10,6);
+scene.add(keyLight);
+const fillLight=new THREE.PointLight(0x7a5030,0.6,30);
+fillLight.position.set(-5,6,-2);
+scene.add(fillLight);
+scene.add(new THREE.AmbientLight(0x1a0f08,0.4));
+
+/* ── skeleton definition ── */
+// 0:head 1:neck 2:chest 3:spine 4:pelvis
+// 5:lShoulder 6:lElbow 7:lHand
+// 8:rShoulder 9:rElbow 10:rHand
+// 11:lHip 12:lKnee 13:lFoot
+// 14:rHip 15:rKnee 16:rFoot
+const BONES=[[0,1],[1,2],[2,3],[3,4],[2,5],[5,6],[6,7],[2,8],[8,9],[9,10],
+             [4,11],[11,12],[12,13],[4,14],[14,15],[15,16]];
+const REST=[
+  [0,7.2,0],[0,6.6,0],[0,5.8,0],[0,5.0,0],[0,4.2,0],
+  [-0.6,5.7,0],[-1.2,4.8,0],[-1.4,4.0,0],
+  [0.6,5.7,0],[1.2,4.8,0],[1.4,4.0,0],
+  [-0.3,4.1,0],[-0.35,2.4,0],[-0.35,0.05,0],
+  [0.3,4.1,0],[0.35,2.4,0],[0.35,0.05,0]
+];
+const N_JOINTS=17, N_FIGURES=6;
+
+/* ── derive per-figure params from seed ── */
+const figures=[];
+for(let f=0;f<N_FIGURES;f++){
+  const si=f*8;
+  const baseX=(f-2.5)*3.2+seedByte(si)*1.2-0.6;
+  const baseZ=seedByte(si+1)*2.0-1.0;
+  const scale=0.42+seedByte(si+2)*0.16;
+  const phaseBase=seedByte(si+3)*Math.PI*2;
+  const freqMul=0.6+seedByte(si+4)*0.8;
+  const ampMul=0.5+seedByte(si+5)*0.7;
+  const hue=0.04+seedByte(si+6)*0.08;
+  const sat=0.55+seedByte(si+7)*0.35;
+
+  /* per-joint animation: each joint gets amplitude + phase offsets from seed */
+  const jAnim=[];
+  for(let j=0;j<N_JOINTS;j++){
+    const ji=(f*N_JOINTS+j)*3;
+    jAnim.push({
+      ax: (seedByte(ji%64)*0.5-0.25)*ampMul,
+      ay: (seedByte((ji+1)%64)*0.3-0.15)*ampMul,
+      az: (seedByte((ji+2)%64)*0.4-0.2)*ampMul,
+      px: seedByte((ji+3)%64)*Math.PI*2,
+      py: seedByte((ji+4)%64)*Math.PI*2,
+      pz: seedByte((ji+5)%64)*Math.PI*2,
+      fx: 0.3+seedByte((ji+6)%64)*0.7,
+      fy: 0.4+seedByte((ji+7)%64)*0.5,
+      fz: 0.3+seedByte((ji+8)%64)*0.6,
+    });
+  }
+
+  const color=new THREE.Color().setHSL(hue,sat,0.65);
+  const colorDim=new THREE.Color().setHSL(hue,sat*0.4,0.3);
+  figures.push({baseX,baseZ,scale,phaseBase,freqMul,jAnim,color,colorDim,
+                joints:REST.map(r=>[...r]), trails:[]});
+}
+
+/* ── joint spheres: InstancedMesh ── */
+const jointGeo=new THREE.IcosahedronGeometry(0.07,1);
+const jointMat=new THREE.MeshStandardMaterial({roughness:0.5,metalness:0.3,emissive:0x1a0800});
+const jointMesh=new THREE.InstancedMesh(jointGeo,jointMat,N_FIGURES*N_JOINTS);
+scene.add(jointMesh);
+const dummy=new THREE.Object3D();
+const jColor=new THREE.Color();
+
+/* ── bone lines ── */
+const boneLineMat=new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:0.85});
+const bonePositions=new Float32Array(N_FIGURES*BONES.length*2*3);
+const boneColors=new Float32Array(N_FIGURES*BONES.length*2*3);
+const boneGeo=new THREE.BufferGeometry();
+boneGeo.setAttribute('position',new THREE.BufferAttribute(bonePositions,3));
+boneGeo.setAttribute('color',new THREE.BufferAttribute(boneColors,3));
+const boneLines=new THREE.LineSegments(boneGeo,boneLineMat);
+scene.add(boneLines);
+
+/* ── trails (hands + head) ── */
+const TRAIL_JOINTS=[0,7,10,13,16];
+const TRAIL_LEN=48;
+for(const fig of figures){
+  for(const tj of TRAIL_JOINTS){
+    fig.trails.push({joint:tj,buf:[]});
+  }
+}
+const trailMat=new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:0.4});
+const trailGroup=new THREE.Group();
+scene.add(trailGroup);
+
+/* ── inter-figure connection lines ── */
+const connMat=new THREE.LineBasicMaterial({color:0x6b4a2a,transparent:true,opacity:0.12});
+const connMaxPairs=N_FIGURES*(N_FIGURES-1)/2;
+const connPos=new Float32Array(connMaxPairs*2*3);
+const connGeo=new THREE.BufferGeometry();
+connGeo.setAttribute('position',new THREE.BufferAttribute(connPos,3));
+const connLines=new THREE.LineSegments(connGeo,connMat);
+scene.add(connLines);
+
+/* ── shadows on floor (simple dark circles) ── */
+const shadowGeo=new THREE.CircleGeometry(0.6,16);
+const shadowMat=new THREE.MeshBasicMaterial({color:0x000000,transparent:true,opacity:0.15});
+const shadows=[];
+for(let f=0;f<N_FIGURES;f++){
+  const s=new THREE.Mesh(shadowGeo,shadowMat);
+  s.rotation.x=-Math.PI/2;
+  s.position.y=0.01;
+  scene.add(s);
+  shadows.push(s);
+}
+
+/* ── animation ── */
+const clock=new THREE.Clock();
+let paused=false;
+addEventListener('click',()=>{paused=!paused});
+
+function animate(){
+  requestAnimationFrame(animate);
+  const t=clock.getElapsedTime();
+  if(paused){ renderer.render(scene,camera); return; }
+
+  /* global choreographic pulse — shared tempo with drift */
+  const tempo=0.55;
+  const globalPhase=t*tempo;
+
+  /* update each figure */
+  for(let f=0;f<N_FIGURES;f++){
+    const fig=figures[f];
+    const joints=fig.joints;
+    const phase=globalPhase+fig.phaseBase;
+
+    /* compute joint positions */
+    for(let j=0;j<N_JOINTS;j++){
+      const a=fig.jAnim[j];
+      const rx=REST[j][0], ry=REST[j][1], rz=REST[j][2];
+      /* layered sine motion — two frequencies for organic feel */
+      const ox=a.ax*Math.sin(phase*a.fx+a.px)+a.ax*0.3*Math.sin(phase*a.fx*2.1+a.px+1.0);
+      const oy=a.ay*Math.sin(phase*a.fy+a.py)+a.ay*0.2*Math.sin(phase*a.fy*1.7+a.py+0.5);
+      const oz=a.az*Math.sin(phase*a.fz+a.pz)+a.az*0.35*Math.sin(phase*a.fz*1.9+a.pz+2.0);
+
+      /* subtle breath: whole body lifts/lowers */
+      const breath=Math.sin(phase*0.8+fig.phaseBase)*0.06;
+
+      joints[j][0]=(rx+ox)*fig.scale+fig.baseX;
+      joints[j][1]=(ry+oy+breath)*fig.scale;
+      joints[j][2]=(rz+oz)*fig.scale+fig.baseZ;
+    }
+
+    /* enforce bone length constraints (2 iterations) */
+    for(let iter=0;iter<2;iter++){
+      for(const [a,b] of BONES){
+        const ja=joints[a], jb=joints[b];
+        const dx=jb[0]-ja[0], dy=jb[1]-ja[1], dz=jb[2]-ja[2];
+        const d=Math.sqrt(dx*dx+dy*dy+dz*dz)+1e-6;
+        const restLen=Math.sqrt((REST[b][0]-REST[a][0])**2+(REST[b][1]-REST[a][1])**2+
+                     (REST[b][2]-REST[a][2])**2)*fig.scale;
+        const diff=(d-restLen)/d*0.5;
+        const cx=dx*diff, cy=dy*diff, cz=dz*diff;
+        ja[0]+=cx; ja[1]+=cy; ja[2]+=cz;
+        jb[0]-=cx; jb[1]-=cy; jb[2]-=cz;
+      }
+    }
+
+    /* update instanced joints */
+    for(let j=0;j<N_JOINTS;j++){
+      const idx=f*N_JOINTS+j;
+      dummy.position.set(joints[j][0],joints[j][1],joints[j][2]);
+      /* extremities slightly larger */
+      const s=(j===0||j===7||j===10||j===13||j===16)?1.3:0.8;
+      dummy.scale.setScalar(s);
+      dummy.updateMatrix();
+      jointMesh.setMatrixAt(idx,dummy.matrix);
+      jointMesh.setColorAt(idx,(j===0||j===7||j===10)?fig.color:fig.colorDim);
+    }
+
+    /* update bone lines */
+    for(let b=0;b<BONES.length;b++){
+      const [a,bi]=BONES[b];
+      const off=(f*BONES.length+b)*6;
+      bonePositions[off]=joints[a][0]; bonePositions[off+1]=joints[a][1]; bonePositions[off+2]=joints[a][2];
+      bonePositions[off+3]=joints[bi][0]; bonePositions[off+4]=joints[bi][1]; bonePositions[off+5]=joints[bi][2];
+      boneColors[off]=fig.color.r; boneColors[off+1]=fig.color.g; boneColors[off+2]=fig.color.b;
+      boneColors[off+3]=fig.colorDim.r; boneColors[off+4]=fig.colorDim.g; boneColors[off+5]=fig.colorDim.b;
+    }
+
+    /* update trails */
+    for(const trail of fig.trails){
+      const jp=joints[trail.joint];
+      trail.buf.push([jp[0],jp[1],jp[2]]);
+      if(trail.buf.length>TRAIL_LEN) trail.buf.shift();
+    }
+
+    /* shadow */
+    const pelvis=joints[4];
+    shadows[f].position.x=pelvis[0];
+    shadows[f].position.z=pelvis[2];
+    shadows[f].scale.setScalar(fig.scale*1.5);
+  }
+
+  jointMesh.instanceMatrix.needsUpdate=true;
+  jointMesh.instanceColor.needsUpdate=true;
+  boneGeo.attributes.position.needsUpdate=true;
+  boneGeo.attributes.color.needsUpdate=true;
+
+  /* rebuild trail lines */
+  while(trailGroup.children.length) {
+    const c=trailGroup.children[0];
+    trailGroup.remove(c);
+    c.geometry.dispose();
+  }
+  for(let f=0;f<N_FIGURES;f++){
+    const fig=figures[f];
+    for(const trail of fig.trails){
+      if(trail.buf.length<3) continue;
+      const pts=trail.buf.map(p=>new THREE.Vector3(p[0],p[1],p[2]));
+      const tg=new THREE.BufferGeometry().setFromPoints(pts);
+      const cols=new Float32Array(pts.length*3);
+      for(let i=0;i<pts.length;i++){
+        const a=i/pts.length;
+        cols[i*3]=fig.color.r*a; cols[i*3+1]=fig.color.g*a; cols[i*3+2]=fig.color.b*a;
+      }
+      tg.setAttribute('color',new THREE.BufferAttribute(cols,3));
+      const tl=new THREE.Line(tg,new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:0.25}));
+      trailGroup.add(tl);
+    }
+  }
+
+  /* inter-figure connections (hands near each other) */
+  let ci=0;
+  const handJoints=[7,10];
+  for(let a=0;a<N_FIGURES;a++){
+    for(let b=a+1;b<N_FIGURES;b++){
+      for(const hj of handJoints){
+        const ja=figures[a].joints[hj], jb=figures[b].joints[hj];
+        const dx=ja[0]-jb[0], dy=ja[1]-jb[1], dz=ja[2]-jb[2];
+        const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if(d<3.5 && ci<connMaxPairs){
+          connPos[ci*6]=ja[0]; connPos[ci*6+1]=ja[1]; connPos[ci*6+2]=ja[2];
+          connPos[ci*6+3]=jb[0]; connPos[ci*6+4]=jb[1]; connPos[ci*6+5]=jb[2];
+          ci++;
+        }
+      }
+    }
+  }
+  /* zero out unused */
+  for(let i=ci;i<connMaxPairs;i++){
+    connPos[i*6]=connPos[i*6+1]=connPos[i*6+2]=0;
+    connPos[i*6+3]=connPos[i*6+4]=connPos[i*6+5]=0;
+  }
+  connGeo.setDrawRange(0,ci*2);
+  connGeo.attributes.position.needsUpdate=true;
+
+  /* gentle camera sway */
+  const camSway=Math.sin(t*0.15)*0.4;
+  camera.position.x=camSway;
+  camera.position.y=4.5+Math.sin(t*0.1)*0.3;
+  camera.lookAt(0,3.2,0);
+
+  renderer.render(scene,camera);
+}
+animate();
+
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+</script>
+</body>
+</html>
