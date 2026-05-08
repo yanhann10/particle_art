@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: dissolve, intensity: contemplative -->
+<!-- REF: Mu Qi (牧谿) ink-wash vanishing forms -->
+<title>mg5 · yugen lamp</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#060709; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">mg5</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+/* ── constants ── */
+const W = 245, H = 245;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x060709, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 500);
+camera.position.set(0, 0.6, 5.5);
+
+/* ── GPGPU render targets ── */
+const rtOpts = {
+  type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  depthBuffer: false
+};
+let rtA = new THREE.WebGLRenderTarget(W, H, rtOpts);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtOpts);
+const rtHome = new THREE.WebGLRenderTarget(W, H, rtOpts);
+const rtNorm = new THREE.WebGLRenderTarget(W, H, rtOpts);
+
+const camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+function blitDataTex(data, target) {
+  const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat, THREE.FloatType);
+  tex.needsUpdate = true;
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { t: { value: tex } },
+    vertexShader: `varying vec2 v; void main(){ v=uv; gl_Position=vec4(position,1.0); }`,
+    fragmentShader: `uniform sampler2D t; varying vec2 v; void main(){ gl_FragColor=texture2D(t,v); }`
+  });
+  const s = new THREE.Scene();
+  s.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat));
+  renderer.setRenderTarget(target);
+  renderer.render(s, camOrtho);
+  renderer.setRenderTarget(null);
+  mat.dispose(); tex.dispose();
+}
+
+/* ── sample geometry & init GPGPU textures ── */
+function initFromGeometry(geometry) {
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  const bb = geometry.boundingBox;
+  const center = new THREE.Vector3(); bb.getCenter(center);
+  const sz = new THREE.Vector3(); bb.getSize(sz);
+  const scale = 3.2 / Math.max(sz.x, sz.y, sz.z);
+
+  const tmpMesh = new THREE.Mesh(geometry);
+  const sampler = new MeshSurfaceSampler(tmpMesh).build();
+
+  const posArr  = new Float32Array(N * 4);
+  const normArr = new Float32Array(N * 4);
+  const _p = new THREE.Vector3(), _n = new THREE.Vector3();
+
+  for (let i = 0; i < N; i++) {
+    sampler.sample(_p, _n);
+    posArr[i * 4]     = (_p.x - center.x) * scale;
+    posArr[i * 4 + 1] = (_p.y - center.y) * scale;
+    posArr[i * 4 + 2] = (_p.z - center.z) * scale;
+    posArr[i * 4 + 3] = Math.random();
+    normArr[i * 4]     = _n.x;
+    normArr[i * 4 + 1] = _n.y;
+    normArr[i * 4 + 2] = _n.z;
+    normArr[i * 4 + 3] = 0.0;
+  }
+
+  blitDataTex(posArr, rtHome);
+  blitDataTex(posArr, rtA);
+  blitDataTex(normArr, rtNorm);
+
+  buildPointCloud();
+}
+
+/* ── sim shader: yugen — stochastic release, bounded rise, slow return ── */
+const simU = {
+  prev:   { value: null },
+  home:   { value: rtHome.texture },
+  norm:   { value: rtNorm.texture },
+  uTime:  { value: 0.0 },
+  uPulse: { value: 0.06 },
+  uDrift: { value: 0.01 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simU,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev, home, norm;
+    uniform float uTime, uPulse, uDrift;
+    varying vec2 vUv;
+
+    // pseudo-random hash
+    float hash(float n){ return fract(sin(n)*43758.5453); }
+
+    void main(){
+      vec4 h = texture2D(home, vUv);
+      vec4 n = texture2D(norm, vUv);
+      vec4 p = texture2D(prev, vUv);
+      float phase = h.w;
+
+      vec3 nDir = normalize(n.xyz + vec3(0.001));
+
+      // === subtle surface breathing (always present, gentle) ===
+      float breath = sin(uTime * 0.8 + phase * 6.2832) * 0.3 + 0.5;
+      breath += 0.15 * sin(uTime * 1.9 + phase * 12.566);
+      breath = clamp(breath, 0.0, 1.0);
+      float outward = breath * uPulse;
+
+      // === stochastic release cycle (yugen dissolution) ===
+      // each particle has its own slow cycle period (20-45s)
+      float period = 20.0 + hash(phase * 137.0) * 25.0;
+      float t = mod(uTime / period + phase * 3.17 + hash(phase * 71.0) * 2.0, 1.0);
+
+      // dwell on surface for ~88% of cycle, release for ~12%
+      // stagger onset with hash so particles don't sync
+      float onset = 0.86 + hash(phase * 53.0) * 0.04;
+      float peak  = onset + 0.05;
+      float end   = min(onset + 0.12, 1.0);
+
+      // smooth rise and gentle return
+      float release = smoothstep(onset, peak, t) * (1.0 - smoothstep(peak, end, t));
+
+      // max rise bounded to 1.4 units — no runaway
+      float maxRise = 0.8 + hash(phase * 97.0) * 0.6;
+      float rise = release * maxRise;
+
+      // rise direction: mostly upward with slight outward lean
+      vec3 upDir = vec3(
+        nDir.x * 0.15 + hash(phase * 31.0 + 0.5) * 0.06 - 0.03,
+        0.85 + nDir.y * 0.15,
+        nDir.z * 0.15 + hash(phase * 47.0 + 0.5) * 0.06 - 0.03
+      );
+      upDir = normalize(upDir);
+
+      // tangential drift on surface (very subtle)
+      float dAngle = uTime * 0.15 + phase * 6.2832;
+      vec3 tang = normalize(cross(nDir, vec3(0.0, 1.0, 0.01)));
+      vec3 btan = cross(nDir, tang);
+      vec3 drift = (tang * cos(dAngle) + btan * sin(dAngle)) * uDrift * (1.0 - release);
+
+      vec3 pos = h.xyz + nDir * outward + drift + upDir * rise;
+
+      // age encodes release amount for fading in render shader
+      gl_FragColor = vec4(pos, release);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), simMat));
+
+/* ── point cloud render ── */
+let points = null;
+let ready = false;
+
+function buildPointCloud() {
+  const geom = new THREE.BufferGeometry();
+  const uv = new Float32Array(N * 2);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    uv[i * 2]     = (x + 0.5) / W;
+    uv[i * 2 + 1] = (y + 0.5) / H;
+  }
+  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+  geom.setAttribute('uvIdx',    new THREE.BufferAttribute(uv, 2));
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      state:  { value: rtA.texture },
+      home:   { value: rtHome.texture },
+      uPixel: { value: renderer.getPixelRatio() },
+      uTime:  { value: 0.0 }
+    },
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: `
+      uniform sampler2D state, home;
+      uniform float uPixel, uTime;
+      attribute vec2 uvIdx;
+      varying float vRelease;
+      varying float vHeight;
+      varying float vDisp;
+      void main(){
+        vec4 s = texture2D(state, uvIdx);
+        vec4 h = texture2D(home, uvIdx);
+        vec3 p = s.xyz;
+        vRelease = s.w;  // 0 = on surface, 1 = fully released
+        vHeight = clamp((h.y + 1.8) / 3.6, 0.0, 1.0);
+        vDisp = length(p - h.xyz);
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        float dist = max(-mv.z, 0.1);
+        // risen particles shrink slightly
+        float sz = mix(1.0, 0.5, vRelease);
+        gl_PointSize = sz * uPixel * (30.0 / dist);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      varying float vRelease;
+      varying float vHeight;
+      varying float vDisp;
+      void main(){
+        vec2 d = gl_PointCoord - 0.5;
+        float r = dot(d, d);
+        if (r > 0.25) discard;
+        float a = exp(-r * 14.0);
+
+        // palette: cool slate-blue base → warm amber whisper for risen
+        vec3 cSurface = vec3(0.42, 0.48, 0.62);  // muted slate-blue
+        vec3 cDeep    = vec3(0.22, 0.26, 0.44);   // deeper indigo shadow
+        vec3 cRisen   = vec3(0.78, 0.62, 0.38);   // warm amber
+
+        // surface particles: subtle height variation
+        vec3 col = mix(cDeep, cSurface, smoothstep(0.0, 0.7, vHeight));
+
+        // risen particles shift to warm amber
+        col = mix(col, cRisen, vRelease * 0.7);
+
+        // === key yugen effect: risen particles fade toward invisibility ===
+        // surface particles: full presence; risen: ghostly
+        float opacity = mix(0.65, 0.04, smoothstep(0.0, 0.8, vRelease));
+
+        // subtle surface glow
+        float glow = 0.5 + vDisp * 2.0;
+
+        gl_FragColor = vec4(col * a * glow, a * opacity);
+      }
+    `
+  });
+
+  points = new THREE.Points(geom, mat);
+  scene.add(points);
+  ready = true;
+}
+
+/* ── fallback: icosahedron if model load fails ── */
+function useFallback() {
+  if (ready) return;
+  const g = new THREE.IcosahedronGeometry(1.6, 5);
+  initFromGeometry(g);
+}
+
+/* ── load GLTF model (same as parent) ── */
+const loader = new GLTFLoader();
+loader.load(
+  'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/IridescenceLamp/glTF-Binary/IridescenceLamp.glb',
+  (gltf) => {
+    if (ready) return;
+    let mesh = null;
+    gltf.scene.traverse((child) => {
+      if (!mesh && child.isMesh && child.geometry && child.geometry.attributes.position) {
+        mesh = child;
+      }
+    });
+    if (mesh) {
+      mesh.updateWorldMatrix(true, false);
+      const geo = mesh.geometry.clone();
+      geo.applyMatrix4(mesh.matrixWorld);
+      initFromGeometry(geo);
+    } else {
+      useFallback();
+    }
+  },
+  undefined,
+  () => useFallback()
+);
+setTimeout(useFallback, 7000);
+
+/* ── pointer: gentle influence on pulse & drift ── */
+const tgt = { pulse: 0.06, drift: 0.01 };
+addEventListener('pointermove', (e) => {
+  const nx = e.clientX / innerWidth - 0.5;
+  const ny = e.clientY / innerHeight - 0.5;
+  tgt.pulse = 0.06 + ny * 0.08;
+  tgt.drift = 0.01 + nx * 0.015;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── render loop ── */
+const t0 = performance.now();
+function loop() {
+  requestAnimationFrame(loop);
+  if (!ready) { renderer.render(scene, camera); return; }
+
+  const elapsed = (performance.now() - t0) / 1000;
+
+  simU.uPulse.value += (tgt.pulse - simU.uPulse.value) * 0.03;
+  simU.uDrift.value += (tgt.drift - simU.uDrift.value) * 0.03;
+  simU.uTime.value = elapsed;
+
+  // step simulation
+  simU.prev.value = rtA.texture;
+  simU.home.value = rtHome.texture;
+  simU.norm.value = rtNorm.texture;
+  renderer.setRenderTarget(rtB);
+  renderer.render(simScene, camOrtho);
+  const tmp = rtA; rtA = rtB; rtB = tmp;
+  renderer.setRenderTarget(null);
+
+  // update point cloud uniforms
+  points.material.uniforms.state.value = rtA.texture;
+  points.material.uniforms.home.value = rtHome.texture;
+  points.material.uniforms.uTime.value = elapsed;
+
+  // slow contemplative orbit — tracks centroid
+  const ang = elapsed * 0.06;
+  camera.position.x = Math.sin(ang) * 5.4;
+  camera.position.z = Math.cos(ang) * 5.4;
+  camera.position.y = 0.3 + Math.sin(elapsed * 0.04) * 0.4;
+  camera.lookAt(0, 0.2, 0);
+
+  renderer.render(scene, camera);
+}
+loop();
+</script>
+</body>
+</html>
