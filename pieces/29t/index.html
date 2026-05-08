@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>29t · hyperobject (mass extinction)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; 
+          max-width: 420px; line-height: 1.5; }
+  .counter { position:fixed; right:18px; bottom:14px; opacity:0.38; font-size: 10px; 
+             letter-spacing: 0.04em; text-align: right; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="id">29t</div>
+<div class="hint">timothy morton · dark ecology<br>540 million years compressed to 9 minutes<br>particle cull rate = extinction events per epoch</div>
+<div class="counter" id="counter">
+  <span id="years">0</span> mya<br>
+  <span id="culled">0</span> species lost<br>
+  <span id="remaining">102400</span> remain
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Mass extinction timeline (mya = million years ago) mapped to particle cull events
+// Ordovician-Silurian (443 mya): 86% marine species
+// Late Devonian (375 mya): 75% species
+// Permian-Triassic (252 mya): 96% species — the Great Dying
+// Triassic-Jurassic (201 mya): 80% species
+// Cretaceous-Paleogene (66 mya): 76% species — dinosaurs
+// Holocene (now): ongoing, anthropogenic
+
+const TIMELINE = [
+  { mya: 540, cull: 0.0, color: [0.32, 0.28, 0.24] },      // Cambrian explosion — beginning
+  { mya: 443, cull: 0.86, color: [0.28, 0.30, 0.32] },    // Ordovician-Silurian
+  { mya: 375, cull: 0.75, color: [0.26, 0.28, 0.26] },    // Late Devonian
+  { mya: 252, cull: 0.96, color: [0.18, 0.16, 0.14] },    // Permian-Triassic (Great Dying)
+  { mya: 201, cull: 0.80, color: [0.22, 0.20, 0.18] },    // Triassic-Jurassic
+  { mya: 66,  cull: 0.76, color: [0.30, 0.26, 0.22] },    // Cretaceous-Paleogene
+  { mya: 0,   cull: 0.45, color: [0.14, 0.14, 0.12] }     // Holocene — ongoing
+];
+
+const PIECE_DURATION_SEC = 540; // 9 minutes = 540 seconds for 540 million years
+const MYA_PER_SEC = 1.0;
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+// ---- state: position + alive flag ----
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// init: scattered in a wide horizontal plane (primordial sea)
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  const angle = Math.random() * Math.PI * 2;
+  const r = Math.pow(Math.random(), 0.6) * 40.0;
+  init[i*4]   = Math.cos(angle) * r;
+  init[i*4+1] = (Math.random() * 2 - 1) * 2.0;  // shallow vertical
+  init[i*4+2] = Math.sin(angle) * r;
+  init[i*4+3] = 1.0;  // alive = 1.0, dead = 0.0
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// ---- simulation: geological drift + extinction culls ----
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt:  { value: 0.016 },
+  uTime: { value: 0 },
+  uCullThreshold: { value: 0.0 },  // when cull event hits, raise this
+  uTargetColor: { value: new THREE.Vector3(0.32, 0.28, 0.24) }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uTime;
+    uniform float uCullThreshold;
+    uniform vec3 uTargetColor;
+    varying vec2 vUv;
+
+    // seeded hash for per-particle determinism
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float alive = s.w;
+
+      if (alive < 0.5) {
+        gl_FragColor = vec4(p, 0.0);
+        return;
+      }
+
+      // cull check: if random seed < threshold, kill particle (extinction event)
+      float seed = hash(vUv);
+      if (seed < uCullThreshold) {
+        gl_FragColor = vec4(p, 0.0);
+        return;
+      }
+
+      // geological drift: extremely slow radial expansion + vertical settling
+      float angle = atan(p.z, p.x);
+      float radius = length(p.xz);
+      
+      // drift outward slowly (continental drift scale)
+      radius += uDt * 0.08;
+      
+      // slow vertical oscillation (sediment layers)
+      p.y += sin(uTime * 0.3 + seed * 6.28) * uDt * 0.04;
+      p.y *= 0.998;  // gradual settling toward seabed
+      
+      // rotate very slowly (tectonic rotation)
+      angle += uDt * 0.002 * (seed - 0.5);
+      
+      p.x = cos(angle) * radius;
+      p.z = sin(angle) * radius;
+
+      gl_FragColor = vec4(p, alive);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// ---- render ----
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 400);
+camera.position.set(0, 35, 85);
+camera.lookAt(0, 0, 0);
+
+// fog for depth / hyperobject scale
+scene.fog = new THREE.Fog(0x1a1612, 50, 180);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uColor: { value: new THREE.Vector3(0.32, 0.28, 0.24) }
+  },
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vAlive;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAlive = s.w;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 1.2 * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    varying float vAlive;
+    void main(){
+      if (vAlive < 0.5) discard;
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * 0.65;
+      gl_FragColor = vec4(uColor, a);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// extinction state tracking
+let currentMya = 540;
+let totalCulled = 0;
+let lastEventIndex = -1;
+let cullAccumulator = 0.0;
+
+const counterYears = document.getElementById('years');
+const counterCulled = document.getElementById('culled');
+const counterRemaining = document.getElementById('remaining');
+
+function updateCounters() {
+  counterYears.textContent = Math.round(currentMya);
+  counterCulled.textContent = totalCulled.toLocaleString();
+  const remaining = N - totalCulled;
+  counterRemaining.textContent = remaining.toLocaleString();
+}
+
+let startTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - startTime) / 1000;
+  
+  // update timeline position
+  currentMya = Math.max(0, 540 - elapsed * MYA_PER_SEC);
+  
+  // find current epoch and check for extinction events
+  let currentEpoch = 0;
+  for (let i = 0; i < TIMELINE.length - 1; i++) {
+    if (currentMya <= TIMELINE[i].mya && currentMya > TIMELINE[i+1].mya) {
+      currentEpoch = i;
+      break;
+    }
+  }
+  if (currentMya <= TIMELINE[TIMELINE.length-1].mya) {
+    currentEpoch = TIMELINE.length - 1;
+  }
+  
+  // trigger extinction event when crossing epoch boundary
+  if (currentEpoch > lastEventIndex && TIMELINE[currentEpoch].cull > 0) {
+    const cullFraction = TIMELINE[currentEpoch].cull;
+    cullAccumulator = cullFraction;
+    lastEventIndex = currentEpoch;
+    
+    // update target color for this epoch
+    const c = TIMELINE[currentEpoch].color;
+    simUniforms.uTargetColor.value.set(c[0], c[1], c[2]);
+    pointsMat.uniforms.uColor.value.set(c[0], c[1], c[2]);
+  }
+  
+  // apply cull gradually over 2 seconds
+  if (cullAccumulator > 0) {
+    const cullRate = 0.5 * (1/60);  // drain over ~2 sec
+    const cullThisFrame = Math.min(cullRate, cullAccumulator);
+    simUniforms.uCullThreshold.value = cullThisFrame;
+    cullAccumulator -= cullThisFrame;
+    
+    // estimate culled count (rough — actual cull is probabilistic)
+    const remaining = N - totalCulled;
+    const culledThisFrame = Math.floor(remaining * cullThisFrame);
+    totalCulled += culledThisFrame;
+  } else {
+    simUniforms.uCullThreshold.value = 0.0;
+  }
+  
+  updateCounters();
+
+  // step sim
+  simUniforms.prev.value = rtA.texture;
+  simUniforms.uTime.value = elapsed;
+  renderer.setRenderTarget(rtB);
+  renderer.render(simScene, camOrtho);
+  const tmp = rtA; rtA = rtB; rtB = tmp;
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  
+  // very slow camera rise (geological time scale made visible)
+  camera.position.y = 35 + elapsed * 0.04;
+  camera.position.z = 85 - elapsed * 0.03;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
