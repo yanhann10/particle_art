@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1x7 · parallels (figure-as-line-field)</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">1x7</div>
+<div class="hint">move pointer · figure emerges in parallel drift</div>
+<div class="src">da costa & niederhauser · parallels · lumen 2024</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// PARALLELS — constrained-drift line field warped by presence
+// Each particle moves along a fixed rail (parallel line in world space).
+// Pointer proximity warps the rails toward the pointer, creating figure-shaped density fields.
+// When the pointer is still, rails snap back to parallel — perception flickers between figure and abstract pattern.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0a, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 45);
+camera.lookAt(0, 0, 0);
+
+// LED volume fog — subtle amber atmosphere
+scene.fog = new THREE.FogExp2(0x0a0a0a, 0.008);
+
+const N_RAILS = 140;   // parallel rails across the frame
+const PARTICLES_PER_RAIL = 280;
+const TOTAL = N_RAILS * PARTICLES_PER_RAIL;
+
+// Rail geometry: each rail is a line in XY-plane, particles drift along Z (depth).
+// At rest, rails are evenly spaced horizontal lines spanning x ∈ [-40, 40], y ∈ [-25, 25].
+const rails = [];
+for (let i = 0; i < N_RAILS; i++){
+  const y = -25 + (i / (N_RAILS - 1)) * 50;
+  rails.push({ y0: y, yTarget: y, yVel: 0 });
+}
+
+const geom = new THREE.BufferGeometry();
+const pos = new Float32Array(TOTAL * 3);
+const uvIdx = new Float32Array(TOTAL * 2); // encode (railIdx, posAlongRail) for shader lookup
+
+let idx = 0;
+for (let r = 0; r < N_RAILS; r++){
+  for (let p = 0; p < PARTICLES_PER_RAIL; p++){
+    const t = p / PARTICLES_PER_RAIL;
+    const x = -40 + t * 80;
+    const z = (Math.random() - 0.5) * 60; // depth scatter within the volume
+    pos[idx*3]   = x;
+    pos[idx*3+1] = rails[r].y0;
+    pos[idx*3+2] = z;
+    uvIdx[idx*2]   = r / N_RAILS;
+    uvIdx[idx*2+1] = t;
+    idx++;
+  }
+}
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('uvIdx', new THREE.BufferAttribute(uvIdx, 2));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() },
+    uPointer: { value: new THREE.Vector3(0, 0, 0) },
+    uPointerStrength: { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec3 uPointer;
+    uniform float uPointerStrength;
+    attribute vec2 uvIdx;
+    varying float vDist;
+    varying float vAge;
+    void main(){
+      vec3 p = position;
+      float railIdx = uvIdx.x;
+      float alongRail = uvIdx.y;
+      
+      // drift along Z (into depth) — each particle wraps at ±30
+      float phase = railIdx * 6.28 + alongRail * 3.14;
+      float drift_z = mod(p.z + uTime * (2.0 + sin(phase) * 1.5), 60.0) - 30.0;
+      p.z = drift_z;
+      
+      // warp toward pointer when present
+      vec3 toPointer = uPointer - p;
+      float d = length(toPointer.xy);
+      float influence = exp(-d * 0.08) * uPointerStrength;
+      p.xy += normalize(toPointer.xy) * influence * 8.0;
+      
+      vDist = d;
+      vAge = mod(alongRail + uTime * 0.1, 1.0);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (0.8 + influence * 2.0) * uPixel * (60.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uPointerStrength;
+    varying float vDist;
+    varying float vAge;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      
+      // LED amber — monochrome warm glow
+      vec3 col = vec3(1.0, 0.72, 0.35);
+      
+      // brighten at figure (pointer-warped zones)
+      float figureBoost = exp(-vDist * 0.05) * uPointerStrength;
+      float intensity = 0.25 + figureBoost * 1.2;
+      
+      gl_FragColor = vec4(col * a * intensity, a * (0.6 + figureBoost * 0.4));
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// instanced line segments connecting adjacent particles on same rail (visual rails)
+const lineSegs = [];
+const segGeom = new THREE.BufferGeometry();
+const segPos = new Float32Array((N_RAILS * (PARTICLES_PER_RAIL - 1)) * 2 * 3);
+let segIdx = 0;
+for (let r = 0; r < N_RAILS; r++){
+  for (let p = 0; p < PARTICLES_PER_RAIL - 1; p++){
+    const i1 = r * PARTICLES_PER_RAIL + p;
+    const i2 = i1 + 1;
+    segPos[segIdx++] = pos[i1*3];
+    segPos[segIdx++] = pos[i1*3+1];
+    segPos[segIdx++] = pos[i1*3+2];
+    segPos[segIdx++] = pos[i2*3];
+    segPos[segIdx++] = pos[i2*3+1];
+    segPos[segIdx++] = pos[i2*3+2];
+  }
+}
+segGeom.setAttribute('position', new THREE.BufferAttribute(segPos, 3));
+const lineMat = new THREE.LineBasicMaterial({ color: 0xff9933, transparent: true, opacity: 0.08, blending: THREE.AdditiveBlending });
+const lines = new THREE.LineSegments(segGeom, lineMat);
+scene.add(lines);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pointer interaction
+const pointer = { x: 0, y: 0, active: false, fadeOut: 0 };
+addEventListener('pointermove', (e) => {
+  pointer.active = true;
+  pointer.fadeOut = 1.0;
+  // map screen → world XY (assume z=0 plane)
+  const nx = (e.clientX / innerWidth) * 2 - 1;
+  const ny = -(e.clientY / innerHeight) * 2 + 1;
+  // rough unprojection at z=0
+  const aspect = innerWidth / innerHeight;
+  const fov = camera.fov * Math.PI / 180;
+  const h = 2 * Math.tan(fov / 2) * camera.position.z;
+  const w = h * aspect;
+  pointer.x = nx * w / 2;
+  pointer.y = ny * h / 2;
+});
+
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  
+  mat.uniforms.uTime.value = now / 1000;
+  
+  // fade pointer influence when still
+  if (pointer.active){
+    pointer.fadeOut = Math.max(0, pointer.fadeOut - dt * 0.3);
+    mat.uniforms.uPointer.value.set(pointer.x, pointer.y, 0);
+    mat.uniforms.uPointerStrength.value = pointer.fadeOut;
+  } else {
+    mat.uniforms.uPointerStrength.value = 0;
+  }
+  
+  // camera slow drift — lateral pan, not rotation (viewer inside LED volume)
+  camera.position.x = Math.sin(now * 0.0001) * 6;
+  camera.position.y = Math.cos(now * 0.00015) * 4;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
