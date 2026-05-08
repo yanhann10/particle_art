@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5uw · nocturne border drift</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#05050a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.50; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.40; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">5uw · nocturne border drift</div>
+<div class="hint">drag to orbit · moonlight crossing at x=0</div>
+<div class="src">whistler (nocturne series 1870s) · curl-noise advection · 75k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const BG = 0x05050a;
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(BG, 0.014);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 22, 60);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 10, 0);
+
+// ────────────── curl-noise field (carried from pa2)
+function hash3(x, y, z){
+  const a = Math.sin(x * 12.9898 + y * 78.233 + z * 37.719) * 43758.5453;
+  const b = Math.sin(x * 93.989 + y * 67.345 + z * 89.232) * 28476.453;
+  const c = Math.sin(x * 45.678 + y * 23.456 + z * 67.890) * 19283.746;
+  return [a - Math.floor(a), b - Math.floor(b), c - Math.floor(c)];
+}
+function grad3(i, j, k, x, y, z){
+  const [gx, gy, gz] = hash3(i, j, k);
+  return (gx - 0.5) * (x - i) + (gy - 0.5) * (y - j) + (gz - 0.5) * (z - k);
+}
+function perlin(x, y, z){
+  const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+  const fx = x - ix, fy = y - iy, fz = z - iz;
+  const u = fx * fx * (3 - 2 * fx);
+  const v = fy * fy * (3 - 2 * fy);
+  const w = fz * fz * (3 - 2 * fz);
+  const c000 = grad3(ix, iy, iz, x, y, z);
+  const c100 = grad3(ix+1, iy, iz, x, y, z);
+  const c010 = grad3(ix, iy+1, iz, x, y, z);
+  const c110 = grad3(ix+1, iy+1, iz, x, y, z);
+  const c001 = grad3(ix, iy, iz+1, x, y, z);
+  const c101 = grad3(ix+1, iy, iz+1, x, y, z);
+  const c011 = grad3(ix, iy+1, iz+1, x, y, z);
+  const c111 = grad3(ix+1, iy+1, iz+1, x, y, z);
+  const x00 = c000 * (1 - u) + c100 * u;
+  const x10 = c010 * (1 - u) + c110 * u;
+  const x01 = c001 * (1 - u) + c101 * u;
+  const x11 = c011 * (1 - u) + c111 * u;
+  const y0 = x00 * (1 - v) + x10 * v;
+  const y1 = x01 * (1 - v) + x11 * v;
+  return y0 * (1 - w) + y1 * w;
+}
+function curl(x, y, z, t){
+  const eps = 0.2, scale = 0.12;
+  const xs = x * scale, ys = y * scale, zs = z * scale;
+  const ts = t * 0.12;
+  const px = perlin(xs, ys, zs + ts);
+  const py = perlin(xs + ts, ys, zs);
+  const pz = perlin(xs, ys + ts, zs);
+  return new THREE.Vector3(
+    (perlin(xs, ys, zs + eps) - pz) / eps - (perlin(xs, ys + eps, zs) - px) / eps,
+    (perlin(xs + eps, ys, zs) - px) / eps - (perlin(xs, ys, zs + eps) - py) / eps,
+    (perlin(xs, ys + eps, zs) - py) / eps - (perlin(xs + eps, ys, zs) - pz) / eps
+  );
+}
+
+// ────────────── 75k particles in 4 night-cloud clusters
+// nocturne morph: slower drift (night thermals), higher altitude spread
+const N = 75000;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const crossTime = new Float32Array(N);
+
+const clusters = [
+  { cx: -32, cy: 7,  cz: -10, rx: 9,  ry: 4, rz: 11, count: 19000, delay: 0 },
+  { cx: -32, cy: 14, cz: 6,   rx: 11, ry: 5, rz: 13, count: 22000, delay: 1.5 },
+  { cx: -32, cy: 22, cz: -3,  rx: 8,  ry: 3, rz: 9,  count: 16000, delay: 3.0 },
+  { cx: -32, cy: 11, cz: 18,  rx: 10, ry: 4, rz: 12, count: 18000, delay: 4.5 }
+];
+let idx = 0;
+for (const cl of clusters){
+  for (let i = 0; i < cl.count; i++){
+    const th = Math.random() * Math.PI * 2;
+    const ph = Math.acos(2 * Math.random() - 1);
+    const r = Math.pow(Math.random(), 0.55);
+    positions[idx*3]   = cl.cx + r * cl.rx * Math.sin(ph) * Math.cos(th);
+    positions[idx*3+1] = cl.cy + r * cl.ry * Math.cos(ph);
+    positions[idx*3+2] = cl.cz + r * cl.rz * Math.sin(ph) * Math.sin(th);
+    velocities[idx*3]   = 0.14 + Math.random() * 0.08;
+    velocities[idx*3+1] = (Math.random() - 0.5) * 0.015;
+    velocities[idx*3+2] = (Math.random() - 0.5) * 0.025;
+    seeds[idx] = Math.random();
+    crossTime[idx] = -1;
+    idx++;
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('velocity', new THREE.BufferAttribute(velocities, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('crossTime', new THREE.BufferAttribute(crossTime, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uMoonDir: { value: new THREE.Vector3(-0.4, 0.7, -0.3).normalize() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec3 uMoonDir;
+    attribute vec3 velocity;
+    attribute float seed;
+    attribute float crossTime;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      float t = uTime;
+
+      // curl-noise micro-motion (slowed for nocturnal stillness)
+      float scale = 0.11;
+      float ts = t * 0.12;
+      float xs = p.x * scale, ys = p.y * scale, zs = p.z * scale;
+      float cx = sin(ys + zs + ts) * cos(xs);
+      float cy = sin(xs + zs + ts * 0.8) * cos(ys);
+      float cz = sin(xs + ys + ts * 1.0) * cos(zs);
+      vec3 curlVel = vec3(cx, cy, cz) * 0.22;
+
+      vec3 drift = velocity * t + curlVel * t;
+      p += drift;
+
+      if (p.x > 40.0) p.x -= 80.0;
+
+      // nocturne palette: deep indigo body, moonlit silver edges
+      // Whistler's blue-silver night: #1a2440 body → #c0cce0 moonlit
+      vec3 nightBody  = vec3(0.10, 0.14, 0.25);
+      vec3 moonSilver = vec3(0.75, 0.80, 0.88);
+      vec3 moonGold   = vec3(0.55, 0.52, 0.42);
+
+      // height-based layering: higher clouds catch more moonlight
+      float height = clamp((p.y - 5.0) / 20.0, 0.0, 1.0);
+      float moonFace = dot(normalize(p - vec3(0.0, 10.0, 0.0)), uMoonDir);
+      moonFace = smoothstep(-0.2, 0.6, moonFace);
+
+      vec3 base = mix(nightBody, moonSilver, height * 0.5 + moonFace * 0.45);
+
+      // crossing marker: moonlight spill at x=0 — warm gold instead of pa2's red
+      // (border now reads as moonlit threshold, not oxidized wound)
+      float sinceXing = (crossTime >= 0.0) ? (t - crossTime) : -1.0;
+      float goldMix = 0.0;
+      if (sinceXing >= 0.0){
+        goldMix = smoothstep(0.0, 2.0, sinceXing) * 0.35;
+      }
+      vCol = mix(base, moonGold, goldMix);
+
+      // nocturnal density: particles dimmer at base, brighter near moon-facing top
+      vAlpha = 0.25 + 0.55 * seed + 0.2 * height;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.0 + 0.9 * seed) * uPixel * (65.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float soft = exp(-r * 14.0);
+      float a = soft * vAlpha * 0.55;
+
+      // manual fog (avoid fog:true compile issue)
+      // FogExp2 density 0.014 applied manually
+      float fogFactor = 1.0 - exp(-0.014 * 0.014 * gl_FragCoord.z / gl_FragCoord.w * gl_FragCoord.z / gl_FragCoord.w);
+      fogFactor = clamp(fogFactor, 0.0, 1.0);
+      vec3 fogColor = vec3(0.02, 0.02, 0.04);
+      vec3 col = mix(vCol, fogColor, fogFactor);
+
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── moon glow: faint disc upper-left as orientation anchor
+const moonGeo = new THREE.CircleGeometry(1.8, 32);
+const moonMat = new THREE.MeshBasicMaterial({
+  color: 0xd8d0c0, transparent: true, opacity: 0.12,
+  side: THREE.DoubleSide
+});
+const moon = new THREE.Mesh(moonGeo, moonMat);
+moon.position.set(-30, 45, -40);
+moon.lookAt(camera.position);
+scene.add(moon);
+
+// halo around moon
+const haloGeo = new THREE.CircleGeometry(5, 32);
+const haloMat = new THREE.MeshBasicMaterial({
+  color: 0x8090b0, transparent: true, opacity: 0.04,
+  side: THREE.DoubleSide
+});
+const halo = new THREE.Mesh(haloGeo, haloMat);
+halo.position.copy(moon.position);
+halo.lookAt(camera.position);
+scene.add(halo);
+
+// ────────────── ground: dark water-like plane with faint reflection hint
+const waterGeo = new THREE.PlaneGeometry(100, 100);
+const waterMat = new THREE.MeshBasicMaterial({
+  color: 0x080a12, transparent: true, opacity: 0.6,
+  side: THREE.DoubleSide
+});
+const water = new THREE.Mesh(waterGeo, waterMat);
+water.rotation.x = -Math.PI / 2;
+water.position.y = -0.5;
+scene.add(water);
+
+// faint grid on water (much subtler than pa2)
+const gridHelper = new THREE.GridHelper(80, 40, 0x0e1018, 0x0a0c14);
+gridHelper.position.y = -0.3;
+gridHelper.material.transparent = true;
+gridHelper.material.opacity = 0.3;
+scene.add(gridHelper);
+
+// cool ambient only — nocturne has no sun
+const ambient = new THREE.AmbientLight(0x0a0c18, 0.2);
+scene.add(ambient);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+const pos = geom.attributes.position.array;
+const vel = geom.attributes.velocity.array;
+const xTime = geom.attributes.crossTime.array;
+const sd = geom.attributes.seed.array;
+
+// centroid tracking for camera
+let cx = 0, cy = 10, cz = 0;
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  let sumX = 0, sumY = 0, sumZ = 0;
+  const sampleStep = 8;
+
+  for (let i = 0; i < N; i++){
+    const px = pos[i*3], py = pos[i*3+1], pz = pos[i*3+2];
+    const c = curl(px, py, pz, t);
+    const dt = 0.016;
+    const nx = px + (vel[i*3] + c.x * 0.22) * dt;
+    const ny = py + (vel[i*3+1] + c.y * 0.22) * dt;
+    const nz = pz + (vel[i*3+2] + c.z * 0.22) * dt;
+
+    pos[i*3]   = nx > 40 ? nx - 80 : nx;
+    pos[i*3+1] = ny;
+    pos[i*3+2] = nz;
+
+    if (xTime[i] < 0 && px < 0 && pos[i*3] >= 0){
+      xTime[i] = t;
+    }
+
+    if (i % sampleStep === 0){
+      sumX += pos[i*3];
+      sumY += pos[i*3+1];
+      sumZ += pos[i*3+2];
+    }
+  }
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.crossTime.needsUpdate = true;
+
+  // smooth centroid tracking
+  const sN = Math.floor(N / sampleStep);
+  const tX = sumX / sN, tY = sumY / sN, tZ = sumZ / sN;
+  cx += (tX - cx) * 0.02;
+  cy += (tY - cy) * 0.02;
+  cz += (tZ - cz) * 0.02;
+
+  // gentle nocturnal orbit: slower, lower sweep
+  const camR = 62 + Math.sin(t * 0.02) * 4;
+  const camAngle = t * 0.015;
+  camera.position.x = cx + Math.sin(camAngle) * 10;
+  camera.position.y = cy + 14 + Math.sin(t * 0.025) * 2;
+  camera.position.z = cz + camR;
+  controls.target.set(cx, cy, cz);
+
+  // keep moon facing camera
+  moon.lookAt(camera.position);
+  halo.lookAt(camera.position);
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
