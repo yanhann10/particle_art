@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>qoi · lucy stela · glyph-carved drift</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#0c0a08;overflow:hidden;
+    color:#e5dcd2;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+  canvas{display:block}
+  .id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;
+    font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;letter-spacing:0.06em;z-index:10}
+  .loading{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+    font-size:13px;opacity:0.6;letter-spacing:0.06em}
+  #grain{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;
+    opacity:0.04;mix-blend-mode:overlay;z-index:5}
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy · stanford 3d scanning repo …</div>
+<canvas id="grain"></canvas>
+<div class="id">qoi</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+/* ── film grain canvas ── */
+const grainC = document.getElementById('grain');
+const grainCtx = grainC.getContext('2d');
+function resizeGrain(){ grainC.width=innerWidth; grainC.height=innerHeight; }
+resizeGrain();
+function drawGrain(){
+  const id = grainCtx.createImageData(grainC.width, grainC.height);
+  const d = id.data;
+  for(let i=0;i<d.length;i+=4){
+    const v = Math.random()*255|0;
+    d[i]=d[i+1]=d[i+2]=v; d[i+3]=255;
+  }
+  grainCtx.putImageData(id,0,0);
+}
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 32);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0c0a08, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 60000;
+const restPositions = new Float32Array(N*3);
+const positions     = new Float32Array(N*3);
+const seeds         = new Float32Array(N);
+const cellIds       = new Float32Array(N); // which grid cell
+
+/* ── palette: weathered limestone, carved shadow, jade inlay ── */
+// sandstone #d4c4a0, ochre #b8863a, carved-dark #5a4430, jade #3a6b4a, highlight #e8dcc8
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0.0 },
+  uMorph: { value: 0.0 },  // 0=Lucy figure, 1=stela grid
+  uGridW: { value: 2.8 },
+  uGridH: { value: 2.2 },
+  uCamY:  { value: 0.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent:true, depthWrite:false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform float uMorph;
+    uniform float uGridW;
+    uniform float uGridH;
+    attribute vec3  rest;
+    attribute float seed;
+    attribute float cellId;
+    varying vec3  vCol;
+    varying float vAlpha;
+    varying float vLeafAngle;
+
+    // simple hash
+    float hash(float n){ return fract(sin(n)*43758.5453); }
+
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.35 + seed * 6.2831;
+
+      // ── compute stela grid cell ──
+      vec2 cell = floor(rest.xy / vec2(uGridW, uGridH));
+      vec2 cellCenter = (cell + 0.5) * vec2(uGridW, uGridH);
+
+      // within-cell glyph offset: leaf-shaped arrangement
+      // create concentric leaf pattern within cell
+      float glyphPhase = hash(cellId) * 6.2831;
+      float glyphLayer = hash(cellId * 7.3) * 0.8 + 0.1;
+      float leafAngle = seed * 6.2831 + glyphPhase;
+      float leafR = seed * glyphLayer * min(uGridW, uGridH) * 0.42;
+      // elongate vertically like Mayan glyphs (taller than wide)
+      float gx = cos(leafAngle) * leafR * 0.7;
+      float gy = sin(leafAngle) * leafR * 1.0;
+
+      vec3 stelaePos = vec3(
+        cellCenter.x + gx,
+        cellCenter.y + gy,
+        rest.z * 0.06 + sin(cellId * 2.7) * 0.3  // near-flat with slight depth per cell
+      );
+
+      // ── morph between Lucy and stela ──
+      float m = uMorph;
+      vec3 pos = mix(p, stelaePos, m);
+
+      // breathing — subtle radial drift
+      vec3 dir = normalize(pos + 0.001);
+      pos += dir * sin(t) * 0.04 * (1.0 + 0.4*sin(seed*11.0));
+
+      // ── vertical drift: slow wave travels upward ──
+      float wave = sin(pos.y * 0.3 - uTime * 0.15) * 0.12;
+      pos.z += wave * m;
+
+      // ── reveal: particles converge from scattered field ──
+      vec3 entry = vec3(
+        sin(seed*40.0) * 22.0,
+        cos(seed*30.0) * 22.0,
+        sin(seed*22.0) * 8.0
+      );
+      pos = mix(entry, pos, smoothstep(0.0, 1.0, uReady));
+
+      // ── color: vertical gradient — warm amber crown to cool jade base ──
+      float ny = clamp((rest.y + 8.0) / 16.0, 0.0, 1.0);
+      vec3 jadeDeep  = vec3(0.22, 0.42, 0.29);   // base: jade shadow
+      vec3 sandstone = vec3(0.83, 0.77, 0.63);    // mid: weathered limestone
+      vec3 amber     = vec3(0.92, 0.72, 0.38);    // crown: sunlit amber
+
+      vec3 col = mix(jadeDeep, sandstone, smoothstep(0.0, 0.5, ny));
+      col = mix(col, amber, smoothstep(0.5, 1.0, ny));
+
+      // per-cell hue variation — some cells get jade inlay accent
+      float cellHue = hash(cellId * 3.1);
+      if(cellHue > 0.75){
+        col = mix(col, vec3(0.24, 0.52, 0.34), 0.4 * m); // jade inlay in stela mode
+      }
+
+      // carved depth: darken points deeper in z when in stela mode
+      float depth = smoothstep(0.3, -0.3, rest.z / 8.0);
+      col *= mix(1.0, 0.6 + 0.4 * depth, m);
+
+      vCol = col;
+      vAlpha = 0.4 + 0.35 * sin(t * 0.6);
+      // leaf angle based on cell + seed for visual variety
+      vLeafAngle = glyphPhase + seed * 1.5;
+
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      float dist = max(1.0, -mv.z);
+      float sz = (1.4 + 1.2 * hash(seed*5.0)) * uPixel * (42.0 / dist);
+      gl_PointSize = sz * (0.3 + 0.7 * uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vLeafAngle;
+
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+
+      // rotate into leaf orientation
+      float ca = cos(vLeafAngle), sa = sin(vLeafAngle);
+      vec2 ruv = vec2(ca*uv.x - sa*uv.y, sa*uv.x + ca*uv.y);
+
+      // leaf shape: elongated ellipse with pointed tips
+      float ex = ruv.x * 2.2;  // narrow
+      float ey = ruv.y * 1.4;  // tall
+      float shape = ex*ex + ey*ey;
+      if(shape > 0.25) discard;
+
+      // central vein line
+      float vein = exp(-abs(ruv.x) * 30.0) * 0.3;
+
+      float falloff = exp(-shape * 12.0);
+      float a = (falloff + vein) * vAlpha;
+
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── ambient light columns: faint vertical beams suggesting stone slabs ── */
+const beamGeo = new THREE.PlaneGeometry(0.3, 30);
+const beamMat = new THREE.MeshBasicMaterial({
+  color: 0xd4c4a0, transparent:true, opacity:0.012,
+  side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite:false
+});
+for(let i = 0; i < 5; i++){
+  const beam = new THREE.Mesh(beamGeo, beamMat);
+  beam.position.set(-6 + i*3 + (Math.random()-0.5)*1.5, 0, -3 + Math.random()*2);
+  beam.rotation.z = (Math.random()-0.5)*0.08;
+  scene.add(beam);
+}
+
+const loadingEl = document.getElementById('loading');
+
+/* ── fallback geometry if PLY fails ── */
+function buildFallback(){
+  // cylinder of points roughly humanoid
+  for(let i=0; i<N; i++){
+    const a = Math.random()*Math.PI*2;
+    const h = (Math.random()-0.5)*15;
+    const r = 2.5 * (1.0 - 0.3*Math.abs(h)/7.5);
+    restPositions[i*3]   = Math.cos(a)*r;
+    restPositions[i*3+1] = h;
+    restPositions[i*3+2] = Math.sin(a)*r*(0.4+0.6*Math.random());
+    seeds[i] = Math.random();
+  }
+  assignCells();
+  initGeom();
+}
+
+function assignCells(){
+  const gw = uniforms.uGridW.value;
+  const gh = uniforms.uGridH.value;
+  for(let i=0; i<N; i++){
+    const cx = Math.floor(restPositions[i*3] / gw);
+    const cy = Math.floor(restPositions[i*3+1] / gh);
+    cellIds[i] = (cx+50)*100 + (cy+50); // unique cell id
+  }
+}
+
+function initGeom(){
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+  geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+  geom.setAttribute('cellId',   new THREE.BufferAttribute(cellIds, 1));
+  revealStart = performance.now();
+  loadingEl.style.display = 'none';
+}
+
+/* ── load Lucy ── */
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+const loader = new PLYLoader();
+let loadTimeout = setTimeout(buildFallback, 12000); // fallback after 12s
+
+loader.load(PLY_URL,
+  (geometry) => {
+    clearTimeout(loadTimeout);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scale = 16 / maxAxis;
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp = new THREE.Vector3();
+    for(let i=0; i<N; i++){
+      sampler.sample(tmp);
+      restPositions[i*3]   = tmp.x;
+      restPositions[i*3+1] = tmp.y;
+      restPositions[i*3+2] = tmp.z;
+      seeds[i] = Math.random();
+    }
+    assignCells();
+    initGeom();
+  },
+  (xhr) => {
+    if(xhr.lengthComputable){
+      const pct = (xhr.loaded/xhr.total*100).toFixed(0);
+      loadingEl.textContent = `loading lucy · ${pct}% …`;
+    }
+  },
+  () => { clearTimeout(loadTimeout); buildFallback(); }
+);
+
+let revealStart = 0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  resizeGrain();
+});
+
+/* ── centroid tracker ── */
+function computeCentroid(){
+  let cx=0,cy=0,cz=0;
+  const attr = geom.getAttribute('rest');
+  if(!attr) return new THREE.Vector3();
+  const a = attr.array;
+  for(let i=0;i<Math.min(1000,N);i++){
+    cx+=a[i*3]; cy+=a[i*3+1]; cz+=a[i*3+2];
+  }
+  const n = Math.min(1000,N);
+  return new THREE.Vector3(cx/n, cy/n, cz/n);
+}
+
+/* ── animation ── */
+const start = performance.now();
+let lastGrain = 0;
+
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // reveal
+  if(revealStart > 0){
+    uniforms.uReady.value = Math.min(1.0, (now - revealStart) / 3000);
+  }
+
+  // morph cycle: Lucy ↔ stela with long dwell at each extreme
+  // ~20s Lucy, ~8s transition, ~14s stela, ~8s transition back
+  const cycle = 50.0;
+  const phase = (t % cycle) / cycle;
+  let morph;
+  if(phase < 0.40)       morph = 0.0;                                    // Lucy dwell
+  else if(phase < 0.56)  morph = smoothstep(0.40, 0.56, phase);          // Lucy→stela
+  else if(phase < 0.84)  morph = 1.0;                                    // stela dwell
+  else                   morph = 1.0 - smoothstep(0.84, 1.0, phase);    // stela→Lucy
+
+  uniforms.uMorph.value = morph;
+
+  // camera: slow vertical drift + gentle orbit
+  const camAngle = t * 0.025;
+  const camR = 30 + 2 * Math.sin(t * 0.04);
+  const camY = Math.sin(t * 0.06) * 3.0; // gentle vertical reading motion
+  camera.position.set(
+    Math.sin(camAngle) * camR,
+    camY,
+    Math.cos(camAngle) * camR
+  );
+
+  // look at centroid
+  const cent = computeCentroid();
+  camera.lookAt(cent.x, cent.y + camY * 0.15, cent.z);
+
+  // slow rotation of the point cloud (very subtle)
+  points.rotation.y = t * 0.015;
+
+  renderer.render(scene, camera);
+
+  // update grain every ~100ms
+  if(now - lastGrain > 100){ drawGrain(); lastGrain = now; }
+
+  requestAnimationFrame(loop);
+}
+
+function smoothstep(a,b,x){ const t=Math.max(0,Math.min(1,(x-a)/(b-a))); return t*t*(3-2*t); }
+
+loop();
+</script>
+</body>
+</html>
