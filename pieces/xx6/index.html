@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xx6 · tender strings</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#060507; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">xx6</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Felix Gonzalez-Torres — light strings draped in space
+// Particles settle onto catenary curves like his "Untitled" (March 5th, 1991)
+// light installations. Warm incandescent glow, gentle sway, intimacy of two.
+
+const W = 256, H = 256;
+const N = W * H; // ~65k particles
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x060507, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// Generate catenary string endpoints — two clusters of anchor points
+// like two bodies connected by light
+const NUM_STRINGS = 14;
+const strings = [];
+for (let i = 0; i < NUM_STRINGS; i++) {
+  const t = i / (NUM_STRINGS - 1);
+  // Two anchor regions — left and right, like paired clocks
+  const lx = -2.2 + Math.random() * 0.4;
+  const ly = 1.8 - t * 3.6 + (Math.random() - 0.5) * 0.3;
+  const lz = (Math.random() - 0.5) * 0.8;
+  const rx = 2.0 + Math.random() * 0.4;
+  const ry = 1.6 - t * 3.4 + (Math.random() - 0.5) * 0.3;
+  const rz = (Math.random() - 0.5) * 0.8;
+  const sag = 0.8 + Math.random() * 1.2; // how much the string droops
+  strings.push({ lx, ly, lz, rx, ry, rz, sag });
+}
+
+// Pack string data into a texture for the sim shader
+const stringData = new Float32Array(NUM_STRINGS * 8);
+for (let i = 0; i < NUM_STRINGS; i++) {
+  const s = strings[i];
+  stringData[i*8+0] = s.lx; stringData[i*8+1] = s.ly; stringData[i*8+2] = s.lz; stringData[i*8+3] = s.sag;
+  stringData[i*8+4] = s.rx; stringData[i*8+5] = s.ry; stringData[i*8+6] = s.rz; stringData[i*8+7] = 0.0;
+}
+const stringTex = new THREE.DataTexture(stringData, NUM_STRINGS * 2, 1, THREE.RGBAFormat, THREE.FloatType);
+stringTex.needsUpdate = true;
+
+// Init: assign each particle to a string and position along catenary
+function makeInitTexture() {
+  const init = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++) {
+    const si = Math.floor(Math.random() * NUM_STRINGS);
+    const s = strings[si];
+    const u = Math.random(); // position along string
+    const x = s.lx + (s.rx - s.lx) * u;
+    const z = s.lz + (s.rz - s.lz) * u;
+    // catenary sag
+    const sagY = -s.sag * 4.0 * u * (1.0 - u);
+    const y = s.ly + (s.ry - s.ly) * u + sagY;
+    // slight scatter so they drift in
+    init[i*4]   = x + (Math.random()-0.5) * 3.0;
+    init[i*4+1] = y + (Math.random()-0.5) * 3.0;
+    init[i*4+2] = z + (Math.random()-0.5) * 2.0;
+    // w encodes: stringIndex (integer part) + u position (fractional)
+    init[i*4+3] = si + u * 0.999;
+  }
+  const t = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+  t.needsUpdate = true;
+  return t;
+}
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: makeInitTexture() } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(rtB); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// Simulation: particles drift toward their assigned catenary position
+const simMat = new THREE.ShaderMaterial({
+  uniforms: {
+    prev: { value: rtA.texture },
+    uStrings: { value: stringTex },
+    uNumStrings: { value: NUM_STRINGS },
+    uTime: { value: 0 },
+    uDt: { value: 0 }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform sampler2D uStrings;
+    uniform int uNumStrings;
+    uniform float uTime;
+    uniform float uDt;
+    varying vec2 vUv;
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float encoded = s.w;
+
+      int si = int(floor(encoded));
+      float u = fract(encoded) / 0.999;
+
+      // Read string endpoints from texture
+      float texW = float(uNumStrings) * 2.0;
+      float sx = (float(si) * 2.0 + 0.5) / texW;
+      vec4 a = texture2D(uStrings, vec2(sx, 0.5));
+      vec4 b = texture2D(uStrings, vec2(sx + 1.0/texW, 0.5));
+
+      vec3 left = a.xyz;
+      float sag = a.w;
+      vec3 right = b.xyz;
+
+      // Target position on catenary
+      float sagY = -sag * 4.0 * u * (1.0 - u);
+      vec3 target;
+      target.x = left.x + (right.x - left.x) * u;
+      target.y = left.y + (right.y - left.y) * u + sagY;
+      target.z = left.z + (right.z - left.z) * u;
+
+      // Gentle sway — each string has its own phase
+      float phase = float(si) * 1.7;
+      float sway = sin(uTime * 0.4 + phase + u * 2.0) * 0.06;
+      float swayV = sin(uTime * 0.3 + phase * 0.7 + u * 3.0) * 0.03;
+      target.x += sway;
+      target.y += swayV;
+      target.z += sin(uTime * 0.25 + phase * 1.3) * 0.04;
+
+      // Spring toward target — tender drift, not snapping
+      vec3 diff = target - p;
+      float dist = length(diff);
+      vec3 force = diff * 1.8; // soft spring
+
+      // Very gentle damped motion
+      p += force * uDt;
+
+      gl_FragColor = vec4(p, encoded);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// Render scene
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 40);
+camera.position.set(0, 0, 7);
+camera.lookAt(0, 0, 0);
+
+// Points
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state: { value: rtA.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime: { value: 0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uTime;
+    attribute vec2 uvIdx;
+    varying float vBright;
+    varying float vFogDepth;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float encoded = s.w;
+      float u = fract(encoded) / 0.999;
+      int si = int(floor(encoded));
+
+      // Each particle pulses gently like a warm bulb
+      float phase = float(si) * 2.3 + u * 6.28;
+      float pulse = 0.7 + 0.3 * sin(uTime * 0.8 + phase);
+      // Bulbs near center of droop are slightly brighter
+      float centerBright = 1.0 - abs(u - 0.5) * 0.6;
+      vBright = pulse * centerBright;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vFogDepth = -mv.z;
+      gl_PointSize = (2.5 + 1.5 * centerBright) * uPixel * (4.0 / max(vFogDepth, 0.5));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vBright;
+    varying float vFogDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 10.0);
+
+      // Warm incandescent color — pale gold to warm white
+      // Gonzalez-Torres' bulbs: that warm amber intimacy
+      vec3 warm = mix(vec3(1.0, 0.85, 0.55), vec3(1.0, 0.95, 0.88), vBright);
+
+      // Depth fog toward background
+      float fogF = 1.0 - exp(-0.008 * vFogDepth * vFogDepth);
+      vec3 col = mix(warm, vec3(0.03, 0.025, 0.035), fogF);
+
+      float alpha = a * vBright * 0.75;
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  const t = now / 1000;
+
+  simMat.uniforms.uTime.value = t;
+  simMat.uniforms.uDt.value = dt;
+
+  // Sim substeps
+  for (let i = 0; i < 2; i++){
+    simMat.uniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = t;
+
+  // Gentle camera drift — intimate distance, slow breathing
+  const ang = t * 0.06;
+  camera.position.x = Math.sin(ang) * 0.8;
+  camera.position.y = Math.sin(ang * 0.7) * 0.3;
+  camera.position.z = 6.5 + Math.sin(ang * 0.5) * 0.5;
+  camera.lookAt(0, -0.3, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
