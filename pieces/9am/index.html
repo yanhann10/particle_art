@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9am · substrate growth</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0e11; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src { position:fixed; right:14px; top:14px; opacity:0.38; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">9am</div>
+<div class="hint">jared tarbell 'substrate' — perpendicular crack propagation</div>
+<div class="src">45k particles · 180 lines · generational color</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0e11);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 24);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── substrate algorithm
+const W = 28, H = 28;
+const grid = [];
+for (let y = 0; y < H; y++){
+  grid[y] = [];
+  for (let x = 0; x < W; x++) grid[y][x] = null;
+}
+
+const lines = [];
+const segments = [];
+
+function gridPt(x, y){
+  const gx = Math.floor((x + W/2) * 2);
+  const gy = Math.floor((y + H/2) * 2);
+  if (gx < 0 || gx >= W || gy < 0 || gy >= H) return null;
+  return grid[gy][gx];
+}
+function markGrid(x, y, lineId){
+  const gx = Math.floor((x + W/2) * 2);
+  const gy = Math.floor((y + H/2) * 2);
+  if (gx >= 0 && gx < W && gy >= 0 && gy < H) grid[gy][gx] = lineId;
+}
+
+function spawnLine(x, y, angle, generation){
+  const line = { x, y, angle, generation, id: lines.length, active: true };
+  lines.push(line);
+  return line;
+}
+
+function growLines(){
+  const stepSize = 0.15;
+  const maxSteps = 150;
+  for (let s = 0; s < maxSteps; s++){
+    let anyActive = false;
+    for (const line of lines){
+      if (!line.active) continue;
+      anyActive = true;
+      const x0 = line.x, y0 = line.y;
+      const dx = Math.cos(line.angle) * stepSize;
+      const dy = Math.sin(line.angle) * stepSize;
+      const x1 = x0 + dx, y1 = y0 + dy;
+      // check bounds
+      if (Math.abs(x1) > W/2 - 0.5 || Math.abs(y1) > H/2 - 0.5){
+        line.active = false;
+        continue;
+      }
+      // check collision
+      const hit = gridPt(x1, y1);
+      if (hit !== null && hit !== line.id){
+        segments.push({ x0, y0, x1, y1, gen: line.generation });
+        line.active = false;
+        // spawn perpendicular at crossing point
+        const perp1 = line.angle + Math.PI / 2;
+        const perp2 = line.angle - Math.PI / 2;
+        if (Math.random() < 0.5){
+          spawnLine(x1, y1, perp1, line.generation + 1);
+        } else {
+          spawnLine(x1, y1, perp2, line.generation + 1);
+        }
+        continue;
+      }
+      segments.push({ x0, y0, x1, y1, gen: line.generation });
+      markGrid(x1, y1, line.id);
+      line.x = x1;
+      line.y = y1;
+    }
+    if (!anyActive) break;
+  }
+}
+
+// seed initial lines from edges
+const edgeSeeds = 8;
+for (let i = 0; i < edgeSeeds; i++){
+  const side = Math.floor(Math.random() * 4);
+  let x, y, angle;
+  switch(side){
+    case 0: x = -W/2 + 1; y = (Math.random() - 0.5) * (H - 2); angle = 0; break;
+    case 1: x = W/2 - 1; y = (Math.random() - 0.5) * (H - 2); angle = Math.PI; break;
+    case 2: x = (Math.random() - 0.5) * (W - 2); y = -H/2 + 1; angle = Math.PI / 2; break;
+    case 3: x = (Math.random() - 0.5) * (W - 2); y = H/2 - 1; angle = -Math.PI / 2; break;
+  }
+  spawnLine(x, y, angle, 0);
+}
+
+growLines();
+
+// ────────────── particle placement along segments
+const N = 45000;
+const positions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const gens = new Float32Array(N);
+
+const segLengths = segments.map(s => Math.hypot(s.x1 - s.x0, s.y1 - s.y0));
+const totalLen = segLengths.reduce((a,b) => a+b, 0);
+let idx = 0;
+for (let i = 0; i < segments.length; i++){
+  const s = segments[i];
+  const count = i === segments.length - 1
+    ? (N - idx)
+    : Math.max(1, Math.floor(N * segLengths[i] / totalLen));
+  for (let k = 0; k < count && idx < N; k++){
+    const t = Math.random();
+    const x = s.x0 + (s.x1 - s.x0) * t;
+    const y = s.y0 + (s.y1 - s.y0) * t;
+    const jitter = 0.08;
+    positions[idx*3]   = x + (Math.random() - 0.5) * jitter;
+    positions[idx*3+1] = y + (Math.random() - 0.5) * jitter;
+    positions[idx*3+2] = (Math.random() - 0.5) * 0.4;
+    seeds[idx] = Math.random();
+    gens[idx] = s.gen / 8;
+    idx++;
+  }
+}
+while (idx < N){
+  positions[idx*3] = 0; positions[idx*3+1] = 0; positions[idx*3+2] = 0;
+  seeds[idx] = Math.random();
+  gens[idx] = 0;
+  idx++;
+}
+
+// ────────────── shader
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('gen', new THREE.BufferAttribute(gens, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float gen;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      float phase = uTime * 0.3 + seed * 6.28;
+      float breath = 0.5 + 0.5 * sin(phase);
+      
+      // generational palette: early gen = warm earth, late gen = cool steel
+      vec3 c0 = vec3(0.82, 0.58, 0.42);
+      vec3 c1 = vec3(0.45, 0.62, 0.68);
+      vec3 c2 = vec3(0.28, 0.42, 0.52);
+      vec3 c3 = vec3(0.88, 0.90, 0.92);
+      float g = clamp(gen, 0.0, 1.0);
+      vec3 early = mix(c0, c1, smoothstep(0.0, 0.4, g));
+      vec3 late = mix(c2, c3, smoothstep(0.6, 1.0, g));
+      vCol = mix(early, late, smoothstep(0.3, 0.7, g));
+      vCol = mix(vCol, vCol * 1.4, breath * 0.3);
+      
+      vAlpha = 0.35 + 0.15 * breath;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (0.8 + 0.4 * breath) * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  
+  const angle = t * 0.08;
+  camera.position.x = Math.sin(angle) * 24;
+  camera.position.z = Math.cos(angle) * 24;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
