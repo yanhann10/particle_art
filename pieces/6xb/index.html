@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4rv · chromatic chart squeegee</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#0e0e10;overflow:hidden;
+  font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;letter-spacing:0.06em}
+</style>
+</head>
+<body>
+<div class="id">4rv</div>
+
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+
+/* ── scene ── */
+const BG = 0x0e0e10;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 9, 30);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 8, 0);
+
+/* ── grid: art-deco tower silhouette as Richter color chart ── */
+const COLS = 18, ROWS = 28;
+const CELL_W = 0.95, CELL_H = 0.58;
+const totalH = ROWS * CELL_H;
+
+function towerHalfWidth(row) {
+  const y = row / ROWS;
+  if (y < 0.22) return COLS / 2;
+  if (y < 0.38) return Math.floor(COLS * 0.40);
+  if (y < 0.52) return Math.floor(COLS * 0.31);
+  if (y < 0.65) return Math.floor(COLS * 0.24);
+  if (y < 0.78) return Math.floor(COLS * 0.17);
+  if (y < 0.88) return Math.floor(COLS * 0.12);
+  return Math.max(1, Math.floor(COLS * 0.07));
+}
+
+const cells = [];
+for (let r = 0; r < ROWS; r++) {
+  const hw = towerHalfWidth(r);
+  const cMid = Math.floor(COLS / 2);
+  for (let c = cMid - hw; c <= cMid + hw; c++) {
+    cells.push({row: r, col: c});
+  }
+}
+
+const N = 70000;
+const perCell = Math.floor(N / cells.length);
+const actualN = perCell * cells.length;
+const remainder = N - actualN;
+
+/* ── deterministic rng ── */
+let rngS = 0xC0FFEE42;
+function rng() {
+  rngS = (rngS + 0x6D2B79F5) | 0;
+  let t = Math.imul(rngS ^ rngS >>> 15, 1 | rngS);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+/* ── Richter color generation ── */
+function hsl2rgb(h, s, l) {
+  const c = (1 - Math.abs(2*l - 1)) * s;
+  const x = c * (1 - Math.abs((h*6) % 2 - 1));
+  const m = l - c/2;
+  let r, g, b;
+  const sec = Math.floor(h * 6) % 6;
+  if (sec===0){r=c;g=x;b=0;}else if(sec===1){r=x;g=c;b=0;}
+  else if(sec===2){r=0;g=c;b=x;}else if(sec===3){r=0;g=x;b=c;}
+  else if(sec===4){r=x;g=0;b=c;}else{r=c;g=0;b=x;}
+  return [r+m, g+m, b+m];
+}
+
+function richterColor() {
+  // Richter 1024/4096 charts: full hue, moderate sat, oil-paint values
+  const h = rng();
+  const s = 0.50 + rng() * 0.40;
+  const l = 0.30 + rng() * 0.32;
+  return hsl2rgb(h, s, l);
+}
+
+/* ── particle buffers ── */
+const positions = new Float32Array(N * 3);
+const colAarr   = new Float32Array(N * 3);
+const colBarr   = new Float32Array(N * 3);
+const cellData  = new Float32Array(N * 2); // normCol, normRow
+const seedArr   = new Float32Array(N);
+
+let idx = 0;
+for (let ci = 0; ci < cells.length; ci++) {
+  const {row, col} = cells[ci];
+  const cx = (col - COLS/2) * CELL_W;
+  const cy = row * CELL_H;
+  const cA = richterColor();
+  const cB = richterColor();
+  const normCol = col / COLS;
+  const normRow = row / ROWS;
+
+  for (let k = 0; k < perCell; k++) {
+    const px = cx + (rng() - 0.5) * CELL_W * 0.88;
+    const py = cy + (rng() - 0.5) * CELL_H * 0.88;
+    const pz = (rng() - 0.5) * 0.06;
+    positions[idx*3]=px; positions[idx*3+1]=py; positions[idx*3+2]=pz;
+    colAarr[idx*3]=cA[0]; colAarr[idx*3+1]=cA[1]; colAarr[idx*3+2]=cA[2];
+    colBarr[idx*3]=cB[0]; colBarr[idx*3+1]=cB[1]; colBarr[idx*3+2]=cB[2];
+    cellData[idx*2]=normCol; cellData[idx*2+1]=normRow;
+    seedArr[idx]=rng();
+    idx++;
+  }
+}
+// Fill remainder particles into last cell
+while (idx < N) {
+  const ci = cells.length - 1;
+  const {row, col} = cells[ci];
+  const cx = (col - COLS/2) * CELL_W;
+  const cy = row * CELL_H;
+  positions[idx*3]=cx; positions[idx*3+1]=cy; positions[idx*3+2]=0;
+  colAarr[idx*3]=0.4; colAarr[idx*3+1]=0.4; colAarr[idx*3+2]=0.4;
+  colBarr[idx*3]=0.4; colBarr[idx*3+1]=0.4; colBarr[idx*3+2]=0.4;
+  cellData[idx*2]=col/COLS; cellData[idx*2+1]=row/ROWS;
+  seedArr[idx]=rng();
+  idx++;
+}
+
+/* ── geometry + material ── */
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('colA',     new THREE.BufferAttribute(colAarr, 3));
+geom.setAttribute('colB',     new THREE.BufferAttribute(colBarr, 3));
+geom.setAttribute('cell',     new THREE.BufferAttribute(cellData, 2));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seedArr, 1));
+
+const uniforms = {
+  uTime:      {value: 0},
+  uPixel:     {value: renderer.getPixelRatio()},
+  uSqueegee:  {value: -0.25},
+  uDir:       {value: 1.0},
+  uPhase:     {value: 0.0}
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uSqueegee;
+    uniform float uDir;
+    uniform float uPhase;
+    attribute vec3 colA;
+    attribute vec3 colB;
+    attribute vec2 cell;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec3 p = position;
+      float normX = cell.x;
+      float normY = cell.y;
+
+      // row-staggered blade: bottom rows lead by ~0.12
+      float rowDelay = normY * 0.12;
+      float blade = uSqueegee - rowDelay;
+
+      // signed distance from blade in sweep direction
+      float d = (normX - blade) * uDir;
+
+      // ── squeegee smear displacement ──
+      float smearWidth = 0.10;
+      float dragTail   = 0.20;
+      float smear = 0.0;
+
+      // Active smear zone: particles near blade dragged in sweep direction
+      if (d > -smearWidth && d < smearWidth) {
+        float t = 1.0 - abs(d) / smearWidth;
+        smear = t * t * 2.2;
+      }
+      // Trailing drag: paint just behind blade still settling
+      if (d < 0.0 && d > -dragTail) {
+        float t = 1.0 + d / dragTail;
+        smear += t * t * 0.6;
+      }
+      // Apply displacement in sweep direction (world x)
+      p.x += smear * uDir * 0.7;
+      // Vertical paint-wobble near blade
+      p.y += smear * sin(seed * 31.4) * 0.04;
+      // Slight z-lift at blade (paint thickness)
+      p.z += smear * 0.08;
+
+      // ── color transition ──
+      // Behind blade: new color. Ahead: old color.
+      float colorT = smoothstep(0.03, -0.03, d);
+      vec3 curCol  = mix(colA, colB, uPhase);
+      vec3 nextCol = mix(colB, colA, uPhase);
+      vCol = mix(curCol, nextCol, colorT);
+
+      // At blade: slight desaturation (paint mixing)
+      if (abs(d) < smearWidth) {
+        float bleed = (1.0 - abs(d)/smearWidth) * 0.12;
+        float lum = dot(vCol, vec3(0.299, 0.587, 0.114));
+        vCol = mix(vCol, vec3(lum), bleed);
+      }
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * (26.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      // Manual fog (no fog uniforms to avoid compile issues)
+      float fog = exp(-0.0012 * dist * dist);
+      vCol *= fog;
+      vAlpha = 0.82 * fog;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      vec2 uv = gl_PointCoord - 0.5;
+      float r2 = dot(uv, uv);
+      if (r2 > 0.22) discard;
+      // Slightly soft square feel — Richter's paint squares aren't perfectly round
+      float edge = smoothstep(0.22, 0.06, r2);
+      gl_FragColor = vec4(vCol, vAlpha * edge);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── squeegee animation state ── */
+let sqPos = -0.30;
+let sqDir = 1;
+let pauseT = 2.5; // initial pause to admire chart A
+let phase = 0;    // 0 → showing A, 1 → showing B
+
+function regenColorAttr(attr) {
+  const arr = attr.array;
+  for (let ci = 0; ci < cells.length; ci++) {
+    const c = richterColor();
+    for (let k = 0; k < perCell; k++) {
+      const i = ci * perCell + k;
+      arr[i*3]=c[0]; arr[i*3+1]=c[1]; arr[i*3+2]=c[2];
+    }
+  }
+  attr.needsUpdate = true;
+}
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── click to trigger immediate sweep ── */
+let clickOverride = false;
+addEventListener('click', () => { if (pauseT > 0.5) pauseT = 0; });
+
+/* ── loop ── */
+const clock = new THREE.Clock();
+function loop() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.getElapsedTime();
+  uniforms.uTime.value = t;
+
+  // Squeegee sweep
+  if (pauseT > 0) {
+    pauseT -= dt;
+  } else {
+    const speed = 0.22; // ~7s per sweep
+    sqPos += speed * sqDir * dt;
+
+    if (sqDir > 0 && sqPos > 1.30) {
+      sqPos = 1.30;
+      pauseT = 3.5 + Math.random() * 2.0;
+      sqDir = -1;
+      phase = 1 - phase;
+      uniforms.uPhase.value = phase;
+      regenColorAttr(phase === 0 ? geom.attributes.colB : geom.attributes.colA);
+    } else if (sqDir < 0 && sqPos < -0.30) {
+      sqPos = -0.30;
+      pauseT = 3.5 + Math.random() * 2.0;
+      sqDir = 1;
+      phase = 1 - phase;
+      uniforms.uPhase.value = phase;
+      regenColorAttr(phase === 0 ? geom.attributes.colB : geom.attributes.colA);
+    }
+  }
+  uniforms.uSqueegee.value = sqPos;
+  uniforms.uDir.value = sqDir;
+
+  // Gentle orbit — centroid at ~45% of tower height
+  const centroidY = totalH * 0.42;
+  const ang = t * 0.035;
+  const camR = 26;
+  camera.position.x = Math.sin(ang) * camR;
+  camera.position.z = Math.cos(ang) * camR;
+  camera.position.y = centroidY + 1.5 + Math.sin(t * 0.025) * 1.0;
+  camera.lookAt(0, centroidY, 0);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
