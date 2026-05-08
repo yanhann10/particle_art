@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gma · Chua's circuit bifurcation explorer</title>
+<!-- MOTION: oscillation, intensity: vigorous -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 10px; letter-spacing: 0.04em; color:#889; }
+  .param { position:fixed; right:14px; top:14px; opacity:0.6; font-size: 10px; letter-spacing: 0.04em; color:#889; 
+           font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div class="id">gma</div>
+<div class="hint">move pointer X axis → drive bifurcation parameter α</div>
+<div class="param" id="param">α = 0.000 | regime: fixed point</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0c);
+scene.fog = new THREE.Fog(0x0a0a0c, 18, 50);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 8, 22);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+/* --- Chua's circuit parameters --- */
+// dx/dt = α (y - x - h(x))
+// dy/dt = x - y + z
+// dz/dt = -β y
+// h(x) = m1*x + 0.5*(m0-m1)*(|x+1| - |x-1|)
+
+const dt = 0.006;  // integration timestep
+let alpha = 8.4;   // control parameter (user drives this)
+const beta = 14.0;
+const m0 = -1.143;
+const m1 = -0.714;
+
+let state = { x: 0.1, y: 0.0, z: 0.0 };
+const history = [];
+const MAX_HISTORY = 12000;
+
+function chuaH(x) {
+  return m1 * x + 0.5 * (m0 - m1) * (Math.abs(x + 1.0) - Math.abs(x - 1.0));
+}
+
+function step(s, a) {
+  const hx = chuaH(s.x);
+  const dx = a * (s.y - s.x - hx);
+  const dy = s.x - s.y + s.z;
+  const dz = -beta * s.y;
+  return {
+    x: s.x + dx * dt,
+    y: s.y + dy * dt,
+    z: s.z + dz * dt
+  };
+}
+
+/* --- Trail geometry --- */
+const trailGeom = new THREE.BufferGeometry();
+const positions = new Float32Array(MAX_HISTORY * 3);
+const colors = new Float32Array(MAX_HISTORY * 3);
+trailGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+trailGeom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+const trailMat = new THREE.LineBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.85,
+  linewidth: 1,
+  fog: true
+});
+const trailLine = new THREE.Line(trailGeom, trailMat);
+scene.add(trailLine);
+
+/* --- Current point marker --- */
+const markerGeom = new THREE.SphereGeometry(0.15, 16, 16);
+const markerMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 });
+const marker = new THREE.Mesh(markerGeom, markerMat);
+scene.add(marker);
+
+/* --- Attractor lobes ghost --- */
+const lobe1 = new THREE.Mesh(
+  new THREE.SphereGeometry(1.2, 24, 24),
+  new THREE.MeshBasicMaterial({ color: 0x3366aa, transparent: true, opacity: 0.08, wireframe: true })
+);
+lobe1.position.set(-1.8, 0, 0);
+scene.add(lobe1);
+
+const lobe2 = new THREE.Mesh(
+  new THREE.SphereGeometry(1.2, 24, 24),
+  new THREE.MeshBasicMaterial({ color: 0xaa3366, transparent: true, opacity: 0.08, wireframe: true })
+);
+lobe2.position.set(1.8, 0, 0);
+scene.add(lobe2);
+
+/* --- Coordinate axes (subtle) --- */
+function addAxis(from, to, col) {
+  const points = [new THREE.Vector3(...from), new THREE.Vector3(...to)];
+  const geom = new THREE.BufferGeometry().setFromPoints(points);
+  const mat = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.2 });
+  scene.add(new THREE.Line(geom, mat));
+}
+addAxis([-6, 0, 0], [6, 0, 0], 0xff4444);
+addAxis([0, -6, 0], [0, 6, 0], 0x44ff44);
+addAxis([0, 0, -6], [0, 0, 6], 0x4444ff);
+
+/* --- User pointer control --- */
+let pointerX = 0.5;
+addEventListener('pointermove', (e) => {
+  pointerX = e.clientX / innerWidth;
+});
+
+/* --- Regime detection --- */
+function detectRegime(a) {
+  if (a < 8.0) return 'fixed point';
+  if (a < 8.5) return 'limit cycle';
+  if (a < 9.5) return 'period-doubling';
+  if (a < 10.5) return 'chaos onset';
+  return 'double-scroll attractor';
+}
+
+/* --- Color mapping by velocity magnitude --- */
+function computeColor(vx, vy, vz, a) {
+  const speed = Math.sqrt(vx * vx + vy * vy + vz * vz);
+  const t = Math.min(1.0, speed / 20.0);
+  
+  // Low alpha: blue-green (stable)
+  // High alpha: red-orange-yellow (chaotic)
+  const normalizedAlpha = (a - 8.0) / 4.0;
+  const hue = 200 - normalizedAlpha * 150; // 200 (cyan) → 50 (yellow-orange)
+  
+  const h = hue / 60.0;
+  const c = 1.0;
+  const x = c * (1.0 - Math.abs((h % 2) - 1.0));
+  let r, g, b;
+  if (h < 1) { r = c; g = x; b = 0; }
+  else if (h < 2) { r = x; g = c; b = 0; }
+  else if (h < 3) { r = 0; g = c; b = x; }
+  else if (h < 4) { r = 0; g = x; b = c; }
+  else if (h < 5) { r = x; g = 0; b = c; }
+  else { r = c; g = 0; b = x; }
+  
+  const intensity = 0.4 + 0.6 * t;
+  return { r: r * intensity, g: g * intensity, b: b * intensity };
+}
+
+/* --- Simulation loop --- */
+let autoRotate = 0.0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop() {
+  // Map pointer X to alpha (bifurcation parameter)
+  const targetAlpha = 8.0 + pointerX * 4.0; // 8.0 → 12.0
+  alpha += (targetAlpha - alpha) * 0.05;
+  
+  // Integrate ODE
+  const prev = state;
+  state = step(state, alpha);
+  
+  // Velocity for color
+  const vx = (state.x - prev.x) / dt;
+  const vy = (state.y - prev.y) / dt;
+  const vz = (state.z - prev.z) / dt;
+  
+  // Add to history
+  history.push({ ...state, vx, vy, vz });
+  if (history.length > MAX_HISTORY) history.shift();
+  
+  // Update trail geometry
+  const posAttr = trailGeom.attributes.position;
+  const colAttr = trailGeom.attributes.color;
+  for (let i = 0; i < history.length; i++) {
+    const h = history[i];
+    const scale = 3.0; // scale phase space to world coordinates
+    posAttr.array[i * 3] = h.x * scale;
+    posAttr.array[i * 3 + 1] = h.y * scale;
+    posAttr.array[i * 3 + 2] = h.z * scale;
+    
+    const col = computeColor(h.vx, h.vy, h.vz, alpha);
+    const fade = i / history.length; // fade older segments
+    colAttr.array[i * 3] = col.r * fade;
+    colAttr.array[i * 3 + 1] = col.g * fade;
+    colAttr.array[i * 3 + 2] = col.b * fade;
+  }
+  posAttr.needsUpdate = true;
+  colAttr.needsUpdate = true;
+  trailGeom.setDrawRange(0, history.length);
+  
+  // Update marker
+  marker.position.set(state.x * 3.0, state.y * 3.0, state.z * 3.0);
+  
+  // Update param display
+  const regime = detectRegime(alpha);
+  document.getElementById('param').textContent = `α = ${alpha.toFixed(3)} | regime: ${regime}`;
+  
+  // Camera orbit
+  autoRotate += 0.002;
+  const radius = 22;
+  const theta = autoRotate;
+  const phi = 1.15;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+// Reset to sensible initial condition in attractor basin
+state = { x: 0.1, y: 0.0, z: 0.0 };
+for (let i = 0; i < 500; i++) state = step(state, 9.0); // pre-settle
+
+loop();
+</script>
+</body>
+</html>
