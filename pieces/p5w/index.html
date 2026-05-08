@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>p5w · ancestral face morphogenesis</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">p5w</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Nouf Aljowaysir · Where Am I From? · latent face interpolation</div>
+<div class="stat" id="stat">generation 0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Nouf Aljowaysir — ancestral face morphogenesis
+   Three facial point clouds (great-grandparent → grandparent → self)
+   interpolate through latent space. Each particle lags uniquely,
+   creating the in-between frames where memory hesitates.
+   Palette: sepia ground, rose cheek-bloom, ink outlines. */
+
+const BG = 0x1a1612;
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(BG, 0.02);
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 12);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, 0.5, 0);
+controls.enableZoom = true;
+
+// --- three ancestral face anchors (latent coordinates) ---
+// simplified face topology: forehead, eyes, cheeks, nose, mouth, chin
+const N = 40000;
+
+// anchor A: great-grandparent — wider face, lower brow, stern
+const anchorA = [];
+for (let i = 0; i < N; i++) {
+  const u = Math.random(), v = Math.random();
+  const theta = u * Math.PI * 2;
+  const phi = Math.acos(2 * v - 1);
+  const r = 1.8 + Math.random() * 0.15;
+  let x = r * Math.sin(phi) * Math.cos(theta);
+  let y = r * Math.sin(phi) * Math.sin(theta);
+  let z = r * Math.cos(phi);
+  // flatten front (face plane)
+  if (z > 0) z *= 0.4;
+  // widen cheeks
+  if (Math.abs(y) < 0.8 && Math.abs(x) < 1.2) x *= 1.25;
+  // lower brow
+  if (z > 0 && y > 1.0) y -= 0.2;
+  anchorA.push({ x, y, z });
+}
+
+// anchor B: grandparent — softer, narrower, higher cheekbones
+const anchorB = [];
+for (let i = 0; i < N; i++) {
+  const u = Math.random(), v = Math.random();
+  const theta = u * Math.PI * 2;
+  const phi = Math.acos(2 * v - 1);
+  const r = 1.75 + Math.random() * 0.12;
+  let x = r * Math.sin(phi) * Math.cos(theta);
+  let y = r * Math.sin(phi) * Math.sin(theta);
+  let z = r * Math.cos(phi);
+  if (z > 0) z *= 0.38;
+  // narrow face
+  if (Math.abs(y) < 1.0 && Math.abs(x) < 1.0) x *= 0.9;
+  // lift cheekbones
+  if (z > 0 && Math.abs(y) < 0.5 && Math.abs(x) < 0.8) y += 0.15;
+  anchorB.push({ x, y, z });
+}
+
+// anchor C: self — youthful, rounded, fuller lower face
+const anchorC = [];
+for (let i = 0; i < N; i++) {
+  const u = Math.random(), v = Math.random();
+  const theta = u * Math.PI * 2;
+  const phi = Math.acos(2 * v - 1);
+  const r = 1.7 + Math.random() * 0.14;
+  let x = r * Math.sin(phi) * Math.cos(theta);
+  let y = r * Math.sin(phi) * Math.sin(theta);
+  let z = r * Math.cos(phi);
+  if (z > 0) z *= 0.36;
+  // rounder jaw
+  if (y < -0.6 && Math.abs(x) < 0.9) {
+    x *= 1.1;
+    y -= 0.1;
+  }
+  // fuller cheeks
+  if (Math.abs(y) < 0.4 && Math.abs(x) < 0.8) x *= 1.05;
+  anchorC.push({ x, y, z });
+}
+
+// each particle has a unique lag coefficient (memory delay)
+const lags = new Float32Array(N);
+for (let i = 0; i < N; i++) lags[i] = 0.8 + Math.random() * 0.35;
+
+// current positions (will interpolate)
+const pos = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const regions = new Float32Array(N); // which face region (for color)
+for (let i = 0; i < N; i++) {
+  pos[i * 3]     = anchorA[i].x;
+  pos[i * 3 + 1] = anchorA[i].y;
+  pos[i * 3 + 2] = anchorA[i].z;
+  seeds[i] = Math.random();
+  // region encoding: 0=forehead, 1=eyes, 2=cheeks, 3=nose, 4=mouth, 5=chin
+  const y = anchorA[i].y, x = Math.abs(anchorA[i].x), z = anchorA[i].z;
+  if (y > 1.2) regions[i] = 0.0;
+  else if (y > 0.6 && y < 1.0 && x < 0.5) regions[i] = 1.0;
+  else if (y > 0.0 && y < 0.8 && x > 0.4) regions[i] = 2.0;
+  else if (y > 0.2 && y < 0.6 && x < 0.3) regions[i] = 3.0;
+  else if (y > -0.4 && y < 0.2 && x < 0.6) regions[i] = 4.0;
+  else regions[i] = 5.0;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('region', new THREE.BufferAttribute(regions, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float region;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec3 p = position;
+
+      // gentle per-particle drift (memory jitter)
+      float t = uTime * 0.25 + seed * 6.28;
+      p.x += sin(t) * 0.006;
+      p.y += cos(t * 0.8) * 0.005;
+      p.z += sin(t * 1.1) * 0.004;
+
+      // palette: sepia base, rose cheeks, ink outlines
+      vec3 sepia = vec3(0.82, 0.68, 0.52);
+      vec3 rose  = vec3(0.92, 0.62, 0.58);
+      vec3 ink   = vec3(0.15, 0.12, 0.11);
+      vec3 warm  = vec3(0.88, 0.76, 0.64);
+
+      float r = region;
+      if (r < 0.5) vCol = sepia; // forehead
+      else if (r < 1.5) vCol = ink; // eyes
+      else if (r < 2.5) vCol = rose; // cheeks
+      else if (r < 3.5) vCol = warm; // nose
+      else if (r < 4.5) vCol = mix(rose, ink, 0.3); // mouth
+      else vCol = mix(sepia, ink, 0.25); // chin
+
+      // pulse breathing
+      float pulse = 0.85 + 0.15 * sin(uTime * 0.6 + seed * 12.0);
+      vCol *= pulse;
+
+      vAlpha = 0.45 + pulse * 0.15;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 1.5 * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // soft falloff
+      float core = exp(-r * 20.0);
+      float halo = exp(-r * 6.0) * 0.3;
+      float a = (core + halo) * vAlpha;
+
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ambient light for depth perception
+const ambient = new THREE.AmbientLight(0x3a2f28, 0.6);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0xffd4a8, 0.4);
+dirLight.position.set(2, 3, 4);
+scene.add(dirLight);
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// interpolation state
+let generation = 0; // 0=A→B, 1=B→C, 2=C→A
+let progress = 0;
+const CYCLE_DURATION = 12.0; // seconds per morph
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function loop() {
+  const elapsed = (performance.now() - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  if (!paused) {
+    progress += 0.016 / CYCLE_DURATION;
+    if (progress >= 1.0) {
+      progress = 0;
+      generation = (generation + 1) % 3;
+    }
+  }
+
+  // determine source and target anchors
+  let srcAnc, tgtAnc;
+  if (generation === 0) { srcAnc = anchorA; tgtAnc = anchorB; }
+  else if (generation === 1) { srcAnc = anchorB; tgtAnc = anchorC; }
+  else { srcAnc = anchorC; tgtAnc = anchorA; }
+
+  // interpolate with per-particle lag
+  for (let i = 0; i < N; i++) {
+    const lagT = Math.min(1, progress * lags[i]);
+    // ease-in-out
+    const t = lagT < 0.5
+      ? 2 * lagT * lagT
+      : 1 - Math.pow(-2 * lagT + 2, 2) / 2;
+
+    pos[i * 3]     = lerp(srcAnc[i].x, tgtAnc[i].x, t);
+    pos[i * 3 + 1] = lerp(srcAnc[i].y, tgtAnc[i].y, t);
+    pos[i * 3 + 2] = lerp(srcAnc[i].z, tgtAnc[i].z, t);
+  }
+  geom.attributes.position.needsUpdate = true;
+
+  // camera tracks centroid
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < N; i++) {
+    cx += pos[i * 3];
+    cy += pos[i * 3 + 1];
+    cz += pos[i * 3 + 2];
+  }
+  cx /= N; cy /= N; cz /= N;
+  controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.015);
+
+  const genNames = ['great-grandparent → grandparent', 'grandparent → self', 'self → great-grandparent'];
+  statEl.textContent = `${genNames[generation]} · ${(progress * 100).toFixed(0)}%${paused ? ' · paused' : ''}`;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
