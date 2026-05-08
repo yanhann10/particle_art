@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: pulse, intensity: gentle -->
+<title>scw · iridescent lamp</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06070b; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">scw</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+/* ── constants ── */
+const W = 245, H = 245;
+const N = W * H; // 60025
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06070b, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 500);
+camera.position.set(0, 0.6, 5.5);
+
+/* ── GPGPU render targets ── */
+const rtOpts = {
+  type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  depthBuffer: false
+};
+let rtA = new THREE.WebGLRenderTarget(W, H, rtOpts);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtOpts);
+const rtHome = new THREE.WebGLRenderTarget(W, H, rtOpts);
+const rtNorm = new THREE.WebGLRenderTarget(W, H, rtOpts);
+
+const camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+function blitDataTex(data, target) {
+  const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat, THREE.FloatType);
+  tex.needsUpdate = true;
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { t: { value: tex } },
+    vertexShader: `varying vec2 v; void main(){ v=uv; gl_Position=vec4(position,1.0); }`,
+    fragmentShader: `uniform sampler2D t; varying vec2 v; void main(){ gl_FragColor=texture2D(t,v); }`
+  });
+  const s = new THREE.Scene();
+  s.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat));
+  renderer.setRenderTarget(target);
+  renderer.render(s, camOrtho);
+  renderer.setRenderTarget(null);
+  mat.dispose(); tex.dispose();
+}
+
+/* ── sample geometry & init GPGPU textures ── */
+function initFromGeometry(geometry) {
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  const bb = geometry.boundingBox;
+  const center = new THREE.Vector3(); bb.getCenter(center);
+  const sz = new THREE.Vector3(); bb.getSize(sz);
+  const scale = 3.2 / Math.max(sz.x, sz.y, sz.z);
+
+  const tmpMesh = new THREE.Mesh(geometry);
+  const sampler = new MeshSurfaceSampler(tmpMesh).build();
+
+  const posArr  = new Float32Array(N * 4);
+  const normArr = new Float32Array(N * 4);
+  const _p = new THREE.Vector3(), _n = new THREE.Vector3();
+
+  for (let i = 0; i < N; i++) {
+    sampler.sample(_p, _n);
+    posArr[i * 4]     = (_p.x - center.x) * scale;
+    posArr[i * 4 + 1] = (_p.y - center.y) * scale;
+    posArr[i * 4 + 2] = (_p.z - center.z) * scale;
+    posArr[i * 4 + 3] = Math.random(); // per-particle phase
+    normArr[i * 4]     = _n.x;
+    normArr[i * 4 + 1] = _n.y;
+    normArr[i * 4 + 2] = _n.z;
+    normArr[i * 4 + 3] = 0.0;
+  }
+
+  blitDataTex(posArr, rtHome);
+  blitDataTex(posArr, rtA);
+  blitDataTex(normArr, rtNorm);
+
+  buildPointCloud();
+}
+
+/* ── sim shader: breathe along normals, gentle tangential drift ── */
+const simU = {
+  prev:   { value: null },
+  home:   { value: rtHome.texture },
+  norm:   { value: rtNorm.texture },
+  uTime:  { value: 0.0 },
+  uPulse: { value: 0.12 },
+  uDrift: { value: 0.018 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simU,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev, home, norm;
+    uniform float uTime, uPulse, uDrift;
+    varying vec2 vUv;
+    void main(){
+      vec4 h = texture2D(home, vUv);
+      vec4 n = texture2D(norm, vUv);
+      float phase = h.w;
+      // breathing: sinusoidal outward pulse along surface normal
+      float breath = sin(uTime * 1.1 + phase * 6.2832) * 0.5 + 0.5;
+      // second harmonic for organic feel
+      breath += 0.25 * sin(uTime * 2.7 + phase * 12.566);
+      breath = clamp(breath, 0.0, 1.0);
+      float outward = breath * uPulse;
+      // tangential drift: slow orbit around normal
+      float dAngle = uTime * 0.25 + phase * 6.2832;
+      vec3 nDir = normalize(n.xyz + vec3(0.001));
+      vec3 tang = normalize(cross(nDir, vec3(0.0, 1.0, 0.01)));
+      vec3 btan = cross(nDir, tang);
+      vec3 drift = (tang * cos(dAngle) + btan * sin(dAngle)) * uDrift * breath;
+      vec3 pos = h.xyz + nDir * outward + drift;
+      float age = mod(phase + uTime * 0.04, 1.0);
+      gl_FragColor = vec4(pos, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), simMat));
+
+/* ── point cloud render ── */
+let points = null;
+let ready = false;
+
+function buildPointCloud() {
+  const geom = new THREE.BufferGeometry();
+  const uv = new Float32Array(N * 2);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    uv[i * 2]     = (x + 0.5) / W;
+    uv[i * 2 + 1] = (y + 0.5) / H;
+  }
+  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+  geom.setAttribute('uvIdx',    new THREE.BufferAttribute(uv, 2));
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      state:  { value: rtA.texture },
+      home:   { value: rtHome.texture },
+      uPixel: { value: renderer.getPixelRatio() },
+      uTime:  { value: 0.0 }
+    },
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: `
+      uniform sampler2D state, home;
+      uniform float uPixel, uTime;
+      attribute vec2 uvIdx;
+      varying float vAge;
+      varying float vHeight;
+      varying float vDisp;
+      void main(){
+        vec4 s = texture2D(state, uvIdx);
+        vec4 h = texture2D(home, uvIdx);
+        vec3 p = s.xyz;
+        vAge = s.w;
+        vHeight = clamp((h.y + 1.8) / 3.6, 0.0, 1.0);
+        vDisp = length(p - h.xyz);
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        float dist = max(-mv.z, 0.1);
+        gl_PointSize = (0.9 + 1.4 * vDisp * 5.0) * uPixel * (35.0 / dist);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      varying float vAge;
+      varying float vHeight;
+      varying float vDisp;
+      void main(){
+        vec2 d = gl_PointCoord - 0.5;
+        float r = dot(d, d);
+        if (r > 0.25) discard;
+        float a = exp(-r * 13.0);
+        // palette: deep indigo → magenta → warm gold
+        vec3 cA = vec3(0.18, 0.28, 0.72);  // #2E47B8 indigo
+        vec3 cB = vec3(0.82, 0.28, 0.58);  // #D14794 magenta
+        vec3 cC = vec3(0.96, 0.84, 0.45);  // #F5D673 gold
+        float k = clamp(vHeight + vAge * 0.15, 0.0, 1.0);
+        vec3 col = mix(cA, cB, smoothstep(0.0, 0.5, k));
+        col = mix(col, cC, smoothstep(0.5, 1.0, k));
+        // displaced particles glow brighter
+        float glow = 0.55 + vDisp * 6.0;
+        gl_FragColor = vec4(col * a * glow, a * 0.8);
+      }
+    `
+  });
+
+  points = new THREE.Points(geom, mat);
+  scene.add(points);
+  ready = true;
+}
+
+/* ── fallback: icosahedron if model load fails ── */
+function useFallback() {
+  if (ready) return;
+  const g = new THREE.IcosahedronGeometry(1.6, 5);
+  initFromGeometry(g);
+}
+
+/* ── load GLTF model ── */
+const loader = new GLTFLoader();
+loader.load(
+  'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/IridescenceLamp/glTF-Binary/IridescenceLamp.glb',
+  (gltf) => {
+    if (ready) return;
+    let mesh = null;
+    gltf.scene.traverse((child) => {
+      if (!mesh && child.isMesh && child.geometry && child.geometry.attributes.position) {
+        mesh = child;
+      }
+    });
+    if (mesh) {
+      mesh.updateWorldMatrix(true, false);
+      const geo = mesh.geometry.clone();
+      geo.applyMatrix4(mesh.matrixWorld);
+      initFromGeometry(geo);
+    } else {
+      useFallback();
+    }
+  },
+  undefined,
+  () => useFallback()
+);
+setTimeout(useFallback, 7000);
+
+/* ── pointer: nudge pulse & drift ── */
+const tgt = { pulse: 0.12, drift: 0.018 };
+addEventListener('pointermove', (e) => {
+  const nx = e.clientX / innerWidth - 0.5;
+  const ny = e.clientY / innerHeight - 0.5;
+  tgt.pulse = 0.12 + ny * 0.18;
+  tgt.drift = 0.018 + nx * 0.035;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── render loop ── */
+const t0 = performance.now();
+function loop() {
+  requestAnimationFrame(loop);
+  if (!ready) { renderer.render(scene, camera); return; }
+
+  const elapsed = (performance.now() - t0) / 1000;
+
+  // ease params
+  simU.uPulse.value += (tgt.pulse - simU.uPulse.value) * 0.04;
+  simU.uDrift.value += (tgt.drift - simU.uDrift.value) * 0.04;
+  simU.uTime.value = elapsed;
+
+  // step simulation
+  simU.prev.value = rtA.texture;
+  simU.home.value = rtHome.texture;
+  simU.norm.value = rtNorm.texture;
+  renderer.setRenderTarget(rtB);
+  renderer.render(simScene, camOrtho);
+  const tmp = rtA; rtA = rtB; rtB = tmp;
+  renderer.setRenderTarget(null);
+
+  // update point cloud uniforms
+  points.material.uniforms.state.value = rtA.texture;
+  points.material.uniforms.home.value = rtHome.texture;
+  points.material.uniforms.uTime.value = elapsed;
+
+  // slow orbit — tracks centroid
+  const ang = elapsed * 0.12;
+  camera.position.x = Math.sin(ang) * 5.2;
+  camera.position.z = Math.cos(ang) * 5.2;
+  camera.position.y = 0.4 + Math.sin(elapsed * 0.07) * 0.6;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+}
+loop();
+</script>
+</body>
+</html>
