@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mw3 · forty voices in elliptical nave</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08090c; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">mw3</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 300);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08090c, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── 40 voice positions on an elliptical plan (Rideau Chapel proportions) ── */
+const NUM_VOICES = 40;
+const SEMI_A = 10.5;   // nave long axis
+const SEMI_B = 6.0;    // nave short axis
+const COLUMN_H = 12.5;
+
+const voiceXZ = [];
+for (let i = 0; i < NUM_VOICES; i++) {
+  const th = (i / NUM_VOICES) * Math.PI * 2;
+  voiceXZ.push(Math.cos(th) * SEMI_A, Math.sin(th) * SEMI_B);
+}
+
+/* ── particles ── */
+const N = 70000;
+const N_COL = Math.floor(N * 0.14);  // column / speaker-stand particles
+const N_FIELD = N - N_COL;
+
+const pos   = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const flags = new Float32Array(N);   // 1 = column, 0 = field
+let w = 0;
+
+// columns: thin tapered pillars w/ cypress-like organic taper from parent DNA
+for (let i = 0; i < N_COL; i++) {
+  const vi = i % NUM_VOICES;
+  const cx = voiceXZ[vi * 2], cz = voiceXZ[vi * 2 + 1];
+  const y = Math.random() * COLUMN_H;
+  const yt = y / COLUMN_H;
+  // cypress taper: widest at ~30 % height, narrow top
+  const taper = 0.06 + 0.14 * Math.max(0, 1.0 - 1.8 * Math.pow(yt - 0.30, 2));
+  const a = Math.random() * Math.PI * 2;
+  const r = Math.random() * taper;
+  pos[w * 3]     = cx + Math.cos(a) * r;
+  pos[w * 3 + 1] = y;
+  pos[w * 3 + 2] = cz + Math.sin(a) * r;
+  seeds[w] = Math.random();
+  flags[w] = 1.0;
+  w++;
+}
+
+// field: fill the interior ellipse, multi-layered vertically (0.3 → 10)
+for (let i = 0; i < N_FIELD; i++) {
+  let x, z;
+  const shrink = 0.88;   // keep inside the ring of columns
+  for (;;) {
+    x = (Math.random() * 2 - 1) * SEMI_A * shrink;
+    z = (Math.random() * 2 - 1) * SEMI_B * shrink;
+    if ((x * x) / (SEMI_A * shrink) ** 2 + (z * z) / (SEMI_B * shrink) ** 2 <= 1) break;
+  }
+  const y = 0.3 + Math.random() * 9.7;
+  pos[w * 3]     = x;
+  pos[w * 3 + 1] = y;
+  pos[w * 3 + 2] = z;
+  seeds[w] = Math.random();
+  flags[w] = 0.0;
+  w++;
+}
+
+/* ── geometry & material ── */
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('flag',     new THREE.BufferAttribute(flags, 1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+};
+
+const VOICE_COUNT = NUM_VOICES;
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: /* glsl */`
+    #define VOICES ${VOICE_COUNT}
+    #define SEMI_A ${SEMI_A.toFixed(1)}
+    #define SEMI_B ${SEMI_B.toFixed(1)}
+    #define PI 3.14159265
+
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float flag;
+
+    varying float vIntensity;
+    varying float vHeight;
+    varying float vFlag;
+
+    void main() {
+      vec3 p = position;
+      vFlag = flag;
+      vHeight = p.y / 12.5;
+
+      /* column particles: gentle cypress sway */
+      if (flag > 0.5) {
+        float sway = 0.035 * vHeight * sin(uTime * 0.35 + seed * 6.28);
+        p.x += sway;
+        p.z += sway * 0.6;
+        vIntensity = 0.0;  // not used for columns
+      } else {
+        /* ── interference from 40 voices ──
+           Each voice emits a spherical wave from its position on the ellipse.
+           Voices have individual slow phase drifts (polyphonic detuning). */
+        float waveSum = 0.0;
+        float k = 2.2;
+        for (int i = 0; i < VOICES; i++) {
+          float fi = float(i);
+          float th = (fi / float(VOICES)) * 2.0 * PI;
+          float vx = cos(th) * SEMI_A;
+          float vz = sin(th) * SEMI_B;
+          float dx = p.x - vx;
+          float dz = p.z - vz;
+          float dist = sqrt(dx * dx + dz * dz) + 0.1;
+          /* each voice drifts in phase like singers breathing independently */
+          float voicePhase = fi * 0.157 + sin(uTime * 0.04 + fi * 0.73) * 2.5;
+          float omega = 0.7 + sin(fi * 0.41) * 0.12;
+          waveSum += sin(k * dist - omega * uTime + voicePhase) / (1.0 + dist * 0.12);
+        }
+        /* partial normalization — keep high contrast for filaments */
+        vIntensity = waveSum / 10.0;
+
+        /* subtle displacement along the wave */
+        p.y += 0.06 * vIntensity;
+        p.x += sin(uTime * 0.15 + seed * 6.28) * 0.015;
+        p.z += cos(uTime * 0.12 + seed * 6.28) * 0.015;
+      }
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      float sz;
+      if (flag > 0.5) {
+        sz = 0.9;
+      } else {
+        /* constructive → large & visible; destructive → tiny & dim */
+        float c = smoothstep(-0.1, 1.0, vIntensity);
+        sz = 0.2 + 1.8 * c;
+      }
+      gl_PointSize = sz * uPixel * (42.0 / max(dist, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: /* glsl */`
+    varying float vIntensity;
+    varying float vHeight;
+    varying float vFlag;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+      if (r2 > 0.25) discard;
+      float falloff = exp(-r2 * 14.0);
+
+      /* palette: cool slate base, warm amber at constructive peaks */
+      vec3 colSlate   = vec3(0.38, 0.44, 0.55);
+      vec3 colLight   = vec3(0.58, 0.64, 0.74);
+      vec3 colAmber   = vec3(0.96, 0.74, 0.32);
+      vec3 colPillar  = vec3(0.30, 0.34, 0.42);
+
+      vec3 col;
+      float alpha;
+
+      if (vFlag > 0.5) {
+        /* column: dark slate, modest glow at top */
+        col = mix(colPillar, colSlate, vHeight * 0.35);
+        alpha = falloff * 0.45;
+      } else {
+        float constructive = smoothstep(0.15, 0.85, vIntensity);
+        float destructive  = smoothstep(0.0, -0.4, vIntensity);
+
+        col = mix(colSlate, colLight, vHeight * 0.25);
+        /* warm accent at constructive peaks — the focal reward */
+        col = mix(col, colAmber, constructive * 0.75);
+
+        /* filament effect: high alpha at constructive nodes, near-zero at destructive */
+        alpha = falloff * (0.04 + 0.72 * smoothstep(-0.15, 0.6, vIntensity));
+        alpha *= (1.0 - destructive * 0.92);
+      }
+
+      /* distance fade (manual fog replacement — no fog uniform dependency) */
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── camera: slow elliptical walk inside the nave ── */
+const t0 = performance.now();
+
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+  uniforms.uTime.value = t;
+
+  /* walker path: a smaller ellipse inside the nave, ~80s per circuit */
+  const walkTh = t * 0.078;
+  const walkA  = SEMI_A * 0.48;
+  const walkB  = SEMI_B * 0.48;
+  /* figure-8 perturbation so path crosses the center — more interference variety */
+  const cx = Math.cos(walkTh) * walkA + Math.sin(walkTh * 2.0) * 1.2;
+  const cz = Math.sin(walkTh) * walkB + Math.cos(walkTh * 1.7) * 0.8;
+  const cy = 4.2 + Math.sin(t * 0.06) * 0.8;
+
+  camera.position.set(cx, cy, cz);
+
+  /* look slightly ahead on the walk + angled upward toward the columns */
+  const aheadTh = walkTh + 0.5;
+  const lx = Math.cos(aheadTh) * walkA * 0.25;
+  const lz = Math.sin(aheadTh) * walkB * 0.25;
+  camera.lookAt(lx, 5.8, lz);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
