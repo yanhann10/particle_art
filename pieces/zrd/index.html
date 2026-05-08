@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zrd · macroblock arabesque · engineered glitch</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#5a5960; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">zrd · macroblock arabesque · engineered glitch</div>
+<div class="hint">drag to orbit · click to pause/resume · bit-flip events</div>
+<div class="src">rosa menkman · dct lattice + chroma subsample + block teleport</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Rosa Menkman's JPEG glitch-as-language: differential-growth curve from ajo,
+// but particles snap to an 8×8 macroblock grid. DCT-basis cosine ripples
+// modulate position. Bit-flip events teleport entire 8×8 blocks. Chroma-
+// subsampled palette (magenta/cyan/yellow on ringing-artifact gray).
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x5a5960, 0.018);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(10, 9, 16);
+const renderer = new THREE.WebGLRenderer({ antialias: false }); // keep aliasing for digital artifact feel
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x5a5960, 1);
+document.body.appendChild(renderer.domElement);
+
+const lightKey = new THREE.DirectionalLight(0xffffff, 0.7);
+lightKey.position.set(8, 14, 6);
+scene.add(lightKey);
+scene.add(new THREE.AmbientLight(0x505055, 0.5));
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 6, 0);
+
+// ─────────── differential growth (inherited from ajo/5gm)
+const MAX_VERTS = 1100;
+const ATTRACT   = 0.065;
+const REPEL_R   = 0.6;
+const REPEL_STR = 0.15;
+const NOISE     = 0.004;
+const PRESSURE  = 0.0032;
+const RISE      = 0.005;
+const MAX_D     = 0.45;
+
+const verts = [];
+for (let i = 0; i < 16; i++){
+  const th = i / 16 * Math.PI * 2;
+  const r = 1.8 + (Math.random() - 0.5) * 0.12;
+  verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+}
+
+const CELL = REPEL_R, grid = new Map();
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i];
+    const k = Math.floor(v.x/CELL)+','+Math.floor(v.y/CELL)+','+Math.floor(v.z/CELL);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++){
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+function step(){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    for (const j of neighbors(v)){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d/REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x + b.x - 2*v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2*v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2*v.z) * ATTRACT;
+  }
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++){ cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x - cx, oy = verts[i].y - cy, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox/d) * PRESSURE;
+    dy[i] += (oy/d) * PRESSURE * 0.35;
+    dz[i] += (oz/d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[i].age;
+    const upward = RISE * (0.25 + 1.3 * Math.min(a * 1.6, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE;
+    verts[i].y += dy[i] + (Math.random()-0.5)*NOISE * 0.4 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE;
+    verts[i].age += 0.0015;
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if (ex*ex+ey*ey+ez*ez > MAX_D*MAX_D && verts.length + grown.length < MAX_VERTS){
+      grown.push({
+        x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5 - 0.06, z:(a.z+b.z)*0.5,
+        age: Math.max(a.age, b.age) * 0.5
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+for (let s = 0; s < 900; s++) step();
+addEventListener('click', () => { paused = !paused; });
+
+// ─────────── macroblock particle system
+// particles live on an 8×8 grid in 3D — x,y,z each quantized to 0.5 units.
+// curve samples are snapped to nearest macroblock. DCT-basis cosine ripples
+// modulate position. bit-flip events teleport blocks.
+const BLOCK_SIZE = 0.5; // 8×8 macroblock spacing
+const particles = [];
+const blockOffsets = new Map(); // (bx,by,bz) -> {dx, dy, dz} teleport offset
+
+// chroma-subsampled palette: magenta, cyan, yellow (classic JPEG chroma channels)
+const PALETTE = [
+  new THREE.Color(0xd946a8), // magenta
+  new THREE.Color(0x00c9d4), // cyan
+  new THREE.Color(0xffd60a), // yellow
+];
+
+const particleGeo = new THREE.BufferGeometry();
+const particleMat = new THREE.ShaderMaterial({
+  uniforms: {
+    time: { value: 0 },
+    pointSize: { value: 3.0 },
+  },
+  vertexShader: `
+    uniform float time;
+    uniform float pointSize;
+    attribute vec3 color;
+    attribute float blockIndex;
+    varying vec3 vColor;
+    void main(){
+      vColor = color;
+      vec3 pos = position;
+      // DCT basis ripple: cos modulation on each axis
+      float phase = blockIndex * 0.3 + time * 0.4;
+      pos.x += 0.08 * cos(phase * 2.0);
+      pos.y += 0.08 * sin(phase * 1.5);
+      pos.z += 0.08 * cos(phase * 2.5);
+      vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
+      gl_Position = projectionMatrix * mvPos;
+      gl_PointSize = pointSize * (200.0 / -mvPos.z);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    void main(){
+      float r = length(gl_PointCoord - 0.5);
+      if (r > 0.5) discard;
+      gl_FragColor = vec4(vColor, 1.0);
+    }
+  `,
+  transparent: false,
+  depthWrite: true,
+});
+
+let particleMesh = null;
+
+function snapToBlock(x, y, z){
+  return {
+    bx: Math.round(x / BLOCK_SIZE),
+    by: Math.round(y / BLOCK_SIZE),
+    bz: Math.round(z / BLOCK_SIZE),
+  };
+}
+
+function rebuildParticles(){
+  if (verts.length < 8) return;
+  const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+  const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.0);
+  const N_SAMPLES = Math.min(800, verts.length * 2);
+  
+  particles.length = 0;
+  const seenBlocks = new Set();
+
+  for (let i = 0; i < N_SAMPLES; i++){
+    const tt = i / N_SAMPLES;
+    const p = curve.getPointAt(tt);
+    const snapped = snapToBlock(p.x, p.y, p.z);
+    const blockKey = `${snapped.bx},${snapped.by},${snapped.bz}`;
+    
+    if (seenBlocks.has(blockKey)) continue;
+    seenBlocks.add(blockKey);
+
+    const baseX = snapped.bx * BLOCK_SIZE;
+    const baseY = snapped.by * BLOCK_SIZE;
+    const baseZ = snapped.bz * BLOCK_SIZE;
+
+    // apply block teleport offset if exists
+    let offset = blockOffsets.get(blockKey) || { dx: 0, dy: 0, dz: 0 };
+
+    // add 8×8 particles per block (64 particles)
+    for (let py = 0; py < 8; py++){
+      for (let px = 0; px < 8; px++){
+        const x = baseX + (px - 3.5) * 0.065 + offset.dx;
+        const y = baseY + (py - 3.5) * 0.065 + offset.dy;
+        const z = baseZ + offset.dz;
+        
+        // chroma subsample: use same color for 2×2 quads
+        const colorIndex = Math.floor(px / 2) % PALETTE.length;
+        const color = PALETTE[colorIndex];
+
+        particles.push({
+          x, y, z,
+          color,
+          blockIndex: seenBlocks.size,
+          blockKey,
+        });
+      }
+    }
+  }
+
+  const positions = new Float32Array(particles.length * 3);
+  const colors = new Float32Array(particles.length * 3);
+  const blockIndices = new Float32Array(particles.length);
+  for (let i = 0; i < particles.length; i++){
+    const p = particles[i];
+    positions[i*3] = p.x;
+    positions[i*3+1] = p.y;
+    positions[i*3+2] = p.z;
+    colors[i*3] = p.color.r;
+    colors[i*3+1] = p.color.g;
+    colors[i*3+2] = p.color.b;
+    blockIndices[i] = p.blockIndex;
+  }
+  particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  particleGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  particleGeo.setAttribute('blockIndex', new THREE.BufferAttribute(blockIndices, 1));
+
+  if (particleMesh) scene.remove(particleMesh);
+  particleMesh = new THREE.Points(particleGeo, particleMat);
+  scene.add(particleMesh);
+}
+
+// bit-flip event: teleport a random block
+function bitFlipEvent(){
+  const keys = Array.from(new Set(particles.map(p => p.blockKey)));
+  if (keys.length === 0) return;
+  const victimKey = keys[Math.floor(Math.random() * keys.length)];
+  blockOffsets.set(victimKey, {
+    dx: (Math.random() - 0.5) * 2.0,
+    dy: (Math.random() - 0.5) * 1.5,
+    dz: (Math.random() - 0.5) * 2.0,
+  });
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let nextBitFlip = start + 3000 + Math.random() * 4000;
+
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+
+  for (let s = 0; s < 3; s++) step();
+
+  // bit-flip event timing
+  if (now > nextBitFlip){
+    bitFlipEvent();
+    nextBitFlip = now + 2500 + Math.random() * 5000;
+    rebuildParticles();
+  }
+
+  if (verts.length > 8 && now % 200 < 16){
+    rebuildParticles();
+  }
+
+  particleMat.uniforms.time.value = t;
+
+  let yMean = 0; for (const v of verts) yMean += v.y; yMean /= Math.max(verts.length, 1);
+  const targetY = Math.max(yMean, 3.0);
+  controls.target.y += (targetY - controls.target.y) * 0.03;
+  const desiredCamY = targetY + 4.5;
+  camera.position.y += (desiredCamY - camera.position.y) * 0.03;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
