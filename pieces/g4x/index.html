@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>g4x · (Dés)Ordres</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f4ede1; overflow:hidden;
+               color:#1a1510; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">g4x</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf4ede1);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 38);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// 32×32 grid of nested-square line segments
+const GRID = 32;
+const CELL = 0.85;
+const GRID_W = GRID * CELL;
+const N = GRID * GRID;
+
+// Each cell: 4 short line segments forming a square outline
+// We'll instance the segments and apply per-instance transforms
+const SEG_PER_CELL = 4;
+const TOTAL_SEGS = N * SEG_PER_CELL;
+
+// Base segment geometry: a short horizontal line
+const segGeom = new THREE.BufferGeometry();
+const segVerts = new Float32Array([
+  -0.3, 0, 0,
+   0.3, 0, 0
+]);
+segGeom.setAttribute('position', new THREE.BufferAttribute(segVerts, 3));
+
+// Instance data: translate, rotate, chaos
+const offsets = new Float32Array(TOTAL_SEGS * 3);
+const rotations = new Float32Array(TOTAL_SEGS);
+const chaos = new Float32Array(TOTAL_SEGS);
+
+let idx = 0;
+for (let row = 0; row < GRID; row++){
+  for (let col = 0; col < GRID; col++){
+    // Normalized y: 0 at top, 1 at bottom
+    const normY = row / (GRID - 1);
+    const chaosAmt = Math.pow(normY, 1.5); // entropy gradient
+
+    // Cell center in grid coords
+    const cx = (col - GRID/2 + 0.5) * CELL;
+    const cy = (GRID/2 - row - 0.5) * CELL;
+
+    // Base square size
+    const sqSize = 0.28;
+
+    // Four segments: top, right, bottom, left
+    const dirs = [
+      { dx:0, dy:sqSize, angle:0 },           // top horizontal
+      { dx:sqSize, dy:0, angle:Math.PI/2 },   // right vertical
+      { dx:0, dy:-sqSize, angle:0 },          // bottom horizontal
+      { dx:-sqSize, dy:0, angle:Math.PI/2 }   // left vertical
+    ];
+
+    for (let s = 0; s < SEG_PER_CELL; s++){
+      const dir = dirs[s];
+      // Position jitter proportional to chaos
+      const jitterX = (Math.random() - 0.5) * chaosAmt * 0.18;
+      const jitterY = (Math.random() - 0.5) * chaosAmt * 0.18;
+      offsets[idx*3]   = cx + dir.dx + jitterX;
+      offsets[idx*3+1] = cy + dir.dy + jitterY;
+      offsets[idx*3+2] = 0;
+
+      // Rotation jitter
+      const jitterAngle = (Math.random() - 0.5) * chaosAmt * 0.35;
+      rotations[idx] = dir.angle + jitterAngle;
+
+      chaos[idx] = chaosAmt;
+      idx++;
+    }
+  }
+}
+
+const instancedGeom = new THREE.InstancedBufferGeometry();
+instancedGeom.copy(segGeom);
+instancedGeom.instanceCount = TOTAL_SEGS;
+instancedGeom.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
+instancedGeom.setAttribute('rotation', new THREE.InstancedBufferAttribute(rotations, 1));
+instancedGeom.setAttribute('chaosAmt', new THREE.InstancedBufferAttribute(chaos, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uColor: { value: new THREE.Color(0x1a1510) }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  vertexShader: `
+    attribute vec3 offset;
+    attribute float rotation;
+    attribute float chaosAmt;
+    uniform float uTime;
+
+    void main(){
+      // Apply rotation around Z
+      float c = cos(rotation);
+      float s = sin(rotation);
+      vec3 p = position;
+      vec3 rotP = vec3(
+        p.x * c - p.y * s,
+        p.x * s + p.y * c,
+        p.z
+      );
+
+      // Translate to grid position
+      vec3 worldPos = rotP + offset;
+
+      // Gentle 3D wave distortion driven by chaos
+      float wave = sin(worldPos.x * 2.0 + uTime * 0.4) * cos(worldPos.y * 1.8 + uTime * 0.3);
+      worldPos.z += wave * chaosAmt * 0.6;
+
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(worldPos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    void main(){
+      gl_FragColor = vec4(uColor, 1.0);
+    }
+  `
+});
+
+const lines = new THREE.LineSegments(instancedGeom, mat);
+scene.add(lines);
+
+// Subtle camera orbit
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Slow orbit around Y axis
+  const angle = t * 0.08;
+  const radius = 38;
+  camera.position.x = Math.sin(angle) * radius * 0.5;
+  camera.position.z = Math.cos(angle) * radius;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
