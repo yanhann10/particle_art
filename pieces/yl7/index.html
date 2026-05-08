@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yl7 · Celtic interlace murmuration · Book of Kells knot geometry</title>
+<!-- MOTION: weaving, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0f0d11; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">yl7</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 400);
+camera.position.set(0, 0, 62);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0f0d11, 1);
+document.body.appendChild(renderer.domElement);
+
+// Celtic interlace as structural spine: four interwoven paths (north/south/east/west)
+// that cross at cardinal points, each path a continuous closed loop
+const STRANDS = 4;
+const BOIDS_PER_STRAND = 800;
+const N = STRANDS * BOIDS_PER_STRAND;
+
+// Define the four interlaced paths parametrically
+// Each path: a figure-eight that weaves over/under the others
+function getKnotPath(strandIdx, t) {
+  const phase = (strandIdx / STRANDS) * Math.PI * 2;
+  const scale = 18;
+  
+  // Base figure-eight with phase offset per strand
+  const s = t * Math.PI * 2 + phase;
+  const x = Math.sin(s) * scale;
+  const y = Math.sin(s * 2) * scale * 0.5;
+  
+  // Z-depth encodes over/under: each strand weaves through the others
+  // at crossings, one rises, the next dips
+  const crossPhase = (s + phase) % (Math.PI * 2);
+  const crossing = Math.sin(crossPhase * 2);
+  const z = crossing * 4 * Math.sin(strandIdx * Math.PI * 0.5);
+  
+  // Add secondary loop that interlocks with neighbors
+  const neighborPhase = phase + Math.PI * 0.5;
+  const interlock = Math.cos(s * 3 + neighborPhase) * 3;
+  
+  return new THREE.Vector3(
+    x + interlock * Math.cos(phase),
+    y + interlock * Math.sin(phase),
+    z
+  );
+}
+
+// Initialize boids along the four knotwork paths
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const strandIds = new Float32Array(N);
+const pathParams = new Float32Array(N); // position along path [0,1]
+
+for (let strand = 0; strand < STRANDS; strand++) {
+  for (let i = 0; i < BOIDS_PER_STRAND; i++) {
+    const idx = strand * BOIDS_PER_STRAND + i;
+    const t = i / BOIDS_PER_STRAND;
+    
+    // Place on path with small perpendicular offset
+    const pos = getKnotPath(strand, t);
+    const nextPos = getKnotPath(strand, t + 0.01);
+    const tangent = nextPos.clone().sub(pos).normalize();
+    const binormal = new THREE.Vector3(-tangent.y, tangent.x, 0).normalize();
+    const offset = binormal.multiplyScalar((Math.random() - 0.5) * 0.8);
+    
+    positions[idx*3]   = pos.x + offset.x;
+    positions[idx*3+1] = pos.y + offset.y;
+    positions[idx*3+2] = pos.z + offset.z;
+    
+    // Initial velocity along path
+    velocities[idx*3]   = tangent.x * 0.3;
+    velocities[idx*3+1] = tangent.y * 0.3;
+    velocities[idx*3+2] = tangent.z * 0.3;
+    
+    seeds[idx] = Math.random();
+    strandIds[idx] = strand;
+    pathParams[idx] = t;
+  }
+}
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float strandId;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      float phase = seed * 6.28 + uTime * 0.2;
+      float pulse = 0.5 + 0.5 * sin(phase);
+      
+      // Book of Kells palette: vermillion, lapis lazuli, verdigris, gold leaf
+      vec3 c0 = vec3(0.82, 0.24, 0.18); // vermillion
+      vec3 c1 = vec3(0.15, 0.32, 0.68); // lapis
+      vec3 c2 = vec3(0.28, 0.58, 0.52); // verdigris
+      vec3 c3 = vec3(0.88, 0.72, 0.28); // gold
+      
+      // Assign color by strand with pulse variation
+      vec3 baseCol;
+      if (strandId < 1.0) baseCol = c0;
+      else if (strandId < 2.0) baseCol = c1;
+      else if (strandId < 3.0) baseCol = c2;
+      else baseCol = c3;
+      
+      vCol = mix(baseCol, c3, pulse * 0.3);
+      vAlpha = 0.6 + 0.4 * pulse;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (2.0 + 1.5*pulse) * uPixel * (60.0/dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('strandId', new THREE.BufferAttribute(strandIds, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Boid parameters tuned for knotwork flow
+const PERCEPTION = 2.8;
+const SEPARATION_DIST = 1.0;
+const COHESION_FORCE = 0.015;
+const ALIGNMENT_FORCE = 0.12;
+const SEPARATION_FORCE = 0.18;
+const PATH_ATTRACTION = 0.35; // strong pull back to knotwork path
+const STRAND_COHESION = 0.08; // boids prefer their own strand
+const MAX_SPEED = 1.4;
+const MIN_SPEED = 0.5;
+
+const CELL_SIZE = PERCEPTION * 1.5;
+let spatialGrid = new Map();
+
+function getSpatialKey(x, y, z){
+  const cx = Math.floor(x / CELL_SIZE);
+  const cy = Math.floor(y / CELL_SIZE);
+  const cz = Math.floor(z / CELL_SIZE);
+  return `${cx},${cy},${cz}`;
+}
+
+function rebuildSpatialGrid(){
+  spatialGrid.clear();
+  for (let i = 0; i < N; i++){
+    const key = getSpatialKey(positions[i*3], positions[i*3+1], positions[i*3+2]);
+    if (!spatialGrid.has(key)) spatialGrid.set(key, []);
+    spatialGrid.get(key).push(i);
+  }
+}
+
+function getNeighborCells(x, y, z){
+  const cells = [];
+  const cx = Math.floor(x / CELL_SIZE);
+  const cy = Math.floor(y / CELL_SIZE);
+  const cz = Math.floor(z / CELL_SIZE);
+  for (let dx = -1; dx <= 1; dx++){
+    for (let dy = -1; dy <= 1; dy++){
+      for (let dz = -1; dz <= 1; dz++){
+        const key = `${cx+dx},${cy+dy},${cz+dz}`;
+        if (spatialGrid.has(key)) cells.push(...spatialGrid.get(key));
+      }
+    }
+  }
+  return cells;
+}
+
+const tmpVec = new THREE.Vector3();
+const avgVel = new THREE.Vector3();
+const avgPos = new THREE.Vector3();
+const steering = new THREE.Vector3();
+
+function updateBoids(dt, t){
+  rebuildSpatialGrid();
+  
+  for (let i = 0; i < N; i++){
+    const px = positions[i*3];
+    const py = positions[i*3+1];
+    const pz = positions[i*3+2];
+    const vx = velocities[i*3];
+    const vy = velocities[i*3+1];
+    const vz = velocities[i*3+2];
+    const myStrand = strandIds[i];
+    
+    avgPos.set(0,0,0);
+    avgVel.set(0,0,0);
+    steering.set(0,0,0);
+    let cohesionCount = 0;
+    let alignmentCount = 0;
+    let strandMateCount = 0;
+    
+    const neighbors = getNeighborCells(px, py, pz);
+    
+    for (const j of neighbors){
+      if (i === j) continue;
+      const dx = positions[j*3] - px;
+      const dy = positions[j*3+1] - py;
+      const dz = positions[j*3+2] - pz;
+      const distSq = dx*dx + dy*dy + dz*dz;
+      
+      if (distSq < PERCEPTION * PERCEPTION && distSq > 0.01){
+        const dist = Math.sqrt(distSq);
+        
+        avgPos.x += positions[j*3];
+        avgPos.y += positions[j*3+1];
+        avgPos.z += positions[j*3+2];
+        cohesionCount++;
+        
+        avgVel.x += velocities[j*3];
+        avgVel.y += velocities[j*3+1];
+        avgVel.z += velocities[j*3+2];
+        alignmentCount++;
+        
+        if (dist < SEPARATION_DIST){
+          const force = (SEPARATION_DIST - dist) / SEPARATION_DIST;
+          steering.x -= (dx / dist) * force * SEPARATION_FORCE;
+          steering.y -= (dy / dist) * force * SEPARATION_FORCE;
+          steering.z -= (dz / dist) * force * SEPARATION_FORCE;
+        }
+        
+        // Extra cohesion with same-strand boids
+        if (Math.abs(strandIds[j] - myStrand) < 0.1) {
+          strandMateCount++;
+        }
+      }
+    }
+    
+    if (cohesionCount > 0){
+      avgPos.multiplyScalar(1 / cohesionCount);
+      const dx = avgPos.x - px;
+      const dy = avgPos.y - py;
+      const dz = avgPos.z - pz;
+      const cohesionMult = strandMateCount > 0 ? COHESION_FORCE + STRAND_COHESION : COHESION_FORCE;
+      steering.x += dx * cohesionMult;
+      steering.y += dy * cohesionMult;
+      steering.z += dz * cohesionMult;
+    }
+    
+    if (alignmentCount > 0){
+      avgVel.multiplyScalar(1 / alignmentCount);
+      steering.x += (avgVel.x - vx) * ALIGNMENT_FORCE;
+      steering.y += (avgVel.y - vy) * ALIGNMENT_FORCE;
+      steering.z += (avgVel.z - vz) * ALIGNMENT_FORCE;
+    }
+    
+    // Path attraction: pull boid back toward its designated knotwork strand
+    // Advance path parameter slowly over time
+    pathParams[i] = (pathParams[i] + dt * 0.002) % 1.0;
+    const targetPos = getKnotPath(myStrand, pathParams[i]);
+    const toPx = targetPos.x - px;
+    const toPy = targetPos.y - py;
+    const toPz = targetPos.z - pz;
+    steering.x += toPx * PATH_ATTRACTION;
+    steering.y += toPy * PATH_ATTRACTION;
+    steering.z += toPz * PATH_ATTRACTION;
+    
+    velocities[i*3]   += steering.x * dt;
+    velocities[i*3+1] += steering.y * dt;
+    velocities[i*3+2] += steering.z * dt;
+    
+    const speed = Math.sqrt(
+      velocities[i*3]*velocities[i*3] + 
+      velocities[i*3+1]*velocities[i*3+1] + 
+      velocities[i*3+2]*velocities[i*3+2]
+    );
+    if (speed > MAX_SPEED){
+      velocities[i*3]   *= MAX_SPEED / speed;
+      velocities[i*3+1] *= MAX_SPEED / speed;
+      velocities[i*3+2] *= MAX_SPEED / speed;
+    } else if (speed < MIN_SPEED && speed > 0.01){
+      velocities[i*3]   *= MIN_SPEED / speed;
+      velocities[i*3+1] *= MIN_SPEED / speed;
+      velocities[i*3+2] *= MIN_SPEED / speed;
+    }
+    
+    positions[i*3]   += velocities[i*3] * dt;
+    positions[i*3+1] += velocities[i*3+1] * dt;
+    positions[i*3+2] += velocities[i*3+2] * dt;
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+  geom.computeBoundingSphere();
+}
+
+const centroid = new THREE.Vector3();
+function updateCamera(t){
+  centroid.set(0,0,0);
+  for (let i = 0; i < N; i++){
+    centroid.x += positions[i*3];
+    centroid.y += positions[i*3+1];
+    centroid.z += positions[i*3+2];
+  }
+  centroid.multiplyScalar(1 / N);
+  
+  // Camera orbits slowly, viewing the knotwork from above-oblique
+  const orbitRadius = 52;
+  const orbitSpeed = 0.05;
+  const angle = t * 0.00008 * orbitSpeed;
+  camera.position.x = centroid.x + Math.cos(angle) * orbitRadius;
+  camera.position.z = centroid.z + Math.sin(angle) * orbitRadius;
+  camera.position.y = centroid.y + 20 + Math.sin(angle * 0.3) * 8;
+  camera.lookAt(centroid);
+}
+
+let lastTime = performance.now();
+const start = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  const t = now - start;
+  
+  uniforms.uTime.value = t / 1000;
+  updateBoids(dt * 60, t);
+  updateCamera(t);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
