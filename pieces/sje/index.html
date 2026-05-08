@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chladni plate · cymatics eigenmode resonance</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .mode  { position:fixed; right:14px; bottom:12px; opacity:0.6; font-size: 11px; letter-spacing: 0.08em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">sje · chladni plate</div>
+<div class="mode" id="mode">mode (1,1)</div>
+<div class="hint">auto-cycles eigenmode every 8s · sand self-organizes to nodal lines</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Chladni cymatics: 50k particles on a square plate vibrating at eigenmode (m,n).
+// Each particle drifts toward nodal lines (where |u|=0) via −∇|u| plus Brownian jitter.
+// Pattern snaps from chaos to crystalline symmetry as (m,n) steps up.
+// Visual signature: white sand on dark gunmetal plate.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0c, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 50);
+camera.position.set(0, 4.5, 7.5);
+camera.lookAt(0, 0, 0);
+
+// dark gunmetal plate (physical substrate for sand)
+const plateMat = new THREE.MeshStandardMaterial({
+  color: 0x1a1c22,
+  metalness: 0.8,
+  roughness: 0.4
+});
+const plate = new THREE.Mesh(new THREE.PlaneGeometry(10, 10, 1, 1), plateMat);
+plate.rotation.x = -Math.PI / 2;
+plate.receiveShadow = true;
+scene.add(plate);
+
+// thin rim around plate
+const rimGeom = new THREE.TorusGeometry(5.1, 0.08, 8, 64);
+rimGeom.rotateX(Math.PI / 2);
+const rimMat = new THREE.MeshStandardMaterial({ color: 0x2a2c32, metalness: 0.6, roughness: 0.5 });
+const rim = new THREE.Mesh(rimGeom, rimMat);
+rim.position.y = 0.08;
+scene.add(rim);
+
+// lighting: soft overhead + side key so nodal patterns read in relief
+const ambLight = new THREE.AmbientLight(0x404552, 0.6);
+scene.add(ambLight);
+const keyLight = new THREE.DirectionalLight(0xffffff, 0.8);
+keyLight.position.set(-3, 6, 4);
+keyLight.castShadow = false;
+scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0x8090a0, 0.3);
+fillLight.position.set(5, 3, -2);
+scene.add(fillLight);
+
+// particle system: 50k sand grains
+const N = 50000;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+
+function initParticles() {
+  for (let i = 0; i < N; i++) {
+    const x = (Math.random() - 0.5) * 9.5;
+    const y = (Math.random() - 0.5) * 9.5;
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = 0.05 + Math.random() * 0.03;
+    positions[i * 3 + 2] = y;
+    velocities[i * 3] = 0;
+    velocities[i * 3 + 1] = 0;
+    velocities[i * 3 + 2] = 0;
+  }
+}
+initParticles();
+
+const particleGeom = new THREE.BufferGeometry();
+particleGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+const particleMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime: { value: 0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uPixel;
+    uniform float uTime;
+    varying float vSpeed;
+    void main() {
+      vSpeed = length(position.xy);
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = 1.6 * uPixel * (12.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vSpeed;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      vec3 col = vec3(0.98, 0.96, 0.92);
+      gl_FragColor = vec4(col * a, a * 0.9);
+    }
+  `
+});
+
+const particles = new THREE.Points(particleGeom, particleMat);
+scene.add(particles);
+
+// eigenmode state
+let modeM = 1, modeN = 1;
+const MODES = [
+  [1, 1], [2, 1], [2, 2], [3, 1], [3, 2], [3, 3], [4, 2], [4, 3], [5, 2], [5, 3]
+];
+let modeIdx = 0;
+let lastModeSwitch = 0;
+const MODE_INTERVAL = 8000;
+
+const modeEl = document.getElementById('mode');
+function updateModeText() {
+  modeEl.textContent = `mode (${modeM},${modeN})`;
+}
+
+// Chladni eigenfunction for square plate: u(x,y) = cos(mπx/L)cos(nπy/L) - cos(nπx/L)cos(mπy/L)
+// Amplitude at time t: A(t) = sin(ωt), where ω = √(m² + n²)
+// Nodal lines occur where |u(x,y)| = 0; particles drift toward these via −∇|u|
+function chladniU(x, y, m, n) {
+  const L = 5.0;
+  const a = Math.cos(m * Math.PI * x / L) * Math.cos(n * Math.PI * y / L);
+  const b = Math.cos(n * Math.PI * x / L) * Math.cos(m * Math.PI * y / L);
+  return a - b;
+}
+
+function chladniGrad(x, y, m, n, eps = 0.08) {
+  const u0 = chladniU(x, y, m, n);
+  const ux = chladniU(x + eps, y, m, n);
+  const uy = chladniU(x, y + eps, m, n);
+  return [(ux - u0) / eps, (uy - u0) / eps];
+}
+
+const L = 5.0;
+let lastT = performance.now();
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  particleMat.uniforms.uTime.value = now / 1000;
+
+  // mode auto-cycle
+  if (now - lastModeSwitch > MODE_INTERVAL) {
+    modeIdx = (modeIdx + 1) % MODES.length;
+    [modeM, modeN] = MODES[modeIdx];
+    lastModeSwitch = now;
+    updateModeText();
+  }
+
+  // oscillation amplitude envelope: slow sine for visual continuity
+  const amp = Math.sin(now * 0.0012);
+
+  // update particles: drift toward nodal lines via −∇|u| + Brownian jitter
+  for (let i = 0; i < N; i++) {
+    let x = positions[i * 3];
+    let z = positions[i * 3 + 2];
+
+    // clamp to plate bounds
+    if (Math.abs(x) > 4.75) x = Math.sign(x) * 4.75;
+    if (Math.abs(z) > 4.75) z = Math.sign(z) * 4.75;
+
+    const u = Math.abs(chladniU(x, z, modeM, modeN)) * amp;
+    const [gx, gy] = chladniGrad(x, z, modeM, modeN);
+    const gradMag = Math.sqrt(gx * gx + gy * gy);
+    
+    // force toward nodal line (proportional to |u|, direction −∇|u|)
+    const forceFactor = 4.0 * u;
+    let fx = 0, fz = 0;
+    if (gradMag > 0.001) {
+      fx = -(gx / gradMag) * forceFactor;
+      fz = -(gy / gradMag) * forceFactor;
+    }
+
+    // Brownian jitter (prevents perfect collapse)
+    fx += (Math.random() - 0.5) * 0.4;
+    fz += (Math.random() - 0.5) * 0.4;
+
+    // damping
+    velocities[i * 3] *= 0.92;
+    velocities[i * 3 + 2] *= 0.92;
+
+    velocities[i * 3] += fx * dt;
+    velocities[i * 3 + 2] += fz * dt;
+
+    x += velocities[i * 3] * dt;
+    z += velocities[i * 3 + 2] * dt;
+
+    // bounce at plate edges
+    if (x > 4.8) { x = 4.8; velocities[i * 3] *= -0.5; }
+    if (x < -4.8) { x = -4.8; velocities[i * 3] *= -0.5; }
+    if (z > 4.8) { z = 4.8; velocities[i * 3 + 2] *= -0.5; }
+    if (z < -4.8) { z = -4.8; velocities[i * 3 + 2] *= -0.5; }
+
+    positions[i * 3] = x;
+    positions[i * 3 + 2] = z;
+
+    // slight vertical jitter for visual depth
+    positions[i * 3 + 1] = 0.05 + Math.abs(u) * 0.12 + Math.random() * 0.01;
+  }
+
+  particleGeom.attributes.position.needsUpdate = true;
+
+  // slow camera orbit
+  const ang = now * 0.00012;
+  camera.position.x = Math.sin(ang) * 7.5;
+  camera.position.z = Math.cos(ang) * 7.5;
+  camera.position.y = 4.5 + Math.sin(ang * 0.8) * 0.8;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+loop();
+</script>
+</body>
+</html>
