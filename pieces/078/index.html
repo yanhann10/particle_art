@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>078 · substrate · particle maze</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f8f5ee; overflow:hidden;
+               color:#3a3a3a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#3a3a3a; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; color:#3a3a3a; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; color:#3a3a3a; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; color:#3a3a3a; }
+</style>
+</head>
+<body>
+<div class="id">078</div>
+<div class="hint">drag to orbit · scroll to zoom · click to pause/resume</div>
+<div class="src">Jared Tarbell's Substrate · perpendicular line growth + intersection spawning</div>
+<div class="stat" id="stat">lines=0</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Substrate algorithm by Jared Tarbell (2003) — perpendicular line growth with
+// intersection-spawned children. Each line travels forward until it crosses
+// an existing line, then stops and spawns a new line perpendicular at the crossing.
+// Result is an architectural urban-organic maze that fills the canvas. We render
+// the line graph as particle clusters along segments with generation-graded palette.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf8f5ee);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+// ───────────────────────── substrate state
+const CANVAS_W = 32, CANVAS_H = 24;  // logical canvas dimensions
+const STEP = 0.08;                   // step distance per growth iteration
+const MAX_LINES = 800;               // stop spawning new lines after this
+let paused = false;
+
+const lines = [];           // each line: { x0, y0, x1, y1, angle, active, generation, path: [{x,y},...] }
+const grid = {};            // spatial hash for collision detection
+const CELL_SIZE = 0.4;
+let maxGeneration = 0;
+
+function cellKey(x, y){
+  return Math.floor(x/CELL_SIZE)+','+Math.floor(y/CELL_SIZE);
+}
+function addToGrid(x, y, lineIdx){
+  const k = cellKey(x, y);
+  if (!grid[k]) grid[k] = [];
+  grid[k].push(lineIdx);
+}
+function queryGrid(x, y){
+  const cx = Math.floor(x/CELL_SIZE), cy = Math.floor(y/CELL_SIZE);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++)
+    for (let dy=-1; dy<=1; dy++){
+      const arr = grid[(cx+dx)+','+(cy+dy)];
+      if (arr) for (const idx of arr) out.push(idx);
+    }
+  return out;
+}
+
+// Line-segment intersection test (2D)
+function segmentIntersect(ax, ay, bx, by, cx, cy, dx, dy){
+  const denom = (bx-ax)*(dy-cy) - (by-ay)*(dx-cx);
+  if (Math.abs(denom) < 1e-8) return null;
+  const t = ((cx-ax)*(dy-cy) - (cy-ay)*(dx-cx)) / denom;
+  const u = ((cx-ax)*(by-ay) - (cy-ay)*(bx-ax)) / denom;
+  if (t >= 0 && t <= 1 && u >= 0 && u <= 1){
+    return { x: ax + t*(bx-ax), y: ay + t*(by-ay) };
+  }
+  return null;
+}
+
+// Spawn a new line at (x,y) traveling in direction 'angle' with given generation
+function spawnLine(x, y, angle, generation){
+  if (lines.length >= MAX_LINES) return;
+  lines.push({
+    x0: x, y0: y,
+    x1: x, y1: y,
+    angle: angle,
+    active: true,
+    generation: generation,
+    path: [{x, y}]
+  });
+  if (generation > maxGeneration) maxGeneration = generation;
+}
+
+// Initial seeds — spawn 4 lines from canvas edges
+spawnLine(-CANVAS_W/2, (Math.random()-0.5)*CANVAS_H*0.6, 0, 0);                           // from left, heading right
+spawnLine(CANVAS_W/2, (Math.random()-0.5)*CANVAS_H*0.6, Math.PI, 0);                     // from right, heading left
+spawnLine((Math.random()-0.5)*CANVAS_W*0.6, -CANVAS_H/2, Math.PI/2, 0);                  // from bottom, heading up
+spawnLine((Math.random()-0.5)*CANVAS_W*0.6, CANVAS_H/2, -Math.PI/2, 0);                  // from top, heading down
+
+function stepSubstrate(){
+  if (paused) return;
+  let anyActive = false;
+  for (let i = 0; i < lines.length; i++){
+    const line = lines[i];
+    if (!line.active) continue;
+    anyActive = true;
+
+    // attempt to grow by STEP in current angle
+    const nx = line.x1 + Math.cos(line.angle) * STEP;
+    const ny = line.y1 + Math.sin(line.angle) * STEP;
+
+    // check if new segment crosses ANY existing line
+    let crossing = false, crossPt = null;
+    const candidates = queryGrid(nx, ny);
+    const candidateSet = new Set(candidates);
+    for (const j of candidateSet){
+      if (j === i) continue;
+      const other = lines[j];
+      if (other.path.length < 2) continue;
+      // check intersection with all segments of other line
+      for (let k = 0; k < other.path.length - 1; k++){
+        const pt = segmentIntersect(
+          line.x1, line.y1, nx, ny,
+          other.path[k].x, other.path[k].y,
+          other.path[k+1].x, other.path[k+1].y
+        );
+        if (pt){
+          crossing = true;
+          crossPt = pt;
+          break;
+        }
+      }
+      if (crossing) break;
+    }
+
+    // check canvas bounds
+    if (Math.abs(nx) > CANVAS_W/2 || Math.abs(ny) > CANVAS_H/2){
+      line.active = false;
+      continue;
+    }
+
+    if (crossing && crossPt){
+      // stop this line at the crossing point
+      line.x1 = crossPt.x;
+      line.y1 = crossPt.y;
+      line.path.push({x: crossPt.x, y: crossPt.y});
+      addToGrid(crossPt.x, crossPt.y, i);
+      line.active = false;
+
+      // spawn TWO new perpendicular lines at the crossing (±90 degrees)
+      const perp1 = line.angle + Math.PI/2;
+      const perp2 = line.angle - Math.PI/2;
+      spawnLine(crossPt.x, crossPt.y, perp1, line.generation + 1);
+      spawnLine(crossPt.x, crossPt.y, perp2, line.generation + 1);
+    } else {
+      // grow forward
+      line.x1 = nx;
+      line.y1 = ny;
+      line.path.push({x: nx, y: ny});
+      addToGrid(nx, ny, i);
+    }
+  }
+  // if no active lines remain, spawn a new random seed to fill gaps
+  if (!anyActive && lines.length < MAX_LINES){
+    const edge = Math.floor(Math.random() * 4);
+    if (edge === 0) spawnLine(-CANVAS_W/2, (Math.random()-0.5)*CANVAS_H*0.8, 0, 0);
+    else if (edge === 1) spawnLine(CANVAS_W/2, (Math.random()-0.5)*CANVAS_H*0.8, Math.PI, 0);
+    else if (edge === 2) spawnLine((Math.random()-0.5)*CANVAS_W*0.8, -CANVAS_H/2, Math.PI/2, 0);
+    else spawnLine((Math.random()-0.5)*CANVAS_W*0.8, CANVAS_H/2, -Math.PI/2, 0);
+  }
+}
+
+// pre-warm: run 2000 steps to establish the maze structure before first render
+for (let s = 0; s < 2000; s++) stepSubstrate();
+
+addEventListener('click', () => { paused = !paused; });
+
+// ───────────────────────── render: 50k particles distributed along line segments
+// palette: generation-graded from warm ochre (gen 0) → burnt sienna → charcoal (high gen)
+const N_RENDER = 50000;
+const rPos = new Float32Array(N_RENDER * 3);
+const rGen = new Float32Array(N_RENDER);
+const rSeed = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeed[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('gen', new THREE.BufferAttribute(rGen, 1));
+geom.setAttribute('seed', new THREE.BufferAttribute(rSeed, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uMaxGen: { value: 1 }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uMaxGen;
+    attribute float gen;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      // very subtle shimmer
+      float t = uTime * 0.3 + seed * 6.28;
+      p.x += 0.008 * sin(t);
+      p.y += 0.008 * cos(t * 1.3);
+
+      float normGen = clamp(gen / max(uMaxGen, 1.0), 0.0, 1.0);
+      // palette: warm ochre → burnt sienna → charcoal
+      vec3 a = vec3(0.85, 0.64, 0.32);    // ochre
+      vec3 b = vec3(0.72, 0.38, 0.28);    // burnt sienna
+      vec3 c = vec3(0.25, 0.23, 0.22);    // charcoal
+      vec3 col = mix(a, b, smoothstep(0.0, 0.5, normGen));
+      col = mix(col, c, smoothstep(0.5, 1.0, normGen));
+      vCol = col;
+      vAlpha = 0.45 + 0.15 * (1.0 - normGen);  // early generations slightly more opaque
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 1.8 * uPixel * (50.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function redistributeParticles(){
+  // compute total path length across all lines
+  let totalLen = 0;
+  const lineLens = [];
+  for (const line of lines){
+    let len = 0;
+    for (let i = 0; i < line.path.length - 1; i++){
+      const a = line.path[i], b = line.path[i+1];
+      len += Math.hypot(b.x - a.x, b.y - a.y);
+    }
+    lineLens.push(len);
+    totalLen += len;
+  }
+  if (totalLen < 1e-6) return;
+
+  let written = 0;
+  for (let li = 0; li < lines.length; li++){
+    const line = lines[li];
+    const share = Math.max(1, Math.floor(N_RENDER * lineLens[li] / totalLen));
+    if (line.path.length < 2) continue;
+    // compute segment lengths within this line
+    const segLens = [];
+    let lineTotal = 0;
+    for (let i = 0; i < line.path.length - 1; i++){
+      const a = line.path[i], b = line.path[i+1];
+      const d = Math.hypot(b.x - a.x, b.y - a.y);
+      segLens.push(d);
+      lineTotal += d;
+    }
+    if (lineTotal < 1e-6) continue;
+    for (let i = 0; i < line.path.length - 1 && written < N_RENDER; i++){
+      const a = line.path[i], b = line.path[i+1];
+      const segShare = Math.max(1, Math.floor(share * segLens[i] / lineTotal));
+      for (let k = 0; k < segShare && written < N_RENDER; k++){
+        const u = Math.random();
+        const x = a.x + (b.x - a.x)*u + (Math.random()-0.5)*0.04;
+        const y = a.y + (b.y - a.y)*u + (Math.random()-0.5)*0.04;
+        rPos[written*3]   = x;
+        rPos[written*3+1] = y;
+        rPos[written*3+2] = 0;
+        rGen[written] = line.generation;
+        written++;
+      }
+    }
+  }
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.gen.needsUpdate = true;
+}
+
+function loop(){
+  uniforms.uTime.value = (performance.now() - start) / 1000;
+
+  // grow the substrate a few steps per frame
+  for (let s = 0; s < 4; s++) stepSubstrate();
+
+  redistributeParticles();
+  uniforms.uMaxGen.value = Math.max(maxGeneration, 1);
+
+  statEl.textContent = `lines=${lines.length} · gen=${maxGeneration}${paused ? ' · paused' : ''}`;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
