@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>j87 · Cellular Forms — morphogenetic growth</title>
+<!-- MOTION: accumulation, intensity: gentle -->
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#030303; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">j87</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x030303);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 12);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+// Lighting — raking light for sculptural relief
+const keyLight = new THREE.DirectionalLight(0xfff5ee, 1.8);
+keyLight.position.set(4, 6, 3);
+scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0xc8d8e8, 0.3);
+fillLight.position.set(-3, -2, 5);
+scene.add(fillLight);
+const rimLight = new THREE.DirectionalLight(0xffe0d0, 0.5);
+rimLight.position.set(-2, 4, -4);
+scene.add(rimLight);
+const ambient = new THREE.AmbientLight(0x1a1418, 0.6);
+scene.add(ambient);
+
+// Deterministic RNG
+let rngS = 48271653;
+function rng(){ rngS |= 0; rngS = rngS + 0x6d2b79f5 | 0;
+  let t = Math.imul(rngS ^ rngS >>> 15, 1 | rngS);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// Cell system
+const MAX_CELLS = 40000;
+const cellPos = new Float32Array(MAX_CELLS * 3);
+const cellNutrient = new Float32Array(MAX_CELLS);
+const cellNeighbors = new Array(MAX_CELLS); // arrays of neighbor indices
+const cellAge = new Float32Array(MAX_CELLS);
+let numCells = 0;
+
+const REST_LEN = 0.18;
+const SPLIT_THRESHOLD = 1.0;
+const NUTRIENT_RATE = 0.012;
+const SPRING_K = 0.15;
+const DAMPING = 0.92;
+const MAX_NEIGHBORS = 7;
+
+// Velocities for relaxation
+const cellVel = new Float32Array(MAX_CELLS * 3);
+
+// Initialize seed cluster — icosahedron vertices
+function initSeed(){
+  const phi = (1 + Math.sqrt(5)) / 2;
+  const verts = [
+    [-1, phi, 0],[1, phi, 0],[-1,-phi, 0],[1,-phi, 0],
+    [0,-1, phi],[0, 1, phi],[0,-1,-phi],[0, 1,-phi],
+    [phi, 0,-1],[phi, 0, 1],[-phi, 0,-1],[-phi, 0, 1]
+  ];
+  const scale = 0.5;
+  for (const v of verts){
+    const i = numCells;
+    cellPos[i*3] = v[0]*scale;
+    cellPos[i*3+1] = v[1]*scale;
+    cellPos[i*3+2] = v[2]*scale;
+    cellNutrient[i] = rng() * 0.3;
+    cellNeighbors[i] = [];
+    cellAge[i] = 0;
+    numCells++;
+  }
+  // Connect nearest neighbors
+  rebuildNeighbors(0, numCells);
+}
+
+function rebuildNeighbors(start, end){
+  for (let i = start; i < end; i++){
+    const dists = [];
+    for (let j = 0; j < numCells; j++){
+      if (j === i) continue;
+      const dx = cellPos[i*3]-cellPos[j*3];
+      const dy = cellPos[i*3+1]-cellPos[j*3+1];
+      const dz = cellPos[i*3+2]-cellPos[j*3+2];
+      dists.push({idx: j, d: dx*dx+dy*dy+dz*dz});
+    }
+    dists.sort((a,b) => a.d - b.d);
+    cellNeighbors[i] = dists.slice(0, MAX_NEIGHBORS).filter(d => d.d < REST_LEN*REST_LEN*16).map(d => d.idx);
+  }
+}
+
+function addNeighborsBidirectional(idx){
+  // Find nearest cells to new cell and link
+  const dists = [];
+  for (let j = 0; j < numCells; j++){
+    if (j === idx) continue;
+    const dx = cellPos[idx*3]-cellPos[j*3];
+    const dy = cellPos[idx*3+1]-cellPos[j*3+1];
+    const dz = cellPos[idx*3+2]-cellPos[j*3+2];
+    dists.push({idx: j, d: dx*dx+dy*dy+dz*dz});
+  }
+  dists.sort((a,b) => a.d - b.d);
+  const nn = dists.slice(0, MAX_NEIGHBORS).filter(d => d.d < REST_LEN*REST_LEN*20);
+  cellNeighbors[idx] = nn.map(d => d.idx);
+  // Add back-links
+  for (const n of nn){
+    if (cellNeighbors[n.idx] && cellNeighbors[n.idx].length < MAX_NEIGHBORS){
+      if (!cellNeighbors[n.idx].includes(idx)) cellNeighbors[n.idx].push(idx);
+    }
+  }
+}
+
+// Split a cell
+function splitCell(idx){
+  if (numCells >= MAX_CELLS) return;
+  const ni = numCells;
+  // Place new cell offset from parent along normal estimate
+  let nx=0, ny=0, nz=0;
+  const px = cellPos[idx*3], py = cellPos[idx*3+1], pz = cellPos[idx*3+2];
+  // Normal = sum of vectors from neighbors to cell
+  const neighbors = cellNeighbors[idx];
+  for (const n of neighbors){
+    nx += px - cellPos[n*3];
+    ny += py - cellPos[n*3+1];
+    nz += pz - cellPos[n*3+2];
+  }
+  let len = Math.sqrt(nx*nx+ny*ny+nz*nz);
+  if (len < 0.001){ nx = rng()-0.5; ny = rng()-0.5; nz = rng()-0.5; len = Math.sqrt(nx*nx+ny*ny+nz*nz); }
+  nx /= len; ny /= len; nz /= len;
+  // Add small random perturbation for organic feel
+  nx += (rng()-0.5)*0.3; ny += (rng()-0.5)*0.3; nz += (rng()-0.5)*0.3;
+  len = Math.sqrt(nx*nx+ny*ny+nz*nz);
+  nx /= len; ny /= len; nz /= len;
+
+  const offset = REST_LEN * (0.4 + rng()*0.3);
+  cellPos[ni*3] = px + nx * offset;
+  cellPos[ni*3+1] = py + ny * offset;
+  cellPos[ni*3+2] = pz + nz * offset;
+  cellVel[ni*3] = 0; cellVel[ni*3+1] = 0; cellVel[ni*3+2] = 0;
+  cellNutrient[ni] = 0;
+  cellNutrient[idx] = 0;
+  cellAge[ni] = 0;
+  cellNeighbors[ni] = [];
+  numCells++;
+  addNeighborsBidirectional(ni);
+}
+
+// Relaxation step
+function relax(){
+  for (let i = 0; i < numCells; i++){
+    let fx=0, fy=0, fz=0;
+    const px = cellPos[i*3], py = cellPos[i*3+1], pz = cellPos[i*3+2];
+    const neighbors = cellNeighbors[i];
+    if (!neighbors) continue;
+    for (const n of neighbors){
+      const dx = cellPos[n*3] - px;
+      const dy = cellPos[n*3+1] - py;
+      const dz = cellPos[n*3+2] - pz;
+      const dist = Math.sqrt(dx*dx+dy*dy+dz*dz);
+      if (dist < 0.001) continue;
+      const force = (dist - REST_LEN) * SPRING_K;
+      fx += (dx/dist) * force;
+      fy += (dy/dist) * force;
+      fz += (dz/dist) * force;
+    }
+    cellVel[i*3] = (cellVel[i*3] + fx) * DAMPING;
+    cellVel[i*3+1] = (cellVel[i*3+1] + fy) * DAMPING;
+    cellVel[i*3+2] = (cellVel[i*3+2] + fz) * DAMPING;
+  }
+  for (let i = 0; i < numCells; i++){
+    cellPos[i*3] += cellVel[i*3];
+    cellPos[i*3+1] += cellVel[i*3+1];
+    cellPos[i*3+2] += cellVel[i*3+2];
+  }
+}
+
+// Nutrient accumulation — cells on convex hull get more
+function accumulateNutrient(dt){
+  for (let i = 0; i < numCells; i++){
+    const neighbors = cellNeighbors[i];
+    if (!neighbors || neighbors.length === 0) { cellNutrient[i] += NUTRIENT_RATE * dt * 2; continue; }
+    // Exposure heuristic: fewer neighbors = more exposed = more nutrient
+    const exposure = 1.0 - (neighbors.length / MAX_NEIGHBORS) * 0.6;
+    // Age factor — younger cells grow faster (tip growth)
+    const ageFactor = 1.0 / (1.0 + cellAge[i] * 0.01);
+    cellNutrient[i] += NUTRIENT_RATE * dt * exposure * ageFactor * (0.7 + rng()*0.6);
+    cellAge[i] += dt;
+  }
+}
+
+initSeed();
+
+// ── Instanced rendering
+const cellGeo = new THREE.SphereGeometry(REST_LEN * 0.52, 6, 5);
+const cellMat = new THREE.MeshStandardMaterial({
+  color: 0xf2ece4,
+  roughness: 0.85,
+  metalness: 0.02,
+  envMapIntensity: 0.2
+});
+const instancedMesh = new THREE.InstancedMesh(cellGeo, cellMat, MAX_CELLS);
+instancedMesh.count = numCells;
+scene.add(instancedMesh);
+
+const dummy = new THREE.Object3D();
+const colorObj = new THREE.Color();
+
+function updateInstances(){
+  instancedMesh.count = numCells;
+  for (let i = 0; i < numCells; i++){
+    dummy.position.set(cellPos[i*3], cellPos[i*3+1], cellPos[i*3+2]);
+    // Slight size variation based on age
+    const s = 0.85 + Math.min(cellAge[i] * 0.002, 0.3);
+    dummy.scale.setScalar(s);
+    dummy.updateMatrix();
+    instancedMesh.setMatrixAt(i, dummy.matrix);
+    // Color: bone white with subtle pink on younger cells
+    const youth = 1.0 / (1.0 + cellAge[i] * 0.05);
+    colorObj.setRGB(0.93 - youth*0.02, 0.89 - youth*0.05, 0.86 - youth*0.06);
+    instancedMesh.setColorAt(i, colorObj);
+  }
+  instancedMesh.instanceMatrix.needsUpdate = true;
+  if (instancedMesh.instanceColor) instancedMesh.instanceColor.needsUpdate = true;
+}
+
+// ── Camera orbit tracking centroid
+function getCentroid(){
+  let cx=0, cy=0, cz=0;
+  for (let i = 0; i < numCells; i++){
+    cx += cellPos[i*3]; cy += cellPos[i*3+1]; cz += cellPos[i*3+2];
+  }
+  return new THREE.Vector3(cx/numCells, cy/numCells, cz/numCells);
+}
+
+function getBounds(){
+  let maxR = 0;
+  const c = getCentroid();
+  for (let i = 0; i < numCells; i++){
+    const dx = cellPos[i*3]-c.x, dy = cellPos[i*3+1]-c.y, dz = cellPos[i*3+2]-c.z;
+    const r = Math.sqrt(dx*dx+dy*dy+dz*dz);
+    if (r > maxR) maxR = r;
+  }
+  return maxR;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Main loop
+const start = performance.now();
+let lastSplit = 0;
+const SPLITS_PER_FRAME = 3;
+
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+  const dt = Math.min(1/30, 0.033);
+
+  // Accumulate nutrient
+  accumulateNutrient(dt * 60);
+
+  // Split cells that exceed threshold
+  let splits = 0;
+  if (numCells < MAX_CELLS){
+    for (let i = 0; i < numCells && splits < SPLITS_PER_FRAME; i++){
+      if (cellNutrient[i] >= SPLIT_THRESHOLD){
+        splitCell(i);
+        splits++;
+      }
+    }
+  }
+
+  // Relaxation passes
+  relax();
+  relax();
+
+  // Update rendering
+  updateInstances();
+
+  // Camera — orbit tracking centroid, distance adapts to bounds
+  const centroid = getCentroid();
+  const radius = getBounds();
+  const camDist = Math.max(radius * 2.8, 4);
+  const angle = elapsed * 0.08;
+  const camY = Math.sin(elapsed * 0.05) * radius * 0.3;
+  camera.position.set(
+    centroid.x + Math.cos(angle) * camDist,
+    centroid.y + camY,
+    centroid.z + Math.sin(angle) * camDist
+  );
+  camera.lookAt(centroid);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
