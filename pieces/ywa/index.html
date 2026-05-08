@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>ywa · fidenza flow ribbons</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#1a1714;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;opacity:0.55;font-size:11px;letter-spacing:0.06em;z-index:10}
+</style>
+</head>
+<body>
+<div class="id">ywa</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── simplex 2D (compact) ── */
+const F2=0.5*(Math.sqrt(3)-1), G2=(3-Math.sqrt(3))/6;
+const perm=new Uint8Array(512), grad=[[1,1],[-1,1],[1,-1],[-1,-1],[1,0],[-1,0],[0,1],[0,-1]];
+{const p=new Uint8Array(256);for(let i=0;i<256;i++)p[i]=i;
+ for(let i=255;i>0;i--){const j=Math.floor(Math.random()*(i+1));[p[i],p[j]]=[p[j],p[i]];}
+ for(let i=0;i<512;i++)perm[i]=p[i&255];}
+function simplex2(x,y){
+  const s=(x+y)*F2,i=Math.floor(x+s),j=Math.floor(y+s);
+  const t=(i+j)*G2,x0=x-(i-t),y0=y-(j-t);
+  const i1=x0>y0?1:0,j1=x0>y0?0:1;
+  const x1=x0-i1+G2,y1=y0-j1+G2,x2=x0-1+2*G2,y2=y0-1+2*G2;
+  const ii=i&255,jj=j&255;
+  let n0=0,n1=0,n2=0;
+  let t0=0.5-x0*x0-y0*y0;if(t0>0){t0*=t0;const g=grad[perm[ii+perm[jj]]%8];n0=t0*t0*(g[0]*x0+g[1]*y0);}
+  let t1=0.5-x1*x1-y1*y1;if(t1>0){t1*=t1;const g=grad[perm[ii+i1+perm[jj+j1]]%8];n1=t1*t1*(g[0]*x1+g[1]*y1);}
+  let t2=0.5-x2*x2-y2*y2;if(t2>0){t2*=t2;const g=grad[perm[ii+1+perm[jj+1]]%8];n2=t2*t2*(g[0]*x2+g[1]*y2);}
+  return 70*(n0+n1+n2);
+}
+
+/* ── flow field ── */
+const FIELD_RES=120, FIELD_SCALE=0.018, DOMAIN=16;
+function flowAngle(x,y){
+  return simplex2(x*FIELD_SCALE,y*FIELD_SCALE)*Math.PI*2
+       + simplex2(x*FIELD_SCALE*2.3+100,y*FIELD_SCALE*2.3+100)*Math.PI*0.4;
+}
+
+/* ── occupancy grid for collision ── */
+const OCC_RES=400, OCC_CELL=DOMAIN/OCC_RES;
+const occ=new Uint8Array(OCC_RES*OCC_RES);
+function occIdx(x,y){
+  const gx=Math.floor((x+DOMAIN*0.5)/OCC_CELL),gy=Math.floor((y+DOMAIN*0.5)/OCC_CELL);
+  if(gx<0||gx>=OCC_RES||gy<0||gy>=OCC_RES)return -1;
+  return gy*OCC_RES+gx;
+}
+function markOcc(x,y,r){
+  const cells=Math.ceil(r/OCC_CELL)+1;
+  const gx0=Math.floor((x+DOMAIN*0.5)/OCC_CELL),gy0=Math.floor((y+DOMAIN*0.5)/OCC_CELL);
+  for(let dy=-cells;dy<=cells;dy++)for(let dx=-cells;dx<=cells;dx++){
+    const gx=gx0+dx,gy=gy0+dy;
+    if(gx>=0&&gx<OCC_RES&&gy>=0&&gy<OCC_RES)occ[gy*OCC_RES+gx]=1;
+  }
+}
+function checkOcc(x,y,r){
+  const cells=Math.ceil(r/OCC_CELL);
+  const gx0=Math.floor((x+DOMAIN*0.5)/OCC_CELL),gy0=Math.floor((y+DOMAIN*0.5)/OCC_CELL);
+  for(let dy=-cells;dy<=cells;dy++)for(let dx=-cells;dx<=cells;dx++){
+    const gx=gx0+dx,gy=gy0+dy;
+    if(gx<0||gx>=OCC_RES||gy<0||gy>=OCC_RES)return true;
+    if(occ[gy*OCC_RES+gx])return true;
+  }
+  return false;
+}
+
+/* ── palette: Fidenza "Luxe" earth tones ── */
+const PALETTE=[
+  new THREE.Color(0.76,0.42,0.28),  // terracotta
+  new THREE.Color(0.55,0.58,0.45),  // sage
+  new THREE.Color(0.38,0.45,0.52),  // dusty slate
+  new THREE.Color(0.82,0.72,0.52),  // ochre
+  new THREE.Color(0.90,0.86,0.78),  // warm cream
+  new THREE.Color(0.28,0.24,0.22),  // dark umber
+  new THREE.Color(0.62,0.32,0.34),  // muted rose
+  new THREE.Color(0.44,0.52,0.42),  // olive
+];
+
+/* ── generate streamlines ── */
+const streamlines=[];
+const STEP=0.12, MAX_LEN=300, MIN_LEN=12;
+const ATTEMPTS=2200;
+
+for(let a=0;a<ATTEMPTS&&streamlines.length<180;a++){
+  const sx=(Math.random()-0.5)*DOMAIN*0.88, sy=(Math.random()-0.5)*DOMAIN*0.88;
+  const baseW=0.08+Math.random()*0.28;
+  if(checkOcc(sx,sy,baseW*1.5))continue;
+
+  const pts=[{x:sx,y:sy}];
+  let cx=sx,cy=sy,ok=true;
+  // integrate forward
+  for(let s=0;s<MAX_LEN;s++){
+    const ang=flowAngle(cx,cy);
+    const nx=cx+Math.cos(ang)*STEP, ny=cy+Math.sin(ang)*STEP;
+    const w=baseW*(0.6+0.4*Math.sin(s*0.05));
+    if(checkOcc(nx,ny,w*1.8)){ok=true;break;}
+    pts.push({x:nx,y:ny});cx=nx;cy=ny;
+  }
+  // integrate backward from seed
+  cx=sx;cy=sy;
+  const bpts=[];
+  for(let s=0;s<MAX_LEN;s++){
+    const ang=flowAngle(cx,cy);
+    const nx=cx-Math.cos(ang)*STEP, ny=cy-Math.sin(ang)*STEP;
+    const w=baseW*(0.6+0.4*Math.sin(s*0.05));
+    if(checkOcc(nx,ny,w*1.8))break;
+    bpts.push({x:nx,y:ny});cx=nx;cy=ny;
+  }
+  bpts.reverse();
+  const full=bpts.concat(pts);
+  if(full.length<MIN_LEN)continue;
+
+  // mark occupancy
+  for(let i=0;i<full.length;i++){
+    const w=baseW*(0.6+0.4*Math.sin(i*0.05));
+    markOcc(full[i].x,full[i].y,w*1.6);
+  }
+  streamlines.push({pts:full, width:baseW, color:PALETTE[Math.floor(Math.random()*PALETTE.length)]});
+}
+
+/* ── build ribbon geometry for each streamline ── */
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.setClearColor(0x1a1714,1);
+document.body.appendChild(renderer.domElement);
+
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(38,innerWidth/innerHeight,0.1,80);
+camera.position.set(0,14,12);
+camera.lookAt(0,0,0);
+
+// height function for 3D lift
+function heightAt(x,y){
+  return simplex2(x*0.06+50,y*0.06+50)*0.8
+       + simplex2(x*0.12+200,y*0.12+200)*0.3;
+}
+
+// build merged geometry
+const ribbonGroup=new THREE.Group();
+
+for(const sl of streamlines){
+  const {pts,width,color}=sl;
+  if(pts.length<3)continue;
+  const verts=[],indices=[],colors=[];
+  const darkFactor=0.7+Math.random()*0.3;
+  const c=color.clone().multiplyScalar(darkFactor);
+  // slight per-streamline color variation
+  const cVar=new THREE.Color(
+    c.r+(Math.random()-0.5)*0.06,
+    c.g+(Math.random()-0.5)*0.06,
+    c.b+(Math.random()-0.5)*0.04
+  );
+
+  for(let i=0;i<pts.length;i++){
+    const p=pts[i];
+    const t=i/(pts.length-1);
+    // width tapers at ends
+    const taper=Math.sin(t*Math.PI);
+    const w=width*(0.5+0.5*taper)*(0.7+0.3*Math.sin(i*0.08));
+    // perpendicular
+    let dx=0,dy=1;
+    if(i<pts.length-1){dx=pts[i+1].x-p.x;dy=pts[i+1].y-p.y;}
+    else{dx=p.x-pts[i-1].x;dy=p.y-pts[i-1].y;}
+    const len=Math.sqrt(dx*dx+dy*dy)||1;
+    const nx=-dy/len, ny=dx/len;
+    const h=heightAt(p.x,p.y);
+    // two verts per point (left/right of ribbon)
+    verts.push(p.x+nx*w, h, p.y+ny*w);
+    verts.push(p.x-nx*w, h, p.y-ny*w);
+    // per-vertex color with subtle variation
+    const edgeDark=0.92+Math.random()*0.08;
+    colors.push(cVar.r*edgeDark,cVar.g*edgeDark,cVar.b*edgeDark);
+    colors.push(cVar.r*0.88*edgeDark,cVar.g*0.88*edgeDark,cVar.b*0.88*edgeDark);
+  }
+  for(let i=0;i<pts.length-1;i++){
+    const a=i*2,b=a+1,c=a+2,d=a+3;
+    indices.push(a,c,b, b,c,d);
+  }
+  const geom=new THREE.BufferGeometry();
+  geom.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
+  geom.setAttribute('color',new THREE.Float32BufferAttribute(colors,3));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  const mat=new THREE.ShaderMaterial({
+    vertexShader:`
+      attribute vec3 color;
+      varying vec3 vColor;
+      varying vec3 vWorldPos;
+      void main(){
+        vColor=color;
+        vec4 wp=modelMatrix*vec4(position,1.0);
+        vWorldPos=wp.xyz;
+        gl_Position=projectionMatrix*viewMatrix*wp;
+      }`,
+    fragmentShader:`
+      varying vec3 vColor;
+      varying vec3 vWorldPos;
+      void main(){
+        // subtle depth fog toward background
+        float d=length(vWorldPos);
+        float fog=1.0-exp(-d*d*0.0006);
+        vec3 bgCol=vec3(0.102,0.090,0.078);
+        // film grain
+        float grain=fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233)))*43758.5453);
+        vec3 col=mix(vColor,bgCol,fog*0.35);
+        col+=vec3((grain-0.5)*0.025);
+        gl_FragColor=vec4(col,1.0);
+      }`,
+    side:THREE.DoubleSide
+  });
+  const mesh=new THREE.Mesh(geom,mat);
+  ribbonGroup.add(mesh);
+}
+
+scene.add(ribbonGroup);
+
+// ambient ground plane — subtle paper texture
+const groundGeom=new THREE.PlaneGeometry(28,28,1,1);
+const groundMat=new THREE.ShaderMaterial({
+  vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+  fragmentShader:`
+    varying vec2 vUv;
+    void main(){
+      float grain=fract(sin(dot(vUv*400.0,vec2(12.9898,78.233)))*43758.5453)*0.03;
+      vec3 bg=vec3(0.102,0.090,0.078)+grain;
+      // warm center glow
+      float c=1.0-smoothstep(0.0,0.7,length(vUv-0.5));
+      bg+=vec3(0.02,0.015,0.01)*c;
+      gl_FragColor=vec4(bg,1.0);
+    }`,
+  side:THREE.DoubleSide
+});
+const ground=new THREE.Mesh(groundGeom,groundMat);
+ground.rotation.x=-Math.PI/2;
+ground.position.y=-1.2;
+scene.add(ground);
+
+// warm side-light gradient (top-down soft light)
+const dLight=new THREE.DirectionalLight(0xfff0e0,0.4);
+dLight.position.set(3,10,2);
+scene.add(dLight);
+scene.add(new THREE.AmbientLight(0x887766,0.3));
+
+// gentle camera drift
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+function loop(t){
+  const s=t*0.001;
+  // very slow orbit — sculptural reveal
+  const ang=s*0.04;
+  const radius=15+Math.sin(s*0.02)*2;
+  const elev=12+Math.sin(s*0.035)*3;
+  camera.position.set(Math.sin(ang)*radius, elev, Math.cos(ang)*radius);
+  camera.lookAt(0,0,0);
+  renderer.render(scene,camera);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
