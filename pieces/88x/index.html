@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- MOTION: sway, intensity: gentle -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>88x · thread memory</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#050607;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;opacity:0.55;font-size:11px;letter-spacing:0.06em}
+</style>
+</head>
+<body>
+<div class="id">88x</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── Chiharu Shiota thread installation ──────────────────────────
+   A single dress suspended in architectural darkness, held by
+   14 000 taut crimson threads radiating to ceiling, walls, floor.
+   Palette: monochrome crimson (#9c1f1f) on near-black.
+   Technique: LineSegments + additive blending, per-strand sway.
+   Reference: Shiota's "The Key in the Hand" (2015, Venice),
+   "Uncertain Journey" (2016, Mori Art Museum).
+   ─────────────────────────────────────────────────────────────── */
+
+const THREADS = 14000;
+const BG = 0x050607;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 80);
+camera.position.set(0, 0.2, 7);
+camera.lookAt(0, 0, 0);
+
+/* ── dress form (LatheGeometry) ───────────────────────────────── */
+const profile = [
+  new THREE.Vector2(0.001, 1.18),   // crown / hanger hook
+  new THREE.Vector2(0.05,  1.10),   // narrow neck
+  new THREE.Vector2(0.20,  0.92),   // shoulders
+  new THREE.Vector2(0.23,  0.65),   // chest
+  new THREE.Vector2(0.15,  0.38),   // waist cinch
+  new THREE.Vector2(0.14,  0.22),   // waist low
+  new THREE.Vector2(0.24,  0.00),   // hip
+  new THREE.Vector2(0.38, -0.40),   // upper skirt
+  new THREE.Vector2(0.50, -0.72),   // lower skirt
+  new THREE.Vector2(0.56, -0.98),   // hem
+  new THREE.Vector2(0.58, -1.08),   // hem edge
+];
+const dressGeom = new THREE.LatheGeometry(profile, 28);
+const dressY = 0.35;
+
+// ghostly solid dress — dark enough to recede, bright enough to read
+const dressMesh = new THREE.Mesh(dressGeom, new THREE.MeshBasicMaterial({
+  color: 0x1c0707, transparent: true, opacity: 0.55, side: THREE.DoubleSide
+}));
+dressMesh.position.y = dressY;
+scene.add(dressMesh);
+
+// wireframe overlay for edge definition
+const dressWire = new THREE.Mesh(dressGeom, new THREE.MeshBasicMaterial({
+  color: 0x3a1212, transparent: true, opacity: 0.18, wireframe: true
+}));
+dressWire.position.y = dressY;
+scene.add(dressWire);
+
+/* ── surface sampler ──────────────────────────────────────────── */
+function sampleTriangle(a, b, c) {
+  let u = Math.random(), v = Math.random();
+  if (u + v > 1) { u = 1 - u; v = 1 - v; }
+  return new THREE.Vector3(
+    a.x * (1 - u - v) + b.x * u + c.x * v,
+    a.y * (1 - u - v) + b.y * u + c.y * v,
+    a.z * (1 - u - v) + b.z * u + c.z * v
+  );
+}
+
+function sampleSurface(geom, n, yOff) {
+  const pos = geom.attributes.position;
+  const idx = geom.index;
+  const triN = idx ? idx.count / 3 : pos.count / 3;
+  const out = [];
+  const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    const t = Math.floor(Math.random() * triN);
+    const i0 = idx ? idx.getX(t * 3)     : t * 3;
+    const i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+    const i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+    va.fromBufferAttribute(pos, i0);
+    vb.fromBufferAttribute(pos, i1);
+    vc.fromBufferAttribute(pos, i2);
+    const p = sampleTriangle(va, vb, vc);
+    p.y += yOff;
+    out.push(p);
+  }
+  return out;
+}
+
+const dressPts = sampleSurface(dressGeom, THREADS, dressY);
+
+/* ── far-anchor generators ────────────────────────────────────── */
+function ceilingAnchor() {
+  return new THREE.Vector3(
+    (Math.random() - 0.5) * 4.0,
+    3.2 + Math.random() * 1.8,
+    (Math.random() - 0.5) * 4.0
+  );
+}
+function wallAnchor() {
+  const th = Math.random() * Math.PI * 2;
+  const r  = 3.0 + Math.random() * 2.5;
+  return new THREE.Vector3(
+    Math.cos(th) * r,
+    (Math.random() - 0.4) * 3.5,
+    Math.sin(th) * r
+  );
+}
+function floorAnchor() {
+  return new THREE.Vector3(
+    (Math.random() - 0.5) * 5.5,
+    -2.5 - Math.random() * 1.2,
+    (Math.random() - 0.5) * 5.5
+  );
+}
+
+/* ── build thread segments ────────────────────────────────────── */
+const pos   = new Float32Array(THREADS * 6);
+const aPhase = new Float32Array(THREADS * 2);
+const aFlex  = new Float32Array(THREADS * 2);
+const aAlpha = new Float32Array(THREADS * 2);
+
+let vi = 0, pi = 0, fi = 0, ai = 0;
+
+for (let i = 0; i < THREADS; i++) {
+  const dp = dressPts[i];
+  const roll = Math.random();
+  let far, dressEnd = true;
+
+  if (roll < 0.32) {
+    far = ceilingAnchor();           // suspension threads
+  } else if (roll < 0.68) {
+    far = wallAnchor();              // outward web
+  } else if (roll < 0.84) {
+    far = floorAnchor();             // downward cascade
+  } else {
+    // ambient anchor-to-anchor (no dress)
+    dressEnd = false;
+    const a1 = wallAnchor();
+    const a2 = Math.random() < 0.5 ? ceilingAnchor() : wallAnchor();
+    pos[vi++] = a1.x; pos[vi++] = a1.y; pos[vi++] = a1.z;
+    pos[vi++] = a2.x; pos[vi++] = a2.y; pos[vi++] = a2.z;
+    const ph = Math.random() * Math.PI * 2;
+    aPhase[pi++] = ph; aPhase[pi++] = ph + Math.random() * 2.5;
+    aFlex[fi++] = 0.4 + Math.random() * 0.6;
+    aFlex[fi++] = 0.4 + Math.random() * 0.6;
+    const al = 0.025 + Math.random() * 0.035;
+    aAlpha[ai++] = al; aAlpha[ai++] = al;
+    continue;
+  }
+
+  // dress-connected thread
+  pos[vi++] = dp.x; pos[vi++] = dp.y; pos[vi++] = dp.z;
+  pos[vi++] = far.x; pos[vi++] = far.y; pos[vi++] = far.z;
+
+  const ph = Math.random() * Math.PI * 2;
+  aPhase[pi++] = ph;
+  aPhase[pi++] = ph + Math.random() * 2.0;
+
+  aFlex[fi++] = 0.0;                                // dress end: taut
+  aFlex[fi++] = 0.25 + Math.random() * 0.75;        // far end: breathes
+
+  const len = dp.distanceTo(far);
+  const al  = 0.055 + Math.random() * 0.065;
+  aAlpha[ai++] = al;
+  aAlpha[ai++] = Math.max(0.02, al * (1.0 - len * 0.04));
+}
+
+const threadGeom = new THREE.BufferGeometry();
+threadGeom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+threadGeom.setAttribute('aPhase',   new THREE.BufferAttribute(aPhase, 1));
+threadGeom.setAttribute('aFlex',    new THREE.BufferAttribute(aFlex, 1));
+threadGeom.setAttribute('aAlpha',   new THREE.BufferAttribute(aAlpha, 1));
+
+const threadMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime:    { value: 0.0 },
+    uPointer: { value: new THREE.Vector2(0, 0) }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float aPhase;
+    attribute float aFlex;
+    attribute float aAlpha;
+    uniform float uTime;
+    uniform vec2  uPointer;
+    varying float vAlpha;
+    varying float vPhase;
+    varying float vDepth;
+    void main() {
+      vec3 p = position;
+      float t = uTime;
+      // taut sway — breath, not flutter
+      float sw = aFlex * 0.045;
+      p.x += sin(t * 0.65 + aPhase)       * sw;
+      p.y += sin(t * 0.45 + aPhase * 1.3) * sw * 0.55;
+      p.z += cos(t * 0.55 + aPhase * 0.8) * sw * 0.7;
+      // pointer influence (gentle tug)
+      p.x += aFlex * uPointer.x * 0.18;
+      p.y += aFlex * uPointer.y * 0.10;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      vAlpha = aAlpha;
+      vPhase = aPhase;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vPhase;
+    varying float vDepth;
+    void main() {
+      // subtle warmth variation within crimson
+      vec3 warm = vec3(0.65, 0.14, 0.09);
+      vec3 cool = vec3(0.56, 0.11, 0.16);
+      float t = sin(vPhase * 2.7) * 0.5 + 0.5;
+      vec3 col = mix(warm, cool, t);
+      // depth fog — far threads fade into darkness
+      float fog = smoothstep(14.0, 3.0, vDepth);
+      gl_FragColor = vec4(col, vAlpha * fog);
+    }
+  `
+});
+
+const threads = new THREE.LineSegments(threadGeom, threadMat);
+scene.add(threads);
+
+/* ── pointer ──────────────────────────────────────────────────── */
+const ptr = { x: 0, y: 0 };
+addEventListener('pointermove', e => {
+  ptr.x = e.clientX / innerWidth  - 0.5;
+  ptr.y = e.clientY / innerHeight - 0.5;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── render loop ──────────────────────────────────────────────── */
+const t0 = performance.now();
+const smoothPtr = new THREE.Vector2(0, 0);
+
+function loop() {
+  const elapsed = (performance.now() - t0) * 0.001;
+
+  threadMat.uniforms.uTime.value = elapsed;
+  smoothPtr.x += (ptr.x - smoothPtr.x) * 0.025;
+  smoothPtr.y += (ptr.y - smoothPtr.y) * 0.025;
+  threadMat.uniforms.uPointer.value.copy(smoothPtr);
+
+  // slow, contemplative orbit
+  const ang = elapsed * 0.055;
+  const camR = 6.8;
+  camera.position.x = Math.sin(ang) * camR;
+  camera.position.z = Math.cos(ang) * camR;
+  camera.position.y = 0.25 + Math.sin(elapsed * 0.035) * 0.45;
+  camera.lookAt(0, 0.1, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
