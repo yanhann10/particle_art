@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- MOTION: drift, intensity: gentle -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bt6 · process elements · accumulation field</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#0c0a08;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;opacity:0.55;font-size:11px;letter-spacing:0.06em;z-index:10}
+</style>
+</head>
+<body>
+<div class="id">bt6</div>
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  Casey Reas — Process 18 / Process Compendium (2005–2010)
+  400 elements trace circular arcs on the surface of a sphere.
+  When two elements come within ε, a leaf-shaped mark bridges
+  their positions — the leaf is the connecting tissue between
+  agents. Over minutes the canvas builds from open scaffold into
+  a dense, interlocking field. Sumi-ink warmth: bone on near-black.
+  The image is a RECORD of agent interactions, not agent state.
+*/
+
+const BG = 0x0c0a08;
+const W = innerWidth, H = innerHeight;
+
+const renderer = new THREE.WebGLRenderer({
+  antialias: false,
+  preserveDrawingBuffer: true
+});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.autoClear = false;
+renderer.setClearColor(BG, 1);
+renderer.clear();
+document.body.appendChild(renderer.domElement);
+
+// ortho camera for 2D compositing
+const camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+camOrtho.position.z = 1;
+
+// 3D perspective camera for projecting agents
+const cam3D = new THREE.PerspectiveCamera(48, W / H, 0.1, 100);
+cam3D.position.set(0, 0, 4.5);
+cam3D.lookAt(0, 0, 0);
+
+// --- fade scene (slow darkening for accumulation) ---
+const sceneFade = new THREE.Scene();
+const fadeMat = new THREE.MeshBasicMaterial({
+  color: BG,
+  transparent: true,
+  opacity: 0.0018,
+  depthTest: false
+});
+sceneFade.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), fadeMat));
+
+// --- mark scene (leaf connections drawn additively) ---
+const sceneMark = new THREE.Scene();
+
+// ─── agent system ───
+const N = 400;
+const SPHERE_R = 1.7;
+const EPSILON = 0.42;
+const EPS2 = EPSILON * EPSILON;
+
+const agents = [];
+for (let i = 0; i < N; i++) {
+  // random great-circle plane via axis
+  const ath = Math.acos(2 * Math.random() - 1);
+  const aph = Math.random() * Math.PI * 2;
+  const axis = new THREE.Vector3(
+    Math.sin(ath) * Math.cos(aph),
+    Math.sin(ath) * Math.sin(aph),
+    Math.cos(ath)
+  ).normalize();
+
+  // orthonormal basis on the circle plane
+  const arb = Math.abs(axis.x) < 0.9 ? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,1,0);
+  const u = new THREE.Vector3().crossVectors(axis, arb).normalize();
+  const v = new THREE.Vector3().crossVectors(axis, u).normalize();
+
+  // small-circle tilt (not all great circles)
+  const tilt = 0.55 + Math.random() * 0.45;
+  const offset = Math.sqrt(Math.max(0, 1 - tilt * tilt)) * SPHERE_R;
+  const circR = SPHERE_R * tilt;
+
+  const angle0 = Math.random() * Math.PI * 2;
+  const speed = (0.12 + Math.random() * 0.30) * (Math.random() < 0.5 ? 1 : -1);
+
+  agents.push({ axis, u, v, circR, offset, angle: angle0, speed,
+    pos: new THREE.Vector3(), scr: new THREE.Vector2() });
+  // init position
+  const a = agents[i];
+  a.pos.copy(a.u).multiplyScalar(Math.cos(a.angle) * a.circR)
+       .addScaledVector(a.v, Math.sin(a.angle) * a.circR)
+       .addScaledVector(a.axis, a.offset);
+}
+
+function updateAgents(dt) {
+  for (const a of agents) {
+    a.angle += a.speed * dt;
+    a.pos.copy(a.u).multiplyScalar(Math.cos(a.angle) * a.circR)
+         .addScaledVector(a.v, Math.sin(a.angle) * a.circR)
+         .addScaledVector(a.axis, a.offset);
+    // project to NDC
+    const v3 = a.pos.clone().project(cam3D);
+    a.scr.set(v3.x, v3.y);
+  }
+}
+
+// ─── leaf-mark geometry ───
+// each leaf = 2 triangles (4 unique verts, 6 indices)
+const MAX_MARKS = 3000;
+const posArr = new Float32Array(MAX_MARKS * 4 * 3);
+const colArr = new Float32Array(MAX_MARKS * 4 * 4);
+const idxArr = new Uint32Array(MAX_MARKS * 6);
+
+// precompute index pattern
+for (let m = 0; m < MAX_MARKS; m++) {
+  const b = m * 4;
+  const ii = m * 6;
+  idxArr[ii]   = b;     idxArr[ii+1] = b+1; idxArr[ii+2] = b+2;
+  idxArr[ii+3] = b;     idxArr[ii+4] = b+2; idxArr[ii+5] = b+3;
+}
+
+const markGeo = new THREE.BufferGeometry();
+markGeo.setAttribute('position', new THREE.BufferAttribute(posArr, 3).setUsage(THREE.DynamicDrawUsage));
+markGeo.setAttribute('color', new THREE.BufferAttribute(colArr, 4).setUsage(THREE.DynamicDrawUsage));
+markGeo.setIndex(new THREE.BufferAttribute(idxArr, 1));
+markGeo.setDrawRange(0, 0);
+
+const markMat = new THREE.MeshBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthTest: false,
+  side: THREE.DoubleSide
+});
+sceneMark.add(new THREE.Mesh(markGeo, markMat));
+
+// palette: sumi-ink warmth — bone, parchment, umber, single burnt-sienna accent
+const PAL = [
+  [0.90, 0.86, 0.74],   // warm bone
+  [0.82, 0.72, 0.55],   // aged parchment
+  [0.68, 0.52, 0.32],   // dark amber
+  [0.94, 0.90, 0.82],   // near white
+  [0.56, 0.18, 0.10],   // burnt sienna accent
+];
+
+// contact-time map for opacity growth
+const contactTime = new Map();
+
+function buildMarks() {
+  let mc = 0;
+  const active = new Set();
+
+  for (let i = 0; i < N && mc < MAX_MARKS; i++) {
+    const ai = agents[i];
+    for (let j = i + 1; j < N && mc < MAX_MARKS; j++) {
+      const aj = agents[j];
+      const dx = ai.pos.x - aj.pos.x;
+      const dy = ai.pos.y - aj.pos.y;
+      const dz = ai.pos.z - aj.pos.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+
+      if (d2 < EPS2 && d2 > 0.002) {
+        const key = i * N + j;
+        active.add(key);
+        let ct = (contactTime.get(key) || 0) + 0.016;
+        contactTime.set(key, ct);
+
+        const proximity = 1 - Math.sqrt(d2) / EPSILON;
+
+        // leaf endpoints = agent screen positions
+        // leaf midpoint bulges perpendicular
+        const sx = ai.scr.x, sy = ai.scr.y;
+        const ex = aj.scr.x, ey = aj.scr.y;
+        const mx = (sx + ex) * 0.5, my = (sy + ey) * 0.5;
+        const edx = ex - sx, edy = ey - sy;
+        const len = Math.sqrt(edx*edx + edy*edy) + 1e-6;
+        const nx = -edy / len, ny = edx / len;
+
+        // leaf width: proportional to length, capped
+        const leafW = Math.min(len * 0.35, 0.018) * (0.7 + proximity * 0.5);
+
+        // alpha grows with contact time
+        const alpha = Math.min(0.015 + ct * 0.4, 0.055) * (0.6 + proximity * 0.6);
+
+        const ci = ((i + j) * 7) % PAL.length;
+        const [cr, cg, cb] = PAL[ci];
+
+        const b = mc * 12; // 4 verts * 3
+        const bc = mc * 16; // 4 verts * 4
+
+        // vert 0: start (leaf tip)
+        posArr[b]    = sx; posArr[b+1]  = sy; posArr[b+2]  = 0;
+        // vert 1: mid + normal (leaf bulge)
+        posArr[b+3]  = mx + nx*leafW; posArr[b+4]  = my + ny*leafW; posArr[b+5]  = 0;
+        // vert 2: end (leaf tip)
+        posArr[b+6]  = ex; posArr[b+7]  = ey; posArr[b+8]  = 0;
+        // vert 3: mid - normal (leaf bulge other side)
+        posArr[b+9]  = mx - nx*leafW; posArr[b+10] = my - ny*leafW; posArr[b+11] = 0;
+
+        // colors with alpha
+        for (let k = 0; k < 4; k++) {
+          // tips slightly dimmer
+          const tipFade = (k === 0 || k === 2) ? 0.5 : 1.0;
+          colArr[bc + k*4]     = cr * tipFade;
+          colArr[bc + k*4 + 1] = cg * tipFade;
+          colArr[bc + k*4 + 2] = cb * tipFade;
+          colArr[bc + k*4 + 3] = alpha * tipFade;
+        }
+
+        mc++;
+      }
+    }
+  }
+
+  // prune stale contacts
+  for (const [key] of contactTime) {
+    if (!active.has(key)) contactTime.delete(key);
+  }
+
+  markGeo.setDrawRange(0, mc * 6);
+  markGeo.attributes.position.needsUpdate = true;
+  markGeo.attributes.color.needsUpdate = true;
+}
+
+// ─── camera: ultra-slow drift ───
+let camTheta = 0;
+
+// ─── resize ───
+addEventListener('resize', () => {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h);
+  cam3D.aspect = w / h;
+  cam3D.updateProjectionMatrix();
+  renderer.clear();
+});
+
+// ─── pre-render for render gate ───
+// run simulation forward and draw many frames of accumulated marks
+for (let f = 0; f < 120; f++) {
+  updateAgents(0.016);
+  buildMarks();
+  renderer.render(sceneMark, camOrtho);
+}
+
+// ─── main loop ───
+function loop() {
+  updateAgents(0.016);
+
+  // ultra-slow camera orbit (the drawing accumulates from shifting viewpoints)
+  camTheta += 0.0003;
+  cam3D.position.set(
+    Math.sin(camTheta) * 4.5,
+    Math.cos(camTheta * 0.6) * 0.8,
+    Math.cos(camTheta) * 4.5
+  );
+  cam3D.lookAt(0, 0, 0);
+
+  buildMarks();
+
+  // fade: slow darkening
+  renderer.render(sceneFade, camOrtho);
+  // draw new leaf marks additively
+  renderer.render(sceneMark, camOrtho);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
