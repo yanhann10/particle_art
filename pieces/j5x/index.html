@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: propagate, intensity: gentle -->
+<title>j5x · pond ripple leaves · Goldsworthy wave</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#080a0f; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; z-index:10; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size:11px; letter-spacing:0.04em; z-index:10; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size:10px; letter-spacing:0.04em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">j5x</div>
+<div class="hint" id="hint">Andy Goldsworthy · leaf arrangements on still water · wave propagation</div>
+<div class="src">wavefront across a field of leaves</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 400);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x080a0f, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── leaf field parameters ── */
+const N = 4200;
+const FIELD_RADIUS = 28;
+const positions = new Float32Array(N * 3);
+const restPositions = new Float32Array(N * 3);
+const leafSeeds = new Float32Array(N);
+const leafPhases = new Float32Array(N);
+const leafSizes = new Float32Array(N);
+
+// Poisson-ish disc distribution via rejection sampling
+let placed = 0;
+const MIN_DIST = 0.55;
+const buckets = new Map();
+function bkey(x, z) {
+  return `${Math.floor(x / MIN_DIST)},${Math.floor(z / MIN_DIST)}`;
+}
+function canPlace(x, z) {
+  const bx = Math.floor(x / MIN_DIST);
+  const bz = Math.floor(z / MIN_DIST);
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dz = -2; dz <= 2; dz++) {
+      const k = `${bx+dx},${bz+dz}`;
+      const list = buckets.get(k);
+      if (!list) continue;
+      for (const [px, pz] of list) {
+        const ddx = px - x, ddz = pz - z;
+        if (ddx*ddx + ddz*ddz < MIN_DIST*MIN_DIST) return false;
+      }
+    }
+  }
+  return true;
+}
+
+let attempts = 0;
+while (placed < N && attempts < N * 30) {
+  attempts++;
+  const angle = Math.random() * Math.PI * 2;
+  // density falls off toward edges — more leaves near center
+  const rr = Math.sqrt(Math.random()) * FIELD_RADIUS;
+  const x = Math.cos(angle) * rr;
+  const z = Math.sin(angle) * rr;
+  
+  if (placed < 800 || canPlace(x, z)) {
+    const i = placed;
+    restPositions[i*3]   = x;
+    restPositions[i*3+1] = 0;
+    restPositions[i*3+2] = z;
+    positions[i*3]   = x;
+    positions[i*3+1] = 0;
+    positions[i*3+2] = z;
+    leafSeeds[i] = Math.random();
+    leafPhases[i] = Math.random() * 6.283;
+    leafSizes[i] = 0.7 + Math.random() * 0.6;
+    
+    const k = bkey(x, z);
+    if (!buckets.has(k)) buckets.set(k, []);
+    buckets.get(k).push([x, z]);
+    placed++;
+  }
+}
+// fill remaining with random if rejection sampling didn't complete
+while (placed < N) {
+  const angle = Math.random() * Math.PI * 2;
+  const rr = Math.sqrt(Math.random()) * FIELD_RADIUS;
+  const i = placed;
+  restPositions[i*3]   = Math.cos(angle) * rr;
+  restPositions[i*3+1] = 0;
+  restPositions[i*3+2] = Math.sin(angle) * rr;
+  positions[i*3]   = restPositions[i*3];
+  positions[i*3+1] = 0;
+  positions[i*3+2] = restPositions[i*3+2];
+  leafSeeds[i] = Math.random();
+  leafPhases[i] = Math.random() * 6.283;
+  leafSizes[i] = 0.7 + Math.random() * 0.6;
+  placed++;
+}
+
+/* ── wave sources ── */
+const MAX_WAVES = 6;
+const waves = []; // { x, z, birthTime, amplitude, speed, decay }
+
+function spawnWave(t) {
+  // spawn within inner 60% of field for best visual coverage
+  const angle = Math.random() * Math.PI * 2;
+  const r = Math.random() * FIELD_RADIUS * 0.6;
+  waves.push({
+    x: Math.cos(angle) * r,
+    z: Math.sin(angle) * r,
+    birthTime: t,
+    amplitude: 1.2 + Math.random() * 0.8,
+    speed: 5.0 + Math.random() * 3.0,
+    decay: 0.06 + Math.random() * 0.03,
+    frequency: 0.8 + Math.random() * 0.4
+  });
+  if (waves.length > MAX_WAVES) waves.shift();
+}
+
+// spawn initial wave so something is visible immediately
+spawnWave(0);
+spawnWave(-1.5);
+
+/* ── shader material ── */
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float phase;
+    attribute float leafSize;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vSeed;
+    void main(){
+      vec3 p = position;
+      
+      // height displacement drives color
+      float h = p.y; // set by JS wave computation
+      float hNorm = clamp(h * 0.5 + 0.5, 0.0, 1.0);
+      
+      // palette: autumn pond — deep olive → amber → pale gold (crests)
+      // with subtle variation per leaf
+      vec3 cDeep   = vec3(0.12, 0.14, 0.08); // dark water-stained leaf
+      vec3 cMid    = vec3(0.58, 0.32, 0.10); // rust / burnt sienna
+      vec3 cAmber  = vec3(0.82, 0.58, 0.18); // amber
+      vec3 cGold   = vec3(0.95, 0.85, 0.45); // pale gold highlight
+      
+      // per-leaf color shift
+      float leafHue = seed;
+      vec3 base = mix(cDeep, cMid, smoothstep(0.2, 0.5, hNorm + leafHue * 0.15));
+      base = mix(base, cAmber, smoothstep(0.45, 0.7, hNorm));
+      base = mix(base, cGold, smoothstep(0.75, 1.0, hNorm) * 0.7);
+      
+      // slight green tint for some leaves
+      if (leafHue < 0.25) {
+        base = mix(base, vec3(0.18, 0.28, 0.08), 0.3 * (1.0 - hNorm));
+      }
+      
+      vCol = base;
+      vAlpha = 0.55 + 0.45 * smoothstep(0.3, 0.9, hNorm);
+      vSeed = seed;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = leafSize * (2.5 + 1.5 * hNorm) * uPixel * (55.0 / max(dist, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vSeed;
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      
+      // leaf-like shape: ellipse with pointed tip
+      // rotate per seed
+      float angle = vSeed * 3.14159;
+      float ca = cos(angle), sa = sin(angle);
+      vec2 ruv = vec2(ca*uv.x - sa*uv.y, sa*uv.x + ca*uv.y);
+      
+      // elliptical with taper
+      float ex = ruv.x * 2.2;
+      float ey = ruv.y * 1.4;
+      // taper: narrower at +y end
+      ex *= 1.0 + ruv.y * 0.8;
+      
+      float d = ex*ex + ey*ey;
+      if (d > 0.25) discard;
+      
+      // central vein
+      float vein = exp(-abs(ruv.x) * 30.0) * 0.15;
+      
+      float a = exp(-d * 8.0) * vAlpha;
+      vec3 col = vCol + vein * vec3(0.1, 0.08, 0.02);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(leafSeeds, 1));
+geom.setAttribute('phase', new THREE.BufferAttribute(leafPhases, 1));
+geom.setAttribute('leafSize', new THREE.BufferAttribute(leafSizes, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── water surface (dark reflective plane) ── */
+const waterGeom = new THREE.CircleGeometry(FIELD_RADIUS * 1.3, 64);
+const waterMat = new THREE.MeshBasicMaterial({
+  color: 0x060810,
+  transparent: true,
+  opacity: 0.7
+});
+const water = new THREE.Mesh(waterGeom, waterMat);
+water.rotation.x = -Math.PI / 2;
+water.position.y = -0.3;
+scene.add(water);
+
+/* ── subtle ambient particles (dust on water surface) ── */
+const dustN = 600;
+const dustPos = new Float32Array(dustN * 3);
+for (let i = 0; i < dustN; i++) {
+  const a = Math.random() * Math.PI * 2;
+  const r = Math.sqrt(Math.random()) * FIELD_RADIUS * 1.1;
+  dustPos[i*3]   = Math.cos(a) * r;
+  dustPos[i*3+1] = -0.1 + Math.random() * 0.3;
+  dustPos[i*3+2] = Math.sin(a) * r;
+}
+const dustGeom = new THREE.BufferGeometry();
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({
+  color: 0x2a3040,
+  size: 0.15,
+  transparent: true,
+  opacity: 0.25,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+/* ── fog-like depth atmosphere via vertical gradient background ── */
+// Dark-to-slightly-less-dark gradient via a large backdrop
+const bgGeom = new THREE.PlaneGeometry(200, 200);
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false,
+  uniforms: {},
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      // deep night gradient
+      vec3 top = vec3(0.04, 0.05, 0.09);
+      vec3 bot = vec3(0.02, 0.02, 0.04);
+      vec3 col = mix(bot, top, vUv.y);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const bg = new THREE.Mesh(bgGeom, bgMat);
+bg.position.set(0, 0, -60);
+bg.renderOrder = -1;
+scene.add(bg);
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── animation loop ── */
+let nextWaveTime = 2.5;
+const hintEl = document.getElementById('hint');
+const startT = performance.now();
+let lastT = startT;
+
+function computeWaves(t) {
+  // spawn new waves periodically (narrative: stones dropped into pond)
+  if (t > nextWaveTime) {
+    spawnWave(t);
+    // varying intervals — sometimes a flurry, sometimes stillness
+    nextWaveTime = t + 2.5 + Math.random() * 4.5;
+  }
+  
+  // compute height displacement for each leaf
+  for (let i = 0; i < N; i++) {
+    const rx = restPositions[i*3];
+    const rz = restPositions[i*3+2];
+    let h = 0;
+    
+    for (const w of waves) {
+      const age = t - w.birthTime;
+      if (age < 0) continue;
+      
+      const dx = rx - w.x;
+      const dz = rz - w.z;
+      const dist = Math.sqrt(dx*dx + dz*dz);
+      
+      // wavefront position
+      const wavefrontDist = age * w.speed;
+      const distFromFront = Math.abs(dist - wavefrontDist);
+      
+      // wave envelope: gaussian around wavefront, decaying with distance from source
+      const envelope = Math.exp(-distFromFront * distFromFront * w.frequency * w.frequency)
+                     * Math.exp(-dist * w.decay)
+                     * Math.exp(-age * 0.15); // temporal fade
+      
+      // oscillation
+      const phase = dist * w.frequency - age * w.speed * w.frequency;
+      h += w.amplitude * envelope * Math.sin(phase * 2.5);
+    }
+    
+    // gentle ambient bob per leaf
+    h += Math.sin(t * 0.4 + leafPhases[i]) * 0.04;
+    
+    positions[i*3]   = rx + h * 0.05 * Math.sin(leafPhases[i]); // slight lateral sway
+    positions[i*3+1] = h;
+    positions[i*3+2] = rz + h * 0.05 * Math.cos(leafPhases[i]);
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+}
+
+function updateCamera(t) {
+  // slow overhead orbit — looking down at the pond surface
+  const orbitRadius = 38;
+  const orbitHeight = 32;
+  const angle = t * 0.04;
+  
+  // gentle breathing in orbit radius
+  const breathe = 1.0 + 0.06 * Math.sin(t * 0.15);
+  
+  camera.position.x = Math.cos(angle) * orbitRadius * breathe;
+  camera.position.z = Math.sin(angle) * orbitRadius * breathe;
+  camera.position.y = orbitHeight + Math.sin(t * 0.08) * 3;
+  camera.lookAt(0, -1, 0);
+}
+
+let frameCount = 0;
+
+function loop() {
+  const now = performance.now();
+  const dt = Math.min((now - lastT) / 1000, 0.05);
+  lastT = now;
+  const t = (now - startT) / 1000;
+  
+  frameCount++;
+  
+  uniforms.uTime.value = t;
+  computeWaves(t);
+  updateCamera(t);
+  
+  // update hint with wave count
+  if (frameCount % 90 === 0) {
+    const activeWaves = waves.filter(w => (t - w.birthTime) < 12).length;
+    hintEl.textContent = `${activeWaves} wavefront${activeWaves !== 1 ? 's' : ''} · ${N} leaves · pond propagation`;
+  }
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
