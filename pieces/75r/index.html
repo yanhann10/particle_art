@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>75r · relational gathering</title>
+<!-- MOTION: gather, intensity: gentle -->
+<style>
+html, body { margin:0; padding:0; height:100%; background:#0d0f0a; overflow:hidden; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+      font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; letter-spacing:0.06em; }
+.social { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:11px;
+          font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; letter-spacing:0.04em;
+          text-align:right; line-height:1.6; }
+</style>
+</head>
+<body>
+<div class="id">75r</div>
+<div class="social" id="social">tabs 1 · pulses 0</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── social layer ─────────────────────────────────── */
+const myId = Math.random().toString(36).slice(2,8);
+let tabCount = 1, pulseCount = 0;
+const externalForce = new THREE.Vector3();
+const sharedCentroid = new THREE.Vector3();
+const socialEl = document.getElementById('social');
+const knownTabs = new Map();
+knownTabs.set(myId, Date.now());
+
+const bc = new BroadcastChannel('relational-gathering');
+bc.onmessage = e => {
+  const d = e.data;
+  if (d.type === 'presence') {
+    knownTabs.set(d.id, Date.now());
+    sharedCentroid.lerp(new THREE.Vector3(d.cx,d.cy,d.cz), 0.25);
+  } else if (d.type === 'pulse') {
+    externalForce.set(d.fx,d.fy,d.fz);
+    pulseCount++;
+  }
+};
+setInterval(() => {
+  const now = Date.now();
+  for (const [id,last] of knownTabs) if (now-last>6000 && id!==myId) knownTabs.delete(id);
+  knownTabs.set(myId, now);
+  tabCount = knownTabs.size;
+  bc.postMessage({type:'presence',id:myId,cx:centroid.x,cy:centroid.y,cz:centroid.z});
+  socialEl.textContent = `tabs ${tabCount} · pulses ${pulseCount}`;
+}, 2000);
+
+/* WebSocket — Binance BTC trade stream */
+let ws = null, lastPrice = 0;
+function connectWS(){
+  try {
+    ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade');
+    ws.onmessage = e => {
+      try {
+        const p = parseFloat(JSON.parse(e.data).p);
+        if (lastPrice > 0) {
+          const v = (p - lastPrice) / lastPrice;
+          const a = p % 6.28;
+          externalForce.set(Math.cos(a)*v*60, v*40, Math.sin(a)*v*60);
+          pulseCount++;
+          bc.postMessage({type:'pulse',fx:externalForce.x,fy:externalForce.y,fz:externalForce.z});
+          if (pulseCount%10===0) socialEl.textContent = `tabs ${tabCount} · pulses ${pulseCount}`;
+        }
+        lastPrice = p;
+      } catch(_){}
+    };
+    ws.onclose = () => setTimeout(connectWS, 5000);
+    ws.onerror = () => { try{ws.close();}catch(_){} };
+  } catch(_){}
+}
+connectWS();
+
+/* ── scene ────────────────────────────────────────── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 2, 28);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0d0f0a, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 16000;
+const pos = new Float32Array(N*3);
+const vel = new Float32Array(N*3);
+const ltype = new Float32Array(N);
+const seed = new Float32Array(N);
+const ph   = new Float32Array(N);
+
+for (let i=0; i<N; i++){
+  const r = 6 + Math.random()*16;
+  const th = Math.random()*Math.PI*2;
+  const phi = Math.acos(2*Math.random()-1);
+  pos[i*3]   = r*Math.sin(phi)*Math.cos(th);
+  pos[i*3+1] = r*Math.sin(phi)*Math.sin(th)*0.6;
+  pos[i*3+2] = r*Math.cos(phi);
+  ltype[i] = Math.floor(Math.random()*4);
+  seed[i]  = Math.random();
+  ph[i]    = Math.random()*Math.PI*2;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos,3));
+geom.setAttribute('leafType', new THREE.BufferAttribute(ltype,1));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seed,1));
+geom.setAttribute('phase',    new THREE.BufferAttribute(ph,1));
+
+const uniforms = {
+  uTime:  {value:0},
+  uPixel: {value:renderer.getPixelRatio()},
+  uTabs:  {value:1},
+  uPulse: {value:0}
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent:true, depthWrite:false,
+  blending: THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime, uPixel, uTabs, uPulse;
+    attribute float leafType, seed, phase;
+    varying vec3 vCol;
+    varying float vAlpha, vAngle;
+    void main(){
+      vec3 p = position;
+      // palette — deep moss / copper / dried rose / parchment
+      vec3 c;
+      if (leafType < 0.5)      c = vec3(0.176, 0.353, 0.153);
+      else if (leafType < 1.5) c = vec3(0.769, 0.471, 0.243);
+      else if (leafType < 2.5) c = vec3(0.545, 0.176, 0.227);
+      else                     c = vec3(0.910, 0.835, 0.640);
+      // warmth from social presence
+      float w = clamp((uTabs - 1.0)*0.15, 0.0, 0.4);
+      c += vec3(w*0.3, w*0.1, -w*0.1);
+      c += vec3(0.18, 0.12, 0.04) * uPulse;
+      c *= 0.55 + 0.45*seed;
+      vCol = c;
+      vAlpha = 0.45 + 0.35*seed;
+      vAngle = seed*6.28 + uTime*(0.25 + 0.2*seed);
+      vec4 mv = modelViewMatrix * vec4(p,1.0);
+      float d = -mv.z;
+      gl_PointSize = (2.8 + 1.8*seed) * uPixel * (42.0 / max(d,1.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader:`
+    varying vec3 vCol;
+    varying float vAlpha, vAngle;
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      float c = cos(vAngle), s = sin(vAngle);
+      vec2 r = vec2(c*uv.x - s*uv.y, s*uv.x + c*uv.y);
+      // leaf silhouette — pointed ellipse
+      float lx = abs(r.x)*2.8;
+      float ly = abs(r.y)*1.1;
+      float ld = lx*lx + ly*ly + lx*ly*2.2;
+      if (ld > 0.25) discard;
+      float vein = exp(-abs(r.x)*45.0)*0.12;
+      float a = exp(-ld*10.0) * vAlpha;
+      gl_FragColor = vec4((vCol + vec3(vein))*a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* atmosphere — vertical warm→cool gradient behind the leaves */
+const fogGeo = new THREE.PlaneGeometry(90, 90);
+const fogMat = new THREE.ShaderMaterial({
+  transparent:true, depthWrite:false, side:THREE.DoubleSide,
+  uniforms:{uTime:uniforms.uTime},
+  vertexShader:`
+    varying vec2 vUv;
+    void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }
+  `,
+  fragmentShader:`
+    varying vec2 vUv;
+    uniform float uTime;
+    void main(){
+      vec3 warm = vec3(0.11,0.055,0.025);
+      vec3 cool = vec3(0.02,0.035,0.06);
+      vec3 col = mix(cool, warm, vUv.y*0.8+0.1);
+      col += vec3(0.008,0.004,0.0)*sin(vUv.x*3.14+uTime*0.08);
+      float a = 0.32*smoothstep(0.0,0.5,1.0-abs(vUv.y-0.5)*2.0);
+      gl_FragColor = vec4(col,a);
+    }
+  `
+});
+const fogPlane = new THREE.Mesh(fogGeo, fogMat);
+fogPlane.position.z = -18;
+scene.add(fogPlane);
+
+/* dust motes — sparse, large, slow */
+const DUST = 200;
+const dustPos = new Float32Array(DUST*3);
+const dustSeed = new Float32Array(DUST);
+for (let i=0;i<DUST;i++){
+  dustPos[i*3]   = (Math.random()-0.5)*50;
+  dustPos[i*3+1] = (Math.random()-0.5)*30;
+  dustPos[i*3+2] = (Math.random()-0.5)*40;
+  dustSeed[i]    = Math.random();
+}
+const dustGeom = new THREE.BufferGeometry();
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos,3));
+dustGeom.setAttribute('seed', new THREE.BufferAttribute(dustSeed,1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms, transparent:true, depthWrite:false,
+  blending:THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime, uPixel;
+    attribute float seed;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      p.y += sin(uTime*0.2 + seed*6.28)*0.5;
+      p.x += cos(uTime*0.15 + seed*3.0)*0.3;
+      vec4 mv = modelViewMatrix*vec4(p,1.0);
+      gl_PointSize = (1.0+seed*1.5)*uPixel*(30.0/max(-mv.z,1.0));
+      gl_Position = projectionMatrix*mv;
+      vA = 0.06 + 0.04*seed;
+    }
+  `,
+  fragmentShader:`
+    varying float vA;
+    void main(){
+      float r = length(gl_PointCoord-0.5);
+      if(r>0.5) discard;
+      float a = exp(-r*8.0)*vA;
+      gl_FragColor = vec4(vec3(0.9,0.82,0.7)*a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+const centroid = new THREE.Vector3();
+
+/* 3 gathering attractors */
+const att = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const clock = new THREE.Clock();
+let pulseDecay = 0;
+
+function loop(){
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t  = clock.getElapsedTime();
+  uniforms.uTime.value = t;
+  uniforms.uTabs.value = tabCount;
+
+  pulseDecay = pulseDecay*0.93 + externalForce.length()*0.4;
+  pulseDecay = Math.min(pulseDecay, 1);
+  uniforms.uPulse.value = pulseDecay;
+
+  /* shift attractors — shared centroid blends in from other tabs */
+  att[0].set(
+    Math.sin(t*0.13)*3 + sharedCentroid.x*0.4,
+    Math.cos(t*0.17)*2 + sharedCentroid.y*0.4,
+    Math.sin(t*0.11+1)*2
+  );
+  att[1].set(Math.cos(t*0.09+2)*5, Math.sin(t*0.14+1)*3, Math.cos(t*0.12)*3);
+  att[2].set(Math.sin(t*0.07+4)*4, Math.cos(t*0.1+3)*2, Math.sin(t*0.15+2)*4);
+
+  const gs = 0.8 + tabCount*0.4; // more tabs → tighter gathering
+  let cx=0,cy=0,cz=0;
+
+  for (let i=0; i<N; i++){
+    const ix=i*3, iy=i*3+1, iz=i*3+2;
+    const px=pos[ix], py=pos[iy], pz=pos[iz];
+
+    /* nearest attractor */
+    let bi=0, bd=1e9;
+    for (let a=0;a<3;a++){
+      const dx=px-att[a].x, dy=py-att[a].y, dz=pz-att[a].z;
+      const d2=dx*dx+dy*dy+dz*dz;
+      if(d2<bd){bd=d2;bi=a;}
+    }
+    const ax=att[bi].x, ay=att[bi].y, az=att[bi].z;
+    const dx=ax-px, dy=ay-py, dz=az-pz;
+    const dist=Math.sqrt(dx*dx+dy*dy+dz*dz)+0.01;
+
+    /* gather */
+    const gf = gs*0.28/(1+dist*0.25);
+    vel[ix] += dx/dist*gf*dt;
+    vel[iy] += dy/dist*gf*dt;
+    vel[iz] += dz/dist*gf*dt;
+
+    /* orbital tangent — spiral, not beeline */
+    vel[ix] += (-dz/dist)*0.14*dt;
+    vel[iz] += (dx/dist)*0.14*dt;
+
+    /* external pulse */
+    vel[ix] += externalForce.x*dt*0.25;
+    vel[iy] += externalForce.y*dt*0.25;
+    vel[iz] += externalForce.z*dt*0.25;
+
+    /* flutter */
+    vel[ix] += Math.sin(t*2.3+ph[i])*0.06*dt;
+    vel[iy] += Math.cos(t*1.7+ph[i]*1.3)*0.06*dt;
+
+    /* damp */
+    vel[ix]*=0.97; vel[iy]*=0.97; vel[iz]*=0.97;
+
+    pos[ix]+=vel[ix]; pos[iy]+=vel[iy]; pos[iz]+=vel[iz];
+    cx+=pos[ix]; cy+=pos[iy]; cz+=pos[iz];
+  }
+  geom.attributes.position.needsUpdate = true;
+
+  centroid.set(cx/N, cy/N, cz/N);
+  externalForce.multiplyScalar(0.91);
+
+  /* camera tracks centroid gently */
+  camera.position.x += (centroid.x*0.3 - camera.position.x)*0.018;
+  camera.position.y += (centroid.y*0.3+2 - camera.position.y)*0.018;
+  camera.lookAt(centroid.x*0.5, centroid.y*0.5, centroid.z*0.5);
+
+  /* synthetic fallback pulses when no WS */
+  if (!ws || ws.readyState !== WebSocket.OPEN){
+    if (Math.random()<0.004){
+      const a=t*0.7;
+      externalForce.set(Math.cos(a)*0.4,0.25,Math.sin(a)*0.4);
+      pulseCount++;
+      if(pulseCount%5===0) socialEl.textContent=`tabs ${tabCount} · pulses ${pulseCount}`;
+    }
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
