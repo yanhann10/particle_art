@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>7kd · the flock that loses one and finds it again</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a14; overflow:hidden;
+               color:#a8b8d0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  /* desaturated dawn gradient — muted, inhabited sky */
+  body {
+    background:
+      linear-gradient(to bottom,
+        #14141e 0%,
+        #1e1a28 22%,
+        #2e2228 45%,
+        #3e3028 68%,
+        #504030 88%,
+        #5a4a38 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size: 10px; letter-spacing: 0.06em;
+          color: #907858; }
+</style>
+</head>
+<body>
+<div class="id">7kd</div>
+<div class="hint">no input — watch the flock breathe. one bird strays. the others wait.</div>
+<div class="src">descended from sav · depth-cued fog + DOF</div>
+<div class="arc" id="arc">together · 100%</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// sav mutation: depth-cued fog & DOF
+// - particles further from the focal plane grow larger (bokeh blur) and fade
+// - a focus distance tracks the flock centroid depth
+// - background: desaturated gradient + starfield specks + paper grain overlay
+// - atmosphere: subtle volumetric fog tinted to arc color
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 26);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── starfield: scattered specks for inhabited sky
+const STAR_N = 320;
+const starGeo = new THREE.BufferGeometry();
+const starPos = new Float32Array(STAR_N * 3);
+const starAlpha = new Float32Array(STAR_N);
+for (let i = 0; i < STAR_N; i++){
+  // distribute in a wide shell behind the flock
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI * 0.9 - Math.PI * 0.35;
+  const r = 30 + Math.random() * 50;
+  starPos[i*3]   = Math.cos(th) * Math.cos(ph) * r;
+  starPos[i*3+1] = Math.sin(ph) * r + 5;
+  starPos[i*3+2] = Math.sin(th) * Math.cos(ph) * r;
+  starAlpha[i] = 0.15 + Math.random() * 0.45;
+}
+starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+starGeo.setAttribute('alpha', new THREE.BufferAttribute(starAlpha, 1));
+const starMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, fog: false,
+  uniforms: { uPixel: { value: renderer.getPixelRatio() } },
+  vertexShader: `
+    uniform float uPixel;
+    attribute float alpha;
+    varying float vA;
+    void main(){
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = (0.8 + alpha * 1.2) * uPixel;
+      vA = alpha;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 8.0) * vA;
+      gl_FragColor = vec4(0.75, 0.72, 0.68, a);
+    }
+  `
+});
+scene.add(new THREE.Points(starGeo, starMat));
+
+// ────────────── paper grain overlay (screen-space quad)
+const grainMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, depthTest: false, fog: false,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uTime;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+    void main(){
+      float g = hash(vUv * 800.0 + fract(uTime * 0.3) * 100.0);
+      gl_FragColor = vec4(vec3(g), 0.035);
+    }
+  `
+});
+const grainQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), grainMat);
+grainQuad.frustumCulled = false;
+
+// ────────────── atmospheric fog plane — a subtle haze band at mid-depth
+const fogPlaneMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, fog: false, side: THREE.DoubleSide,
+  uniforms: { uCohesion: { value: 1.0 } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uCohesion;
+    void main(){
+      float band = smoothstep(0.0, 0.35, vUv.y) * smoothstep(1.0, 0.65, vUv.y);
+      vec3 warm = vec3(0.35, 0.25, 0.18);
+      vec3 cool = vec3(0.18, 0.22, 0.32);
+      vec3 col = mix(cool, warm, uCohesion);
+      gl_FragColor = vec4(col, band * 0.06);
+    }
+  `
+});
+const fogPlane = new THREE.Mesh(new THREE.PlaneGeometry(60, 18), fogPlaneMat);
+fogPlane.position.z = -8;
+scene.add(fogPlane);
+
+// ────────────── boids with embedded narrative
+const N = 481;
+const STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+
+for (let i = 0; i < N; i++){
+  const r = Math.random() * 1.6 + 0.4;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI - Math.PI * 0.5;
+  pos[i*3]     = Math.cos(th) * Math.cos(ph) * r;
+  pos[i*3 + 1] = Math.sin(ph) * r;
+  pos[i*3 + 2] = Math.sin(th) * Math.cos(ph) * r;
+  vel[i*3]     = 0.3 + (Math.random() - 0.5) * 0.4;
+  vel[i*3 + 1] = (Math.random() - 0.5) * 0.3;
+  vel[i*3 + 2] = (Math.random() - 0.5) * 0.4;
+}
+pos[STRAGGLER * 3]     = -1.2;
+pos[STRAGGLER * 3 + 1] =  0.6;
+pos[STRAGGLER * 3 + 2] =  0.0;
+
+const PERCEPTION_R = 4.0;
+const SEPARATION_R = 0.9;
+const W_COH = 0.018;
+const W_ALI = 0.060;
+const W_SEP = 0.080;
+const MAX_SPEED = 1.4;
+const MAX_FORCE = 0.030;
+
+let cohesion = 1.0;
+let arcStage = 'together';
+let focusDepth = 26.0; // tracks flock centroid depth for DOF
+const arcEl = document.getElementById('arc');
+
+function step(dt){
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 1; i < N; i++){
+    cx += pos[i*3]; cy += pos[i*3 + 1]; cz += pos[i*3 + 2];
+  }
+  cx /= (N - 1); cy /= (N - 1); cz /= (N - 1);
+
+  // update focus depth: project centroid into camera space
+  const dx = cx - camera.position.x;
+  const dy = cy - camera.position.y;
+  const dz = cz - camera.position.z;
+  const centDist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  focusDepth += (centDist - focusDepth) * dt * 2.0;
+
+  const sx = pos[STRAGGLER*3] - cx;
+  const sy = pos[STRAGGLER*3+1] - cy;
+  const sz = pos[STRAGGLER*3+2] - cz;
+  const stragDist = Math.sqrt(sx*sx + sy*sy + sz*sz);
+  const targetCohesion = Math.max(0.0, Math.min(1.0, 1.0 - stragDist / 8.0));
+  cohesion += (targetCohesion - cohesion) * dt * 0.45;
+
+  if (cohesion > 0.85) arcStage = 'together';
+  else if (cohesion > 0.5 && stragDist > 4.5) arcStage = 'loss';
+  else if (cohesion < 0.5) arcStage = 'seeking';
+  else if (arcStage === 'seeking' && cohesion > 0.65) arcStage = 'return';
+
+  arcEl.textContent = `${arcStage} · ${Math.round(cohesion * 100)}%`;
+
+  const acc = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++){
+    let cohX = 0, cohY = 0, cohZ = 0, cohN = 0;
+    let aliX = 0, aliY = 0, aliZ = 0, aliN = 0;
+    let sepX = 0, sepY = 0, sepZ = 0;
+    const px = pos[i*3], py = pos[i*3+1], pz = pos[i*3+2];
+    const isStrag = (i === STRAGGLER);
+    const perceptionR = isStrag ? PERCEPTION_R * 0.55 : PERCEPTION_R;
+
+    for (let j = 0; j < N; j++){
+      if (i === j) continue;
+      const ddx = pos[j*3] - px;
+      const ddy = pos[j*3+1] - py;
+      const ddz = pos[j*3+2] - pz;
+      const d2 = ddx*ddx + ddy*ddy + ddz*ddz;
+      if (d2 > perceptionR * perceptionR || d2 < 1e-6) continue;
+      cohX += pos[j*3]; cohY += pos[j*3+1]; cohZ += pos[j*3+2]; cohN++;
+      aliX += vel[j*3]; aliY += vel[j*3+1]; aliZ += vel[j*3+2]; aliN++;
+      if (d2 < SEPARATION_R * SEPARATION_R){
+        const inv = 1.0 / Math.sqrt(d2);
+        sepX -= ddx * inv; sepY -= ddy * inv; sepZ -= ddz * inv;
+      }
+    }
+
+    if (isStrag){
+      const drift = Math.sin(performance.now() * 0.0003) * 0.4;
+      acc[i*3]     += drift;
+      acc[i*3+1]   += -0.25 + Math.cos(performance.now() * 0.0002) * 0.2;
+      acc[i*3+2]   += drift * 0.6;
+    }
+
+    if (!isStrag){
+      if (arcStage === 'seeking' || arcStage === 'return'){
+        const tx = pos[STRAGGLER*3] - px;
+        const ty = pos[STRAGGLER*3+1] - py;
+        const tz = pos[STRAGGLER*3+2] - pz;
+        const td = Math.sqrt(tx*tx + ty*ty + tz*tz) + 1e-3;
+        const seek = arcStage === 'seeking' ? 0.020 : 0.012;
+        acc[i*3]     += (tx / td) * seek;
+        acc[i*3+1]   += (ty / td) * seek;
+        acc[i*3+2]   += (tz / td) * seek;
+      }
+    }
+
+    if (cohN > 0){
+      cohX = cohX/cohN - px; cohY = cohY/cohN - py; cohZ = cohZ/cohN - pz;
+      acc[i*3] += cohX * W_COH; acc[i*3+1] += cohY * W_COH; acc[i*3+2] += cohZ * W_COH;
+    }
+    if (aliN > 0){
+      aliX = aliX/aliN - vel[i*3]; aliY = aliY/aliN - vel[i*3+1]; aliZ = aliZ/aliN - vel[i*3+2];
+      acc[i*3] += aliX * W_ALI; acc[i*3+1] += aliY * W_ALI; acc[i*3+2] += aliZ * W_ALI;
+    }
+    acc[i*3] += sepX * W_SEP; acc[i*3+1] += sepY * W_SEP; acc[i*3+2] += sepZ * W_SEP;
+
+    const d2c = px*px + py*py + pz*pz;
+    if (d2c > 90){
+      const inv = 0.012 / Math.sqrt(d2c);
+      acc[i*3] += -px * inv; acc[i*3+1] += -py * inv; acc[i*3+2] += -pz * inv;
+    }
+  }
+
+  const speedMul = (arcStage === 'loss' || arcStage === 'seeking') ? 0.55
+                  : arcStage === 'return' ? 0.85 : 1.0;
+  for (let i = 0; i < N; i++){
+    let ax = acc[i*3], ay = acc[i*3+1], az = acc[i*3+2];
+    const af = Math.sqrt(ax*ax + ay*ay + az*az);
+    if (af > MAX_FORCE){ ax *= MAX_FORCE/af; ay *= MAX_FORCE/af; az *= MAX_FORCE/af; }
+    vel[i*3] += ax; vel[i*3+1] += ay; vel[i*3+2] += az;
+    let vx = vel[i*3], vy = vel[i*3+1], vz = vel[i*3+2];
+    const sp = Math.sqrt(vx*vx + vy*vy + vz*vz);
+    if (sp > MAX_SPEED){ vx *= MAX_SPEED/sp; vy *= MAX_SPEED/sp; vz *= MAX_SPEED/sp; vel[i*3]=vx; vel[i*3+1]=vy; vel[i*3+2]=vz; }
+    pos[i*3]   += vel[i*3]   * dt * speedMul;
+    pos[i*3+1] += vel[i*3+1] * dt * speedMul;
+    pos[i*3+2] += vel[i*3+2] * dt * speedMul;
+  }
+}
+
+// ────────────── render
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+const seedArr = new Float32Array(N);
+for (let i = 0; i < N; i++) seedArr[i] = Math.random();
+geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+const isStragArr = new Float32Array(N);
+isStragArr[STRAGGLER] = 1.0;
+geom.setAttribute('strag', new THREE.BufferAttribute(isStragArr, 1));
+
+const uniforms = {
+  uTime:       { value: 0 },
+  uPixel:      { value: renderer.getPixelRatio() },
+  uCohesion:   { value: 1.0 },
+  uFocusDist:  { value: 26.0 },  // DOF focal distance
+  uFogColor:   { value: new THREE.Color(0x14141e) }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uCohesion;
+    uniform float uFocusDist;
+    attribute float seed;
+    attribute float strag;
+    varying vec3  vCol;
+    varying float vFade;
+    varying float vCoC;  // circle of confusion — DOF blur amount
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.6 + seed * 6.28;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // DOF: circle of confusion grows with distance from focal plane
+      // Simulates a shallow depth-of-field — objects near focus are crisp,
+      // objects far from focus bloom into soft bokeh discs
+      float depthDelta = abs(dist - uFocusDist);
+      float coc = smoothstep(0.0, 12.0, depthDelta);  // 0=sharp, 1=max blur
+      vCoC = coc;
+
+      // size: sharp particles are small & defined, blurred ones expand (bokeh)
+      float baseSize = 1.5 + 0.6 * sin(t);
+      float stragSize = strag * 2.2;
+      float bokehGrow = 1.0 + coc * 3.5;  // blurred particles up to 4.5x larger
+      gl_PointSize = (baseSize + stragSize) * bokehGrow * uPixel * (16.0 / dist);
+
+      // depth fog: exponential fade with distance
+      float fogAmt = 1.0 - exp(-dist * 0.032);
+      vFade = clamp(1.0 - fogAmt, 0.08, 1.0);
+
+      // color: cohesion-driven palette — muted, earthy
+      vec3 warm  = vec3(0.88, 0.60, 0.30);   // dusty amber
+      vec3 hot   = vec3(0.95, 0.85, 0.68);   // parchment
+      vec3 cool  = vec3(0.38, 0.48, 0.68);   // slate blue
+      vec3 lost  = vec3(0.48, 0.30, 0.52);   // bruised violet
+      vec3 cohCol = mix(cool, warm, smoothstep(0.0, 1.0, uCohesion));
+      vec3 highCol = mix(lost, hot, smoothstep(0.0, 1.0, uCohesion));
+      vCol = mix(cohCol, highCol, strag * 0.7 + smoothstep(0.6, 1.0, sin(t * 0.4)) * 0.18);
+      vCol *= (1.0 + strag * 0.35);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vFade;
+    varying float vCoC;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d,d);
+      if (r2 > 0.25) discard;
+
+      // DOF disc shape: sharp particles have hard Gaussian cores,
+      // blurred particles flatten into soft bokeh discs
+      float sharpFalloff = 14.0;
+      float blurFalloff  = 3.0;
+      float falloff = mix(sharpFalloff, blurFalloff, vCoC);
+      float a = exp(-r2 * falloff) * vFade;
+
+      // blurred particles are dimmer — light spreads across larger disc
+      float intensityScale = mix(1.0, 0.35, vCoC);
+      a *= intensityScale;
+
+      gl_FragColor = vec4(vCol * a * 0.92, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// grain overlay — rendered last, on top
+const grainScene = new THREE.Scene();
+const grainCam = new THREE.Camera();
+grainScene.add(grainQuad);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm
+for (let s = 0; s < 250; s++) step(0.05);
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = now / 1000;
+  uniforms.uCohesion.value = cohesion;
+  uniforms.uFocusDist.value = focusDepth;
+  fogPlaneMat.uniforms.uCohesion.value = cohesion;
+  grainMat.uniforms.uTime.value = now / 1000;
+
+  // tint fog color with arc
+  const fc = uniforms.uFogColor.value;
+  if (cohesion > 0.6) fc.setHex(0x1a1820);
+  else fc.setHex(0x141820);
+
+  step(dt);
+  geom.attributes.position.needsUpdate = true;
+
+  // slow auto-orbit
+  const ang = now * 0.00010;
+  camera.position.x = Math.sin(ang) * 26;
+  camera.position.z = Math.cos(ang) * 26;
+  camera.lookAt(0, 0, 0);
+
+  renderer.autoClear = true;
+  renderer.render(scene, camera);
+  // grain overlay pass
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
