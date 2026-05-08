@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>una · cellular morphogenesis</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0a; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">una</div>
+<div class="hint">cellular growth · drag to orbit · scroll to zoom</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Andy Lomas cellular morphogenesis ── */
+const MAX_CELLS = 65536;
+const SPLIT_THRESHOLD = 0.95;
+const NUTRIENT_RATE = 0.012;
+const SPRING_K = 0.15;
+const DAMPING = 0.88;
+const NEIGHBOR_COUNT = 6;
+const SPLIT_INTERVAL = 120;
+const INITIAL_CELLS = 256;
+
+class Cell {
+  constructor(x, y, z){
+    this.pos = new THREE.Vector3(x, y, z);
+    this.vel = new THREE.Vector3(0, 0, 0);
+    this.nutrient = Math.random() * 0.3;
+    this.neighbors = [];
+    this.age = 0;
+    this.splitCooldown = 0;
+  }
+}
+
+const cells = [];
+let cellCount = 0;
+
+function initCells(){
+  const R = 1.2;
+  for (let i = 0; i < INITIAL_CELLS; i++){
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const r = R * Math.pow(Math.random(), 0.33);
+    const x = r * Math.sin(phi) * Math.cos(theta);
+    const y = r * Math.sin(phi) * Math.sin(theta);
+    const z = r * Math.cos(phi);
+    cells.push(new Cell(x, y, z));
+  }
+  cellCount = cells.length;
+  linkNeighbors();
+}
+
+function linkNeighbors(){
+  for (let i = 0; i < cellCount; i++){
+    const c = cells[i];
+    const dists = [];
+    for (let j = 0; j < cellCount; j++){
+      if (i === j) continue;
+      dists.push({ idx: j, d: c.pos.distanceToSquared(cells[j].pos) });
+    }
+    dists.sort((a, b) => a.d - b.d);
+    c.neighbors = dists.slice(0, NEIGHBOR_COUNT).map(x => x.idx);
+  }
+}
+
+function splitCell(idx){
+  if (cellCount >= MAX_CELLS) return;
+  const parent = cells[idx];
+  if (parent.splitCooldown > 0) return;
+
+  const dir = new THREE.Vector3(
+    Math.random() - 0.5,
+    Math.random() - 0.5,
+    Math.random() - 0.5
+  ).normalize();
+  const offset = 0.12;
+  const child = new Cell(
+    parent.pos.x + dir.x * offset,
+    parent.pos.y + dir.y * offset,
+    parent.pos.z + dir.z * offset
+  );
+  child.nutrient = parent.nutrient * 0.5;
+  parent.nutrient *= 0.5;
+  parent.splitCooldown = 60;
+
+  cells[cellCount] = child;
+  cellCount++;
+  linkNeighbors();
+}
+
+function stepCells(){
+  for (let i = 0; i < cellCount; i++){
+    cells[i].nutrient += NUTRIENT_RATE * (1 + 0.3 * Math.sin(cells[i].age * 0.01));
+    cells[i].age++;
+    if (cells[i].splitCooldown > 0) cells[i].splitCooldown--;
+  }
+
+  for (let i = 0; i < cellCount; i++){
+    const c = cells[i];
+    const force = new THREE.Vector3();
+    for (const nidx of c.neighbors){
+      const n = cells[nidx];
+      const delta = new THREE.Vector3().subVectors(n.pos, c.pos);
+      const d = delta.length();
+      const restLen = 0.18 + c.nutrient * 0.05;
+      const strain = d - restLen;
+      delta.normalize().multiplyScalar(strain * SPRING_K);
+      force.add(delta);
+    }
+    c.vel.add(force);
+    c.vel.multiplyScalar(DAMPING);
+    c.pos.add(c.vel);
+  }
+
+  for (let i = 0; i < cellCount; i++){
+    if (cells[i].nutrient > SPLIT_THRESHOLD && cellCount < MAX_CELLS){
+      splitCell(i);
+      break;
+    }
+  }
+}
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0a0a0a, 8, 24);
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(5.5, 3.8, 9.2);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0a, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 0, 0);
+controls.minDistance = 3;
+controls.maxDistance = 18;
+
+const rimLight = new THREE.DirectionalLight(0xffffff, 0.8);
+rimLight.position.set(4, 5, 3);
+scene.add(rimLight);
+
+const fillLight = new THREE.DirectionalLight(0xffd8c8, 0.3);
+fillLight.position.set(-3, 1, -2);
+scene.add(fillLight);
+
+const ambient = new THREE.AmbientLight(0x1a1618, 0.4);
+scene.add(ambient);
+
+initCells();
+
+const cellGeometry = new THREE.SphereGeometry(0.08, 6, 6);
+const cellMaterial = new THREE.MeshStandardMaterial({
+  color: 0xede8e0,
+  roughness: 0.92,
+  metalness: 0.05,
+  emissive: 0x0a0806,
+  emissiveIntensity: 0.12,
+});
+const cellMesh = new THREE.InstancedMesh(cellGeometry, cellMaterial, MAX_CELLS);
+cellMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(cellMesh);
+
+const linkGeometry = new THREE.BufferGeometry();
+const linkPositions = new Float32Array(MAX_CELLS * NEIGHBOR_COUNT * 2 * 3);
+linkGeometry.setAttribute('position', new THREE.BufferAttribute(linkPositions, 3));
+linkGeometry.setDrawRange(0, 0);
+const linkMaterial = new THREE.LineBasicMaterial({
+  color: 0xd4cfc5,
+  transparent: true,
+  opacity: 0.16,
+  fog: true,
+});
+const linkLines = new THREE.LineSegments(linkGeometry, linkMaterial);
+scene.add(linkLines);
+
+const mat4 = new THREE.Matrix4();
+const centroid = new THREE.Vector3();
+
+function updateRender(){
+  centroid.set(0, 0, 0);
+  for (let i = 0; i < cellCount; i++){
+    centroid.add(cells[i].pos);
+  }
+  centroid.divideScalar(cellCount);
+  controls.target.lerp(centroid, 0.02);
+
+  for (let i = 0; i < cellCount; i++){
+    const c = cells[i];
+    const scale = 1 + c.nutrient * 0.3;
+    mat4.makeScale(scale, scale, scale);
+    mat4.setPosition(c.pos);
+    cellMesh.setMatrixAt(i, mat4);
+  }
+  cellMesh.instanceMatrix.needsUpdate = true;
+  cellMesh.count = cellCount;
+
+  let linkIdx = 0;
+  for (let i = 0; i < cellCount; i++){
+    const c = cells[i];
+    for (const nidx of c.neighbors){
+      if (nidx >= cellCount) continue;
+      const n = cells[nidx];
+      linkPositions[linkIdx++] = c.pos.x;
+      linkPositions[linkIdx++] = c.pos.y;
+      linkPositions[linkIdx++] = c.pos.z;
+      linkPositions[linkIdx++] = n.pos.x;
+      linkPositions[linkIdx++] = n.pos.y;
+      linkPositions[linkIdx++] = n.pos.z;
+    }
+  }
+  linkGeometry.attributes.position.needsUpdate = true;
+  linkGeometry.setDrawRange(0, linkIdx / 3);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let frame = 0;
+function loop(){
+  frame++;
+  if (frame % SPLIT_INTERVAL === 0 && cellCount < MAX_CELLS){
+    stepCells();
+  } else {
+    for (let i = 0; i < cellCount; i++){
+      const c = cells[i];
+      const force = new THREE.Vector3();
+      for (const nidx of c.neighbors){
+        if (nidx >= cellCount) continue;
+        const n = cells[nidx];
+        const delta = new THREE.Vector3().subVectors(n.pos, c.pos);
+        const d = delta.length();
+        const restLen = 0.18 + c.nutrient * 0.05;
+        const strain = d - restLen;
+        delta.normalize().multiplyScalar(strain * SPRING_K);
+        force.add(delta);
+      }
+      c.vel.add(force);
+      c.vel.multiplyScalar(DAMPING);
+      c.pos.add(c.vel);
+      c.nutrient += NUTRIENT_RATE * 0.5;
+      c.age++;
+      if (c.splitCooldown > 0) c.splitCooldown--;
+    }
+  }
+
+  updateRender();
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
