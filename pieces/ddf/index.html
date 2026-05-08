@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<!-- MOTION: drift, intensity: calm -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ddf · tender string weave</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">ddf</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Felix Gonzalez-Torres · light string drape · line weave</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Tender string weave — differential growth draped as
+   Felix Gonzalez-Torres light strands, rendered as woven
+   line segments instead of point sprites. Multiple translucent
+   strands braid around the growth curve; additive blending
+   accumulates them into soft luminous filament. The wire IS
+   the artwork — connection over node. */
+
+const BG = 0x0a0807;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 2, 20);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, -1, 0);
+
+/* ── differential-growth curve (same physics as parent 5xv) ── */
+const MAX_VERTS = 3200;
+const ATTRACT   = 0.05;
+const REPEL_R   = 0.48;
+const REPEL_STR = 0.10;
+const NOISE     = 0.002;
+const PRESSURE  = 0.002;
+const GRAVITY   = 0.008;
+const MAX_D     = 0.36;
+const ANCHOR_N  = 6;
+
+const verts = [];
+const NV0 = 40;
+for (let i = 0; i < NV0; i++) {
+  const t = (i / (NV0 - 1)) * 2 - 1;
+  const x = t * 6;
+  const y = -Math.abs(t) * 1.2 + Math.sin(t * Math.PI * 2) * 0.3;
+  verts.push({ x, z: 0, y, age: 0, pinY: i < ANCHOR_N || i >= NV0 - ANCHOR_N });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i], k = gridKey(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function nearby(v) {
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function step() {
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f; dz[i] += ez * f;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? verts[i - 1] : null;
+    const next = i < n - 1 ? verts[i + 1] : null;
+    const v = verts[i];
+    if (prev) { dx[i] += (prev.x - v.x) * ATTRACT; dz[i] += (prev.z - v.z) * ATTRACT; dy[i] += (prev.y - v.y) * ATTRACT; }
+    if (next) { dx[i] += (next.x - v.x) * ATTRACT; dz[i] += (next.z - v.z) * ATTRACT; dy[i] += (next.y - v.y) * ATTRACT; }
+  }
+  let ccx = 0, ccz = 0;
+  for (let i = 0; i < n; i++) { ccx += verts[i].x; ccz += verts[i].z; }
+  ccx /= n; ccz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - ccx, oz = verts[i].z - ccz;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE; dz[i] += (oz / d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++) {
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+    const grav = verts[i].pinY ? GRAVITY * 0.05 : GRAVITY;
+    verts[i].y += dy[i] - grav + (Math.random() - 0.5) * NOISE * 0.5;
+    verts[i].age += 0.0004;
+  }
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    grown.push(a);
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    if (ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({ x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.02,
+                    z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.02,
+                    y: (a.y + b.y) * 0.5, age: Math.max(a.age, b.age) * 0.7, pinY: false });
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+/* ── line-segment rendering: woven strands ── */
+const N_STRANDS = 14;
+const SPREAD    = 0.12;        // perpendicular offset range
+const MAX_SEG_VERTS = N_STRANDS * MAX_VERTS * 2;
+
+const linePos   = new Float32Array(MAX_SEG_VERTS * 3);
+const lineAge   = new Float32Array(MAX_SEG_VERTS);
+const lineAlpha = new Float32Array(MAX_SEG_VERTS);
+
+// strand personalities — each is a slightly different drape
+const strands = [];
+for (let s = 0; s < N_STRANDS; s++) {
+  strands.push({
+    perpBase: (s / (N_STRANDS - 1)) * 2 - 1,   // -1 to 1
+    yOff:     (Math.random() - 0.5) * 0.05,
+    phase:    Math.random() * Math.PI * 2,
+    waveFreq: 0.08 + Math.random() * 0.18,      // weave frequency
+    waveAmp:  0.18 + Math.random() * 0.35,       // how far strands cross
+    alpha:    0.08 + Math.random() * 0.10,        // 0.08–0.18
+    warmShift: Math.random() * 0.25              // palette shift per strand
+  });
+}
+
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
+lineGeom.setAttribute('aAge',     new THREE.BufferAttribute(lineAge, 1));
+lineGeom.setAttribute('aAlpha',   new THREE.BufferAttribute(lineAlpha, 1));
+
+const lineUniforms = {
+  uTime:       { value: 0 },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.035 }
+};
+
+const lineMat = new THREE.ShaderMaterial({
+  uniforms: lineUniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uFogDensity;
+    attribute float aAge;
+    attribute float aAlpha;
+    varying vec3 vCol;
+    varying float vA;
+    varying float vFog;
+
+    void main() {
+      /* palette: warm filament amber → soft white
+         same Gonzalez-Torres incandescent spectrum as parent */
+      vec3 amber = vec3(1.0, 0.72, 0.32);
+      vec3 warm  = vec3(1.0, 0.88, 0.72);
+      vec3 white = vec3(1.0, 0.96, 0.92);
+      float k = clamp(aAge, 0.0, 1.0);
+      vCol = mix(amber, warm, k);
+      vCol = mix(vCol, white, smoothstep(0.7, 1.0, k) * 0.3);
+
+      /* subtle pulse — all strands breathe together */
+      float pulse = 0.9 + 0.1 * sin(uTime * 0.8 + aAge * 12.0);
+      vCol *= pulse;
+      vA = aAlpha;
+
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float fogDepth = length(mv.xyz);
+      vFog = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vA;
+    varying float vFog;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec3 col = mix(vCol, uFogColor, vFog);
+      float a = vA * (1.0 - vFog * 0.8);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const linesMesh = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(linesMesh);
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* pre-grow the drape before first paint */
+for (let s = 0; s < 500; s++) step();
+
+const statEl = document.getElementById('stat');
+const start  = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  lineUniforms.uTime.value = t;
+
+  for (let s = 0; s < 3; s++) step();
+
+  const n = verts.length;
+
+  /* ── build line segments: N_STRANDS braided around the curve ── */
+  let vi = 0; // vertex write index
+  for (let s = 0; s < N_STRANDS; s++) {
+    const st = strands[s];
+    // gentle time-varying sway per strand — breeze
+    const timeSway = Math.sin(t * 0.3 + st.phase) * 0.012;
+
+    for (let i = 0; i < n - 1; i++) {
+      const a = verts[i], b = verts[i + 1];
+
+      // tangent in XZ
+      const tx = b.x - a.x, tz = b.z - a.z;
+      const tLen = Math.sqrt(tx * tx + tz * tz) + 1e-7;
+      // perpendicular
+      const px = -tz / tLen, pz = tx / tLen;
+
+      // weave: strand's perpendicular position oscillates along the curve
+      const weaveA = st.perpBase + Math.sin(i * st.waveFreq + st.phase) * st.waveAmp + timeSway;
+      const weaveB = st.perpBase + Math.sin((i + 1) * st.waveFreq + st.phase) * st.waveAmp + timeSway;
+
+      const off = SPREAD;
+      const idx = vi * 3;
+
+      // segment start vertex
+      linePos[idx]     = a.x + px * weaveA * off;
+      linePos[idx + 1] = a.y + st.yOff;
+      linePos[idx + 2] = a.z + pz * weaveA * off;
+      lineAge[vi]      = Math.min(a.age * 1.2 + st.warmShift, 1.0);
+      lineAlpha[vi]    = st.alpha;
+      vi++;
+
+      // segment end vertex
+      const idx2 = vi * 3;
+      linePos[idx2]     = b.x + px * weaveB * off;
+      linePos[idx2 + 1] = b.y + st.yOff;
+      linePos[idx2 + 2] = b.z + pz * weaveB * off;
+      lineAge[vi]       = Math.min(b.age * 1.2 + st.warmShift, 1.0);
+      lineAlpha[vi]     = st.alpha;
+      vi++;
+    }
+  }
+
+  lineGeom.setDrawRange(0, vi);
+  lineGeom.attributes.position.needsUpdate = true;
+  lineGeom.attributes.aAge.needsUpdate     = true;
+  lineGeom.attributes.aAlpha.needsUpdate   = true;
+
+  /* camera tracks centroid */
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.02);
+
+  statEl.textContent = `strands=${N_STRANDS} · verts=${n}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
