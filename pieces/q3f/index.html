@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>q3f · tender pheromone trails</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+</style>
+<!-- MOTION: drift, intensity: calm -->
+</head>
+<body>
+<div class="id">q3f</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Sage Jenson (mxsage) · physarum slime-mold trails · paired colonies</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Tender pheromone trails — physarum slime-mold simulation
+   honoring Felix Gonzalez-Torres via paired colonies.
+   Two mirror-symmetric agent populations leave warm amber trails
+   that diffuse and interweave. The absent lover rendered as biological code. */
+
+const BG = 0x0a0807;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, 0, 0);
+
+// physarum parameters — tuned for tender, intimate trails
+const N_AGENTS = 40000;
+const SENSOR_DIST = 0.12;
+const SENSOR_ANGLE = 0.52;
+const ROTATE_ANGLE = 0.45;
+const STEP_DIST = 0.06;
+const DEPOSIT_AMOUNT = 1.8;
+const DECAY_RATE = 0.94;
+const DIFFUSE_RATE = 0.22;
+
+// trail texture resolution
+const TEX_SIZE = 1024;
+const WORLD_SIZE = 14;
+
+// agents: position (x,y), angle, colony (0 or 1)
+const agents = [];
+const halfN = Math.floor(N_AGENTS / 2);
+
+// colony 0: spiral clockwise from left center
+for (let i = 0; i < halfN; i++) {
+  const t = (i / halfN) * Math.PI * 6;
+  const r = 0.4 + (i / halfN) * 2.2;
+  agents.push({
+    x: -3.5 + Math.cos(t) * r,
+    y: Math.sin(t) * r,
+    angle: t + Math.PI / 2 + (Math.random() - 0.5) * 0.4,
+    colony: 0
+  });
+}
+// colony 1: mirror spiral counter-clockwise from right center
+for (let i = 0; i < N_AGENTS - halfN; i++) {
+  const t = (i / (N_AGENTS - halfN)) * Math.PI * 6;
+  const r = 0.4 + (i / (N_AGENTS - halfN)) * 2.2;
+  agents.push({
+    x: 3.5 - Math.cos(t) * r,
+    y: Math.sin(t) * r,
+    angle: Math.PI - t - Math.PI / 2 + (Math.random() - 0.5) * 0.4,
+    colony: 1
+  });
+}
+
+// ping-pong render targets for trail
+const trailA = new THREE.WebGLRenderTarget(TEX_SIZE, TEX_SIZE, {
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.FloatType
+});
+const trailB = new THREE.WebGLRenderTarget(TEX_SIZE, TEX_SIZE, {
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.FloatType
+});
+let currentTrail = trailA, nextTrail = trailB;
+
+// scene for depositing agent pheromone
+const depositScene = new THREE.Scene();
+const depositCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const depositGeom = new THREE.BufferGeometry();
+const depositPos = new Float32Array(N_AGENTS * 3);
+const depositCol = new Float32Array(N_AGENTS * 3);
+for (let i = 0; i < N_AGENTS; i++) {
+  depositPos[i * 3 + 2] = 0;
+}
+depositGeom.setAttribute('position', new THREE.BufferAttribute(depositPos, 3));
+depositGeom.setAttribute('color', new THREE.BufferAttribute(depositCol, 3));
+const depositMat = new THREE.PointsMaterial({
+  size: 2.5 / TEX_SIZE,
+  vertexColors: true,
+  blending: THREE.AdditiveBlending,
+  depthTest: false,
+  transparent: true
+});
+const depositPoints = new THREE.Points(depositGeom, depositMat);
+depositScene.add(depositPoints);
+
+// diffuse/decay shader
+const diffuseMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tTrail: { value: null },
+    uDecay: { value: DECAY_RATE },
+    uDiffuse: { value: DIFFUSE_RATE },
+    uTexelSize: { value: new THREE.Vector2(1 / TEX_SIZE, 1 / TEX_SIZE) }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTrail;
+    uniform float uDecay;
+    uniform float uDiffuse;
+    uniform vec2 uTexelSize;
+    varying vec2 vUv;
+
+    void main() {
+      vec4 center = texture2D(tTrail, vUv);
+      vec4 blur = vec4(0.0);
+      blur += texture2D(tTrail, vUv + vec2(-uTexelSize.x, 0.0));
+      blur += texture2D(tTrail, vUv + vec2(uTexelSize.x, 0.0));
+      blur += texture2D(tTrail, vUv + vec2(0.0, -uTexelSize.y));
+      blur += texture2D(tTrail, vUv + vec2(0.0, uTexelSize.y));
+      blur += texture2D(tTrail, vUv + vec2(-uTexelSize.x, -uTexelSize.y));
+      blur += texture2D(tTrail, vUv + vec2(uTexelSize.x, -uTexelSize.y));
+      blur += texture2D(tTrail, vUv + vec2(-uTexelSize.x, uTexelSize.y));
+      blur += texture2D(tTrail, vUv + vec2(uTexelSize.x, uTexelSize.y));
+      blur /= 8.0;
+      vec4 mixed = mix(center, blur, uDiffuse);
+      gl_FragColor = mixed * uDecay;
+    }
+  `
+});
+const diffuseScene = new THREE.Scene();
+const diffuseCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const diffuseQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), diffuseMat);
+diffuseScene.add(diffuseQuad);
+
+// read trail pixel data for agent sensing
+const trailPixels = new Uint8Array(TEX_SIZE * TEX_SIZE * 4);
+let needsRead = true;
+
+function worldToUV(x, y) {
+  return {
+    u: (x / WORLD_SIZE + 1) * 0.5,
+    v: (y / WORLD_SIZE + 1) * 0.5
+  };
+}
+
+function sampleTrail(u, v) {
+  const px = Math.floor(u * TEX_SIZE);
+  const py = Math.floor(v * TEX_SIZE);
+  if (px < 0 || px >= TEX_SIZE || py < 0 || py >= TEX_SIZE) return 0;
+  const idx = (py * TEX_SIZE + px) * 4;
+  // sum RGB channels
+  return (trailPixels[idx] + trailPixels[idx + 1] + trailPixels[idx + 2]) / 765;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function stepAgents() {
+  if (paused) return;
+
+  // read trail texture
+  if (needsRead) {
+    renderer.readRenderTargetPixels(
+      currentTrail, 0, 0, TEX_SIZE, TEX_SIZE, trailPixels
+    );
+    needsRead = false;
+  }
+
+  // sense & steer
+  for (let i = 0; i < agents.length; i++) {
+    const a = agents[i];
+    const { u, v } = worldToUV(a.x, a.y);
+
+    // sense forward-left, forward, forward-right
+    const senseL = {
+      u: u + Math.cos(a.angle - SENSOR_ANGLE) * SENSOR_DIST / WORLD_SIZE,
+      v: v + Math.sin(a.angle - SENSOR_ANGLE) * SENSOR_DIST / WORLD_SIZE
+    };
+    const senseF = {
+      u: u + Math.cos(a.angle) * SENSOR_DIST / WORLD_SIZE,
+      v: v + Math.sin(a.angle) * SENSOR_DIST / WORLD_SIZE
+    };
+    const senseR = {
+      u: u + Math.cos(a.angle + SENSOR_ANGLE) * SENSOR_DIST / WORLD_SIZE,
+      v: v + Math.sin(a.angle + SENSOR_ANGLE) * SENSOR_DIST / WORLD_SIZE
+    };
+
+    const valL = sampleTrail(senseL.u, senseL.v);
+    const valF = sampleTrail(senseF.u, senseF.v);
+    const valR = sampleTrail(senseR.u, senseR.v);
+
+    // steer toward strongest
+    if (valF > valL && valF > valR) {
+      // continue straight
+    } else if (valF < valL && valF < valR) {
+      // random turn
+      a.angle += (Math.random() - 0.5) * ROTATE_ANGLE * 2;
+    } else if (valL > valR) {
+      a.angle -= ROTATE_ANGLE;
+    } else if (valR > valL) {
+      a.angle += ROTATE_ANGLE;
+    }
+
+    // move
+    const nx = a.x + Math.cos(a.angle) * STEP_DIST;
+    const ny = a.y + Math.sin(a.angle) * STEP_DIST;
+
+    // wrap boundaries softly
+    if (Math.abs(nx) > WORLD_SIZE * 0.48) {
+      a.angle = Math.PI - a.angle + (Math.random() - 0.5) * 0.3;
+    } else {
+      a.x = nx;
+    }
+    if (Math.abs(ny) > WORLD_SIZE * 0.48) {
+      a.angle = -a.angle + (Math.random() - 0.5) * 0.3;
+    } else {
+      a.y = ny;
+    }
+
+    // update deposit positions
+    const uv2 = worldToUV(a.x, a.y);
+    depositPos[i * 3] = uv2.u * 2 - 1;
+    depositPos[i * 3 + 1] = uv2.v * 2 - 1;
+
+    // colony 0: warm amber, colony 1: soft peach (paired but distinct)
+    if (a.colony === 0) {
+      depositCol[i * 3] = 1.0 * DEPOSIT_AMOUNT;
+      depositCol[i * 3 + 1] = 0.65 * DEPOSIT_AMOUNT;
+      depositCol[i * 3 + 2] = 0.28 * DEPOSIT_AMOUNT;
+    } else {
+      depositCol[i * 3] = 1.0 * DEPOSIT_AMOUNT;
+      depositCol[i * 3 + 1] = 0.78 * DEPOSIT_AMOUNT;
+      depositCol[i * 3 + 2] = 0.65 * DEPOSIT_AMOUNT;
+    }
+  }
+  depositGeom.attributes.position.needsUpdate = true;
+  depositGeom.attributes.color.needsUpdate = true;
+
+  // deposit pheromone
+  renderer.setRenderTarget(currentTrail);
+  renderer.render(depositScene, depositCamera);
+
+  // diffuse & decay
+  diffuseMat.uniforms.tTrail.value = currentTrail.texture;
+  renderer.setRenderTarget(nextTrail);
+  renderer.render(diffuseScene, diffuseCamera);
+
+  // swap
+  [currentTrail, nextTrail] = [nextTrail, currentTrail];
+  needsRead = true;
+}
+
+// display scene: render trail texture onto a plane
+const displayGeom = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE);
+const displayMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tTrail: { value: null },
+    uTime: { value: 0 },
+    uFogColor: { value: new THREE.Color(BG) },
+    uFogDensity: { value: 0.018 }
+  },
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    varying vec2 vUv;
+    varying float vFogFactor;
+    uniform float uFogDensity;
+    void main() {
+      vUv = uv;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mv;
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTrail;
+    uniform float uTime;
+    uniform vec3 uFogColor;
+    varying vec2 vUv;
+    varying float vFogFactor;
+
+    void main() {
+      vec4 trail = texture2D(tTrail, vUv);
+      float intensity = (trail.r + trail.g + trail.b) / 3.0;
+
+      // soft glow from trail density
+      vec3 amber = vec3(1.0, 0.68, 0.32);
+      vec3 peach = vec3(1.0, 0.82, 0.68);
+      vec3 col = mix(amber, peach, trail.b / (trail.r + trail.g + trail.b + 0.001));
+
+      // gentle pulse
+      float pulse = 0.92 + 0.08 * sin(uTime * 0.8);
+      col *= pulse;
+
+      float alpha = smoothstep(0.02, 0.18, intensity) * 0.85;
+
+      // fog blend
+      col = mix(col, uFogColor, vFogFactor * 0.7);
+      alpha *= (1.0 - vFogFactor * 0.6);
+
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+const displayMesh = new THREE.Mesh(displayGeom, displayMat);
+scene.add(displayMesh);
+
+// faint paper-grain overlay
+const grainGeom = new THREE.PlaneGeometry(WORLD_SIZE * 1.1, WORLD_SIZE * 1.1);
+const grainMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    float rand(vec2 co) {
+      return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+    }
+    void main() {
+      float grain = rand(vUv * 512.0 + uTime * 0.01) * 0.05;
+      gl_FragColor = vec4(vec3(grain), grain * 0.8);
+    }
+  `
+});
+const grainMesh = new THREE.Mesh(grainGeom, grainMat);
+grainMesh.position.z = 0.01;
+scene.add(grainMesh);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow: let trails establish before first render
+for (let i = 0; i < 180; i++) stepAgents();
+
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  displayMat.uniforms.uTime.value = t;
+  grainMat.uniforms.uTime.value = t;
+
+  // step simulation 2x per frame for smoothness
+  stepAgents();
+  stepAgents();
+
+  displayMat.uniforms.tTrail.value = currentTrail.texture;
+
+  controls.update();
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
