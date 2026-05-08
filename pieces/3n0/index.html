@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3n0 · Shiota web — hexagonal nodes</title>
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#050505; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+<!-- MOTION: drift, intensity: calm -->
+</head>
+<body>
+<div class="id">3n0</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x050505);
+scene.fog = new THREE.FogExp2(0x050505, 0.045);
+
+const camera = new THREE.PerspectiveCamera(62, innerWidth/innerHeight, 0.1, 120);
+camera.position.set(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ── Ambient + directional light for sphere
+const ambLight = new THREE.AmbientLight(0x221111, 0.8);
+scene.add(ambLight);
+const dirLight = new THREE.DirectionalLight(0xffeedd, 0.6);
+dirLight.position.set(-3, 5, 2);
+scene.add(dirLight);
+
+// ── Deterministic RNG
+let rngState = 91827364;
+function rng(){ rngState |= 0; rngState = rngState + 0x6d2b79f5 | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// ── Suspended sphere — the still center
+const sphereRadius = 1.8;
+const sphereCenter = new THREE.Vector3(2.8, 0.6, -3.0);
+const sphereGeo = new THREE.SphereGeometry(sphereRadius, 24, 16);
+const sphereMat = new THREE.MeshStandardMaterial({
+  color: 0xf0e8dc,
+  emissive: 0xf0e8dc,
+  emissiveIntensity: 0.85,
+  roughness: 0.9,
+  metalness: 0.0,
+  transparent: true,
+  opacity: 0.35
+});
+const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+sphere.position.copy(sphereCenter);
+scene.add(sphere);
+
+// ── Generate anchor points on imaginary architectural surfaces
+const ROOM = { w: 18, h: 12, d: 28 };
+const anchors = [];
+
+function wallPoint(){
+  const face = Math.floor(rng() * 6);
+  let x, y, z;
+  const hw = ROOM.w / 2, hh = ROOM.h / 2, hd = ROOM.d / 2;
+  switch(face){
+    case 0: x = -hw; y = (rng()-0.5)*ROOM.h; z = (rng()-0.5)*ROOM.d; break;
+    case 1: x =  hw; y = (rng()-0.5)*ROOM.h; z = (rng()-0.5)*ROOM.d; break;
+    case 2: y = -hh; x = (rng()-0.5)*ROOM.w; z = (rng()-0.5)*ROOM.d; break;
+    case 3: y =  hh; x = (rng()-0.5)*ROOM.w; z = (rng()-0.5)*ROOM.d; break;
+    case 4: z = -hd; x = (rng()-0.5)*ROOM.w; y = (rng()-0.5)*ROOM.h; break;
+    case 5: z =  hd; x = (rng()-0.5)*ROOM.w; y = (rng()-0.5)*ROOM.h; break;
+  }
+  return new THREE.Vector3(x, y, z);
+}
+
+// Generate anchor points — biased toward sphere vicinity
+const NUM_ANCHORS = 600;
+for (let i = 0; i < NUM_ANCHORS; i++){
+  if (rng() < 0.35){
+    const dir = new THREE.Vector3(rng()-0.5, rng()-0.5, rng()-0.5).normalize();
+    const dist = sphereRadius + 0.1 + rng() * 2.5;
+    const p = sphereCenter.clone().add(dir.multiplyScalar(dist));
+    anchors.push(p);
+  } else {
+    anchors.push(wallPoint());
+  }
+}
+
+// ── Build line segments
+const NUM_LINES = 20000;
+const linePositions = new Float32Array(NUM_LINES * 6);
+let li = 0;
+
+function sphereSurfacePoint(from){
+  const dir = sphereCenter.clone().sub(from).normalize();
+  return sphereCenter.clone().add(dir.multiplyScalar(-sphereRadius * (0.98 + rng()*0.04)));
+}
+
+// Category 1: wall-to-wall threads (~40%)
+const catA = Math.floor(NUM_LINES * 0.4);
+for (let i = 0; i < catA && li < NUM_LINES; i++){
+  const a = wallPoint();
+  const b = wallPoint();
+  const mid = a.clone().add(b).multiplyScalar(0.5);
+  const distToSphere = mid.distanceTo(sphereCenter);
+  if (distToSphere > 12 && rng() > 0.3) { i--; continue; }
+  const idx = li * 6;
+  linePositions[idx]   = a.x; linePositions[idx+1] = a.y; linePositions[idx+2] = a.z;
+  linePositions[idx+3] = b.x; linePositions[idx+4] = b.y; linePositions[idx+5] = b.z;
+  li++;
+}
+
+// Category 2: threads converging on sphere (~35%)
+const catB = Math.floor(NUM_LINES * 0.35);
+for (let i = 0; i < catB && li < NUM_LINES; i++){
+  const a = anchors[Math.floor(rng() * anchors.length)];
+  const nearSphere = sphereSurfacePoint(a);
+  nearSphere.x += (rng()-0.5) * 0.5;
+  nearSphere.y += (rng()-0.5) * 0.5;
+  nearSphere.z += (rng()-0.5) * 0.5;
+  const idx = li * 6;
+  linePositions[idx]   = a.x; linePositions[idx+1] = a.y; linePositions[idx+2] = a.z;
+  linePositions[idx+3] = nearSphere.x; linePositions[idx+4] = nearSphere.y; linePositions[idx+5] = nearSphere.z;
+  li++;
+}
+
+// Category 3: short local threads (~25%)
+const catC = NUM_LINES - li;
+for (let i = 0; i < catC && li < NUM_LINES; i++){
+  const ai = Math.floor(rng() * anchors.length);
+  const a = anchors[ai];
+  let best = null, bestDist = Infinity;
+  for (let j = 0; j < 8; j++){
+    const bi = Math.floor(rng() * anchors.length);
+    if (bi === ai) continue;
+    const d = a.distanceTo(anchors[bi]);
+    if (d < bestDist && d > 0.2){ bestDist = d; best = anchors[bi]; }
+  }
+  if (!best) { best = wallPoint(); }
+  const idx = li * 6;
+  linePositions[idx]   = a.x; linePositions[idx+1] = a.y; linePositions[idx+2] = a.z;
+  linePositions[idx+3] = best.x; linePositions[idx+4] = best.y; linePositions[idx+5] = best.z;
+  li++;
+}
+
+const basePositions = new Float32Array(linePositions);
+
+const lineGeo = new THREE.BufferGeometry();
+lineGeo.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+
+const lineMat = new THREE.LineBasicMaterial({
+  color: 0xc20018,
+  transparent: true,
+  opacity: 0.08,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  fog: true
+});
+const threads = new THREE.LineSegments(lineGeo, lineMat);
+scene.add(threads);
+
+// ── Soft hexagon nodes at anchor points using custom shader
+const hexVertShader = `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mvPosition;
+}
+`;
+
+const hexFragShader = `
+uniform vec3 uColor;
+uniform float uOpacity;
+varying vec2 vUv;
+
+float hexSDF(vec2 p) {
+  const vec3 k = vec3(-0.866025404, 0.5, 0.577350269);
+  p = abs(p);
+  p -= 2.0 * min(dot(k.xy, p), 0.0) * k.xy;
+  p -= vec2(clamp(p.x, -k.z, k.z), 1.0);
+  return length(p) * sign(p.y);
+}
+
+void main() {
+  vec2 p = (vUv - 0.5) * 2.0;
+  float d = hexSDF(p);
+  float alpha = smoothstep(0.15, -0.05, d);
+  alpha *= smoothstep(1.0, 0.4, length(p));
+  gl_FragColor = vec4(uColor, alpha * uOpacity);
+}
+`;
+
+const hexMat = new THREE.ShaderMaterial({
+  vertexShader: hexVertShader,
+  fragmentShader: hexFragShader,
+  uniforms: {
+    uColor: { value: new THREE.Color(0xc20018) },
+    uOpacity: { value: 0.25 }
+  },
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  side: THREE.DoubleSide
+});
+
+const hexNodes = [];
+const HEX_SUBSET = 180;
+for (let i = 0; i < HEX_SUBSET; i++){
+  const anchor = anchors[Math.floor(rng() * anchors.length)];
+  const size = 0.08 + rng() * 0.12;
+  const hexGeo = new THREE.PlaneGeometry(size, size);
+  const hexMesh = new THREE.Mesh(hexGeo, hexMat.clone());
+  hexMesh.position.copy(anchor);
+  hexMesh.rotation.set(rng()*Math.PI*2, rng()*Math.PI*2, rng()*Math.PI*2);
+  hexMesh.userData.basePos = anchor.clone();
+  hexMesh.userData.phase = rng() * Math.PI * 2;
+  hexMesh.userData.rotSpeed = (rng() - 0.5) * 0.02;
+  scene.add(hexMesh);
+  hexNodes.push(hexMesh);
+}
+
+// ── Camera path
+const cameraPath = {
+  radius: 6.5,
+  height: 0.8,
+  speed: 0.018,
+  lookBias: new THREE.Vector3(0.5, 0.3, 0)
+};
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+
+  // Breathing threads
+  const breathAmp = 0.015;
+  const breathFreq = 0.3;
+  const posAttr = lineGeo.attributes.position;
+  const arr = posAttr.array;
+  for (let i = 0; i < li * 6; i += 3){
+    const bx = basePositions[i];
+    const by = basePositions[i+1];
+    const bz = basePositions[i+2];
+    const phase = bx * 0.7 + by * 1.1 + bz * 0.5;
+    const b = Math.sin(elapsed * breathFreq + phase) * breathAmp;
+    arr[i]   = bx + b;
+    arr[i+1] = by + b * 0.7;
+    arr[i+2] = bz + b * 0.5;
+  }
+  posAttr.needsUpdate = true;
+
+  // Animate hexagonal nodes — gentle drift + rotation
+  hexNodes.forEach(node => {
+    const base = node.userData.basePos;
+    const phase = node.userData.phase;
+    const drift = Math.sin(elapsed * 0.2 + phase) * 0.03;
+    node.position.set(
+      base.x + drift * Math.cos(phase),
+      base.y + drift * Math.sin(phase * 1.3),
+      base.z + drift * Math.sin(phase * 0.7)
+    );
+    node.rotation.z += node.userData.rotSpeed;
+  });
+
+  // Camera dolly
+  const angle = elapsed * cameraPath.speed;
+  const cr = cameraPath.radius;
+  camera.position.set(
+    sphereCenter.x + Math.cos(angle) * cr,
+    sphereCenter.y + cameraPath.height + Math.sin(elapsed * 0.012) * 1.5,
+    sphereCenter.z + Math.sin(angle) * cr
+  );
+  const lookTarget = sphereCenter.clone();
+  lookTarget.x += Math.sin(elapsed * 0.04) * cameraPath.lookBias.x;
+  lookTarget.y += Math.cos(elapsed * 0.03) * cameraPath.lookBias.y;
+  camera.lookAt(lookTarget);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
