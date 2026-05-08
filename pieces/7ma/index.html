@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7ma · hobbs flow partitions · 8 color regions</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1510; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">7ma · hobbs flow partitions</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// 8 non-overlapping flow regions, each with its own palette zone and streamline direction.
+// Particles flow along curl-free vector fields (derived from scalar potentials) so we get
+// clean, non-crossing trajectories. Composition: significant negative space between regions,
+// earth palette (umber, terracotta, ochre, oxide red) + cool accent (slate blue).
+
+const W = 256, H = 256, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1510, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// 8 flow regions with hand-placed centers, radii, and flow axis
+const REGIONS = [
+  { center: [-3.5, 1.2, 0.0], radius: 1.4, axis: [0.8, 0.6, 0.0], color: [0.42, 0.24, 0.14] }, // raw umber
+  { center: [2.8, 2.0, 0.5],  radius: 1.0, axis: [-0.6, 0.8, 0.0], color: [0.72, 0.36, 0.22] }, // terracotta
+  { center: [-1.2, -1.8, -0.3], radius: 1.6, axis: [0.5, -0.7, 0.3], color: [0.78, 0.62, 0.28] }, // ochre
+  { center: [3.2, -1.5, 0.8], radius: 1.3, axis: [-0.9, 0.3, 0.2], color: [0.65, 0.22, 0.18] }, // oxide red
+  { center: [0.2, 2.5, -0.6], radius: 0.9, axis: [0.3, -0.9, 0.1], color: [0.58, 0.48, 0.32] }, // raw sienna
+  { center: [-2.5, -0.5, 1.0], radius: 1.1, axis: [0.7, 0.5, -0.4], color: [0.32, 0.42, 0.52] }, // slate blue (cool accent)
+  { center: [1.0, 0.3, -1.2], radius: 1.2, axis: [-0.4, 0.6, 0.7], color: [0.48, 0.28, 0.18] }, // burnt umber
+  { center: [-0.8, -3.0, 0.4], radius: 1.5, axis: [0.6, 0.7, -0.2], color: [0.85, 0.72, 0.45] }, // yellow ochre
+];
+
+function makeInitTexture(){
+  const init = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++){
+    // assign particle to one of 8 regions, spawn inside that region's sphere
+    const r = REGIONS[i % REGIONS.length];
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const rad = Math.pow(Math.random(), 0.5) * r.radius;
+    init[i*4]   = r.center[0] + rad * Math.sin(phi) * Math.cos(theta);
+    init[i*4+1] = r.center[1] + rad * Math.sin(phi) * Math.sin(theta);
+    init[i*4+2] = r.center[2] + rad * Math.cos(phi);
+    init[i*4+3] = i % REGIONS.length; // region ID
+  }
+  const t = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+  t.needsUpdate = true; return t;
+}
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: makeInitTexture() } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(rtB); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// simulation: flow along region-specific axis, constrained inside region sphere
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.0 },
+  uRegions: { value: new Float32Array(REGIONS.length * 8) }
+};
+// pack region data: center.xyz, radius, axis.xyz, _pad
+for (let i = 0; i < REGIONS.length; i++){
+  const r = REGIONS[i];
+  simUniforms.uRegions.value[i*8]   = r.center[0];
+  simUniforms.uRegions.value[i*8+1] = r.center[1];
+  simUniforms.uRegions.value[i*8+2] = r.center[2];
+  simUniforms.uRegions.value[i*8+3] = r.radius;
+  simUniforms.uRegions.value[i*8+4] = r.axis[0];
+  simUniforms.uRegions.value[i*8+5] = r.axis[1];
+  simUniforms.uRegions.value[i*8+6] = r.axis[2];
+  simUniforms.uRegions.value[i*8+7] = 0.0;
+}
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uRegions[64]; // 8 regions × 8 floats
+    varying vec2 vUv;
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      int rid = int(s.w);
+
+      // unpack region
+      int idx = rid * 8;
+      vec3 center = vec3(uRegions[idx], uRegions[idx+1], uRegions[idx+2]);
+      float radius = uRegions[idx+3];
+      vec3 axis = vec3(uRegions[idx+4], uRegions[idx+5], uRegions[idx+6]);
+
+      // flow field: curl-free (gradient of scalar potential)
+      // potential = dot(p - center, axis) → gradient = axis
+      // add small radial restoring force to keep particles inside sphere
+      vec3 toCenter = center - p;
+      float dist = length(toCenter);
+      vec3 restore = toCenter * smoothstep(radius * 0.7, radius * 1.1, dist) * 2.5;
+
+      vec3 flow = normalize(axis) * 1.8 + restore;
+      p += flow * uDt;
+
+      // hard boundary: if outside sphere, project back to surface
+      vec3 offset = p - center;
+      float d = length(offset);
+      if (d > radius){
+        p = center + normalize(offset) * radius;
+      }
+
+      gl_FragColor = vec4(p, float(rid));
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// render scene
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+camera.lookAt(0, 0, 0);
+
+// ambient paper-grain texture via volumetric fog slab
+const fogGeom = new THREE.PlaneGeometry(30, 30);
+const fogMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    void main(){
+      float grain = hash(vUv * 800.0 + uTime * 0.01);
+      float a = grain * 0.04;
+      gl_FragColor = vec4(0.92, 0.88, 0.82, a);
+    }
+  `
+});
+const fogPlane = new THREE.Mesh(fogGeom, fogMat);
+fogPlane.position.z = -5.0;
+scene.add(fogPlane);
+
+// points geometry
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const colorsArr = new Float32Array(REGIONS.length * 3);
+for (let i = 0; i < REGIONS.length; i++){
+  colorsArr[i*3]   = REGIONS[i].color[0];
+  colorsArr[i*3+1] = REGIONS[i].color[1];
+  colorsArr[i*3+2] = REGIONS[i].color[2];
+}
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state: { value: rtA.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uColors: { value: colorsArr }
+  },
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uColors[24]; // 8 regions × 3 floats
+    attribute vec2 uvIdx;
+    varying vec3 vCol;
+    varying float vDepth;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      int rid = int(s.w);
+
+      // retrieve color
+      int idx = rid * 3;
+      vec3 col = vec3(uColors[idx], uColors[idx+1], uColors[idx+2]);
+      
+      // add subtle hand-painted variation
+      float var = fract(sin(dot(uvIdx, vec2(12.9898, 78.233))) * 43758.5453);
+      col *= 0.88 + var * 0.24;
+      vCol = col;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      
+      // vary size slightly per particle (wabi-sabi imperfection)
+      float sizeVar = 0.85 + var * 0.3;
+      gl_PointSize = sizeVar * 3.2 * uPixel * (18.0 / vDepth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      
+      // soft brush stroke falloff
+      float a = 1.0 - smoothstep(0.0, 0.25, r);
+      a = pow(a, 1.8);
+      
+      // depth haze (oil painting atmospheric perspective)
+      float haze = 1.0 - smoothstep(12.0, 22.0, vDepth);
+      vec3 col = mix(vec3(0.10, 0.08, 0.06), vCol, haze);
+      
+      gl_FragColor = vec4(col, a * 0.92);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+
+  fogMat.uniforms.uTime.value = now / 1000;
+  simUniforms.uDt.value = dt * 0.6;
+
+  // sim 2 substeps
+  for (let i = 0; i < 2; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+
+  // gentle camera drift (not rotation — static composed framing)
+  camera.position.x = Math.sin(now * 0.00008) * 0.4;
+  camera.position.y = Math.cos(now * 0.00006) * 0.3;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
