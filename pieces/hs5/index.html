@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>&lt;NEW_ID&gt; · thread memory</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#0a0608;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;letter-spacing:0.06em;color:#cdd2dc;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+.hint{position:fixed;left:14px;top:14px;opacity:0.7;font-size:11px;letter-spacing:0.04em;color:#cdd2dc;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+button.start{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#1a0a0e;color:#d4a0a0;border:1px solid #6a2030;padding:12px 22px;border-radius:4px;cursor:pointer;font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:13px;letter-spacing:0.06em}
+button.start:hover{background:#2a1018}
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · breathe into the threads</button>
+<div class="id">&lt;NEW_ID&gt;</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 2, 22);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0608, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── dress silhouette profile: y → radius ── */
+function dressR(y) {
+  if (y > 4.5) return 0.3 * Math.max(0, 1.0 - (y - 4.5) / 1.5);
+  if (y > 3.5) return 0.3;
+  if (y > 3.0) return 0.2;
+  if (y > 2.0) return 0.2 + (3.0 - y) * 0.8;
+  if (y > 0.5) return 1.0 - (2.0 - y) * 0.2;
+  if (y > -0.5) return 0.7;
+  return 0.7 + (-0.5 - y) * 0.55;
+}
+
+function dressPoint() {
+  const y = -6 + Math.random() * 12;
+  const r = dressR(y) * (0.92 + Math.random() * 0.16);
+  const th = Math.random() * Math.PI * 2;
+  return [r * Math.cos(th), y, r * Math.sin(th)];
+}
+
+function anchorPoint() {
+  const th = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const rx = 13, ry = 11, rz = 13;
+  return [rx * Math.sin(phi) * Math.cos(th), ry * Math.cos(phi), rz * Math.sin(phi) * Math.sin(th)];
+}
+
+/* ── THREADS (LineSegments) ── */
+const THREADS = 4500;
+const tPos = new Float32Array(THREADS * 6);
+const tEnd = new Float32Array(THREADS * 2);
+const tBand = new Float32Array(THREADS * 2);
+const tSeed = new Float32Array(THREADS * 2);
+
+for (let i = 0; i < THREADS; i++) {
+  const dp = dressPoint();
+  const ep = Math.random() < 0.65 ? anchorPoint() : dressPoint();
+  const band = Math.floor(Math.random() * 5);
+  const seed = Math.random();
+  const i6 = i * 6;
+  tPos[i6] = dp[0]; tPos[i6+1] = dp[1]; tPos[i6+2] = dp[2];
+  tPos[i6+3] = ep[0]; tPos[i6+4] = ep[1]; tPos[i6+5] = ep[2];
+  tEnd[i*2] = 0.0; tEnd[i*2+1] = 1.0;
+  tBand[i*2] = band; tBand[i*2+1] = band;
+  tSeed[i*2] = seed; tSeed[i*2+1] = seed;
+}
+
+const threadGeom = new THREE.BufferGeometry();
+threadGeom.setAttribute('position', new THREE.BufferAttribute(tPos, 3));
+threadGeom.setAttribute('aEnd',  new THREE.BufferAttribute(tEnd, 1));
+threadGeom.setAttribute('aBand', new THREE.BufferAttribute(tBand, 1));
+threadGeom.setAttribute('aSeed', new THREE.BufferAttribute(tSeed, 1));
+
+const uBands = new THREE.Vector4(0,0,0,0);
+const uniforms = {
+  uTime:   {value: 0},
+  uBands:  {value: uBands},
+  uTreble: {value: 0}
+};
+
+const threadMat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform vec4  uBands;
+    uniform float uTreble;
+    attribute float aEnd;
+    attribute float aBand;
+    attribute float aSeed;
+    varying float vAlpha;
+    varying float vDepth;
+
+    float getBand(float b){
+      if(b<0.5) return uBands.x;
+      if(b<1.5) return uBands.y;
+      if(b<2.5) return uBands.z;
+      if(b<3.5) return uBands.w;
+      return uTreble;
+    }
+
+    void main(){
+      float energy = getBand(aBand);
+      vec3 p = position;
+
+      /* vibrate anchor-end perpendicular to thread */
+      float vibAmp = energy * 0.7 * aEnd;
+      float vibFreq = 2.5 + aBand * 1.2;
+      vec3 up = vec3(0.0, 1.0, 0.0);
+      vec3 vibDir = normalize(cross(normalize(p + vec3(0.01,0.02,0.03)), up));
+      p += vibDir * sin(uTime * vibFreq + aSeed * 6.2832) * vibAmp;
+
+      /* dress end: gentle breath */
+      if(aEnd < 0.5){
+        float breath = 1.0 + energy * 0.12;
+        p.xz *= breath;
+      }
+
+      vAlpha = 0.08 + energy * 0.22;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vDepth;
+    void main(){
+      vec3 red = vec3(0.70, 0.07, 0.07);
+      float fade = smoothstep(45.0, 4.0, vDepth);
+      float a = vAlpha * fade;
+      gl_FragColor = vec4(red * a, a);
+    }
+  `
+});
+
+const threads = new THREE.LineSegments(threadGeom, threadMat);
+scene.add(threads);
+
+/* ── DRESS PARTICLES ── */
+const DRESS_N = 5000;
+const dPos = new Float32Array(DRESS_N * 3);
+const dSeed = new Float32Array(DRESS_N);
+for (let i = 0; i < DRESS_N; i++) {
+  const dp = dressPoint();
+  dPos[i*3] = dp[0]; dPos[i*3+1] = dp[1]; dPos[i*3+2] = dp[2];
+  dSeed[i] = Math.random();
+}
+
+const dressGeom = new THREE.BufferGeometry();
+dressGeom.setAttribute('position', new THREE.BufferAttribute(dPos, 3));
+dressGeom.setAttribute('aSeed', new THREE.BufferAttribute(dSeed, 1));
+
+const pxRatio = renderer.getPixelRatio().toFixed(1);
+const dressMat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform vec4  uBands;
+    uniform float uTreble;
+    attribute float aSeed;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = position;
+      float energy = (uBands.x + uBands.y + uBands.z + uBands.w + uTreble) * 0.2;
+
+      /* gentle breath with bass */
+      float breath = 1.0 + uBands.x * 0.12;
+      p.xz *= breath;
+
+      /* slight drift */
+      p.y += sin(uTime * 1.8 + aSeed * 6.28) * uTreble * 0.25;
+
+      vAlpha = 0.25 + energy * 0.5;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + energy * 1.5) * ${pxRatio} * (28.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 18.0) * vAlpha;
+      vec3 col = vec3(0.82, 0.10, 0.08);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const dressPoints = new THREE.Points(dressGeom, dressMat);
+scene.add(dressPoints);
+
+/* ── SUSPENDED KEYS — small bright motes caught in the web ── */
+const KEY_N = 40;
+const kPos = new Float32Array(KEY_N * 3);
+const kSeed = new Float32Array(KEY_N);
+for (let i = 0; i < KEY_N; i++) {
+  const th = Math.random() * Math.PI * 2;
+  const r = 1.5 + Math.random() * 6;
+  const y = -4 + Math.random() * 8;
+  kPos[i*3] = r * Math.cos(th);
+  kPos[i*3+1] = y;
+  kPos[i*3+2] = r * Math.sin(th);
+  kSeed[i] = Math.random();
+}
+
+const keyGeom = new THREE.BufferGeometry();
+keyGeom.setAttribute('position', new THREE.BufferAttribute(kPos, 3));
+keyGeom.setAttribute('aSeed', new THREE.BufferAttribute(kSeed, 1));
+
+const keyMat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform vec4  uBands;
+    attribute float aSeed;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      /* subtle pendulum swing */
+      p.x += sin(uTime * 0.6 + aSeed * 6.28) * 0.3;
+      p.y += cos(uTime * 0.4 + aSeed * 3.14) * 0.15;
+      vA = 0.5 + uBands.z * 0.5;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 3.5 * ${pxRatio} * (30.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 10.0) * vA;
+      /* pale warm glow — keys/objects caught in the web */
+      vec3 col = vec3(0.95, 0.80, 0.65);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(keyGeom, keyMat));
+
+/* ── RESIZE ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── AUDIO (from parent 8ug) ── */
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+let analyser = null, freqData = null;
+
+async function startAudio(){
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting mic…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.72;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'live · threads listen';
+  } catch(e){
+    hint.textContent = 'mic denied · threads breathe alone';
+  }
+}
+startBtn.addEventListener('click', startAudio);
+
+function bandEnergy(arr, lo, hi){
+  let s = 0;
+  for (let i = lo; i < hi; i++) s += arr[i];
+  return (s / (hi - lo)) / 255;
+}
+
+/* ── RENDER LOOP ── */
+const camTarget = new THREE.Vector3(0, 0, 0);
+const t0 = performance.now();
+
+function loop(){
+  const t = (performance.now() - t0) / 1000;
+  uniforms.uTime.value = t;
+
+  /* audio or synthetic */
+  if (analyser){
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    uBands.x = bandEnergy(freqData, 0, Math.floor(n*0.04));
+    uBands.y = bandEnergy(freqData, Math.floor(n*0.04), Math.floor(n*0.12));
+    uBands.z = bandEnergy(freqData, Math.floor(n*0.12), Math.floor(n*0.30));
+    uBands.w = bandEnergy(freqData, Math.floor(n*0.30), Math.floor(n*0.55));
+    uniforms.uTreble.value = bandEnergy(freqData, Math.floor(n*0.55), n);
+  } else {
+    uBands.x = 0.35 + 0.35 * Math.sin(t * 1.3);
+    uBands.y = 0.30 + 0.30 * Math.sin(t * 2.1 + 1.1);
+    uBands.z = 0.25 + 0.25 * Math.sin(t * 3.0 + 2.0);
+    uBands.w = 0.20 + 0.20 * Math.sin(t * 4.7 + 0.4);
+    uniforms.uTreble.value = 0.18 + 0.18 * Math.sin(t * 7.0);
+  }
+
+  /* slow orbit tracking centroid */
+  const oR = 21, oS = 0.07;
+  camera.position.x = oR * Math.sin(t * oS);
+  camera.position.z = oR * Math.cos(t * oS);
+  camera.position.y = 1.5 + Math.sin(t * 0.045) * 3.0;
+  camera.lookAt(camTarget);
+
+  /* gentle coherent rotation */
+  const ry = t * 0.012;
+  threads.rotation.y = ry;
+  dressPoints.rotation.y = ry;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
