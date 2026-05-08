@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pk7 · dictyostelium aggregation (GPGPU)</title>
+<!-- MOTION: gathering, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0806; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">pk7</div>
+<div class="hint">slime mold aggregation · hover to starve local cells</div>
+<div class="src">dictyostelium discoideum · 100k GPGPU cells</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Cellular slime mold (Dictyostelium) aggregation model:
+// - Each cell emits cAMP when starved
+// - Cells chemotaxis toward cAMP gradient
+// - cAMP diffuses and decays
+// - Aggregation centers emerge spontaneously
+// - Cells form streams, then mounds, then migrate as pseudoplasmodia
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0806, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping,
+                   depthBuffer: false };
+let rtCells = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtCellsB = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtCAMP = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtCAMPB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// init: uniform scatter with random phase
+const initCells = new Float32Array(N * 4);
+const initCAMP = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  const x = (i % W) / W;
+  const y = Math.floor(i / W) / H;
+  // position in [-8, 8] plane
+  initCells[i*4]   = (x - 0.5) * 16;
+  initCells[i*4+1] = (y - 0.5) * 16;
+  initCells[i*4+2] = 0;
+  // w = starvation time (random start)
+  initCells[i*4+3] = Math.random() * 3;
+  
+  initCAMP[i*4]   = 0;
+  initCAMP[i*4+1] = 0;
+  initCAMP[i*4+2] = 0;
+  initCAMP[i*4+3] = 0;
+}
+const initCellsTex = new THREE.DataTexture(initCells, W, H, THREE.RGBAFormat, THREE.FloatType);
+initCellsTex.needsUpdate = true;
+const initCAMPTex = new THREE.DataTexture(initCAMP, W, H, THREE.RGBAFormat, THREE.FloatType);
+initCAMPTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: null } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+const blitMesh = new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat);
+blitScene.add(blitMesh);
+
+blitMat.uniforms.tex.value = initCellsTex;
+renderer.setRenderTarget(rtCells);
+renderer.render(blitScene, camOrtho);
+
+blitMat.uniforms.tex.value = initCAMPTex;
+renderer.setRenderTarget(rtCAMP);
+renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// cAMP diffusion/decay
+const campUniforms = {
+  prev: { value: rtCAMP.texture },
+  cells: { value: rtCells.texture },
+  uDt: { value: 0.016 },
+  uDiffusion: { value: 0.35 },
+  uDecay: { value: 0.08 },
+  uEmission: { value: 0.12 },
+  uTexel: { value: new THREE.Vector2(1/W, 1/H) }
+};
+const campMat = new THREE.ShaderMaterial({
+  uniforms: campUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev, cells;
+    uniform float uDt, uDiffusion, uDecay, uEmission;
+    uniform vec2 uTexel;
+    varying vec2 vUv;
+    
+    void main(){
+      float c = texture2D(prev, vUv).r;
+      vec4 cell = texture2D(cells, vUv);
+      float starvation = cell.w;
+      
+      // Laplacian diffusion
+      float lap = -4.0 * c;
+      lap += texture2D(prev, vUv + vec2(uTexel.x, 0)).r;
+      lap += texture2D(prev, vUv - vec2(uTexel.x, 0)).r;
+      lap += texture2D(prev, vUv + vec2(0, uTexel.y)).r;
+      lap += texture2D(prev, vUv - vec2(0, uTexel.y)).r;
+      
+      float dc = uDiffusion * lap - uDecay * c;
+      
+      // cells emit cAMP when starved (threshold at 1.0)
+      if (starvation > 1.0) {
+        dc += uEmission * smoothstep(1.0, 2.0, starvation);
+      }
+      
+      c += dc * uDt;
+      c = max(0.0, c);
+      
+      gl_FragColor = vec4(c, c, c, 1.0);
+    }
+  `
+});
+const campScene = new THREE.Scene();
+campScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), campMat));
+
+// cell movement
+const cellUniforms = {
+  prev: { value: rtCells.texture },
+  camp: { value: rtCAMP.texture },
+  uDt: { value: 0.016 },
+  uChemotaxis: { value: 2.8 },
+  uNoise: { value: 0.15 },
+  uStarvationRate: { value: 0.018 },
+  uTexel: { value: new THREE.Vector2(1/W, 1/H) },
+  uTime: { value: 0 },
+  uStarvationZone: { value: new THREE.Vector2(-100, -100) }
+};
+const cellMat = new THREE.ShaderMaterial({
+  uniforms: cellUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev, camp;
+    uniform float uDt, uChemotaxis, uNoise, uStarvationRate, uTime;
+    uniform vec2 uTexel, uStarvationZone;
+    varying vec2 vUv;
+    
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec2 pos = s.xy;
+      float starvation = s.w;
+      
+      // compute cAMP gradient
+      float c = texture2D(camp, vUv).r;
+      float cx1 = texture2D(camp, vUv + vec2(uTexel.x, 0)).r;
+      float cx0 = texture2D(camp, vUv - vec2(uTexel.x, 0)).r;
+      float cy1 = texture2D(camp, vUv + vec2(0, uTexel.y)).r;
+      float cy0 = texture2D(camp, vUv - vec2(0, uTexel.y)).r;
+      vec2 grad = vec2(cx1 - cx0, cy1 - cy0);
+      
+      // chemotaxis
+      vec2 vel = grad * uChemotaxis;
+      
+      // random walk
+      float seed = hash(vUv + uTime * 0.001);
+      float angle = seed * 6.28318;
+      vel += vec2(cos(angle), sin(angle)) * uNoise;
+      
+      pos += vel * uDt;
+      
+      // wrap boundaries
+      pos = mod(pos + 8.0, 16.0) - 8.0;
+      
+      // accumulate starvation
+      float localRate = uStarvationRate;
+      // pointer zone accelerates starvation
+      if (distance(pos, uStarvationZone) < 2.0) {
+        localRate *= 4.0;
+      }
+      starvation += localRate * uDt;
+      
+      gl_FragColor = vec4(pos, 0, starvation);
+    }
+  `
+});
+const cellScene = new THREE.Scene();
+cellScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), cellMat));
+
+// render points
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 12, 18);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    cellState: { value: rtCells.texture },
+    campState: { value: rtCAMP.texture },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D cellState, campState;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vStarvation;
+    varying float vCAMP;
+    void main(){
+      vec4 s = texture2D(cellState, uvIdx);
+      vec2 pos = s.xy;
+      vStarvation = s.w;
+      vCAMP = texture2D(campState, uvIdx).r;
+      
+      vec3 p = vec3(pos.x, 0.0, pos.y);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      
+      // cells grow when aggregating
+      float sizeMod = 1.0 + smoothstep(0.0, 0.3, vCAMP) * 1.5;
+      gl_PointSize = 2.2 * sizeMod * uPixel * (12.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vStarvation;
+    varying float vCAMP;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      
+      // color: amber (normal) → warm orange (starved) → bright yellow (aggregating)
+      vec3 normal = vec3(0.85, 0.72, 0.48);
+      vec3 starved = vec3(0.92, 0.55, 0.28);
+      vec3 aggregated = vec3(0.98, 0.88, 0.42);
+      
+      float starveMix = smoothstep(0.8, 2.0, vStarvation);
+      float aggMix = smoothstep(0.1, 0.4, vCAMP);
+      
+      vec3 col = mix(normal, starved, starveMix);
+      col = mix(col, aggregated, aggMix);
+      
+      float intensity = 0.3 + aggMix * 0.8;
+      gl_FragColor = vec4(col * a * intensity, a * 0.9);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// substrate plane
+const substrate = new THREE.Mesh(
+  new THREE.PlaneGeometry(18, 18, 1, 1),
+  new THREE.MeshBasicMaterial({ color: 0x121008, transparent: true, opacity: 0.4 })
+);
+substrate.rotation.x = -Math.PI / 2;
+substrate.position.y = -0.05;
+scene.add(substrate);
+
+// ambient light
+scene.add(new THREE.AmbientLight(0x1a1510, 0.3));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pointer interaction
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2(-100, -100);
+addEventListener('pointermove', (e) => {
+  pointer.x = (e.clientX / innerWidth) * 2 - 1;
+  pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const intersects = raycaster.intersectObject(substrate);
+  if (intersects.length > 0) {
+    const p = intersects[0].point;
+    cellUniforms.uStarvationZone.value.set(p.x, p.z);
+  }
+});
+
+let t0 = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+  
+  cellUniforms.uTime.value = elapsed;
+  
+  // update cAMP field (3 substeps)
+  for (let i = 0; i < 3; i++) {
+    campUniforms.prev.value = rtCAMP.texture;
+    campUniforms.cells.value = rtCells.texture;
+    renderer.setRenderTarget(rtCAMPB);
+    renderer.render(campScene, camOrtho);
+    let tmp = rtCAMP; rtCAMP = rtCAMPB; rtCAMPB = tmp;
+  }
+  
+  // update cell positions (2 substeps)
+  for (let i = 0; i < 2; i++) {
+    cellUniforms.prev.value = rtCells.texture;
+    cellUniforms.camp.value = rtCAMP.texture;
+    renderer.setRenderTarget(rtCellsB);
+    renderer.render(cellScene, camOrtho);
+    let tmp = rtCells; rtCells = rtCellsB; rtCellsB = tmp;
+  }
+  
+  renderer.setRenderTarget(null);
+  
+  pointsMat.uniforms.cellState.value = rtCells.texture;
+  pointsMat.uniforms.campState.value = rtCAMP.texture;
+  
+  // slow camera orbit
+  const ang = elapsed * 0.08;
+  camera.position.x = Math.sin(ang) * 18;
+  camera.position.z = Math.cos(ang) * 18;
+  camera.position.y = 12 + Math.sin(ang * 0.4) * 3;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
