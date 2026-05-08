@@ -3,12 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>q01 · Shiota — after the dream</title>
-<!-- MOTION: sway, intensity: gentle -->
+<title>q01 · cyanotype cosmos</title>
+<!-- MOTION: drift, intensity: calm -->
 <style>
-html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#000000; }
-canvas { display:block; }
-.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+  html, body { margin:0; padding:0; height:100%; background:#0d2c54; overflow:hidden;
+               color:#e8f2f7; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
 </style>
 </head>
 <body>
@@ -20,449 +21,186 @@ canvas { display:block; }
 import * as THREE from 'three';
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x000000);
-scene.fog = new THREE.FogExp2(0x030101, 0.014);
+scene.background = new THREE.Color(0x0d2c54);
+scene.fog = new THREE.Fog(0x0d2c54, 15, 55);
 
-const camera = new THREE.PerspectiveCamera(66, innerWidth/innerHeight, 0.1, 200);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 120);
+camera.position.set(0, 0, 32);
+
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 document.body.appendChild(renderer.domElement);
 
-scene.add(new THREE.AmbientLight(0x0a0303, 0.3));
+// galactic coordinate star distribution
+const N = 18000;
+const positions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const brightness = new Float32Array(N);
 
-const pL = new THREE.PointLight(0xffd0b0, 0.45, 50, 1.8);
-pL.position.set(-2.0, 9.0, 1.5);
-scene.add(pL);
-
-let seed = 71928364;
-function rng(){ seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return (seed >>> 0) / 4294967296; }
-
-// ── SUSPENDED DRESS — wireframe silhouette, the absent body
-// Shiota's "After the Dream" / "Over the Continents" — a dress as presence-in-absence
-const dressPos = new THREE.Vector3(0.0, 0.8, -1.0);
-const dressVerts = [];
-const dressEdges = [];
-
-// Build dress silhouette as connected rings at different heights
-// Collar ring (narrow)
-const collarY = 5.2, collarR = 0.35, collarN = 10;
-const collarStart = dressVerts.length;
-for(let i=0; i<collarN; i++){
-  const a = (i/collarN)*Math.PI*2;
-  dressVerts.push(new THREE.Vector3(
-    Math.cos(a)*collarR + dressPos.x,
-    collarY + dressPos.y,
-    Math.sin(a)*collarR + dressPos.z
-  ));
+for (let i = 0; i < N; i++) {
+  const u = Math.random();
+  let r, theta, z;
+  if (u < 0.6) {
+    // galactic plane — Milky Way band
+    r = 8 + Math.random() * 18;
+    theta = Math.random() * Math.PI * 2;
+    z = (Math.random() - 0.5) * 2.5;
+  } else if (u < 0.85) {
+    // halo stars
+    r = 12 + Math.random() * 22;
+    theta = Math.random() * Math.PI * 2;
+    z = (Math.random() - 0.5) * 15;
+  } else {
+    // foreground close stars
+    r = 2 + Math.random() * 6;
+    theta = Math.random() * Math.PI * 2;
+    z = (Math.random() - 0.5) * 5;
+  }
+  positions[i*3]   = r * Math.cos(theta);
+  positions[i*3+1] = z;
+  positions[i*3+2] = r * Math.sin(theta);
+  seeds[i] = Math.random();
+  brightness[i] = 0.3 + Math.random() * 0.7;
 }
-for(let i=0; i<collarN; i++) dressEdges.push([collarStart+i, collarStart+(i+1)%collarN]);
 
-// Shoulder ring
-const shoulderY = 4.6, shoulderR = 1.1, shoulderN = 14;
-const shoulderStart = dressVerts.length;
-for(let i=0; i<shoulderN; i++){
-  const a = (i/shoulderN)*Math.PI*2;
-  const r = shoulderR + Math.sin(a*2)*0.15;
-  dressVerts.push(new THREE.Vector3(
-    Math.cos(a)*r + dressPos.x,
-    shoulderY + dressPos.y,
-    Math.sin(a)*r + dressPos.z
-  ));
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('brightness', new THREE.BufferAttribute(brightness, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBrushOrigin: { value: new THREE.Vector2(0, 0) },
+  uBrushScale: { value: 1.0 }
+};
+
+// simplex 2D noise for brushstroke SDF
+const simplexCode = `
+vec3 mod289_3(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec2 mod289_2(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+vec3 permute(vec3 x) { return mod289_3(((x*34.0)+1.0)*x); }
+float snoise(vec2 v) {
+  const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
+  vec2 i  = floor(v + dot(v, C.yy));
+  vec2 x0 = v -   i + dot(i, C.xx);
+  vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+  vec4 x12 = x0.xyxy + C.xxzz;
+  x12.xy -= i1;
+  i = mod289_2(i);
+  vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
+  vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+  m = m*m; m = m*m;
+  vec3 x = 2.0 * fract(p * C.www) - 1.0;
+  vec3 h = abs(x) - 0.5;
+  vec3 ox = floor(x + 0.5);
+  vec3 a0 = x - ox;
+  m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+  vec3 g; g.x  = a0.x  * x0.x  + h.x  * x0.y;
+  g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+  return 130.0 * dot(m, g);
 }
-for(let i=0; i<shoulderN; i++) dressEdges.push([shoulderStart+i, shoulderStart+(i+1)%shoulderN]);
+`;
 
-// Bust ring
-const bustY = 3.6, bustR = 0.85, bustN = 14;
-const bustStart = dressVerts.length;
-for(let i=0; i<bustN; i++){
-  const a = (i/bustN)*Math.PI*2;
-  dressVerts.push(new THREE.Vector3(
-    Math.cos(a)*bustR + dressPos.x,
-    bustY + dressPos.y,
-    Math.sin(a)*bustR + dressPos.z
-  ));
-}
-for(let i=0; i<bustN; i++) dressEdges.push([bustStart+i, bustStart+(i+1)%bustN]);
-
-// Waist ring (narrow)
-const waistY = 2.2, waistR = 0.6, waistN = 14;
-const waistStart = dressVerts.length;
-for(let i=0; i<waistN; i++){
-  const a = (i/waistN)*Math.PI*2;
-  dressVerts.push(new THREE.Vector3(
-    Math.cos(a)*waistR + dressPos.x,
-    waistY + dressPos.y,
-    Math.sin(a)*waistR + dressPos.z
-  ));
-}
-for(let i=0; i<waistN; i++) dressEdges.push([waistStart+i, waistStart+(i+1)%waistN]);
-
-// Hip ring
-const hipY = 1.0, hipR = 1.2, hipN = 16;
-const hipStart = dressVerts.length;
-for(let i=0; i<hipN; i++){
-  const a = (i/hipN)*Math.PI*2;
-  dressVerts.push(new THREE.Vector3(
-    Math.cos(a)*hipR + dressPos.x,
-    hipY + dressPos.y,
-    Math.sin(a)*hipR + dressPos.z
-  ));
-}
-for(let i=0; i<hipN; i++) dressEdges.push([hipStart+i, hipStart+(i+1)%hipN]);
-
-// Hem ring (wide, flared)
-const hemY = -2.8, hemR = 2.6, hemN = 20;
-const hemStart = dressVerts.length;
-for(let i=0; i<hemN; i++){
-  const a = (i/hemN)*Math.PI*2;
-  const r = hemR + Math.sin(a*3+0.5)*0.3 + Math.cos(a*5)*0.15;
-  dressVerts.push(new THREE.Vector3(
-    Math.cos(a)*r + dressPos.x,
-    hemY + dressPos.y + Math.sin(a*4)*0.15,
-    Math.sin(a)*r + dressPos.z
-  ));
-}
-for(let i=0; i<hemN; i++) dressEdges.push([hemStart+i, hemStart+(i+1)%hemN]);
-
-// Vertical seams connecting rings
-const rings = [
-  {start: collarStart, n: collarN},
-  {start: shoulderStart, n: shoulderN},
-  {start: bustStart, n: bustN},
-  {start: waistStart, n: waistN},
-  {start: hipStart, n: hipN},
-  {start: hemStart, n: hemN}
-];
-for(let r=0; r<rings.length-1; r++){
-  const top = rings[r], bot = rings[r+1];
-  const step = Math.max(1, Math.floor(top.n / Math.min(top.n, bot.n)));
-  for(let i=0; i<top.n; i+=step){
-    const bi = Math.round((i/top.n)*bot.n) % bot.n;
-    dressEdges.push([top.start+i, bot.start+bi]);
-    // Cross-bracing for structure
-    if(rng()<0.4){
-      const bi2 = (bi+1) % bot.n;
-      dressEdges.push([top.start+i, bot.start+bi2]);
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float brightness;
+    varying float vBright;
+    varying vec2 vScreenPos;
+    void main(){
+      vec3 p = position;
+      // gentle orbital drift
+      float t = uTime * 0.08 + seed * 6.28;
+      p.x += sin(t * 0.7) * 0.4;
+      p.z += cos(t * 0.5) * 0.35;
+      p.y += sin(t * 1.2 + seed * 3.0) * 0.25;
+      
+      vBright = brightness;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vec4 clip = projectionMatrix * mv;
+      vScreenPos = (clip.xy / clip.w) * 0.5 + 0.5;
+      
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + brightness * 1.8) * uPixel * (40.0 / dist);
+      gl_Position = clip;
     }
-  }
-}
-
-// Build dress geometry
-const dressGeoArr = new Float32Array(dressEdges.length * 6);
-for(let i=0; i<dressEdges.length; i++){
-  const [a,b] = dressEdges[i];
-  const va = dressVerts[a], vb = dressVerts[b];
-  dressGeoArr[i*6]=va.x; dressGeoArr[i*6+1]=va.y; dressGeoArr[i*6+2]=va.z;
-  dressGeoArr[i*6+3]=vb.x; dressGeoArr[i*6+4]=vb.y; dressGeoArr[i*6+5]=vb.z;
-}
-const dressGeo = new THREE.BufferGeometry();
-dressGeo.setAttribute('position', new THREE.BufferAttribute(dressGeoArr, 3));
-const dress = new THREE.LineSegments(dressGeo, new THREE.LineBasicMaterial({
-  color: 0x1a0a08,
-  transparent: true,
-  opacity: 0.65
-}));
-scene.add(dress);
-
-// ── SMALL LUMINOUS SPHERE — heart at the dress's chest, not competing
-const sphereRadius = 0.65;
-const spherePos = new THREE.Vector3(dressPos.x, dressPos.y + 3.8, dressPos.z);
-const sphere = new THREE.Mesh(
-  new THREE.SphereGeometry(sphereRadius, 24, 16),
-  new THREE.MeshStandardMaterial({
-    color: 0xf0e8dc,
-    emissive: 0xf0e8dc,
-    emissiveIntensity: 0.7,
-    roughness: 0.95,
-    metalness: 0.0,
-    transparent: true,
-    opacity: 0.6
-  })
-);
-sphere.position.copy(spherePos);
-scene.add(sphere);
-
-// ── ROOM — Shiota's architectural cube
-const ROOM = { w: 32, h: 22, d: 40 };
-const hw = ROOM.w/2, hh = ROOM.h/2, hd = ROOM.d/2;
-
-function wallPt(){
-  const f = Math.floor(rng()*6);
-  let x,y,z;
-  switch(f){
-    case 0: x=-hw; y=(rng()-0.5)*ROOM.h; z=(rng()-0.5)*ROOM.d; break;
-    case 1: x= hw; y=(rng()-0.5)*ROOM.h; z=(rng()-0.5)*ROOM.d; break;
-    case 2: y=-hh; x=(rng()-0.5)*ROOM.w; z=(rng()-0.5)*ROOM.d; break;
-    case 3: y= hh; x=(rng()-0.5)*ROOM.w; z=(rng()-0.5)*ROOM.d; break;
-    case 4: z=-hd; x=(rng()-0.5)*ROOM.w; y=(rng()-0.5)*ROOM.h; break;
-    default:z= hd; x=(rng()-0.5)*ROOM.w; y=(rng()-0.5)*ROOM.h; break;
-  }
-  return new THREE.Vector3(x,y,z);
-}
-
-// ── ANCHORS
-const NUM_ANCHORS = 1000;
-const anchors = [];
-
-// Truncated icosahedron base (Mohr directive — geometry generates topology)
-const phi = (1+Math.sqrt(5))/2;
-const icoVerts = [
-  [0,1,phi],[0,-1,phi],[0,1,-phi],[0,-1,-phi],
-  [1,phi,0],[-1,phi,0],[1,-phi,0],[-1,-phi,0],
-  [phi,0,1],[-phi,0,1],[phi,0,-1],[-phi,0,-1]
-];
-for(const v of icoVerts){
-  anchors.push(new THREE.Vector3(
-    v[0]*7.0 + dressPos.x,
-    v[1]*5.5 + dressPos.y + 1.5,
-    v[2]*7.0 + dressPos.z
-  ));
-}
-
-// Suspension anchors from ceiling — make the hanging legible
-const suspAnchors = [];
-for(let i=0; i<10; i++){
-  const p = new THREE.Vector3(
-    dressPos.x + (rng()-0.5)*3.0,
-    hh,
-    dressPos.z + (rng()-0.5)*3.0
-  );
-  suspAnchors.push(p);
-  anchors.push(p);
-}
-
-// Void zones — deliberate negative space (Tyler Hobbs)
-const voids = [];
-for(let i=0; i<3; i++){
-  voids.push({
-    pos: new THREE.Vector3(
-      dressPos.x + (rng()-0.5)*12,
-      dressPos.y + 1.5 + (rng()-0.5)*8,
-      dressPos.z + (rng()-0.5)*12
-    ),
-    r: 2.0 + rng()*1.8
-  });
-}
-function inVoid(p){
-  for(const v of voids) if(p.distanceTo(v.pos)<v.r) return true;
-  return false;
-}
-
-// Dense shell around dress form
-const dressCentroid = new THREE.Vector3(dressPos.x, dressPos.y + 1.5, dressPos.z);
-for(let i=anchors.length; i<NUM_ANCHORS; i++){
-  let p;
-  const r = rng();
-  if(r < 0.4){
-    // Near dress body
-    const vi = Math.floor(rng()*dressVerts.length);
-    const dir = new THREE.Vector3(rng()-0.5, rng()-0.5, rng()-0.5).normalize();
-    p = dressVerts[vi].clone().add(dir.multiplyScalar(0.5 + rng()*5.0));
-  } else if(r < 0.55){
-    // Near sphere
-    const dir = new THREE.Vector3(rng()-0.5, rng()-0.5, rng()-0.5).normalize();
-    p = spherePos.clone().add(dir.multiplyScalar(sphereRadius + 0.3 + rng()*4.0));
-  } else if(r < 0.75){
-    p = wallPt();
-    p.lerp(dressCentroid, 0.15 + rng()*0.5);
-  } else {
-    p = wallPt();
-  }
-  if(!inVoid(p)) anchors.push(p);
-}
-
-// Surface samplers
-function dressSurf(){
-  const vi = Math.floor(rng()*dressVerts.length);
-  return dressVerts[vi].clone();
-}
-function sphereSurf(){
-  const dir = new THREE.Vector3(rng()-0.5, rng()-0.5, rng()-0.5).normalize();
-  return spherePos.clone().add(dir.multiplyScalar(sphereRadius));
-}
-
-// ── BUILD 20,000 TAUT RED THREADS
-const NUM_LINES = 20000;
-const positions = new Float32Array(NUM_LINES * 6);
-const lineDist = new Float32Array(NUM_LINES);
-let li = 0;
-
-function setLine(a, b){
-  if(li >= NUM_LINES) return;
-  const idx = li*6;
-  positions[idx]=a.x; positions[idx+1]=a.y; positions[idx+2]=a.z;
-  positions[idx+3]=b.x; positions[idx+4]=b.y; positions[idx+5]=b.z;
-  const mx=(a.x+b.x)*0.5, my=(a.y+b.y)*0.5, mz=(a.z+b.z)*0.5;
-  const dx=mx-dressCentroid.x, dy=my-dressCentroid.y, dz=mz-dressCentroid.z;
-  lineDist[li] = Math.sqrt(dx*dx+dy*dy+dz*dz);
-  li++;
-}
-
-// Suspension threads — dress hangs from ceiling (Saraceno: make hanging legible)
-for(const sa of suspAnchors){
-  // Connect to collar and shoulder points
-  for(let j=0; j<4; j++){
-    const vi = collarStart + Math.floor(rng()*collarN);
-    setLine(sa, dressVerts[vi]);
-  }
-  for(let j=0; j<2; j++){
-    const vi = shoulderStart + Math.floor(rng()*shoulderN);
-    setLine(sa, dressVerts[vi]);
-  }
-}
-
-// Cat A: threads converging on dress form (48%) — the dress is the primary anchor
-const catA = Math.floor(NUM_LINES * 0.48);
-for(let i=0; i<catA && li<NUM_LINES; i++){
-  let a = rng()<0.5 ? anchors[Math.floor(rng()*anchors.length)] : wallPt();
-  if(inVoid(a)){ i--; continue; }
-  const target = dressSurf();
-  // Quayola: 8% stop short — threads that almost reach but fail
-  if(rng() < 0.08){
-    const dir = a.clone().sub(target).normalize();
-    const shortTarget = target.clone().add(dir.multiplyScalar(0.3 + rng()*1.2));
-    setLine(a, shortTarget);
-  } else {
-    setLine(a, target);
-  }
-}
-
-// Cat B: threads converging on sphere/heart (14%)
-const catB = Math.floor(NUM_LINES * 0.14);
-for(let i=0; i<catB && li<NUM_LINES; i++){
-  let a = rng()<0.45 ? anchors[Math.floor(rng()*anchors.length)] : wallPt();
-  if(inVoid(a)){ i--; continue; }
-  if(rng() < 0.06){
-    const target = sphereSurf();
-    const dir = a.clone().sub(target).normalize();
-    target.add(dir.multiplyScalar(0.2 + rng()*0.8));
-    setLine(a, target);
-  } else {
-    setLine(a, sphereSurf());
-  }
-}
-
-// Cat C: wall-to-wall atmospheric threads (16%)
-const catC = Math.floor(NUM_LINES * 0.16);
-for(let i=0; i<catC && li<NUM_LINES; i++){
-  const a = wallPt();
-  const b = wallPt();
-  const mid = a.clone().add(b).multiplyScalar(0.5);
-  if(mid.distanceTo(dressCentroid) > 15 && rng() > 0.06){ i--; continue; }
-  if(inVoid(mid)){ i--; continue; }
-  setLine(a, b);
-}
-
-// Cat D: dress-to-sphere linking threads — umbilical (6%)
-const catD = Math.floor(NUM_LINES * 0.06);
-for(let i=0; i<catD && li<NUM_LINES; i++){
-  const a = dressSurf();
-  const b = sphereSurf();
-  setLine(a, b);
-}
-
-// Cat E: dendritic branching filaments (fill remaining)
-while(li < NUM_LINES - 80){
-  const ai = Math.floor(rng()*anchors.length);
-  const a = anchors[ai];
-  if(inVoid(a)) continue;
-  let best = null, bestD = Infinity;
-  for(let j=0; j<10; j++){
-    const bi = Math.floor(rng()*anchors.length);
-    if(bi===ai) continue;
-    const d = a.distanceTo(anchors[bi]);
-    if(d < bestD && d > 0.3 && d < 4.5){ bestD=d; best=anchors[bi]; }
-  }
-  if(!best) continue;
-  setLine(a, best);
-  // Branch — Y-fork (Entangled Others: dendritic growth)
-  if(rng() < 0.3 && li < NUM_LINES){
-    const mid = a.clone().lerp(best, 0.3 + rng()*0.35);
-    const brDir = new THREE.Vector3(rng()-0.5, rng()-0.5, rng()-0.5).normalize();
-    const brEnd = mid.clone().add(brDir.multiplyScalar(0.8 + rng()*2.0));
-    if(!inVoid(brEnd)) setLine(mid, brEnd);
-    // Second generation branch
-    if(rng() < 0.25 && li < NUM_LINES){
-      const mid2 = mid.clone().lerp(brEnd, 0.4 + rng()*0.3);
-      const br2Dir = new THREE.Vector3(rng()-0.5, rng()-0.5, rng()-0.5).normalize();
-      const br2End = mid2.clone().add(br2Dir.multiplyScalar(0.5 + rng()*1.2));
-      if(!inVoid(br2End)) setLine(mid2, br2End);
+  `,
+  fragmentShader: simplexCode + `
+    uniform float uTime;
+    uniform vec2 uBrushOrigin;
+    uniform float uBrushScale;
+    varying float vBright;
+    varying vec2 vScreenPos;
+    
+    // brushstroke SDF — flowing Bezier-like curve
+    float brushDist(vec2 p, float t) {
+      float y = 0.5 + 0.12 * sin(p.x * 3.0 + t * 0.4);
+      y += 0.06 * snoise(vec2(p.x * 6.0 + t * 0.2, t * 0.3));
+      float d = abs(p.y - y);
+      float w = 0.08 + 0.04 * snoise(vec2(p.x * 4.0, t * 0.5));
+      return smoothstep(w + 0.02, w, d);
     }
-  }
-}
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      
+      // Gaussian star core
+      float core = exp(-r * 16.0);
+      
+      // brushstroke enhancement
+      vec2 bp = (vScreenPos - uBrushOrigin) * uBrushScale;
+      float brush = brushDist(bp, uTime);
+      
+      // cyanotype white on Prussian blue
+      float intensity = vBright * (0.4 + 0.6 * brush);
+      float a = core * intensity * 0.85;
+      vec3 col = vec3(0.95, 0.98, 1.0); // paper white with slight cool tint
+      
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
 
-// Fill remaining
-while(li < NUM_LINES){
-  const a = anchors[Math.floor(rng()*anchors.length)];
-  if(!inVoid(a)){
-    if(rng() < 0.65) setLine(a, dressSurf());
-    else setLine(a, sphereSurf());
-  }
-}
+const points = new THREE.Points(geom, mat);
+scene.add(points);
 
-const basePositions = new Float32Array(positions);
-
-const lineGeo = new THREE.BufferGeometry();
-lineGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-
-const threads = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({
-  color: 0xc20018,
+// background paper texture layer
+const bgGeom = new THREE.PlaneGeometry(80, 60);
+const bgMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: uniforms.uTime },
   transparent: true,
-  opacity: 0.065,
-  blending: THREE.AdditiveBlending,
-  depthWrite: false,
-  fog: true
-}));
-scene.add(threads);
-
-// ── DARK LEAF-SHAPED FRAGMENTS — caught in the web like shed memories
-// Leaf as basic unit: each fragment is a small leaf silhouette
-const NUM_FRAGS = 28;
-for(let i=0; i<NUM_FRAGS; i++){
-  const sz = 0.06 + rng()*0.12;
-  // Leaf shape from 5 vertices
-  const leafShape = new THREE.Shape();
-  leafShape.moveTo(0, -sz*2.2);
-  leafShape.quadraticCurveTo(sz*1.2, -sz*0.5, sz*0.4, sz*1.5);
-  leafShape.quadraticCurveTo(0, sz*2.4, 0, sz*2.4);
-  leafShape.quadraticCurveTo(0, sz*2.4, -sz*0.4, sz*1.5);
-  leafShape.quadraticCurveTo(-sz*1.2, -sz*0.5, 0, -sz*2.2);
-  const geo = new THREE.ShapeGeometry(leafShape, 1);
-  const d = 0.015 + rng()*0.025;
-  const mat = new THREE.MeshBasicMaterial({
-    color: new THREE.Color(d, d*0.3, d*0.15),
-    transparent: true,
-    opacity: 0.2 + rng()*0.35,
-    side: THREE.DoubleSide
-  });
-  const mesh = new THREE.Mesh(geo, mat);
-  // Place along threads — caught in the web
-  const si = Math.floor(rng()*li)*6;
-  const t = 0.15 + rng()*0.7;
-  mesh.position.set(
-    basePositions[si]*(1-t) + basePositions[si+3]*t,
-    basePositions[si+1]*(1-t) + basePositions[si+4]*t,
-    basePositions[si+2]*(1-t) + basePositions[si+5]*t
-  );
-  mesh.rotation.set(rng()*6.28, rng()*6.28, rng()*6.28);
-  scene.add(mesh);
-}
-
-// ── CAMERA — intimate dolly inside the web, figure-8 weaving around dress
-const pathLen = 400;
-const dollyPath = [];
-for(let i=0; i<pathLen; i++){
-  const t = i / pathLen;
-  const p = t * Math.PI * 2;
-  const cx = dressCentroid.x, cy = dressCentroid.y, cz = dressCentroid.z;
-  // Asymmetric orbit — sometimes close, sometimes pulling back
-  const rOuter = 7.0 + Math.sin(p*0.7)*2.5;
-  const x = cx + Math.sin(p)*rOuter + Math.sin(p*1.3+0.8)*1.8;
-  const y = cy + 1.2 + Math.sin(p*0.45+1.0)*3.5 + Math.cos(p*0.3)*0.8;
-  const z = cz + Math.cos(p)*rOuter + Math.cos(p*0.9+1.5)*2.0;
-  dollyPath.push(new THREE.Vector3(x, y, z));
-}
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: simplexCode + `
+    uniform float uTime;
+    varying vec2 vUv;
+    void main(){
+      // subtle paper grain
+      float grain = snoise(vUv * 150.0 + uTime * 0.02) * 0.015;
+      // vignette
+      vec2 c = vUv - 0.5;
+      float vig = 1.0 - dot(c,c) * 0.6;
+      vec3 blue = vec3(0.05, 0.17, 0.33); // Prussian
+      gl_FragColor = vec4(blue * (1.0 + grain) * vig, 1.0);
+    }
+  `
+});
+const bgPlane = new THREE.Mesh(bgGeom, bgMat);
+bgPlane.position.z = -35;
+scene.add(bgPlane);
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth/innerHeight;
@@ -470,58 +208,30 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-const t0 = performance.now();
+// camera gentle drift to frame centroid
+const centroid = new THREE.Vector3();
+geom.computeBoundingBox();
+geom.boundingBox.getCenter(centroid);
+
+const start = performance.now();
 function loop(){
-  const t = (performance.now() - t0) / 1000;
-
-  // ── GENTLE SWAY — like air currents through the gallery
-  // Not systolic pulse but lateral drift, as if someone walked past
-  const arr = lineGeo.attributes.position.array;
-  const swayPhaseX = t * 0.04;
-  const swayPhaseZ = t * 0.031;
-
-  for(let i=0; i<li; i++){
-    const idx = i*6;
-    const dist = lineDist[i];
-    const falloff = Math.max(0, 1.0 - dist / 20.0);
-    const amp = 0.0025 * falloff;
-    // Per-thread phase offset from base position
-    const phase = basePositions[idx]*0.15 + basePositions[idx+1]*0.3 + i*0.002;
-    const swX = Math.sin(swayPhaseX + phase) * amp;
-    const swZ = Math.cos(swayPhaseZ + phase*0.7) * amp * 0.6;
-
-    for(let v=0; v<2; v++){
-      const vi = idx + v*3;
-      arr[vi]   = basePositions[vi]   + swX;
-      arr[vi+1] = basePositions[vi+1] + Math.sin(t*0.025 + phase*1.3)*amp*0.15;
-      arr[vi+2] = basePositions[vi+2] + swZ;
-    }
-  }
-  lineGeo.attributes.position.needsUpdate = true;
-
-  // Glacial camera
-  const speed = 0.002;
-  const pathT = (t * speed) % 1.0;
-  const idx = pathT * (pathLen - 1);
-  const i0 = Math.floor(idx) % pathLen;
-  const i1 = (i0 + 1) % pathLen;
-  const frac = idx - Math.floor(idx);
-  camera.position.lerpVectors(dollyPath[i0], dollyPath[i1], frac);
-
-  // Look at dress centroid with slow wander
-  const look = dressCentroid.clone();
-  look.x += Math.sin(t*0.008)*0.5;
-  look.y += Math.cos(t*0.006)*0.3;
-  camera.lookAt(look);
-
-  // Sphere — imperceptible luminous breathing
-  sphere.material.emissiveIntensity = 0.65 + Math.sin(t*0.05)*0.08;
-  sphere.position.y = spherePos.y + Math.sin(t*0.015)*0.008;
-
-  // Light wander
-  pL.position.x = -2.0 + Math.sin(t*0.005)*1.0;
-  pL.position.y = 9.0 + Math.cos(t*0.004)*0.6;
-
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  
+  // brushstroke parameters drift
+  uniforms.uBrushOrigin.value.x = 0.5 + 0.15 * Math.sin(t * 0.18);
+  uniforms.uBrushOrigin.value.y = 0.5 + 0.1 * Math.cos(t * 0.24);
+  uniforms.uBrushScale.value = 1.8 + 0.4 * Math.sin(t * 0.12);
+  
+  // slow rotation to reveal depth
+  points.rotation.y = t * 0.025;
+  points.rotation.x = Math.sin(t * 0.035) * 0.08;
+  
+  // camera tracks centroid with gentle sway
+  camera.position.x = centroid.x + Math.sin(t * 0.06) * 1.2;
+  camera.position.y = centroid.y + Math.cos(t * 0.08) * 0.8;
+  camera.lookAt(centroid);
+  
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
 }
