@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: morphing, intensity: gentle -->
+<title>a5h · living archive reef · coral latent-space drift</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06191e; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">a5h</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Refik Anadol · Echoes of the Earth: Living Archive ──
+   Parametric coral reef: instanced colonies morph between species archetypes
+   (tube, brain, plate, branching) via Perlin-noise drift through a 4D
+   species latent space. Subsurface-scatter shader for wet coral feel.
+   Plankton particles drift in the water column.
+   Palette: turquoise water (#1a8a7d), coral pink (#e06858), lime kelp (#8bc34a),
+   deep substrate (#1a1a2e), warm amber top-light. */
+
+// ── simplex-style 3D noise (compact)
+const P = new Uint8Array(512);
+{ const p0 = new Uint8Array(256);
+  for (let i=0;i<256;i++) p0[i]=i;
+  for (let i=255;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [p0[i],p0[j]]=[p0[j],p0[i]]; }
+  for (let i=0;i<512;i++) P[i]=p0[i&255]; }
+function fade(t){return t*t*t*(t*(t*6-15)+10);}
+function lerp(a,b,t){return a+t*(b-a);}
+function grad3(h,x,y,z){const k=h&15;return((k&1)?-x:x)+((k&2)?-y:((k&4)?-z:y+(k&8?-z:z)));}
+function noise3(x,y,z){
+  const X=Math.floor(x)&255,Y=Math.floor(y)&255,Z=Math.floor(z)&255;
+  x-=Math.floor(x);y-=Math.floor(y);z-=Math.floor(z);
+  const u=fade(x),v=fade(y),w=fade(z);
+  const A=P[X]+Y,AA=P[A]+Z,AB=P[A+1]+Z,B=P[X+1]+Y,BA=P[B]+Z,BB=P[B+1]+Z;
+  return lerp(lerp(lerp(grad3(P[AA],x,y,z),grad3(P[BA],x-1,y,z),u),
+    lerp(grad3(P[AB],x,y-1,z),grad3(P[BB],x-1,y-1,z),u),v),
+    lerp(lerp(grad3(P[AA+1],x,y,z-1),grad3(P[BA+1],x-1,y,z-1),u),
+    lerp(grad3(P[AB+1],x,y-1,z-1),grad3(P[BB+1],x-1,y-1,z-1),u),v),w);
+}
+function fbm3(x,y,z,oct=3){let v=0,a=1,f=1;for(let i=0;i<oct;i++){v+=a*noise3(x*f,y*f,z*f);a*=0.5;f*=2;}return v;}
+
+// ── scene
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x06191e, 0.045);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 8, 18);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06191e, 1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 3, 0);
+
+// ── lights: warm amber from above, cold teal from below
+const topLight = new THREE.DirectionalLight(0xffcc88, 1.2);
+topLight.position.set(3, 15, 4);
+scene.add(topLight);
+scene.add(new THREE.AmbientLight(0x0a3040, 0.8));
+const bottomLight = new THREE.PointLight(0x1a8a7d, 0.6, 30);
+bottomLight.position.set(0, -2, 0);
+scene.add(bottomLight);
+const rimLight = new THREE.DirectionalLight(0x4488aa, 0.3);
+rimLight.position.set(-6, 4, -6);
+scene.add(rimLight);
+
+// ── coral SSS shader
+const coralVert = `
+varying vec3 vNormal, vWorldPos, vViewDir;
+varying float vHeight, vSpeciesT;
+attribute float speciesT;
+void main(){
+  vNormal = normalize(normalMatrix * normal);
+  vec4 wp = modelMatrix * instanceMatrix * vec4(position, 1.0);
+  vWorldPos = wp.xyz;
+  vViewDir = normalize(cameraPosition - wp.xyz);
+  vHeight = wp.y;
+  vSpeciesT = speciesT;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}`;
+const coralFrag = `
+uniform float uTime;
+uniform vec3 uColA, uColB, uColC;
+varying vec3 vNormal, vWorldPos, vViewDir;
+varying float vHeight, vSpeciesT;
+void main(){
+  vec3 N = normalize(vNormal);
+  vec3 L = normalize(vec3(3.0, 15.0, 4.0) - vWorldPos);
+  float NdL = max(dot(N, L), 0.0);
+  // subsurface scatter approximation
+  float sss = max(0.0, dot(-vViewDir, L)) * 0.4;
+  sss += pow(max(0.0, dot(N, -L + vec3(0.0,0.3,0.0))), 2.0) * 0.25;
+  // species-driven color
+  vec3 baseCol = mix(uColA, uColB, smoothstep(0.3, 0.7, vSpeciesT));
+  baseCol = mix(baseCol, uColC, smoothstep(0.7, 1.0, vSpeciesT));
+  // height gradient: warmer up top, cooler at base
+  float hf = clamp(vHeight / 10.0, 0.0, 1.0);
+  baseCol = mix(baseCol * vec3(0.7, 0.85, 1.0), baseCol * vec3(1.1, 0.95, 0.85), hf);
+  // wet specular
+  vec3 H = normalize(L + vViewDir);
+  float spec = pow(max(dot(N, H), 0.0), 40.0) * 0.6;
+  vec3 col = baseCol * (0.25 + NdL * 0.55 + sss) + vec3(1.0, 0.97, 0.92) * spec;
+  // fog tint
+  float depth = length(vWorldPos - cameraPosition);
+  float fogF = 1.0 - exp(-0.045 * depth * depth);
+  col = mix(col, vec3(0.024, 0.098, 0.118), fogF);
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+// ── coral geometry archetypes
+function makeTubeCoral(segs=12, rSegs=8){
+  const g = new THREE.CylinderGeometry(0.15, 0.25, 1.8, rSegs, segs, true);
+  const pos = g.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    const y = pos.getY(i);
+    const t = (y + 0.9) / 1.8;
+    const wobble = 1 + 0.12 * Math.sin(t * 9.0) * Math.sin(t * 3.7);
+    pos.setX(i, pos.getX(i) * wobble);
+    pos.setZ(i, pos.getZ(i) * wobble);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+function makeBrainCoral(){
+  const g = new THREE.SphereGeometry(0.7, 20, 16);
+  const pos = g.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    const x=pos.getX(i), y=pos.getY(i), z=pos.getZ(i);
+    const n = noise3(x*3.0, y*3.0, z*3.0) * 0.18;
+    const ridge = Math.sin(x*8.0+y*4.0)*0.06;
+    const r = 1 + n + ridge;
+    pos.setX(i, x*r); pos.setY(i, y*r*0.7); pos.setZ(i, z*r);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+function makePlateCoral(){
+  const g = new THREE.CylinderGeometry(1.0, 0.8, 0.15, 24, 4);
+  const pos = g.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    const x=pos.getX(i), z=pos.getZ(i);
+    const r = Math.sqrt(x*x+z*z);
+    const wave = Math.sin(r*6.0)*0.06*(r/1.0);
+    pos.setY(i, pos.getY(i)+wave);
+    const ruffle = 1 + 0.1*Math.sin(Math.atan2(z,x)*12.0)*(r/1.0);
+    pos.setX(i, pos.getX(i)*ruffle);
+    pos.setZ(i, pos.getZ(i)*ruffle);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+function makeBranchCoral(){
+  const pts = [];
+  pts.push(new THREE.Vector3(0,0,0));
+  pts.push(new THREE.Vector3(0.05,0.5,0.03));
+  pts.push(new THREE.Vector3(-0.1,1.0,0.08));
+  pts.push(new THREE.Vector3(0.08,1.5,-0.05));
+  pts.push(new THREE.Vector3(-0.05,2.0,0.1));
+  const curve = new THREE.CatmullRomCurve3(pts);
+  const g = new THREE.TubeGeometry(curve, 16, 0.1, 6, false);
+  // add smaller branches
+  const merged = [g];
+  for(let b=0;b<3;b++){
+    const base = curve.getPointAt(0.3+b*0.2);
+    const ang = b*2.1;
+    const bPts = [base,
+      base.clone().add(new THREE.Vector3(Math.cos(ang)*0.3, 0.4, Math.sin(ang)*0.3)),
+      base.clone().add(new THREE.Vector3(Math.cos(ang)*0.5, 0.8, Math.sin(ang)*0.5))];
+    const bc = new THREE.CatmullRomCurve3(bPts);
+    merged.push(new THREE.TubeGeometry(bc, 8, 0.06, 5, false));
+  }
+  // just return main trunk for simplicity with instancing
+  return g;
+}
+
+const geoTypes = [makeTubeCoral(), makeBrainCoral(), makePlateCoral(), makeBranchCoral()];
+
+// ── colony placement: 3-4 density clusters with negative space
+const COLONIES = 80;
+const clusters = [
+  { cx: -3.5, cz: -2.0, r: 4.0, count: 24 },
+  { cx:  3.0, cz:  1.5, r: 3.5, count: 22 },
+  { cx: -1.0, cz:  4.0, r: 3.0, count: 18 },
+  { cx:  1.5, cz: -4.0, r: 2.5, count: 16 },
+];
+// palette zones per cluster
+const clusterPalettes = [
+  { a: new THREE.Color(0xe06858), b: new THREE.Color(0xd4456a), c: new THREE.Color(0xf0a070) }, // coral-rose
+  { a: new THREE.Color(0x1a8a7d), b: new THREE.Color(0x30b89a), c: new THREE.Color(0x8bc34a) }, // teal-lime
+  { a: new THREE.Color(0xd98060), b: new THREE.Color(0xe06858), c: new THREE.Color(0xeabc68) }, // warm coral
+  { a: new THREE.Color(0x60b0a0), b: new THREE.Color(0x8bc34a), c: new THREE.Color(0x2a9a8a) }, // kelp-green
+];
+
+const coralData = []; // {x,z,scale,geoIdx,speciesT,cluster,rotY,baseY}
+for(let ci=0;ci<clusters.length;ci++){
+  const cl = clusters[ci];
+  for(let i=0;i<cl.count;i++){
+    const ang = Math.random()*Math.PI*2;
+    const rad = Math.random()*cl.r*0.9;
+    const x = cl.cx + Math.cos(ang)*rad;
+    const z = cl.cz + Math.sin(ang)*rad;
+    const sc = 0.5 + Math.random()*1.2;
+    const geoIdx = Math.floor(Math.random()*4);
+    coralData.push({
+      x, z, scale: sc,
+      geoIdx,
+      speciesT: Math.random(),
+      cluster: ci,
+      rotY: Math.random()*Math.PI*2,
+      baseY: geoIdx === 2 ? sc*0.5 + Math.random()*1.5 : 0, // plates can stack
+      noiseSeed: Math.random()*100,
+    });
+  }
+}
+
+// ── build instanced meshes per geometry type
+const coralMeshes = [];
+for(let gi=0;gi<4;gi++){
+  const subset = coralData.filter(c=>c.geoIdx===gi);
+  if(subset.length===0) continue;
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: {value:0},
+      uColA: {value: new THREE.Color(0xe06858)},
+      uColB: {value: new THREE.Color(0x1a8a7d)},
+      uColC: {value: new THREE.Color(0x8bc34a)},
+    },
+    vertexShader: coralVert,
+    fragmentShader: coralFrag,
+  });
+  // add speciesT attribute
+  const geo = geoTypes[gi].clone();
+  const spArr = new Float32Array(geo.attributes.position.count);
+  // will be set per instance via matrix
+  geo.setAttribute('speciesT', new THREE.InstancedBufferAttribute(
+    new Float32Array(subset.length), 1));
+  const mesh = new THREE.InstancedMesh(geo, mat, subset.length);
+  const dummy = new THREE.Object3D();
+  for(let i=0;i<subset.length;i++){
+    const c = subset[i];
+    dummy.position.set(c.x, c.baseY, c.z);
+    dummy.rotation.set(0, c.rotY, 0);
+    dummy.scale.setScalar(c.scale);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+    geo.attributes.speciesT.setX(i, c.speciesT);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  scene.add(mesh);
+  coralMeshes.push({mesh, mat, subset, geo: gi});
+}
+
+// ── substrate plane (sandy reef floor)
+const floorGeo = new THREE.PlaneGeometry(30, 30, 60, 60);
+const floorPos = floorGeo.attributes.position;
+for(let i=0;i<floorPos.count;i++){
+  const x=floorPos.getX(i), y=floorPos.getY(i);
+  floorPos.setZ(i, fbm3(x*0.3, y*0.3, 0)*0.8);
+}
+floorGeo.computeVertexNormals();
+const floorMat = new THREE.MeshStandardMaterial({
+  color: 0x1a1a2e, roughness:0.95, metalness:0.0,
+});
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.rotation.x = -Math.PI/2;
+floor.position.y = -0.1;
+scene.add(floor);
+
+// ── plankton particles
+const PLANKTON = 2000;
+const plkGeo = new THREE.BufferGeometry();
+const plkPos = new Float32Array(PLANKTON*3);
+const plkAlpha = new Float32Array(PLANKTON);
+for(let i=0;i<PLANKTON;i++){
+  plkPos[i*3]   = (Math.random()-0.5)*24;
+  plkPos[i*3+1] = Math.random()*12;
+  plkPos[i*3+2] = (Math.random()-0.5)*24;
+  plkAlpha[i] = 0.2+Math.random()*0.6;
+}
+plkGeo.setAttribute('position', new THREE.BufferAttribute(plkPos, 3));
+plkGeo.setAttribute('alpha', new THREE.BufferAttribute(plkAlpha, 1));
+const plkMat = new THREE.ShaderMaterial({
+  uniforms: { uTime:{value:0} },
+  vertexShader:`
+    attribute float alpha;
+    varying float vAlpha;
+    uniform float uTime;
+    void main(){
+      vAlpha = alpha;
+      vec3 p = position;
+      p.x += sin(uTime*0.3 + position.y*0.5)*0.4;
+      p.y += sin(uTime*0.2 + position.x*0.3)*0.2;
+      p.z += cos(uTime*0.25 + position.y*0.4)*0.3;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = (2.5 + alpha*2.0) * (8.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader:`
+    varying float vAlpha;
+    void main(){
+      float d = length(gl_PointCoord - 0.5)*2.0;
+      if(d > 1.0) discard;
+      float a = (1.0 - d*d) * vAlpha * 0.5;
+      gl_FragColor = vec4(0.75, 0.95, 0.85, a);
+    }`,
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+});
+scene.add(new THREE.Points(plkGeo, plkMat));
+
+// ── caustic light plane (subtle underwater shimmer)
+const causticGeo = new THREE.PlaneGeometry(30, 30);
+const causticMat = new THREE.ShaderMaterial({
+  uniforms: { uTime:{value:0} },
+  vertexShader:`
+    varying vec2 vUv;
+    void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader:`
+    uniform float uTime;
+    varying vec2 vUv;
+    void main(){
+      vec2 p = vUv * 8.0;
+      float c = sin(p.x*2.3+uTime*0.4)*sin(p.y*2.7+uTime*0.35);
+      c = c*0.5+0.5;
+      c = pow(c, 3.0)*0.12;
+      gl_FragColor = vec4(vec3(0.1,0.5,0.45)*c, c*0.4);
+    }`,
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+});
+const caustic = new THREE.Mesh(causticGeo, causticMat);
+caustic.rotation.x = -Math.PI/2;
+caustic.position.y = 0.02;
+scene.add(caustic);
+
+// ── film grain overlay (screen-space quad)
+const grainMat = new THREE.ShaderMaterial({
+  uniforms: { uTime:{value:0} },
+  vertexShader:`varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.0,1.0); }`,
+  fragmentShader:`
+    uniform float uTime;
+    varying vec2 vUv;
+    float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+    void main(){
+      float g = hash(vUv*vec2(1920.0,1080.0)+uTime*100.0);
+      gl_FragColor = vec4(vec3(g), 0.04);
+    }`,
+  transparent:true, depthWrite:false, depthTest:false,
+});
+const grainQuad = new THREE.Mesh(new THREE.PlaneGeometry(2,2), grainMat);
+const grainScene = new THREE.Scene();
+const grainCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+grainScene.add(grainQuad);
+
+// ── animation: species morph via Perlin drift
+const dummy = new THREE.Object3D();
+const t0 = performance.now();
+
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function animate(){
+  const t = (performance.now()-t0)/1000;
+
+  // morph coral instances: slow drift through species latent space
+  for(const cm of coralMeshes){
+    cm.mat.uniforms.uTime.value = t;
+    for(let i=0;i<cm.subset.length;i++){
+      const c = cm.subset[i];
+      // species parameter drifts slowly
+      const ns = noise3(c.noiseSeed, t*0.08, 0)*0.5+0.5;
+      cm.mesh.geometry.attributes.speciesT.setX(i, ns);
+      // gentle scale breathing
+      const breath = 1.0 + 0.03*Math.sin(t*0.8 + c.noiseSeed*10.0);
+      dummy.position.set(c.x, c.baseY, c.z);
+      dummy.rotation.set(0, c.rotY, 0);
+      dummy.scale.setScalar(c.scale * breath);
+      dummy.updateMatrix();
+      cm.mesh.setMatrixAt(i, dummy.matrix);
+    }
+    cm.mesh.geometry.attributes.speciesT.needsUpdate = true;
+    cm.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  plkMat.uniforms.uTime.value = t;
+  causticMat.uniforms.uTime.value = t;
+  grainMat.uniforms.uTime.value = t;
+
+  // camera gently orbits centroid
+  const orbitR = 16 + Math.sin(t*0.05)*2;
+  const orbitAng = t*0.04;
+  const targetCamX = Math.sin(orbitAng)*orbitR;
+  const targetCamZ = Math.cos(orbitAng)*orbitR;
+  const targetCamY = 6 + Math.sin(t*0.07)*2;
+  camera.position.x += (targetCamX - camera.position.x)*0.01;
+  camera.position.z += (targetCamZ - camera.position.z)*0.01;
+  camera.position.y += (targetCamY - camera.position.y)*0.01;
+
+  controls.update();
+  renderer.render(scene, camera);
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+  renderer.autoClear = true;
+  requestAnimationFrame(animate);
+}
+animate();
+</script>
+</body>
+</html>
