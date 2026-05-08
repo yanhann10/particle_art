@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h2y · interpenetrating shells · ruth asawa wire forms</title>
+<!-- MOTION: expanding, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a10; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">h2y</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*
+  Two interpenetrating differential-growth shells inspired by Ruth Asawa's
+  looped-wire sculptures — biomorphic nested forms that pass through each
+  other. Shell A grows in the XZ plane (warm oxidized gold), Shell B is
+  tilted 55° (cool tarnished silver-blue). Cross-system repulsion keeps
+  them from collapsing into one mass while allowing visual interpenetration.
+*/
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a10, 0.018);
+
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 250);
+camera.position.set(10, 10, 16);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a10, 1);
+document.body.appendChild(renderer.domElement);
+
+// Lighting: warm key from above-right, cool fill from below-left
+const keyLight = new THREE.DirectionalLight(0xffecc8, 1.2);
+keyLight.position.set(5, 14, 6);
+scene.add(keyLight);
+scene.add(new THREE.AmbientLight(0x0c0818, 0.45));
+const fillLight = new THREE.DirectionalLight(0x304868, 0.5);
+fillLight.position.set(-8, -2, -6);
+scene.add(fillLight);
+const rimLight = new THREE.DirectionalLight(0x604030, 0.3);
+rimLight.position.set(0, 6, -10);
+scene.add(rimLight);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 4, 0);
+
+// ─── differential growth system ───
+const MAX_VERTS = 900;
+const ATTRACT   = 0.055;
+const REPEL_R   = 0.52;
+const REPEL_STR = 0.13;
+const NOISE_S   = 0.003;
+const PRESSURE  = 0.0028;
+const RISE      = 0.004;
+const MAX_D     = 0.40;
+const CROSS_REPEL_R   = 0.6;
+const CROSS_REPEL_STR = 0.06;
+
+function makeRing(count, radius, tiltAxis, tiltAngle, yOff) {
+  const pts = [];
+  const q = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(...tiltAxis).normalize(), tiltAngle
+  );
+  for (let i = 0; i < count; i++) {
+    const th = (i / count) * Math.PI * 2;
+    const v = new THREE.Vector3(
+      Math.cos(th) * radius,
+      0,
+      Math.sin(th) * radius
+    ).applyQuaternion(q);
+    pts.push({ x: v.x, y: v.y + yOff, z: v.z, age: 0 });
+  }
+  return pts;
+}
+
+// Shell A: XZ plane ring
+const shellA = makeRing(16, 1.8, [0,1,0], 0, 0);
+// Shell B: tilted 55° around X axis, slight Y offset
+const shellB = makeRing(16, 1.6, [1,0.3,0.2], Math.PI * 0.31, 0.4);
+
+const CELL = REPEL_R;
+
+function buildGrid(verts) {
+  const g = new Map();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i];
+    const k = Math.floor(v.x/CELL)+','+Math.floor(v.y/CELL)+','+Math.floor(v.z/CELL);
+    if (!g.has(k)) g.set(k, []);
+    g.get(k).push(i);
+  }
+  return g;
+}
+
+function queryGrid(grid, v) {
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++) {
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+function stepShell(verts, selfGrid, otherVerts, otherGrid) {
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+
+  // Self repulsion
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of queryGrid(selfGrid, v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x-u.x, ey = v.y-u.y, ez = v.z-u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d/REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+    // Cross-system repulsion (gentler, allows interpenetration)
+    for (const j of queryGrid(otherGrid, v)) {
+      const u = otherVerts[j];
+      const ex = v.x-u.x, ey = v.y-u.y, ez = v.z-u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > CROSS_REPEL_R*CROSS_REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = CROSS_REPEL_STR * (1 - d/CROSS_REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+
+  // Spring attraction to neighbors
+  for (let i = 0; i < n; i++) {
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x+b.x-2*v.x)*ATTRACT;
+    dy[i] += (a.y+b.y-2*v.y)*ATTRACT;
+    dz[i] += (a.z+b.z-2*v.z)*ATTRACT;
+  }
+
+  // Outward pressure from centroid
+  let cx2=0, cy2=0, cz2=0;
+  for (let i=0; i<n; i++) { cx2+=verts[i].x; cy2+=verts[i].y; cz2+=verts[i].z; }
+  cx2/=n; cy2/=n; cz2/=n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x-cx2, oy = verts[i].y-cy2, oz = verts[i].z-cz2;
+    const d = Math.hypot(ox,oy,oz) + 1e-6;
+    dx[i] += (ox/d)*PRESSURE;
+    dy[i] += (oy/d)*PRESSURE*0.35;
+    dz[i] += (oz/d)*PRESSURE;
+  }
+
+  // Apply + rise
+  for (let i = 0; i < n; i++) {
+    const upward = RISE * (0.25 + 1.1 * Math.min(verts[i].age * 1.4, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE_S;
+    verts[i].y += dy[i] + (Math.random()-0.5)*NOISE_S*0.4 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE_S;
+    verts[i].age += 0.0012;
+  }
+
+  // Edge splitting
+  const grown = [];
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if (ex*ex+ey*ey+ez*ez > MAX_D*MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({
+        x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5-0.04, z:(a.z+b.z)*0.5,
+        age: Math.max(a.age, b.age)*0.5
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// Pre-grow
+for (let s = 0; s < 900; s++) {
+  const gA = buildGrid(shellA);
+  const gB = buildGrid(shellB);
+  stepShell(shellA, gA, shellB, gB);
+  stepShell(shellB, gB, shellA, gA);
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+// ─── ribbon rendering ───
+const matA = new THREE.MeshStandardMaterial({
+  color: 0xc4973e,
+  emissive: 0x1a0e02,
+  roughness: 0.35,
+  metalness: 0.72,
+  side: THREE.DoubleSide,
+});
+const matB = new THREE.MeshStandardMaterial({
+  color: 0x7a9aaa,
+  emissive: 0x050a10,
+  roughness: 0.40,
+  metalness: 0.55,
+  side: THREE.DoubleSide,
+});
+
+let meshA = null, meshB = null;
+
+function buildRibbon(verts, mat, existingMesh, time) {
+  if (verts.length < 10) return existingMesh;
+  const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+  const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.0);
+  const NS = Math.min(1000, verts.length * 3);
+  const positions = new Float32Array(NS * 2 * 3);
+  const uvs = new Float32Array(NS * 2 * 2);
+  const indices = [];
+  const up = new THREE.Vector3(0, 1, 0);
+
+  for (let i = 0; i < NS; i++) {
+    const tt = i / NS;
+    const p = curve.getPointAt(tt);
+    const tangent = curve.getTangentAt(tt).normalize();
+    let lateral = new THREE.Vector3().crossVectors(tangent, up);
+    if (lateral.lengthSq() < 0.001) lateral.set(1, 0, 0);
+    lateral.normalize();
+    // Arabesque width modulation: base + slow wave + fast ripple
+    const w = 0.18 + 0.10 * Math.sin(tt * 24 + time * 0.3)
+                    + 0.04 * Math.sin(tt * 67 + time * 0.7);
+    const left  = p.clone().addScaledVector(lateral, -w);
+    const right = p.clone().addScaledVector(lateral,  w);
+    const o = i * 6;
+    positions[o]   = left.x;  positions[o+1] = left.y;  positions[o+2] = left.z;
+    positions[o+3] = right.x; positions[o+4] = right.y; positions[o+5] = right.z;
+    uvs[i*4]   = tt; uvs[i*4+1] = 0;
+    uvs[i*4+2] = tt; uvs[i*4+3] = 1;
+  }
+  for (let i = 0; i < NS; i++) {
+    const ni = (i + 1) % NS;
+    const a = i*2, b = i*2+1, c = ni*2, d = ni*2+1;
+    indices.push(a,b,c, b,d,c);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  g.setIndex(indices);
+  g.computeVertexNormals();
+
+  if (existingMesh) { scene.remove(existingMesh); existingMesh.geometry.dispose(); }
+  const m = new THREE.Mesh(g, mat);
+  scene.add(m);
+  return m;
+}
+
+// ─── subtle dust motes for atmosphere ───
+const dustCount = 600;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+const dustAlpha = new Float32Array(dustCount);
+for (let i = 0; i < dustCount; i++) {
+  dustPos[i*3]   = (Math.random()-0.5)*20;
+  dustPos[i*3+1] = Math.random()*16;
+  dustPos[i*3+2] = (Math.random()-0.5)*20;
+  dustAlpha[i] = 0.15 + Math.random()*0.25;
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({
+  color: 0xd0c8b0, size: 0.04, transparent: true, opacity: 0.18,
+  sizeAttenuation: true, depthWrite: false
+});
+const dustPts = new THREE.Points(dustGeo, dustMat);
+scene.add(dustPts);
+
+// ─── film grain overlay (post-process feel via a screen quad) ───
+const grainPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2),
+  new THREE.ShaderMaterial({
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    uniforms: { uTime: { value: 0 } },
+    vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.,1.); }`,
+    fragmentShader: `
+      varying vec2 vUv;
+      uniform float uTime;
+      float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+      void main(){
+        float g = hash(vUv*vec2(1920.,1080.) + uTime*17.3);
+        gl_FragColor = vec4(vec3(g), 0.035);
+      }
+    `
+  })
+);
+const grainScene = new THREE.Scene();
+grainScene.add(grainPlane);
+const grainCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop() {
+  const t = (performance.now() - start) / 1000;
+
+  if (!paused) {
+    for (let s = 0; s < 3; s++) {
+      const gA = buildGrid(shellA);
+      const gB = buildGrid(shellB);
+      stepShell(shellA, gA, shellB, gB);
+      stepShell(shellB, gB, shellA, gA);
+    }
+  }
+
+  meshA = buildRibbon(shellA, matA, meshA, t);
+  meshB = buildRibbon(shellB, matB, meshB, t);
+
+  // Dust drift
+  const dp = dustGeo.attributes.position.array;
+  for (let i = 0; i < dustCount; i++) {
+    dp[i*3+1] += 0.002;
+    if (dp[i*3+1] > 16) dp[i*3+1] = 0;
+  }
+  dustGeo.attributes.position.needsUpdate = true;
+
+  // Camera tracks combined centroid
+  let cx=0, cy=0, cz=0, total = shellA.length + shellB.length;
+  for (const v of shellA) { cx+=v.x; cy+=v.y; cz+=v.z; }
+  for (const v of shellB) { cx+=v.x; cy+=v.y; cz+=v.z; }
+  cx/=total; cy/=total; cz/=total;
+  const targetY = Math.max(cy, 2.0);
+  controls.target.x += (cx - controls.target.x) * 0.03;
+  controls.target.y += (targetY - controls.target.y) * 0.03;
+  controls.target.z += (cz - controls.target.z) * 0.03;
+  camera.position.y += (targetY + 4 - camera.position.y) * 0.03;
+
+  controls.update();
+
+  // Grain overlay
+  grainPlane.material.uniforms.uTime.value = t;
+
+  renderer.autoClear = true;
+  renderer.render(scene, camera);
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
