@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>n36 · chladni plate</title>
+<!-- MOTION: convergence, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">n36 · chladni plate</div>
+<div class="hint">cymatics · Ernst Chladni (1787)</div>
+<div class="src">50k particles · eigenmode self-organization</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Chladni plate simulation: 50k sand particles on a 2×2 metal plate respond to modal vibration.
+// Each (m,n) mode induces a standing-wave field u(x,y) = cos(mπx/L)cos(nπy/L) − cos(nπx/L)cos(mπy/L).
+// Particles move down the gradient toward nodal lines (where u=0) forming crystalline symmetries.
+
+const N = 50000;
+const L = 2.0; // plate side length
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0c, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(28, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 6, 0);
+camera.lookAt(0, 0, 0);
+
+// dark metal plate (square geometry, very dark gray)
+const plateMat = new THREE.MeshBasicMaterial({ color: 0x18181a, side: THREE.DoubleSide });
+const plateGeom = new THREE.PlaneGeometry(L, L, 1, 1);
+const plate = new THREE.Mesh(plateGeom, plateMat);
+plate.rotation.x = -Math.PI / 2;
+scene.add(plate);
+
+// rim (thin square outline to frame the plate)
+const rimPoints = [
+  new THREE.Vector3(-L/2, 0, -L/2),
+  new THREE.Vector3( L/2, 0, -L/2),
+  new THREE.Vector3( L/2, 0,  L/2),
+  new THREE.Vector3(-L/2, 0,  L/2),
+  new THREE.Vector3(-L/2, 0, -L/2)
+];
+const rimGeom = new THREE.BufferGeometry().setFromPoints(rimPoints);
+const rimMat = new THREE.LineBasicMaterial({ color: 0x2a2a2e, linewidth: 1 });
+const rim = new THREE.Line(rimGeom, rimMat);
+scene.add(rim);
+
+// particle state: position (x,y on plate), velocity (vx,vy), age
+const particles = [];
+for (let i = 0; i < N; i++){
+  particles.push({
+    x: (Math.random() - 0.5) * L,
+    y: (Math.random() - 0.5) * L,
+    vx: 0,
+    vy: 0,
+    age: Math.random()
+  });
+}
+
+// points geometry
+const pointsGeom = new THREE.BufferGeometry();
+const positions = new Float32Array(N * 3);
+const colors = new Float32Array(N * 3);
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+pointsGeom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+const pointsMat = new THREE.PointsMaterial({
+  size: 0.012,
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.85,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// mode state: cycle through resonant modes
+const modes = [
+  [1,1], [2,1], [2,2], [3,1], [3,2], [3,3], [4,1], [4,2], [4,3], [4,4],
+  [5,2], [5,3], [5,4], [6,2], [6,3], [6,4], [7,3], [7,4]
+];
+let modeIdx = 0;
+let [m, n] = modes[modeIdx];
+let nextModeTime = 8000; // ms per mode
+let lastModeSwitch = performance.now();
+
+// eigenmode field: u(x,y) = cos(mπx/L)cos(nπy/L) − cos(nπx/L)cos(mπy/L)
+// gradient: ∇u = [du/dx, du/dy]
+function eigenmodeField(x, y, mm, nn) {
+  const pi = Math.PI;
+  const arg1x = mm * pi * x / L;
+  const arg1y = nn * pi * y / L;
+  const arg2x = nn * pi * x / L;
+  const arg2y = mm * pi * y / L;
+  const u = Math.cos(arg1x) * Math.cos(arg1y) - Math.cos(arg2x) * Math.cos(arg2y);
+  const dudx = -mm * pi / L * Math.sin(arg1x) * Math.cos(arg1y)
+               + nn * pi / L * Math.sin(arg2x) * Math.cos(arg2y);
+  const dudy = -nn * pi / L * Math.cos(arg1x) * Math.sin(arg1y)
+               + mm * pi / L * Math.cos(arg2x) * Math.sin(arg2y);
+  return { u, dudx, dudy };
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let time = 0;
+function loop(){
+  const now = performance.now();
+  const dt = 0.016; // fixed timestep
+  time += dt;
+
+  // mode switching
+  if (now - lastModeSwitch > nextModeTime){
+    lastModeSwitch = now;
+    modeIdx = (modeIdx + 1) % modes.length;
+    [m, n] = modes[modeIdx];
+  }
+
+  // camera orbit
+  const camAngle = time * 0.06;
+  camera.position.x = Math.sin(camAngle) * 5.5;
+  camera.position.z = Math.cos(camAngle) * 5.5;
+  camera.position.y = 5 + Math.sin(time * 0.18) * 0.6;
+  camera.lookAt(0, 0, 0);
+
+  // particle dynamics
+  const damping = 0.92;
+  const gradStrength = 0.15;
+  const brownian = 0.008;
+  const halfL = L / 2;
+
+  for (let i = 0; i < N; i++){
+    const p = particles[i];
+    const { dudx, dudy } = eigenmodeField(p.x, p.y, m, n);
+
+    // gradient descent toward nodal lines + small Brownian jitter
+    p.vx += -dudx * gradStrength + (Math.random() - 0.5) * brownian;
+    p.vy += -dudy * gradStrength + (Math.random() - 0.5) * brownian;
+    p.vx *= damping;
+    p.vy *= damping;
+
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+
+    // boundary: reflect at plate edges
+    if (p.x < -halfL) { p.x = -halfL; p.vx = Math.abs(p.vx); }
+    if (p.x >  halfL) { p.x =  halfL; p.vx = -Math.abs(p.vx); }
+    if (p.y < -halfL) { p.y = -halfL; p.vy = Math.abs(p.vy); }
+    if (p.y >  halfL) { p.y =  halfL; p.vy = -Math.abs(p.vy); }
+
+    p.age = (p.age + dt * 0.08) % 1.0;
+
+    // position update
+    positions[i*3]   = p.x;
+    positions[i*3+1] = 0.003; // slight lift above plate
+    positions[i*3+2] = p.y;
+
+    // color: pale sand → warm gold based on speed
+    const speed = Math.sqrt(p.vx*p.vx + p.vy*p.vy);
+    const intensity = Math.min(speed * 10.0, 1.0);
+    const r = 0.90 + intensity * 0.08;
+    const g = 0.88 + intensity * 0.10;
+    const b = 0.75 + intensity * 0.10;
+    colors[i*3]   = r;
+    colors[i*3+1] = g;
+    colors[i*3+2] = b;
+  }
+
+  pointsGeom.attributes.position.needsUpdate = true;
+  pointsGeom.attributes.color.needsUpdate = true;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
