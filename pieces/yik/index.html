@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yik · suminagashi (marbling)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f4ede3; overflow:hidden;
+               color:#2a2620; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#2a2620; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; color:#2a2620; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#2a2620; }
+</style>
+</head>
+<body>
+<div class="id">yik · suminagashi</div>
+<div class="hint">drag to marble · move slowly</div>
+<div class="src">fluid dynamics · ebru marbling</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Suminagashi / Ebru marbling simulation:
+// 2D semi-Lagrangian advection on a viscous fluid surface.
+// Ink drops create concentric rings; camera motion drags the dye field
+// into combed patterns. Sharp ink boundaries, no diffusion.
+// Render-to-texture ping-pong for velocity + dye fields.
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 12, 0);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf4ede3, 1);
+document.body.appendChild(renderer.domElement);
+
+// simulation resolution — higher = sharper ink boundaries
+const SIM_W = 512, SIM_H = 512;
+
+// velocity field (RG = vx, vy)
+const velTarget1 = new THREE.WebGLRenderTarget(SIM_W, SIM_H, {
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat, type: THREE.FloatType
+});
+const velTarget2 = velTarget1.clone();
+let velRead = velTarget1, velWrite = velTarget2;
+
+// dye field (RGB = ink color, A = density)
+const dyeTarget1 = new THREE.WebGLRenderTarget(SIM_W, SIM_H, {
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat, type: THREE.FloatType
+});
+const dyeTarget2 = dyeTarget1.clone();
+let dyeRead = dyeTarget1, dyeWrite = dyeTarget2;
+
+// fullscreen quad for simulation passes
+const simScene = new THREE.Scene();
+const simCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const simQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
+simScene.add(simQuad);
+
+// advection shader — semi-Lagrangian backtracing with no diffusion
+const advectMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uField: { value: null },
+    uVel: { value: null },
+    uDt: { value: 0.016 },
+    uDissipation: { value: 1.0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uField;
+    uniform sampler2D uVel;
+    uniform float uDt;
+    uniform float uDissipation;
+    varying vec2 vUv;
+    void main(){
+      vec2 vel = texture2D(uVel, vUv).xy;
+      vec2 prevUv = vUv - vel * uDt;
+      prevUv = fract(prevUv);
+      vec4 val = texture2D(uField, prevUv);
+      gl_FragColor = val * uDissipation;
+    }
+  `
+});
+
+// impulse shader — add Gaussian velocity/dye at a point
+const impulseMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uField: { value: null },
+    uPos: { value: new THREE.Vector2(0.5, 0.5) },
+    uRadius: { value: 0.08 },
+    uStrength: { value: new THREE.Vector3(0, 0, 0) }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uField;
+    uniform vec2 uPos;
+    uniform float uRadius;
+    uniform vec3 uStrength;
+    varying vec2 vUv;
+    void main(){
+      vec4 base = texture2D(uField, vUv);
+      vec2 d = vUv - uPos;
+      float r = length(d);
+      float gauss = exp(-r * r / (uRadius * uRadius));
+      base.xyz += uStrength * gauss;
+      gl_FragColor = base;
+    }
+  `
+});
+
+// initialize velocity field to zero
+simQuad.material = new THREE.MeshBasicMaterial({ color: 0x000000 });
+renderer.setRenderTarget(velRead);
+renderer.render(simScene, simCamera);
+renderer.setRenderTarget(velWrite);
+renderer.render(simScene, simCamera);
+
+// initialize dye field — place a few concentric ink rings at startup
+// Suminagashi: black/gray rings on cream background
+// Ebru variation: add indigo + ochre rings
+const ringCenters = [
+  { x: 0.35, y: 0.35, col: new THREE.Vector3(0.05, 0.05, 0.05), rad: 0.12 },
+  { x: 0.65, y: 0.40, col: new THREE.Vector3(0.12, 0.15, 0.28), rad: 0.10 },
+  { x: 0.50, y: 0.60, col: new THREE.Vector3(0.58, 0.48, 0.24), rad: 0.08 },
+  { x: 0.28, y: 0.70, col: new THREE.Vector3(0.02, 0.02, 0.02), rad: 0.06 },
+  { x: 0.72, y: 0.68, col: new THREE.Vector3(0.16, 0.18, 0.32), rad: 0.07 }
+];
+simQuad.material = impulseMat;
+renderer.setRenderTarget(dyeRead);
+renderer.clear();
+for (const ring of ringCenters){
+  impulseMat.uniforms.uField.value = dyeRead.texture;
+  impulseMat.uniforms.uPos.value.set(ring.x, ring.y);
+  impulseMat.uniforms.uRadius.value = ring.rad;
+  impulseMat.uniforms.uStrength.value.copy(ring.col).multiplyScalar(1.4);
+  renderer.setRenderTarget(dyeWrite);
+  renderer.render(simScene, simCamera);
+  [dyeRead, dyeWrite] = [dyeWrite, dyeRead];
+}
+
+// display plane — textured with dye field, tilted gently
+const planeGeom = new THREE.PlaneGeometry(10, 10, 1, 1);
+const planeMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uDye: { value: dyeRead.texture },
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uDye;
+    uniform float uTime;
+    varying vec2 vUv;
+    void main(){
+      vec4 dye = texture2D(uDye, vUv);
+      // background: cream parchment
+      vec3 bg = vec3(0.957, 0.929, 0.890);
+      // composite dye onto background with multiply-like blend for ink feel
+      vec3 col = mix(bg, dye.rgb * 0.85, clamp(dye.a * 1.2, 0.0, 1.0));
+      // subtle paper grain
+      float grain = fract(sin(dot(vUv * 512.0, vec2(12.9898, 78.233))) * 43758.5453);
+      col += (grain - 0.5) * 0.008;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+const plane = new THREE.Mesh(planeGeom, planeMat);
+plane.rotation.x = -Math.PI / 2;
+scene.add(plane);
+
+// camera tilt — slow pendulum motion
+let camAngle = 0;
+function updateCamera(t){
+  camAngle = Math.sin(t * 0.12) * 0.15;
+  const r = 12;
+  camera.position.set(Math.sin(camAngle) * r * 0.4, r, Math.cos(camAngle) * r * 0.4);
+  camera.lookAt(0, 0, 0);
+}
+
+// mouse tracking for impulse
+let mouseX = 0.5, mouseY = 0.5;
+let prevMouseX = 0.5, prevMouseY = 0.5;
+let mouseDown = false;
+addEventListener('mousemove', (e) => {
+  mouseX = e.clientX / innerWidth;
+  mouseY = 1.0 - e.clientY / innerHeight;
+});
+addEventListener('mousedown', () => { mouseDown = true; });
+addEventListener('mouseup', () => { mouseDown = false; prevMouseX = mouseX; prevMouseY = mouseY; });
+addEventListener('touchmove', (e) => {
+  if (e.touches.length > 0){
+    mouseX = e.touches[0].clientX / innerWidth;
+    mouseY = 1.0 - e.touches[0].clientY / innerHeight;
+    mouseDown = true;
+  }
+}, { passive: true });
+addEventListener('touchend', () => { mouseDown = false; prevMouseX = mouseX; prevMouseY = mouseY; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  planeMat.uniforms.uTime.value = t;
+  updateCamera(t);
+
+  // advect velocity field
+  simQuad.material = advectMat;
+  advectMat.uniforms.uField.value = velRead.texture;
+  advectMat.uniforms.uVel.value = velRead.texture;
+  advectMat.uniforms.uDt.value = 0.016;
+  advectMat.uniforms.uDissipation.value = 0.995; // very slow velocity decay
+  renderer.setRenderTarget(velWrite);
+  renderer.render(simScene, simCamera);
+  [velRead, velWrite] = [velWrite, velRead];
+
+  // add velocity impulse if mouse dragged
+  if (mouseDown){
+    const dx = mouseX - prevMouseX;
+    const dy = mouseY - prevMouseY;
+    if (Math.abs(dx) > 0.0001 || Math.abs(dy) > 0.0001){
+      simQuad.material = impulseMat;
+      impulseMat.uniforms.uField.value = velRead.texture;
+      impulseMat.uniforms.uPos.value.set(mouseX, mouseY);
+      impulseMat.uniforms.uRadius.value = 0.06;
+      impulseMat.uniforms.uStrength.value.set(dx * 8, dy * 8, 0);
+      renderer.setRenderTarget(velWrite);
+      renderer.render(simScene, simCamera);
+      [velRead, velWrite] = [velWrite, velRead];
+    }
+    prevMouseX = mouseX;
+    prevMouseY = mouseY;
+  }
+
+  // advect dye field
+  simQuad.material = advectMat;
+  advectMat.uniforms.uField.value = dyeRead.texture;
+  advectMat.uniforms.uVel.value = velRead.texture;
+  advectMat.uniforms.uDt.value = 0.016;
+  advectMat.uniforms.uDissipation.value = 0.9995; // near-zero diffusion → sharp ink boundaries
+  renderer.setRenderTarget(dyeWrite);
+  renderer.render(simScene, simCamera);
+  [dyeRead, dyeWrite] = [dyeWrite, dyeRead];
+
+  // occasionally drop new ink rings (very slow — once every 8 seconds)
+  if (Math.random() < 0.002){
+    const col = Math.random() < 0.5
+      ? new THREE.Vector3(0.02, 0.02, 0.02)  // black
+      : (Math.random() < 0.6
+          ? new THREE.Vector3(0.10, 0.12, 0.26) // indigo
+          : new THREE.Vector3(0.54, 0.44, 0.20)); // ochre
+    simQuad.material = impulseMat;
+    impulseMat.uniforms.uField.value = dyeRead.texture;
+    impulseMat.uniforms.uPos.value.set(Math.random(), Math.random());
+    impulseMat.uniforms.uRadius.value = 0.05 + Math.random() * 0.08;
+    impulseMat.uniforms.uStrength.value.copy(col).multiplyScalar(1.2);
+    renderer.setRenderTarget(dyeWrite);
+    renderer.render(simScene, simCamera);
+    [dyeRead, dyeWrite] = [dyeWrite, dyeRead];
+  }
+
+  // update display texture
+  planeMat.uniforms.uDye.value = dyeRead.texture;
+
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
