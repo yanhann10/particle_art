@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>ve4 · differential growth (coral wash)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#070a09; overflow:hidden;
+               color:#dde6d8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">ve4</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 8, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x070a09, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+/* ── differential growth simulation (identical to parent 7ea) ── */
+const MAX_VERTS = 4000;
+const ATTRACT   = 0.06;
+const REPEL_R   = 0.42;
+const REPEL_STR = 0.12;
+const NOISE     = 0.003;
+const PRESSURE  = 0.0035;
+const MAX_D     = 0.32;
+
+const verts = [];
+const NV0 = 24;
+for (let i = 0; i < NV0; i++){
+  const th = i / NV0 * Math.PI * 2;
+  const r  = 1.4 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th)*r, z: Math.sin(th)*r, y: 0, age: 0 });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function gkey(x,z){ return Math.floor(x/CELL)+','+Math.floor(z/CELL); }
+function rebuildGrid(){
+  grid.clear();
+  for(let i=0;i<verts.length;i++){
+    const v=verts[i], k=gkey(v.x,v.z);
+    if(!grid.has(k)) grid.set(k,[]);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx=Math.floor(v.x/CELL), cz=Math.floor(v.z/CELL), out=[];
+  for(let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++){
+    const arr=grid.get((cx+dx)+','+(cz+dz));
+    if(arr) for(const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', ()=>{ paused=!paused; });
+
+function step(){
+  if(paused) return;
+  const n=verts.length;
+  if(n>=MAX_VERTS) return;
+  rebuildGrid();
+  const dx=new Float32Array(n), dz=new Float32Array(n);
+  for(let i=0;i<n;i++){
+    const v=verts[i], cands=neighbors(v);
+    for(const j of cands){
+      if(j===i) continue;
+      const u=verts[j], ex=v.x-u.x, ez=v.z-u.z, d2=ex*ex+ez*ez;
+      if(d2>REPEL_R*REPEL_R||d2<1e-6) continue;
+      const d=Math.sqrt(d2), f=REPEL_STR*(1-d/REPEL_R)/d;
+      dx[i]+=ex*f; dz[i]+=ez*f;
+    }
+  }
+  for(let i=0;i<n;i++){
+    const a=verts[(i-1+n)%n], b=verts[(i+1)%n], v=verts[i];
+    dx[i]+=(a.x+b.x-2*v.x)*ATTRACT;
+    dz[i]+=(a.z+b.z-2*v.z)*ATTRACT;
+  }
+  let cx=0,cz=0;
+  for(let i=0;i<n;i++){ cx+=verts[i].x; cz+=verts[i].z; }
+  cx/=n; cz/=n;
+  for(let i=0;i<n;i++){
+    const ox=verts[i].x-cx, oz=verts[i].z-cz;
+    const d=Math.hypot(ox,oz)+1e-6;
+    dx[i]+=(ox/d)*PRESSURE; dz[i]+=(oz/d)*PRESSURE;
+  }
+  for(let i=0;i<n;i++){
+    verts[i].x+=dx[i]+(Math.random()-0.5)*NOISE;
+    verts[i].z+=dz[i]+(Math.random()-0.5)*NOISE;
+    verts[i].age+=0.0006;
+    verts[i].y=-Math.min(verts[i].age*0.6, 1.4);
+  }
+  const grown=[];
+  for(let i=0;i<n;i++){
+    const a=verts[i], b=verts[(i+1)%n];
+    grown.push(a);
+    const ex=b.x-a.x, ez=b.z-a.z;
+    if(ex*ex+ez*ez>MAX_D*MAX_D && verts.length+grown.length<MAX_VERTS){
+      grown.push({ x:(a.x+b.x)*0.5, z:(a.z+b.z)*0.5,
+                   y:(a.y+b.y)*0.5, age:Math.max(a.age,b.age)*0.85 });
+    }
+  }
+  verts.length=0;
+  for(const v of grown) verts.push(v);
+}
+
+/* ── instanced plane rendering ── */
+const N_RENDER = 40000;
+const baseGeo = new THREE.PlaneGeometry(1, 1, 1, 1);
+const instGeo = new THREE.InstancedBufferGeometry();
+instGeo.index = baseGeo.index;
+instGeo.attributes.position = baseGeo.attributes.position;
+instGeo.attributes.uv = baseGeo.attributes.uv;
+
+const aPos  = new Float32Array(N_RENDER * 3);
+const aTan  = new Float32Array(N_RENDER * 3);
+const aAge  = new Float32Array(N_RENDER);
+const aSeed = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) aSeed[i] = Math.random();
+
+const attrPos  = new THREE.InstancedBufferAttribute(aPos, 3);
+const attrTan  = new THREE.InstancedBufferAttribute(aTan, 3);
+const attrAge  = new THREE.InstancedBufferAttribute(aAge, 1);
+const attrSeed = new THREE.InstancedBufferAttribute(aSeed, 1);
+attrPos.setUsage(THREE.DynamicDrawUsage);
+attrTan.setUsage(THREE.DynamicDrawUsage);
+attrAge.setUsage(THREE.DynamicDrawUsage);
+
+instGeo.setAttribute('aPos',  attrPos);
+instGeo.setAttribute('aTan',  attrTan);
+instGeo.setAttribute('aAge',  attrAge);
+instGeo.setAttribute('aSeed', attrSeed);
+instGeo.instanceCount = N_RENDER;
+
+const uniforms = { uTime: { value: 0 } };
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    uniform float uTime;
+    attribute vec3 aPos;
+    attribute vec3 aTan;
+    attribute float aAge;
+    attribute float aSeed;
+    varying vec3 vCol;
+    varying float vBright;
+    varying vec2 vUv;
+
+    void main(){
+      vUv = uv;
+
+      /* per-instance variation from seed */
+      float angle = aSeed * 6.2831853;
+      float sizeVar = 0.7 + 0.6 * fract(aSeed * 7.31);
+      float sz = 0.075 * sizeVar;
+
+      /* build oriented frame: tangent along curve, binormal via cross with up */
+      vec3 T = normalize(aTan + vec3(0.0, 0.0, 1e-5));
+      vec3 up = vec3(0.0, 1.0, 0.0);
+      vec3 B = normalize(cross(T, up));
+      vec3 N = cross(B, T);
+
+      /* rotate binormal around tangent by per-instance angle → flake tilt */
+      float ca = cos(angle), sa = sin(angle);
+      vec3 B2 = ca * B + sa * N;
+      vec3 N2 = cross(T, B2);
+
+      /* orient plane vertices */
+      vec3 wp = aPos + position.x * T * sz + position.y * B2 * sz;
+
+      /* subtle drift wobble */
+      float t = uTime * 0.3 + aSeed * 6.28;
+      wp += 0.003 * vec3(sin(t), 0.0, cos(t));
+
+      /* palette: algae green → coral red → warm bone */
+      vec3 colA = vec3(0.50, 0.90, 0.62);
+      vec3 colB = vec3(0.95, 0.42, 0.38);
+      vec3 colC = vec3(0.92, 0.88, 0.78);
+      float k = clamp(aAge * 0.8, 0.0, 1.0);
+      vCol = mix(colA, colB, k);
+      vCol = mix(vCol, colC, smoothstep(0.85, 1.0, k) * 0.4);
+
+      /* directional light gives each flake a different catch */
+      vec3 lightDir = normalize(vec3(0.3, 1.0, 0.4));
+      float ndl = abs(dot(N2, lightDir));
+      vCol *= 0.35 + 0.65 * ndl;
+
+      /* opacity: 0.04–0.10, young slightly brighter */
+      float opa = 0.04 + 0.06 * fract(aSeed * 3.17);
+      opa *= (1.0 + 0.25 * (1.0 - k));
+      vBright = opa;
+
+      vec4 mv = modelViewMatrix * vec4(wp, 1.0);
+      /* fog: exp2 density 0.04 */
+      float dist = -mv.z;
+      float fogFactor = exp(-0.0016 * dist * dist);
+      vBright *= fogFactor;
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vBright;
+    varying vec2 vUv;
+
+    void main(){
+      /* soft elliptical falloff from center */
+      vec2 d = (vUv - 0.5) * 2.0;
+      float r2 = dot(d, d);
+      float edge = exp(-r2 * 3.0);
+
+      vec3 col = vCol * vBright * edge;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+
+const mesh = new THREE.Mesh(instGeo, mat);
+mesh.frustumCulled = false;
+scene.add(mesh);
+
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* pre-grow 600 steps → opens with recognizable coral bifurcation */
+for (let s = 0; s < 600; s++) step();
+
+const centroidTarget = new THREE.Vector3();
+const start = performance.now();
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  for (let s = 0; s < 4; s++) step();
+
+  /* track centroid for framing */
+  const n = verts.length;
+  let cx=0, cy=0, cz=0;
+  for (let i=0; i<n; i++){ cx+=verts[i].x; cy+=verts[i].y; cz+=verts[i].z; }
+  cx/=n; cy/=n; cz/=n;
+  centroidTarget.set(cx, cy, cz);
+  controls.target.lerp(centroidTarget, 0.02);
+
+  /* distribute N_RENDER planes along polyline */
+  const lengths = [];
+  let total = 0;
+  for (let i = 0; i < n; i++){
+    const a=verts[i], b=verts[(i+1)%n];
+    const L = Math.sqrt((b.x-a.x)**2 + (b.z-a.z)**2 + (b.y-a.y)**2);
+    lengths.push(L); total += L;
+  }
+
+  if (total > 0){
+    let written = 0;
+    for (let i = 0; i < n; i++){
+      const share = (i === n-1)
+        ? N_RENDER - written
+        : Math.max(1, Math.floor(N_RENDER * lengths[i] / total));
+      const a = verts[i], b = verts[(i+1)%n];
+      const tx = b.x-a.x, ty = b.y-a.y, tz = b.z-a.z;
+      for (let k = 0; k < share && written < N_RENDER; k++){
+        const u = Math.random();
+        const j3 = written * 3;
+        aPos[j3]   = a.x + tx*u + (Math.random()-0.5)*0.02;
+        aPos[j3+1] = a.y + ty*u;
+        aPos[j3+2] = a.z + tz*u + (Math.random()-0.5)*0.02;
+        aTan[j3]   = tx;
+        aTan[j3+1] = ty;
+        aTan[j3+2] = tz;
+        aAge[written] = Math.max(a.age, b.age);
+        written++;
+      }
+    }
+    attrPos.needsUpdate = true;
+    attrTan.needsUpdate = true;
+    attrAge.needsUpdate = true;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
