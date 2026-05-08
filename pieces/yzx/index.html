@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yzx · tinguely-jam · lucy machine</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a080c; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.6; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy · stanford 3d scanning repo …</div>
+<div class="id">yzx</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 30);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a080c, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 60000;
+const restPositions = new Float32Array(N * 3);
+const seeds        = new Float32Array(N);
+const bands        = new Float32Array(N); // y-band index for tinguely slicing
+
+const uniforms = {
+  uTime:    { value: 0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+  uReady:   { value: 0.0 },
+  uJam:     { value: 0.0 },   // 0→1 during jam event
+  uJamPhase:{ value: 0.0 },   // continuous phase within jam
+  uJitter:  { value: 0.0 }    // mechanical rattle intensity
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform float uJam;
+    uniform float uJamPhase;
+    uniform float uJitter;
+    attribute vec3  rest;
+    attribute float seed;
+    attribute float band;
+    varying vec3 vCol;
+    varying float vEnergy;
+
+    // rotate around Y
+    vec3 rotY(vec3 p, float a){
+      float c = cos(a), s = sin(a);
+      return vec3(c*p.x + s*p.z, p.y, -s*p.x + c*p.z);
+    }
+
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.5 + seed * 6.28;
+
+      // breathing
+      vec3 dir = normalize(p);
+      p += dir * sin(t) * 0.06 * (1.0 + 0.5*sin(seed*9.0));
+
+      // --- TINGUELY JAM ---
+      // each band rotates at its own speed/direction during jam
+      float bandF = band;
+      float bandSpeed = (mod(bandF, 3.0) - 1.0) * 2.5 + sin(bandF * 1.7) * 1.8;
+      float jamRotation = uJam * bandSpeed * uJamPhase;
+      // offset: bands slide apart vertically during jam
+      float bandSlide = uJam * sin(bandF * 0.8 + uJamPhase * 2.0) * 0.6;
+      // apply rotation per band
+      p = rotY(p, jamRotation);
+      p.y += bandSlide;
+      // mechanical jitter: high-freq rattle
+      float rattle = uJitter * 0.12;
+      p.x += sin(seed * 400.0 + uTime * 45.0) * rattle;
+      p.y += cos(seed * 350.0 + uTime * 38.0) * rattle;
+      p.z += sin(seed * 280.0 + uTime * 52.0) * rattle;
+
+      // assembly reveal
+      vec3 entry = vec3(sin(seed*40.0), cos(seed*30.0), sin(seed*22.0)) * 18.0;
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      vEnergy = 0.4 + 0.6*sin(t*0.7);
+
+      // palette shifts during jam: ivory/amber → steel/copper (machine colors)
+      vec3 a = vec3(0.95, 0.92, 0.86);
+      vec3 b = vec3(0.98, 0.78, 0.55);
+      vec3 c = vec3(0.78, 0.32, 0.22);
+      // machine palette
+      vec3 ma = vec3(0.75, 0.78, 0.82);
+      vec3 mb = vec3(0.85, 0.55, 0.30);
+      vec3 mc = vec3(0.45, 0.25, 0.15);
+
+      vec3 colWarm = mix(mix(a,b,vEnergy), c, smoothstep(0.78,1.0,vEnergy)*0.6);
+      vec3 colMach = mix(mix(ma,mb,vEnergy), mc, smoothstep(0.78,1.0,vEnergy)*0.6);
+      vCol = mix(colWarm, colMach, uJam * 0.7);
+
+      // spark particles during jam: some get extra bright
+      float spark = step(0.97, fract(seed * 137.0 + uJamPhase * 3.0)) * uJam;
+      vCol += spark * vec3(1.0, 0.7, 0.3) * 2.0;
+      vEnergy = mix(vEnergy, 1.0, spark);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.0 + 1.6*vEnergy + spark*3.0) * uPixel * (45.0/dist) * (0.4 + 0.6*uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vEnergy;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 17.0) * (0.45 + 0.55*vEnergy);
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const loadingEl = document.getElementById('loading');
+
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+const loader = new PLYLoader();
+let revealStart = 0;
+let modelBounds = null;
+
+loader.load(PLY_URL,
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scale = 15 / maxAxis;
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    geometry.computeBoundingBox();
+    modelBounds = geometry.boundingBox;
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp = new THREE.Vector3();
+    const yMin = modelBounds.min.y;
+    const yMax = modelBounds.max.y;
+    const numBands = 12.0;
+
+    for (let i = 0; i < N; i++){
+      sampler.sample(tmp);
+      restPositions[i*3]   = tmp.x;
+      restPositions[i*3+1] = tmp.y;
+      restPositions[i*3+2] = tmp.z;
+      seeds[i] = Math.random();
+      // assign band based on y position
+      bands[i] = Math.floor(((tmp.y - yMin) / (yMax - yMin)) * numBands);
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('band',     new THREE.BufferAttribute(bands, 1));
+
+    loadingEl.style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      loadingEl.textContent = `loading lucy · ${pct}% · stanford 3d scanning repo`;
+    }
+  },
+  (err) => {
+    loadingEl.textContent = 'load failed — check network';
+    console.error(err);
+  });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Tinguely jam timing
+// cycle: 18s calm → 3.5s jam (with 0.4s ramp in, 0.6s ramp out)
+const JAM_CYCLE = 18.0;
+const JAM_DURATION = 3.5;
+const JAM_RAMP_IN = 0.4;
+const JAM_RAMP_OUT = 0.8;
+
+function getJamEnvelope(t) {
+  const cycle = t % (JAM_CYCLE + JAM_DURATION);
+  if (cycle < JAM_CYCLE) return { jam: 0, phase: 0 };
+  const jamT = cycle - JAM_CYCLE;
+  let env = 1.0;
+  if (jamT < JAM_RAMP_IN) env = jamT / JAM_RAMP_IN;
+  else if (jamT > JAM_DURATION - JAM_RAMP_OUT) env = (JAM_DURATION - jamT) / JAM_RAMP_OUT;
+  env = Math.max(0, Math.min(1, env));
+  // ease: cubic
+  env = env * env * (3 - 2 * env);
+  return { jam: env, phase: jamT };
+}
+
+// camera: gentle orbit + centroid tracking
+const camRadius = 30;
+const camTarget = new THREE.Vector3(0, 0, 0);
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (now - revealStart) / 2500);
+  }
+
+  // tinguely jam
+  const { jam, phase } = getJamEnvelope(t);
+  uniforms.uJam.value = jam;
+  uniforms.uJamPhase.value = phase;
+  // jitter ramps faster and has a staccato feel
+  uniforms.uJitter.value = jam * (0.5 + 0.5 * Math.sin(t * 30.0));
+
+  // slow orbit
+  const orbitSpeed = 0.05;
+  // during jam, orbit speeds up briefly
+  const orbitBoost = 1.0 + jam * 2.0;
+  const angle = t * orbitSpeed * orbitBoost;
+  camera.position.x = Math.sin(angle) * camRadius;
+  camera.position.z = Math.cos(angle) * camRadius;
+  camera.position.y = 2 + Math.sin(t * 0.08) * 2;
+  camera.lookAt(camTarget);
+
+  // gentle rotation (reduced during jam since camera orbits faster)
+  points.rotation.y = 0;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
