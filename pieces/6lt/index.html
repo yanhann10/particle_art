@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6lt · Désordres — entropy gradient</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#f5f0e8; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">6lt</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf5f0e8);
+
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 45);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ── Deterministic RNG
+let rngState = 445821;
+function rng(){ 
+  rngState |= 0; 
+  rngState = rngState + 0x6d2b79f5 | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// Box-Muller for Gaussian noise
+function gaussianRandom(){
+  const u1 = rng();
+  const u2 = rng();
+  return Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+}
+
+// ── Grid parameters — Molnar's typical format
+const GRID_ROWS = 40;
+const GRID_COLS = 40;
+const CELL_SIZE = 1.0;
+const SEGMENT_LENGTH = 0.65;
+const NESTED_SQUARES = 3;
+
+// ── Generate geometry — nested squares per cell, each cell perturbed by chaos_amount
+const allSegments = [];
+
+for (let row = 0; row < GRID_ROWS; row++){
+  for (let col = 0; col < GRID_COLS; col++){
+    const cx = (col - GRID_COLS / 2 + 0.5) * CELL_SIZE;
+    const cy = (row - GRID_ROWS / 2 + 0.5) * CELL_SIZE;
+    
+    // Chaos grows from top to bottom
+    const chaos = Math.pow(row / (GRID_ROWS - 1), 1.2);
+    
+    // Draw nested squares
+    for (let sq = 0; sq < NESTED_SQUARES; sq++){
+      const size = SEGMENT_LENGTH * (0.3 + sq * 0.25);
+      const corners = [
+        [-size/2, -size/2],
+        [ size/2, -size/2],
+        [ size/2,  size/2],
+        [-size/2,  size/2]
+      ];
+      
+      // Perturb each corner individually
+      const perturbedCorners = corners.map(([ox, oy]) => {
+        const px = ox + gaussianRandom() * chaos * 0.12;
+        const py = oy + gaussianRandom() * chaos * 0.12;
+        return [px, py];
+      });
+      
+      // Draw four sides
+      for (let i = 0; i < 4; i++){
+        const [x1, y1] = perturbedCorners[i];
+        const [x2, y2] = perturbedCorners[(i + 1) % 4];
+        
+        // Additional rotation per-segment
+        const rot = gaussianRandom() * chaos * 0.08;
+        const cosR = Math.cos(rot);
+        const sinR = Math.sin(rot);
+        
+        // Cell-level offset
+        const offsetX = gaussianRandom() * chaos * 0.06;
+        const offsetY = gaussianRandom() * chaos * 0.06;
+        
+        // Transform
+        const fx1 = cx + offsetX + (x1 * cosR - y1 * sinR);
+        const fy1 = cy + offsetY + (x1 * sinR + y1 * cosR);
+        const fx2 = cx + offsetX + (x2 * cosR - y2 * sinR);
+        const fy2 = cy + offsetY + (x2 * sinR + y2 * cosR);
+        
+        allSegments.push([fx1, fy1, fx2, fy2, chaos]);
+      }
+    }
+  }
+}
+
+// ── Render segments as thin tubes (plotter aesthetic)
+const tubeRadius = 0.015;
+const tubeSeg = 3;
+
+const segmentGroup = new THREE.Group();
+scene.add(segmentGroup);
+
+allSegments.forEach(([x1, y1, x2, y2, chaos]) => {
+  const path = new THREE.CurvePath();
+  path.add(new THREE.LineCurve3(
+    new THREE.Vector3(x1, y1, 0),
+    new THREE.Vector3(x2, y2, 0)
+  ));
+  
+  const tubeGeo = new THREE.TubeGeometry(path, tubeSeg, tubeRadius, 4, false);
+  
+  // Color: black with slight blue tint for deep chaos regions
+  const colorMix = THREE.MathUtils.lerp(0, 0.15, chaos * chaos);
+  const mat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(colorMix * 0.2, colorMix * 0.25, colorMix * 0.35),
+    transparent: true,
+    opacity: 0.88 - chaos * 0.1
+  });
+  
+  const mesh = new THREE.Mesh(tubeGeo, mat);
+  segmentGroup.add(mesh);
+});
+
+// ── Add subtle grain overlay via point-cloud of tiny dark specks (paper texture)
+const grainCount = 2000;
+const grainGeo = new THREE.BufferGeometry();
+const grainPos = new Float32Array(grainCount * 3);
+for (let i = 0; i < grainCount; i++){
+  grainPos[i * 3] = (rng() - 0.5) * GRID_COLS * CELL_SIZE * 1.05;
+  grainPos[i * 3 + 1] = (rng() - 0.5) * GRID_ROWS * CELL_SIZE * 1.05;
+  grainPos[i * 3 + 2] = 0.05 + rng() * 0.05;
+}
+grainGeo.setAttribute('position', new THREE.BufferAttribute(grainPos, 3));
+const grainMat = new THREE.PointsMaterial({
+  color: 0x3a3528,
+  size: 0.015,
+  transparent: true,
+  opacity: 0.08,
+  sizeAttenuation: true
+});
+const grainCloud = new THREE.Points(grainGeo, grainMat);
+scene.add(grainCloud);
+
+// ── Camera orbit — slow, low-amplitude to preserve frontal reading
+const orbitRadius = 45;
+const orbitHeight = 0;
+const orbitSpeed = 0.035;
+
+// ── Resize
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Animate
+const start = performance.now();
+function loop(){
+  const elapsed = (performance.now() - start) / 1000;
+  
+  // Gentle camera orbit — viewer moves around the plane
+  const angle = elapsed * orbitSpeed;
+  camera.position.x = Math.sin(angle) * orbitRadius * 0.15;
+  camera.position.z = orbitRadius + Math.cos(angle) * orbitRadius * 0.08;
+  camera.position.y = orbitHeight + Math.sin(elapsed * 0.02) * 1.2;
+  camera.lookAt(0, 0, 0);
+  
+  // Very subtle grid breathing — chaos rows breathe more
+  segmentGroup.children.forEach((mesh, i) => {
+    const seg = allSegments[i % allSegments.length];
+    const chaos = seg[4];
+    const breathPhase = elapsed * 0.4 + i * 0.01;
+    const breathAmp = 0.003 * chaos;
+    mesh.position.z = Math.sin(breathPhase) * breathAmp;
+  });
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
