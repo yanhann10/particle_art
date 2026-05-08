@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>33k · sublime drift</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020108; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; letter-spacing:0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px;
+          font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#607080; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">33k</div>
+<div class="hint" id="hint">tap for mic</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.05, 900);
+camera.position.set(0, 0.3, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020108, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── Vast field of leaf-particles in a thin luminous band ── */
+const N = 18000;
+const pos = new Float32Array(N * 3);
+const seed = new Float32Array(N);
+const depthA = new Float32Array(N);
+
+function spawnLeaf(i, camZ) {
+  const z = (camZ || 0) - 2 - Math.pow(Math.random(), 0.65) * 460;
+  const dz = Math.abs(z - (camZ || 0));
+  const sx = 3.5 + dz * 0.13;
+  const sy = 0.7 + dz * 0.025;
+  pos[i*3]   = (Math.random()-0.5) * sx * 2;
+  pos[i*3+1] = (Math.random()-0.5) * sy * 2 * Math.pow(Math.random(), 0.6);
+  pos[i*3+2] = z;
+  seed[i] = Math.random();
+  depthA[i] = Math.min(1.0, dz / 380);
+}
+for (let i = 0; i < N; i++) spawnLeaf(i, 0);
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seed, 1));
+geom.setAttribute('depth',    new THREE.BufferAttribute(depthA, 1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBass:  { value: 0 },
+  uMid:   { value: 0 },
+  uCamZ:  { value: 0 }
+};
+
+/* ── Leaf-particle shader ── */
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uBass, uMid, uCamZ;
+    attribute float seed, depth;
+    varying vec3 vCol;
+    varying float vAlpha, vSeed;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.15 + seed * 6.283;
+      float lt = seed * 97.0;
+      /* gentle float — each leaf on its own slow drift */
+      p.y += sin(t * 1.1 + lt) * 0.18 * (1.0 - depth * 0.6);
+      p.x += sin(t * 0.6 + lt * 1.7) * 0.12;
+      /* bass wave propagating through the field */
+      float wave = sin(p.z * 0.018 + uTime * 0.7) * uBass * 3.0;
+      p.y += wave * (1.0 - depth * 0.4);
+      p.x += sin(p.z * 0.025 + uTime * 1.1 + 1.5) * uMid * 1.2;
+
+      /* Turrell palette: amber gold → deep ember → indigo void */
+      vec3 c0 = vec3(0.96, 0.62, 0.13);
+      vec3 c1 = vec3(0.65, 0.18, 0.08);
+      vec3 c2 = vec3(0.06, 0.09, 0.22);
+      float d = depth;
+      vec3 col = d < 0.28 ? mix(c0, c1, d/0.28) : mix(c1, c2, (d-0.28)/0.72);
+      col += c0 * uBass * 0.5 * (1.0 - d);
+      vCol = col;
+
+      float fogD = length(p - vec3(0.0, 0.0, uCamZ));
+      float fog = exp(-fogD * 0.0048);
+      vAlpha = fog * (0.32 + 0.28*(1.0-d)) * (0.7 + 0.35*uBass*(1.0-d));
+      vSeed = seed;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 0.3);
+      float sz = (2.2 + seed * 1.8) * uPixel * (85.0 / dist);
+      gl_PointSize = min(sz, 32.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha, vSeed;
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      float a = vSeed * 3.14159;
+      float ca = cos(a), sa = sin(a);
+      vec2 r = vec2(ca*uv.x - sa*uv.y, sa*uv.x + ca*uv.y);
+      /* leaf silhouette: elongated with pinched tips */
+      float ex = r.x * 2.0, ey = r.y * 3.2;
+      float leaf = ex*ex + ey*ey;
+      if(leaf > 0.25) discard;
+      float edge = 1.0 - smoothstep(0.1, 0.25, leaf);
+      float vein = exp(-abs(r.x) * 45.0) * 0.12;
+      vec3 c = vCol + vein;
+      float o = edge * vAlpha;
+      gl_FragColor = vec4(c * o, o);
+    }
+  `
+});
+scene.add(new THREE.Points(geom, mat));
+
+/* ── Distant focal star — single luminous anchor in the void ── */
+const sGeo = new THREE.BufferGeometry();
+sGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, 0.08, -420]), 3));
+const sMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  uniforms: { uBass: uniforms.uBass, uPixel: uniforms.uPixel },
+  vertexShader: `
+    uniform float uPixel, uBass;
+    void main(){
+      vec4 mv = modelViewMatrix * vec4(position,1.0);
+      gl_PointSize = (3.5 + uBass*4.0) * uPixel * (220.0 / max(-mv.z, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uBass;
+    void main(){
+      float r = length(gl_PointCoord - 0.5);
+      float g = exp(-r*5.0)*0.45 + exp(-r*22.0)*0.55;
+      vec3 c = mix(vec3(0.85,0.55,0.15), vec3(0.95,0.88,0.75), g);
+      float a = g * (0.25 + uBass*0.25);
+      gl_FragColor = vec4(c*a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(sGeo, sMat));
+
+/* ── Faint horizontal glow band — the luminous horizon ── */
+const hGeo = new THREE.PlaneGeometry(600, 3.5);
+const hMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  blending: THREE.AdditiveBlending,
+  uniforms: { uBass: uniforms.uBass },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uBass;
+    void main(){
+      float dy = abs(vUv.y - 0.5) * 2.0;
+      float g = exp(-dy * dy * 8.0);
+      float dx = abs(vUv.x - 0.5) * 2.0;
+      g *= (1.0 - dx * dx);
+      vec3 c = vec3(0.45, 0.22, 0.06);
+      float a = g * (0.03 + uBass * 0.025);
+      gl_FragColor = vec4(c * a, a);
+    }
+  `
+});
+const hMesh = new THREE.Mesh(hGeo, hMat);
+hMesh.position.set(0, 0.05, -200);
+scene.add(hMesh);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── Audio (optional, click to enable) ── */
+const hint = document.getElementById('hint');
+let analyser = null, freqData = null;
+async function startAudio(){
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.82;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'live · bass shapes the void';
+  } catch(e){ hint.textContent = ''; }
+}
+document.body.addEventListener('click', ()=>{ if(!analyser) startAudio(); }, { once:true });
+
+function bandE(arr,lo,hi){ let s=0; for(let i=lo;i<hi;i++) s+=arr[i]; return s/(hi-lo)/255; }
+
+const t0 = performance.now();
+let sBass = 0, sMid = 0;
+
+function loop(){
+  const t = (performance.now()-t0)/1000;
+  uniforms.uTime.value = t;
+
+  /* slow inexorable drift into the field */
+  const cz = -t * 0.7;
+  camera.position.z = cz;
+  camera.position.y = 0.3 + Math.sin(t*0.045)*0.18;
+  camera.position.x = Math.sin(t*0.028)*0.35;
+  camera.lookAt(camera.position.x*0.2, 0.08, cz - 120);
+  uniforms.uCamZ.value = cz;
+
+  /* keep the horizon glow centered ahead */
+  hMesh.position.z = cz - 200;
+  hMesh.position.x = camera.position.x * 0.2;
+
+  /* move the focal star ahead */
+  sGeo.attributes.position.array[2] = cz - 420;
+  sGeo.attributes.position.needsUpdate = true;
+
+  /* recycle particles that fall behind camera */
+  let dirty = false;
+  for(let i=0; i<N; i++){
+    if(pos[i*3+2] > cz + 6){
+      spawnLeaf(i, cz);
+      dirty = true;
+    }
+  }
+  if(dirty){
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.depth.needsUpdate = true;
+    geom.attributes.seed.needsUpdate = true;
+  }
+
+  /* audio or synthetic pulse */
+  let bass=0, mid=0;
+  if(analyser){
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    bass = bandE(freqData, 0, Math.floor(n*0.08));
+    mid  = bandE(freqData, Math.floor(n*0.08), Math.floor(n*0.35));
+  } else {
+    bass = 0.16 + 0.13*Math.sin(t*0.37) + 0.07*Math.sin(t*0.15);
+    mid  = 0.10 + 0.07*Math.sin(t*0.63+1.0);
+  }
+  sBass += (bass-sBass)*0.07;
+  sMid  += (mid-sMid)*0.09;
+  uniforms.uBass.value = sBass;
+  uniforms.uMid.value  = sMid;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
