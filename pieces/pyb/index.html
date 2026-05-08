@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pyb · hypercube projection (Mohr)</title>
+<!-- MOTION: rotation, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">pyb</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+// 7-dimensional hypercube — 2^7 = 128 vertices
+const DIM = 7;
+const N = Math.pow(2, DIM);
+
+// Generate all vertices of the unit hypercube in R^7
+const vertices = [];
+for (let i = 0; i < N; i++) {
+  const v = [];
+  for (let d = 0; d < DIM; d++) {
+    v.push((i & (1 << d)) ? 1 : -1);
+  }
+  vertices.push(v);
+}
+
+// Build edge list — two vertices are connected if Hamming distance = 1
+const edges = [];
+for (let i = 0; i < N; i++) {
+  for (let j = i + 1; j < N; j++) {
+    let diff = 0;
+    for (let d = 0; d < DIM; d++) {
+      if (vertices[i][d] !== vertices[j][d]) diff++;
+    }
+    if (diff === 1) edges.push([i, j]);
+  }
+}
+
+// Random orthonormal projection matrix R^7 → R^3 via Gram-Schmidt
+function randomProjection() {
+  const P = [];
+  for (let row = 0; row < 3; row++) {
+    const v = [];
+    for (let col = 0; col < DIM; col++) {
+      v.push(Math.random() * 2 - 1);
+    }
+    // Gram-Schmidt orthogonalization
+    for (let r = 0; r < row; r++) {
+      let dot = 0;
+      for (let c = 0; c < DIM; c++) dot += P[r][c] * v[c];
+      for (let c = 0; c < DIM; c++) v[c] -= dot * P[r][c];
+    }
+    // Normalize
+    let len = 0;
+    for (let c = 0; c < DIM; c++) len += v[c] * v[c];
+    len = Math.sqrt(len);
+    for (let c = 0; c < DIM; c++) v[c] /= len;
+    P.push(v);
+  }
+  return P;
+}
+
+const projMat = randomProjection();
+
+// Project a 7D vertex to 3D
+function project(v7) {
+  const v3 = [0, 0, 0];
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < DIM; col++) {
+      v3[row] += projMat[row][col] * v7[col];
+    }
+  }
+  return v3;
+}
+
+// Mohr's primary palette — red, blue, yellow, white
+const palette = [
+  new THREE.Color(0xff0033),
+  new THREE.Color(0x0055ff),
+  new THREE.Color(0xffdd00),
+  new THREE.Color(0xffffff)
+];
+
+// Edge selection rule — Mohr-style: keep edges where vertex-index sum % 4 matches edge number % 4
+const selectedEdges = [];
+edges.forEach((e, idx) => {
+  const sumMod = (e[0] + e[1]) % 4;
+  const idxMod = idx % 4;
+  if (sumMod === idxMod) selectedEdges.push(e);
+});
+
+// Build line segments
+const lineMaterial = new THREE.LineBasicMaterial({ vertexColors: true });
+const lineGeoms = [];
+
+selectedEdges.forEach((e, idx) => {
+  const v0 = vertices[e[0]];
+  const v1 = vertices[e[1]];
+  const p0 = project(v0);
+  const p1 = project(v1);
+  
+  const geom = new THREE.BufferGeometry();
+  const positions = new Float32Array([
+    p0[0] * 8, p0[1] * 8, p0[2] * 8,
+    p1[0] * 8, p1[1] * 8, p1[2] * 8
+  ]);
+  const color = palette[idx % 4];
+  const colors = new Float32Array([
+    color.r, color.g, color.b,
+    color.r, color.g, color.b
+  ]);
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const line = new THREE.LineSegments(geom, lineMaterial);
+  scene.add(line);
+  lineGeoms.push({ geom, edge: e });
+});
+
+// Givens rotation in two randomly chosen dimensions
+const dim1 = Math.floor(Math.random() * DIM);
+let dim2 = Math.floor(Math.random() * DIM);
+while (dim2 === dim1) dim2 = Math.floor(Math.random() * DIM);
+
+function rotateHypercube(angle) {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  vertices.forEach(v => {
+    const a = v[dim1];
+    const b = v[dim2];
+    v[dim1] = c * a - s * b;
+    v[dim2] = s * a + c * b;
+  });
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  
+  // Slow hypercube rotation in chosen 2-plane
+  const angle = t * 0.18;
+  rotateHypercube(0.003);
+  
+  // Update line positions
+  lineGeoms.forEach(({ geom, edge }) => {
+    const v0 = vertices[edge[0]];
+    const v1 = vertices[edge[1]];
+    const p0 = project(v0);
+    const p1 = project(v1);
+    const pos = geom.attributes.position.array;
+    pos[0] = p0[0] * 8;
+    pos[1] = p0[1] * 8;
+    pos[2] = p0[2] * 8;
+    pos[3] = p1[0] * 8;
+    pos[4] = p1[1] * 8;
+    pos[5] = p1[2] * 8;
+    geom.attributes.position.needsUpdate = true;
+  });
+  
+  // Gentle camera orbit for depth perception
+  camera.position.x = Math.sin(t * 0.08) * 6;
+  camera.position.y = Math.cos(t * 0.11) * 4;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
