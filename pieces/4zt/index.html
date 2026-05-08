@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: pulse, intensity: vigorous -->
+<title>4zt · differential growth · bass cathedral</title>
+<style>
+html, body { margin:0; padding:0; height:100%; background:#050709; overflow:hidden; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+      font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc;
+      letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">4zt</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Audio (mic) with graceful fallback ── */
+let analyser, freqData, bassEnergy = 0, bassPeak = 0, shockAge = 999;
+const SHOCK_THRESH = 0.55;
+
+async function initAudio() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new AudioContext();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.4;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+  } catch(e) { /* no mic — piece runs fine silent */ }
+}
+initAudio();
+
+function updateAudio() {
+  if (!analyser) { bassEnergy *= 0.95; bassPeak *= 0.92; return; }
+  analyser.getByteFrequencyData(freqData);
+  let sum = 0;
+  for (let i = 1; i < 7; i++) sum += freqData[i];
+  const raw = sum / (6 * 255);
+  const prev = bassEnergy;
+  bassEnergy = raw;
+  if (raw > SHOCK_THRESH && raw - prev > 0.12) {
+    bassPeak = Math.min(raw * 1.8, 1.0);
+    shockAge = 0;
+  }
+  bassPeak *= 0.93;
+  shockAge += 0.016;
+}
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x050709, 0.030);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(9, 9, 15);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050709, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+/* ── Post-processing: chromatic aberration + shockwave ── */
+const rt = new THREE.WebGLRenderTarget(innerWidth, innerHeight);
+const postScene = new THREE.Scene();
+const postCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const postMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tDiffuse: { value: rt.texture },
+    uBass: { value: 0 }, uPeak: { value: 0 },
+    uShockAge: { value: 999 },
+    uRes: { value: new THREE.Vector2(innerWidth, innerHeight) }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float uBass, uPeak, uShockAge;
+    uniform vec2 uRes;
+    varying vec2 vUv;
+    void main() {
+      vec2 uv = vUv;
+      vec2 center = vec2(0.5);
+      /* shockwave ring distortion */
+      float shockR = uShockAge * 1.6;
+      float sw = 0.14;
+      float dist = length(uv - center);
+      float shockStr = uPeak * exp(-uShockAge * 2.8);
+      float ring = smoothstep(shockR - sw, shockR, dist)
+                 * smoothstep(shockR + sw, shockR, dist);
+      vec2 dir = normalize(uv - center + 1e-4);
+      uv += dir * ring * shockStr * 0.07;
+      /* chromatic aberration */
+      float aberr = uBass * 0.009 + uPeak * 0.022;
+      vec2 off = (uv - center) * aberr;
+      float r = texture2D(tDiffuse, uv + off).r;
+      float g = texture2D(tDiffuse, uv).g;
+      float b = texture2D(tDiffuse, uv - off).b;
+      vec3 col = vec3(r, g, b);
+      /* vignette tightens on bass */
+      float vig = 1.0 - smoothstep(0.28, 0.82 - uBass * 0.14, dist);
+      col *= 1.0 - vig * 0.65;
+      /* film grain */
+      float grain = fract(sin(dot(uv * uRes, vec2(12.9898, 78.233))) * 43758.5453);
+      col += (grain - 0.5) * 0.035;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+postScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), postMat));
+
+/* ── Differential growth (full 3D, tower) ── */
+const MAX_VERTS = 4000;
+const ATTRACT = 0.06, REPEL_R = 0.42, REPEL_STR = 0.12;
+const NS = 0.003, PRESSURE = 0.0028, RISE = 0.0045, MAX_D = 0.32;
+let paused = false;
+
+const verts = [];
+for (let i = 0; i < 24; i++) {
+  const th = i/24*Math.PI*2, r = 1.4+(Math.random()-0.5)*0.1;
+  verts.push({ x:Math.cos(th)*r, y:0, z:Math.sin(th)*r, age:0 });
+}
+
+const CELL = REPEL_R, grid = new Map();
+function gk(x,y,z){ return Math.floor(x/CELL)+','+Math.floor(y/CELL)+','+Math.floor(z/CELL); }
+function rebuildGrid(){
+  grid.clear();
+  for(let i=0;i<verts.length;i++){
+    const v=verts[i], k=gk(v.x,v.y,v.z);
+    if(!grid.has(k)) grid.set(k,[]);
+    grid.get(k).push(i);
+  }
+}
+function nbrs(v){
+  const cx=Math.floor(v.x/CELL),cy=Math.floor(v.y/CELL),cz=Math.floor(v.z/CELL),out=[];
+  for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++) for(let dz=-1;dz<=1;dz++){
+    const a=grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if(a) for(const idx of a) out.push(idx);
+  }
+  return out;
+}
+
+function step(){
+  if(paused) return;
+  const n=verts.length; if(n>=MAX_VERTS) return;
+  rebuildGrid();
+  const dx=new Float32Array(n),dy=new Float32Array(n),dz=new Float32Array(n);
+  const bb = 1.0 + bassEnergy * 1.5;
+  for(let i=0;i<n;i++){
+    const v=verts[i];
+    for(const j of nbrs(v)){
+      if(j===i) continue;
+      const u=verts[j], ex=v.x-u.x, ey=v.y-u.y, ez=v.z-u.z;
+      const d2=ex*ex+ey*ey+ez*ez;
+      if(d2>REPEL_R*REPEL_R||d2<1e-6) continue;
+      const d=Math.sqrt(d2), f=REPEL_STR*(1-d/REPEL_R)/d*bb;
+      dx[i]+=ex*f; dy[i]+=ey*f; dz[i]+=ez*f;
+    }
+  }
+  for(let i=0;i<n;i++){
+    const a=verts[(i-1+n)%n],b=verts[(i+1)%n],v=verts[i];
+    dx[i]+=(a.x+b.x-2*v.x)*ATTRACT;
+    dy[i]+=(a.y+b.y-2*v.y)*ATTRACT;
+    dz[i]+=(a.z+b.z-2*v.z)*ATTRACT;
+  }
+  let cx=0,cy=0,cz=0;
+  for(let i=0;i<n;i++){cx+=verts[i].x;cy+=verts[i].y;cz+=verts[i].z;}
+  cx/=n;cy/=n;cz/=n;
+  for(let i=0;i<n;i++){
+    const ox=verts[i].x-cx,oy=verts[i].y-cy,oz=verts[i].z-cz;
+    const d=Math.hypot(ox,oy,oz)+1e-6;
+    dx[i]+=(ox/d)*PRESSURE; dy[i]+=(oy/d)*PRESSURE*0.4; dz[i]+=(oz/d)*PRESSURE;
+  }
+  for(let i=0;i<n;i++){
+    const a=verts[i].age;
+    const up=RISE*(0.3+1.2*Math.min(a*1.5,1.0));
+    verts[i].x+=dx[i]+(Math.random()-0.5)*NS;
+    verts[i].y+=dy[i]+(Math.random()-0.5)*NS*0.5+up;
+    verts[i].z+=dz[i]+(Math.random()-0.5)*NS;
+    verts[i].age+=0.0012;
+  }
+  const grown=[];
+  for(let i=0;i<n;i++){
+    const a=verts[i],b=verts[(i+1)%n];
+    grown.push(a);
+    const ex=b.x-a.x,ey=b.y-a.y,ez=b.z-a.z;
+    if(ex*ex+ey*ey+ez*ez>MAX_D*MAX_D && verts.length+grown.length<MAX_VERTS)
+      grown.push({x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5-0.05, z:(a.z+b.z)*0.5, age:Math.max(a.age,b.age)*0.5});
+  }
+  verts.length=0;
+  for(const v of grown) verts.push(v);
+}
+
+for(let s=0;s<800;s++) step();
+addEventListener('click', ()=>{ paused=!paused; });
+
+/* ── Particle rendering ── */
+const NR = 50000;
+const rPos=new Float32Array(NR*3), rSeed=new Float32Array(NR);
+const rAge=new Float32Array(NR), rHgt=new Float32Array(NR);
+for(let i=0;i<NR;i++) rSeed[i]=Math.random();
+
+const geom=new THREE.BufferGeometry();
+geom.setAttribute('position',new THREE.BufferAttribute(rPos,3));
+geom.setAttribute('seed',new THREE.BufferAttribute(rSeed,1));
+geom.setAttribute('age',new THREE.BufferAttribute(rAge,1));
+geom.setAttribute('hgt',new THREE.BufferAttribute(rHgt,1));
+
+const U={uTime:{value:0},uPixel:{value:renderer.getPixelRatio()},
+         uYMax:{value:1},uBass:{value:0},uPeak:{value:0}};
+
+const mat=new THREE.ShaderMaterial({
+  uniforms:U, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime, uPixel, uYMax, uBass, uPeak;
+    attribute float seed, age, hgt;
+    varying vec3 vCol;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      float t = uTime*0.5 + seed*6.28;
+      float shim = 0.005 + uBass*0.04;
+      p.x += shim*sin(t); p.z += shim*cos(t);
+      /* bass pushes particles radially outward */
+      float rad = length(p.xz)+1e-4;
+      p.xz += (p.xz/rad) * uPeak * 0.18;
+      float h = clamp(hgt / max(uYMax, 0.5), 0.0, 1.0);
+      /* palette: deep indigo → crimson-magenta → hot white
+         Ryoji Ikeda meets Chiharu Shiota — data-as-cathedral */
+      vec3 a = vec3(0.15, 0.10, 0.48);
+      vec3 b = vec3(0.94, 0.16, 0.40);
+      vec3 c = vec3(1.0, 0.94, 0.86);
+      vec3 col = mix(a, b, smoothstep(0.0, 0.48, h));
+      col = mix(col, c, smoothstep(0.48, 1.0, h));
+      /* flash toward white on bass hits */
+      col = mix(col, vec3(1.0, 0.72, 0.88), uPeak*0.55);
+      vCol = col;
+      float sz = 1.6 + uBass*2.2 + uPeak*3.5;
+      vec4 mv = modelViewMatrix * vec4(p,1.0);
+      gl_PointSize = sz * uPixel * (40.0 / -mv.z);
+      vA = 0.62 + uPeak*0.35;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader:`
+    varying vec3 vCol;
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r*15.0) * vA;
+      gl_FragColor = vec4(vCol*a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(geom, mat));
+
+/* ── Ambient side-light gradient (warm above, cold below) — Olafur Eliasson ── */
+const topLight = new THREE.PointLight(0xffaa66, 0.4, 60);
+topLight.position.set(0, 30, 0);
+scene.add(topLight);
+const bottomLight = new THREE.PointLight(0x2244aa, 0.25, 40);
+bottomLight.position.set(0, -5, 0);
+scene.add(bottomLight);
+
+addEventListener('resize', ()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+  rt.setSize(innerWidth,innerHeight);
+  postMat.uniforms.uRes.value.set(innerWidth,innerHeight);
+});
+
+/* ── Saved camera state for bass shake recovery ── */
+let camBaseX = camera.position.x, camBaseZ = camera.position.z;
+
+const t0=performance.now();
+function loop(){
+  const time=(performance.now()-t0)/1000;
+  U.uTime.value=time;
+  updateAudio();
+
+  U.uBass.value=bassEnergy;
+  U.uPeak.value=bassPeak;
+  postMat.uniforms.uBass.value=bassEnergy;
+  postMat.uniforms.uPeak.value=bassPeak;
+  postMat.uniforms.uShockAge.value=shockAge;
+
+  for(let s=0;s<3;s++) step();
+
+  const n=verts.length;
+  let yMax=0;
+  if(n>1){
+    const lengths=[]; let total=0;
+    for(let i=0;i<n;i++){
+      const a=verts[i],b=verts[(i+1)%n];
+      const ex=b.x-a.x,ey=b.y-a.y,ez=b.z-a.z;
+      lengths.push(Math.sqrt(ex*ex+ey*ey+ez*ez));
+      total+=lengths[i];
+      if(a.y>yMax) yMax=a.y;
+    }
+    if(total>0){
+      let w=0;
+      for(let i=0;i<n;i++){
+        const share=(i===n-1)?NR-w:Math.max(1,Math.floor(NR*lengths[i]/total));
+        const a=verts[i],b=verts[(i+1)%n];
+        for(let k=0;k<share&&w<NR;k++){
+          const u=Math.random();
+          rPos[w*3]=a.x+(b.x-a.x)*u+(Math.random()-0.5)*0.018;
+          rPos[w*3+1]=a.y+(b.y-a.y)*u+(Math.random()-0.5)*0.018;
+          rPos[w*3+2]=a.z+(b.z-a.z)*u+(Math.random()-0.5)*0.018;
+          rAge[w]=Math.max(a.age,b.age);
+          rHgt[w]=a.y+(b.y-a.y)*u;
+          w++;
+        }
+      }
+      geom.attributes.position.needsUpdate=true;
+      geom.attributes.age.needsUpdate=true;
+      geom.attributes.hgt.needsUpdate=true;
+    }
+  }
+  U.uYMax.value=Math.max(yMax,1.0);
+
+  let yMean=0;
+  if(n>0){for(let i=0;i<n;i++) yMean+=verts[i].y; yMean/=n;}
+  const tY=Math.max(yMean,2.0);
+  controls.target.y+=(tY-controls.target.y)*0.04;
+  camera.position.y+=(tY+4-camera.position.y)*0.04;
+
+  /* camera micro-shake on bass hits — recovers smoothly */
+  if(bassPeak>0.04){
+    camera.position.x+=((Math.random()-0.5)*bassPeak*0.10);
+    camera.position.z+=((Math.random()-0.5)*bassPeak*0.10);
+  }
+
+  controls.update();
+
+  /* two-pass: scene → RT, then post-process to screen */
+  renderer.setRenderTarget(rt);
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+  renderer.render(postScene, postCam);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
