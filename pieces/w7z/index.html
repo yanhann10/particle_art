@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>w7z · Shiota — Breath Lattice</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#000000; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">w7z</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+scene.fog = new THREE.FogExp2(0x000000, 0.0028);
+
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 140);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0x0a0202, 0.005));
+const key1 = new THREE.PointLight(0x1a0404, 0.010, 32, 2.4);
+key1.position.set(-9, 11, 7);
+scene.add(key1);
+
+const key2 = new THREE.PointLight(0x0e0303, 0.006, 26, 2.2);
+key2.position.set(7, -6, -9);
+scene.add(key2);
+
+let seed = 749201;
+function rng(){ seed^=seed<<13; seed^=seed>>17; seed^=seed<<5; return(seed>>>0)/4294967296; }
+
+const ROOM = { w: 36, h: 22, d: 32 };
+const hw = ROOM.w/2, hh = ROOM.h/2, hd = ROOM.d/2;
+
+// SUSPENDED KEY — the remembered object at center
+const keyPos = new THREE.Vector3(-0.4, 0.8, 1.2);
+
+const keyBody = new THREE.BoxGeometry(0.18, 2.8, 0.18);
+const keyHead = new THREE.TorusGeometry(0.48, 0.10, 8, 16);
+const keyTeeth = new THREE.BoxGeometry(0.12, 0.52, 0.08);
+
+const keyMat = new THREE.MeshStandardMaterial({
+  color: 0xe8dfd0,
+  emissive: 0xc8b8a0,
+  emissiveIntensity: 0.62,
+  roughness: 0.82,
+  metalness: 0.18
+});
+
+const keyGroup = new THREE.Group();
+const body = new THREE.Mesh(keyBody, keyMat);
+body.position.y = -0.8;
+keyGroup.add(body);
+
+const head = new THREE.Mesh(keyHead, keyMat);
+head.position.y = 0.6;
+head.rotation.x = Math.PI/2;
+keyGroup.add(head);
+
+const tooth1 = new THREE.Mesh(keyTeeth, keyMat);
+tooth1.position.set(0.08, -2.0, 0);
+keyGroup.add(tooth1);
+
+const tooth2 = new THREE.Mesh(keyTeeth, keyMat);
+tooth2.position.set(-0.08, -2.3, 0);
+keyGroup.add(tooth2);
+
+keyGroup.position.copy(keyPos);
+keyGroup.rotation.set(0.12, 0.18, -0.08);
+scene.add(keyGroup);
+
+const keyGlow = new THREE.PointLight(0x180404, 0.008, 11, 2.6);
+keyGlow.position.copy(keyPos);
+scene.add(keyGlow);
+
+// KEY SURFACE ANCHORS — distributed along key geometry
+const keyAnchors = [];
+
+for(let i=0; i<32; i++){
+  const t = i/32;
+  const y = keyPos.y + 0.6 - t*3.2;
+  const angle = t*Math.PI*4.2;
+  const r = 0.20 + (t<0.15 ? 0.36 : 0.0);
+  const x = keyPos.x + Math.cos(angle)*r;
+  const z = keyPos.z + Math.sin(angle)*r;
+  keyAnchors.push(new THREE.Vector3(x, y, z));
+}
+
+for(let i=0; i<24; i++){
+  const angle = (i/24)*Math.PI*2;
+  const x = keyPos.x + Math.cos(angle)*0.48;
+  const z = keyPos.z + Math.sin(angle)*0.48;
+  keyAnchors.push(new THREE.Vector3(x, keyPos.y + 0.6, z));
+}
+
+// WALL ANCHORS
+const anchors = [];
+
+function wallPt(){
+  const f=Math.floor(rng()*6);
+  let x,y,z;
+  switch(f){
+    case 0: x=-hw; y=(rng()-0.5)*ROOM.h*0.90; z=(rng()-0.5)*ROOM.d*0.90; break;
+    case 1: x= hw; y=(rng()-0.5)*ROOM.h*0.90; z=(rng()-0.5)*ROOM.d*0.90; break;
+    case 2: y=-hh; x=(rng()-0.5)*ROOM.w*0.90; z=(rng()-0.5)*ROOM.d*0.90; break;
+    case 3: y= hh; x=(rng()-0.5)*ROOM.w*0.90; z=(rng()-0.5)*ROOM.d*0.90; break;
+    case 4: z=-hd; x=(rng()-0.5)*ROOM.w*0.90; y=(rng()-0.5)*ROOM.h*0.90; break;
+    default:z= hd; x=(rng()-0.5)*ROOM.w*0.90; y=(rng()-0.5)*ROOM.h*0.90; break;
+  }
+  return new THREE.Vector3(x,y,z);
+}
+
+for(let i=0; i<160; i++) anchors.push(wallPt());
+
+// RED THREAD NETWORK — 20,000 line segments HARD LIMIT
+const NUM_LINES = 20000;
+const positions = new Float32Array(NUM_LINES*6);
+let li = 0;
+
+function setLine(a, b){
+  if(li>=NUM_LINES) return;
+  const idx=li*6;
+  positions[idx]=a.x; positions[idx+1]=a.y; positions[idx+2]=a.z;
+  positions[idx+3]=b.x; positions[idx+4]=b.y; positions[idx+5]=b.z;
+  li++;
+}
+
+// SUSPENSION THREADS — ceiling to key head
+const suspCount = 12;
+for(let i=0; i<suspCount; i++){
+  const angle = (i/suspCount)*Math.PI*2;
+  const r = 0.36 + (i%3)*0.08;
+  const x = keyPos.x + Math.cos(angle)*r;
+  const z = keyPos.z + Math.sin(angle)*r*0.6;
+  const sp = new THREE.Vector3(x, keyPos.y + 0.6, z);
+  
+  const ceilX = sp.x + (rng()-0.5)*1.6;
+  const ceilZ = sp.z + (rng()-0.5)*1.4;
+  const ceilPt = new THREE.Vector3(ceilX, hh, ceilZ);
+  setLine(ceilPt, sp);
+}
+
+// CONVERGENCE THREADS — wall to key (memory accumulating in the key)
+const convergeBudget = 9200;
+for(let i=0; i<convergeBudget && li<NUM_LINES-10800; i++){
+  const a = anchors[Math.floor(rng()*anchors.length)];
+  const dKey = a.distanceTo(keyPos);
+  if(dKey < 2.8) continue;
+  
+  let closest = keyAnchors[0];
+  let closestD = a.distanceTo(closest);
+  for(let k=0; k<5; k++){
+    const candidate = keyAnchors[Math.floor(rng()*keyAnchors.length)];
+    const cd = a.distanceTo(candidate);
+    if(cd < closestD){ closestD = cd; closest = candidate; }
+  }
+  
+  // 22% stop short — threads that fail to reach the key
+  if(rng()<0.22){
+    const dir = closest.clone().sub(a).normalize();
+    const shortLen = a.distanceTo(closest) * (0.28 + rng()*0.58);
+    const end = a.clone().add(dir.multiplyScalar(shortLen));
+    setLine(a, end);
+  } else {
+    setLine(a, closest);
+  }
+}
+
+// RADIATING THREADS FROM KEY
+for(let i=0; i<840 && li<NUM_LINES-9000; i++){
+  const ka = keyAnchors[Math.floor(rng()*keyAnchors.length)];
+  const dir = ka.clone().sub(keyPos).normalize();
+  dir.x += (rng()-0.5)*0.90;
+  dir.y += (rng()-0.5)*0.80;
+  dir.z += (rng()-0.5)*0.90;
+  dir.normalize();
+  const len = 3.8 + rng()*12.5;
+  const end = ka.clone().add(dir.multiplyScalar(len));
+  if(Math.abs(end.x)<hw && Math.abs(end.y)<hh && Math.abs(end.z)<hd){
+    setLine(ka, end);
+  }
+}
+
+// PROXIMITY WEB — anchor to anchor
+const THRESH = 9.2;
+let webCount = 0, attempts = 0;
+while(webCount<5200 && li<NUM_LINES-4000 && attempts<28000){
+  attempts++;
+  const ai = Math.floor(rng()*anchors.length);
+  const a = anchors[ai];
+  let best = null, bestD = Infinity;
+  for(let j=0; j<7; j++){
+    const bi = Math.floor(rng()*anchors.length);
+    if(bi===ai) continue;
+    const d = a.distanceTo(anchors[bi]);
+    if(d<bestD && d>1.8 && d<THRESH){ bestD=d; best=anchors[bi]; }
+  }
+  if(!best) continue;
+  setLine(a, best);
+  webCount++;
+}
+
+// DENDRITIC BRANCHES near key — Y-forking growth
+for(let i=0; i<240 && li<NUM_LINES-2800; i++){
+  const startDist = 4.8 + rng()*9.2;
+  const angle = rng()*Math.PI*2;
+  const elev = (rng()-0.5)*Math.PI*0.80;
+  const start = keyPos.clone().add(new THREE.Vector3(
+    Math.cos(angle)*Math.cos(elev)*startDist,
+    Math.sin(elev)*startDist,
+    Math.sin(angle)*Math.cos(elev)*startDist
+  ));
+  
+  const dir = new THREE.Vector3(
+    (rng()-0.5)*2.0,
+    (rng()-0.5)*1.6,
+    (rng()-0.5)*2.0
+  ).normalize();
+  
+  const segLen = 1.4 + rng()*1.0;
+  const p1 = start.clone().add(dir.clone().multiplyScalar(segLen));
+  setLine(start, p1);
+  
+  if(li<NUM_LINES-26 && rng()<0.68){
+    const fork1 = dir.clone().applyAxisAngle(
+      new THREE.Vector3(rng()-0.5, rng()-0.5, rng()-0.5).normalize(),
+      0.65 + rng()*0.72
+    ).normalize();
+    const p2a = p1.clone().add(fork1.multiplyScalar(segLen*0.76));
+    setLine(p1, p2a);
+    
+    if(li<NUM_LINES-24 && rng()<0.52){
+      const fork2 = dir.clone().applyAxisAngle(
+        new THREE.Vector3(rng()-0.5, rng()-0.5, rng()-0.5).normalize(),
+        -0.65 - rng()*0.72
+      ).normalize();
+      const p2b = p1.clone().add(fork2.multiplyScalar(segLen*0.72));
+      setLine(p1, p2b);
+      
+      if(li<NUM_LINES-22 && rng()<0.32){
+        const fork3 = fork1.clone().applyAxisAngle(
+          new THREE.Vector3(rng()-0.5, rng()-0.5, rng()-0.5).normalize(),
+          0.58 + rng()*0.60
+        ).normalize();
+        const p3 = p2a.clone().add(fork3.multiplyScalar(segLen*0.58));
+        setLine(p2a, p3);
+      }
+    }
+  }
+}
+
+// HORIZONTAL CROSSING THREADS
+for(let i=0; i<520 && li<NUM_LINES-1600; i++){
+  const y = keyPos.y + (rng()-0.5)*8.0;
+  const x1 = -hw + rng()*4.8;
+  const z1 = (rng()-0.5)*ROOM.d*0.88;
+  const x2 = hw - rng()*4.8;
+  const z2 = (rng()-0.5)*ROOM.d*0.88;
+  setLine(new THREE.Vector3(x1, y, z1), new THREE.Vector3(x2, y, z2));
+}
+
+// VERTICAL THREADS
+for(let i=0; i<360 && li<NUM_LINES-1000; i++){
+  const x = (rng()-0.5)*ROOM.w*0.86;
+  const z = (rng()-0.5)*ROOM.d*0.86;
+  const a = new THREE.Vector3(x, -hh, z);
+  const b = new THREE.Vector3(x + (rng()-0.5)*1.4, hh, z + (rng()-0.5)*1.4);
+  setLine(a, b);
+}
+
+// WALL-TO-WALL SPANS
+let wallSpans = 0;
+while(wallSpans<1600 && li<NUM_LINES-400){
+  const a = wallPt();
+  const b = wallPt();
+  const d = a.distanceTo(b);
+  if(d>7.0 && d<22.0){
+    setLine(a, b);
+    wallSpans++;
+  }
+}
+
+// FILL remaining with long-range connections
+while(li<NUM_LINES-1){
+  const a = anchors[Math.floor(rng()*anchors.length)];
+  const b = anchors[Math.floor(rng()*anchors.length)];
+  const d = a.distanceTo(b);
+  if(d>8.0 && d<19.0){
+    setLine(a, b);
+  }
+}
+
+const basePositions = new Float32Array(positions);
+
+const lineGeo = new THREE.BufferGeometry();
+lineGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+const threads = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({
+  color: 0xc20018, transparent: true, opacity: 0.076,
+  blending: THREE.AdditiveBlending, depthWrite: false, fog: true
+}));
+scene.add(threads);
+
+// CAMERA PATH — spiraling inward through the lattice toward the key
+const pathLen = 2600;
+const dollyPath = [];
+
+for(let i=0; i<pathLen; i++){
+  const t = i/pathLen;
+  let x, y, z;
+
+  if(t<0.30){
+    const lt = t/0.30;
+    const angle = Math.PI*0.20 + lt*Math.PI*0.70;
+    const r = 17.2 - lt*6.0;
+    x = keyPos.x + Math.cos(angle)*r;
+    y = keyPos.y + 7.5 - lt*5.0;
+    z = keyPos.z + Math.sin(angle)*r;
+  } else if(t<0.58){
+    const lt = (t-0.30)/0.28;
+    const angle = Math.PI*0.90 + lt*Math.PI*1.20;
+    const r = 11.2 + Math.sin(lt*Math.PI*1.6)*1.6;
+    x = keyPos.x + Math.cos(angle)*r;
+    y = keyPos.y + 0.5 + Math.cos(lt*Math.PI*1.8)*1.4;
+    z = keyPos.z + Math.sin(angle)*r;
+  } else if(t<0.80){
+    const lt = (t-0.58)/0.22;
+    const angle = Math.PI*2.10 + lt*Math.PI*0.90;
+    const r = 9.5 + Math.cos(lt*Math.PI)*1.8;
+    x = keyPos.x + Math.cos(angle)*r;
+    y = keyPos.y - 1.0 - lt*6.8;
+    z = keyPos.z + Math.sin(angle)*r;
+  } else {
+    const lt = (t-0.80)/0.20;
+    const angle = Math.PI*3.00 + lt*Math.PI*0.60;
+    const r = 9.2 + lt*7.5;
+    x = keyPos.x + Math.cos(angle)*r;
+    y = keyPos.y + 2.8 + lt*5.2;
+    z = keyPos.z + Math.sin(angle)*r;
+  }
+  dollyPath.push(new THREE.Vector3(x, y, z));
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const t0 = performance.now();
+
+function loop(){
+  const elapsed = (performance.now()-t0)/1000;
+
+  // Micro breath on threads
+  const arr = lineGeo.attributes.position.array;
+  for(let i=0; i<Math.min(li, 8000); i++){
+    const idx=i*6;
+    const phase = basePositions[idx]*0.020 + basePositions[idx+1]*0.028 + i*0.000052;
+    const breath = Math.sin(elapsed*0.00036 + phase)*0.000012;
+    for(let v=0; v<2; v++){
+      const vi = idx+v*3;
+      arr[vi]   = basePositions[vi]   + breath*0.012;
+      arr[vi+1] = basePositions[vi+1] + breath*0.010;
+      arr[vi+2] = basePositions[vi+2] + breath*0.014;
+    }
+  }
+  lineGeo.attributes.position.needsUpdate = true;
+
+  // Key subtle sway
+  keyGroup.rotation.y = 0.18 + Math.sin(elapsed*0.000048)*0.012;
+  keyGroup.rotation.z = -0.08 + Math.cos(elapsed*0.000062)*0.010;
+
+  // Camera dolly
+  const speed = 0.000014;
+  const pathT = (elapsed*speed)%1.0;
+  const idx2 = pathT*(pathLen-1);
+  const i0 = Math.floor(idx2)%pathLen;
+  const i1 = (i0+1)%pathLen;
+  const frac = idx2-Math.floor(idx2);
+  camera.position.lerpVectors(dollyPath[i0], dollyPath[i1], frac);
+
+  camera.lookAt(
+    keyPos.x + Math.sin(elapsed*0.000068)*0.20,
+    keyPos.y + Math.cos(elapsed*0.000054)*0.16,
+    keyPos.z + Math.sin(elapsed*0.000046)*0.14
+  );
+
+  key1.intensity = 0.010 + Math.sin(elapsed*0.000050)*0.0042;
+  keyGlow.intensity = 0.008 + Math.sin(elapsed*0.000060)*0.0034;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
