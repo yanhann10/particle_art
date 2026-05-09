@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>k45 · lorenz attractor (differential growth)</title>
+<!-- CROSS-POLLINATE: zs4 (Lorenz attractor) × 7ea (differential growth) -->
+<!-- The attractor orbit is now drawn by a network of nodes that repel/attract like a cellular membrane,
+     growing and subdividing along the path. The form is the same strange attractor, but the rendering
+     technique is differential-growth mesh rather than particle cloud. -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0b0e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">k45</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Lorenz attractor integrated as a parametric curve seed.
+// We sample 2048 points along the orbit, then treat them as differential-growth nodes.
+// Each node repels nearby neighbors if too close, attracts if too far, subdivides if overstretched.
+// The result: a membrane-like tubular surface that follows the attractor's 3D shape.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0b0e, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 90);
+camera.lookAt(0, 0, 0);
+
+// ---- generate Lorenz orbit seed points ----
+function lorenzSample(steps = 2048, dt = 0.008) {
+  const pts = [];
+  let [x, y, z] = [0.1, 0, 0];
+  const sigma = 10.0, rho = 28.0, beta = 8.0/3.0;
+  // skip initial transient
+  for (let i = 0; i < 200; i++) {
+    const dx = sigma * (y - x);
+    const dy = x * (rho - z) - y;
+    const dz = x * y - beta * z;
+    x += dx * dt; y += dy * dt; z += dz * dt;
+  }
+  // sample orbit
+  for (let i = 0; i < steps; i++) {
+    pts.push(new THREE.Vector3(x, y, z - 25));
+    const dx = sigma * (y - x);
+    const dy = x * (rho - z) - y;
+    const dz = x * y - beta * z;
+    x += dx * dt; y += dy * dt; z += dz * dt;
+  }
+  return pts;
+}
+
+const seedPts = lorenzSample(2048, 0.008);
+
+// ---- differential growth node structure ----
+class Node {
+  constructor(p, idx) {
+    this.p = p.clone();
+    this.v = new THREE.Vector3();
+    this.idx = idx;
+    this.neighbors = [];
+  }
+}
+
+const nodes = seedPts.map((p, i) => new Node(p, i));
+// connect each node to 4 nearest neighbors initially (ring topology + cross-links)
+for (let i = 0; i < nodes.length; i++) {
+  nodes[i].neighbors.push(nodes[(i + 1) % nodes.length]);
+  nodes[i].neighbors.push(nodes[(i - 1 + nodes.length) % nodes.length]);
+  if (i % 2 === 0) {
+    nodes[i].neighbors.push(nodes[(i + 2) % nodes.length]);
+    nodes[i].neighbors.push(nodes[(i - 2 + nodes.length) % nodes.length]);
+  }
+}
+
+// differential growth params
+const minDist = 0.5;
+const maxDist = 2.2;
+const repelRadius = 1.2;
+const attractForce = 0.12;
+const repelForce = 0.18;
+const damping = 0.85;
+const subdivThresh = 2.8;
+
+function differentialStep() {
+  // reset velocities
+  nodes.forEach(n => n.v.set(0, 0, 0));
+
+  // 1) attraction/repulsion among neighbors
+  for (let n of nodes) {
+    for (let nb of n.neighbors) {
+      const d = n.p.distanceTo(nb.p);
+      const dir = new THREE.Vector3().subVectors(nb.p, n.p).normalize();
+      if (d > maxDist) {
+        n.v.add(dir.multiplyScalar(attractForce * (d - maxDist)));
+      } else if (d < minDist) {
+        n.v.add(dir.multiplyScalar(-repelForce * (minDist - d)));
+      }
+    }
+  }
+
+  // 2) global repulsion (prevent self-intersection)
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 8; j < nodes.length; j++) {
+      const d = nodes[i].p.distanceTo(nodes[j].p);
+      if (d < repelRadius && d > 0.01) {
+        const dir = new THREE.Vector3().subVectors(nodes[j].p, nodes[i].p).normalize();
+        const push = repelForce * (repelRadius - d) / repelRadius;
+        nodes[i].v.add(dir.clone().multiplyScalar(-push));
+        nodes[j].v.add(dir.multiplyScalar(push));
+      }
+    }
+  }
+
+  // apply velocities
+  nodes.forEach(n => {
+    n.p.add(n.v);
+    n.v.multiplyScalar(damping);
+  });
+
+  // 3) subdivision: if any edge > subdivThresh, insert midpoint
+  const toAdd = [];
+  for (let n of nodes) {
+    for (let i = 0; i < n.neighbors.length; i++) {
+      const nb = n.neighbors[i];
+      const d = n.p.distanceTo(nb.p);
+      if (d > subdivThresh && nodes.length + toAdd.length < 8192) {
+        const mid = new THREE.Vector3().addVectors(n.p, nb.p).multiplyScalar(0.5);
+        const newNode = new Node(mid, nodes.length + toAdd.length);
+        newNode.neighbors.push(n, nb);
+        n.neighbors.splice(i, 1, newNode);
+        const nbIdx = nb.neighbors.indexOf(n);
+        if (nbIdx >= 0) nb.neighbors.splice(nbIdx, 1, newNode);
+        toAdd.push(newNode);
+        break;
+      }
+    }
+  }
+  nodes.push(...toAdd);
+}
+
+// ---- render as tube mesh along node chain ----
+const tubeGeom = new THREE.BufferGeometry();
+function updateTubeMesh() {
+  const positions = [];
+  const colors = [];
+  const indices = [];
+
+  // build a ring around each node
+  const ringSegs = 6;
+  const ringRadius = 0.3;
+  const rings = [];
+
+  for (let n of nodes) {
+    const next = n.neighbors[0] || n;
+    const tangent = new THREE.Vector3().subVectors(next.p, n.p).normalize();
+    if (tangent.lengthSq() < 0.01) tangent.set(0, 0, 1);
+    const perp1 = new THREE.Vector3(tangent.y, -tangent.x, 0).normalize();
+    if (perp1.lengthSq() < 0.01) perp1.set(1, 0, 0);
+    const perp2 = new THREE.Vector3().crossVectors(tangent, perp1).normalize();
+
+    const ring = [];
+    for (let i = 0; i < ringSegs; i++) {
+      const ang = (i / ringSegs) * Math.PI * 2;
+      const off = perp1.clone().multiplyScalar(Math.cos(ang) * ringRadius)
+                   .add(perp2.clone().multiplyScalar(Math.sin(ang) * ringRadius));
+      const p = n.p.clone().add(off);
+      ring.push(p);
+    }
+    rings.push(ring);
+  }
+
+  // connect rings
+  for (let i = 0; i < rings.length; i++) {
+    const ringA = rings[i];
+    const ringB = rings[(i + 1) % rings.length];
+    const baseIdx = positions.length / 3;
+
+    for (let j = 0; j < ringSegs; j++) {
+      const pA = ringA[j];
+      const pB = ringB[j];
+      positions.push(pA.x, pA.y, pA.z, pB.x, pB.y, pB.z);
+
+      // color gradient along orbit (differential growth typically monochrome or subtle)
+      const t = i / rings.length;
+      const col = new THREE.Color().setHSL(0.55 + t * 0.15, 0.65, 0.45 + t * 0.2);
+      colors.push(col.r, col.g, col.b, col.r, col.g, col.b);
+
+      const nextJ = (j + 1) % ringSegs;
+      const a = baseIdx + j * 2;
+      const b = baseIdx + j * 2 + 1;
+      const c = baseIdx + nextJ * 2;
+      const d = baseIdx + nextJ * 2 + 1;
+      indices.push(a, b, c, c, b, d);
+    }
+  }
+
+  tubeGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  tubeGeom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  tubeGeom.setIndex(indices);
+  tubeGeom.computeVertexNormals();
+}
+
+const tubeMat = new THREE.MeshStandardMaterial({
+  vertexColors: true,
+  roughness: 0.6,
+  metalness: 0.2,
+  side: THREE.DoubleSide,
+  flatShading: true
+});
+const tubeMesh = new THREE.Mesh(tubeGeom, tubeMat);
+scene.add(tubeMesh);
+
+// lighting
+const ambLight = new THREE.AmbientLight(0x404050, 0.4);
+scene.add(ambLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(30, 40, 50);
+scene.add(dirLight);
+const fillLight = new THREE.DirectionalLight(0x6080ff, 0.3);
+fillLight.position.set(-20, -10, -30);
+scene.add(fillLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let frame = 0;
+function loop() {
+  frame++;
+  // run differential growth steps
+  if (frame < 600 && frame % 2 === 0) differentialStep();
+  if (frame % 4 === 0) updateTubeMesh();
+
+  // slow camera orbit
+  const t = performance.now() * 0.0001;
+  camera.position.x = Math.sin(t) * 90;
+  camera.position.z = Math.cos(t) * 90;
+  camera.position.y = Math.sin(t * 0.7) * 20;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<!-- MOTION: orbit, intensity: calm -->
+</body>
+</html>
