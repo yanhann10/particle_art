@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ucz · spider web scan (saraceno)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">ucz</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ────────────── scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 12);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── sparse 3D graph: Saraceno web archive topology
+// 300 anchor nodes in bounded volume, connect to 2–4 nearest neighbors
+// + occasional long-range threads (guy-lines across voids)
+const NODES = 300;
+const BOUNDS = 8.0;
+const anchors = [];
+const rng = (() => { let s = 0xD1DAC; return () => { s = (s + 0x9E3779B9) | 0;
+  let t = Math.imul(s ^ (s >>> 16), 0x85EBCA6B);
+  t = Math.imul(t ^ (t >>> 13), 0xC2B2AE35);
+  return ((t ^ (t >>> 16)) >>> 0) / 4294967296; }; })();
+
+// generate anchors: cluster them slightly (spider webs have knot-regions + sparse spans)
+// use small Gaussian clusters around 5 random hubs
+const hubs = [];
+for (let i = 0; i < 5; i++){
+  hubs.push(new THREE.Vector3(
+    (rng() * 2 - 1) * BOUNDS * 0.6,
+    (rng() * 2 - 1) * BOUNDS * 0.6,
+    (rng() * 2 - 1) * BOUNDS * 0.6
+  ));
+}
+
+for (let i = 0; i < NODES; i++){
+  const hub = hubs[Math.floor(rng() * hubs.length)];
+  // Gaussian offset from hub
+  const r = 0.8 + rng() * 1.5;
+  const th = rng() * Math.PI * 2;
+  const ph = Math.acos(2 * rng() - 1);
+  const x = hub.x + r * Math.sin(ph) * Math.cos(th);
+  const y = hub.y + r * Math.sin(ph) * Math.sin(th);
+  const z = hub.z + r * Math.cos(ph);
+  anchors.push({
+    pos: new THREE.Vector3(x, y, z),
+    basePos: new THREE.Vector3(x, y, z),
+    vel: new THREE.Vector3(0, 0, 0),
+    seed: rng()
+  });
+}
+
+// build edge list: each anchor connects to 2–4 nearest + occasional long-range
+const edges = [];
+const MAX_LOCAL = 4;
+const LONG_RANGE_PROB = 0.03;
+const LONG_RANGE_COUNT = Math.floor(NODES * LONG_RANGE_PROB);
+
+for (let i = 0; i < anchors.length; i++){
+  const a = anchors[i];
+  // find nearest neighbors
+  const dists = anchors.map((b, idx) => ({
+    idx,
+    d: idx === i ? Infinity : a.pos.distanceTo(b.pos)
+  }));
+  dists.sort((x, y) => x.d - y.d);
+  // connect to 2–4 nearest (vary per node for irregularity)
+  const count = 2 + Math.floor(rng() * 3);
+  for (let k = 0; k < count && k < dists.length; k++){
+    const j = dists[k].idx;
+    // avoid duplicate edges
+    if (j > i) edges.push({ a: i, b: j, type: 'local' });
+  }
+}
+
+// add long-range guy-lines (spanning across voids)
+for (let k = 0; k < LONG_RANGE_COUNT; k++){
+  const i = Math.floor(rng() * anchors.length);
+  const j = Math.floor(rng() * anchors.length);
+  if (i !== j) edges.push({ a: i, b: j, type: 'long' });
+}
+
+// ────────────── render edges as thin lines (LineSegments)
+const linePosArray = new Float32Array(edges.length * 6);
+const lineColorArray = new Float32Array(edges.length * 6);
+
+// pearlescent metallic palette: silvery whites with faint blue / pink iridescence
+const colA = new THREE.Color(0xe8f2f8);   // ice white
+const colB = new THREE.Color(0xb8d4e8);   // pale blue
+const colC = new THREE.Color(0xf0e8f8);   // pale pink
+
+function updateLineGeometry(){
+  for (let i = 0; i < edges.length; i++){
+    const e = edges[i];
+    const a = anchors[e.a].pos;
+    const b = anchors[e.b].pos;
+    linePosArray[i * 6 + 0] = a.x;
+    linePosArray[i * 6 + 1] = a.y;
+    linePosArray[i * 6 + 2] = a.z;
+    linePosArray[i * 6 + 3] = b.x;
+    linePosArray[i * 6 + 4] = b.y;
+    linePosArray[i * 6 + 5] = b.z;
+    // color: local threads more bluish, long-range more pinkish
+    const col = e.type === 'long' ? colC : (rng() > 0.5 ? colA : colB);
+    lineColorArray[i * 6 + 0] = col.r;
+    lineColorArray[i * 6 + 1] = col.g;
+    lineColorArray[i * 6 + 2] = col.b;
+    lineColorArray[i * 6 + 3] = col.r;
+    lineColorArray[i * 6 + 4] = col.g;
+    lineColorArray[i * 6 + 5] = col.b;
+  }
+}
+updateLineGeometry();
+
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePosArray, 3));
+lineGeom.setAttribute('color', new THREE.BufferAttribute(lineColorArray, 3));
+
+const lineMat = new THREE.LineBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.65,
+  blending: THREE.AdditiveBlending
+});
+const lineObj = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lineObj);
+
+// ────────────── render nodes as tiny sprites (additive bloom)
+const nodeGeom = new THREE.BufferGeometry();
+const nodePosArray = new Float32Array(NODES * 3);
+const nodeSeedArray = new Float32Array(NODES);
+for (let i = 0; i < anchors.length; i++){
+  const a = anchors[i].pos;
+  nodePosArray[i * 3 + 0] = a.x;
+  nodePosArray[i * 3 + 1] = a.y;
+  nodePosArray[i * 3 + 2] = a.z;
+  nodeSeedArray[i] = anchors[i].seed;
+}
+nodeGeom.setAttribute('position', new THREE.BufferAttribute(nodePosArray, 3));
+nodeGeom.setAttribute('seed', new THREE.BufferAttribute(nodeSeedArray, 1));
+
+const nodeUniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const nodeMat = new THREE.ShaderMaterial({
+  uniforms: nodeUniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vPulse;
+    void main(){
+      vec3 p = position;
+      vPulse = 0.5 + 0.5 * sin(uTime * 1.2 + seed * 6.28);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * (18.0 / dist) * (0.7 + 0.3 * vPulse);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vPulse;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * (0.5 + 0.5 * vPulse);
+      vec3 col = vec3(0.9, 0.93, 0.96);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const nodeObj = new THREE.Points(nodeGeom, nodeMat);
+scene.add(nodeObj);
+
+// ────────────── physics: soft spring + wind field (web breathes)
+// each anchor is pulled back to its base position (spring) + wind perturbation
+const SPRING_K = 0.015;
+const DAMPING = 0.92;
+const WIND_SCALE = 0.08;
+
+function updatePhysics(dt, t){
+  // wind field: 3D curl-noise approximation (simple sin-wave combination)
+  const windX = (p, t) => Math.sin(p.y * 0.3 + t * 0.4) * Math.cos(p.z * 0.25 + t * 0.3);
+  const windY = (p, t) => Math.cos(p.x * 0.35 + t * 0.5) * Math.sin(p.z * 0.2 + t * 0.35);
+  const windZ = (p, t) => Math.sin(p.x * 0.25 + t * 0.45) * Math.cos(p.y * 0.3 + t * 0.4);
+
+  for (let i = 0; i < anchors.length; i++){
+    const a = anchors[i];
+    // spring force back to base
+    const dx = a.basePos.x - a.pos.x;
+    const dy = a.basePos.y - a.pos.y;
+    const dz = a.basePos.z - a.pos.z;
+    a.vel.x += dx * SPRING_K;
+    a.vel.y += dy * SPRING_K;
+    a.vel.z += dz * SPRING_K;
+    // wind
+    a.vel.x += windX(a.pos, t) * WIND_SCALE * dt;
+    a.vel.y += windY(a.pos, t) * WIND_SCALE * dt;
+    a.vel.z += windZ(a.pos, t) * WIND_SCALE * dt;
+    // damping
+    a.vel.multiplyScalar(DAMPING);
+    // integrate
+    a.pos.x += a.vel.x * dt;
+    a.pos.y += a.vel.y * dt;
+    a.pos.z += a.vel.z * dt;
+  }
+
+  // update buffers
+  for (let i = 0; i < anchors.length; i++){
+    const a = anchors[i].pos;
+    nodePosArray[i * 3 + 0] = a.x;
+    nodePosArray[i * 3 + 1] = a.y;
+    nodePosArray[i * 3 + 2] = a.z;
+  }
+  nodeGeom.attributes.position.needsUpdate = true;
+  updateLineGeometry();
+  lineGeom.attributes.position.needsUpdate = true;
+}
+
+// ────────────── camera dolly: slow walk-through (Saraceno's scanned archive feel)
+// camera moves in a slow figure-eight around the web's center
+const CAM_RADIUS = 12.0;
+const CAM_HEIGHT = 0.0;
+
+// ────────────── render loop
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let lastT = 0;
+
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  const dt = Math.min(0.05, t - lastT);
+  lastT = t;
+
+  nodeUniforms.uTime.value = t;
+
+  // physics
+  updatePhysics(dt, t);
+
+  // camera dolly: figure-eight path
+  const ang1 = t * 0.12;
+  const ang2 = t * 0.08;
+  const cx = Math.sin(ang1) * CAM_RADIUS * 0.6;
+  const cz = Math.cos(ang2) * CAM_RADIUS;
+  const cy = Math.sin(ang2 * 0.7) * 2.0 + CAM_HEIGHT;
+  camera.position.set(cx, cy, cz);
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
