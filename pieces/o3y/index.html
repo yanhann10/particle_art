@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>o3y · parallel line field · Da Costa & Niederhauser</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 10px; letter-spacing: 0.04em; color:#d4a574; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#d4a574; }
+</style>
+</head>
+<body>
+<div class="id">o3y</div>
+<div class="hint">move to bend the rails · Lumen Prize 2024</div>
+<div class="src">Marc Da Costa · Matthew Niederhauser · Parallels</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0a0a0a, 20, 80);
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 2, 35);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0a, 1);
+document.body.appendChild(renderer.domElement);
+
+// LED amber palette
+const AMBER_BRIGHT = new THREE.Color(0xffa94d);
+const AMBER_MID = new THREE.Color(0xd4a574);
+const AMBER_DIM = new THREE.Color(0x8b7355);
+
+// Parallel rail configuration
+const RAIL_COUNT = 120;
+const RAIL_LENGTH = 50;
+const RAIL_SPACING = 0.38;
+const PARTICLES_PER_RAIL = 85;
+const TOTAL_PARTICLES = RAIL_COUNT * PARTICLES_PER_RAIL;
+
+// Mouse/viewer position (normalized -1 to 1)
+const mouse = new THREE.Vector2(0, 0);
+const targetMouse = new THREE.Vector2(0, 0);
+let mouseVelocity = new THREE.Vector2(0, 0);
+
+// Rail definitions: each rail has a base y-position and z-slice
+const rails = [];
+for (let i = 0; i < RAIL_COUNT; i++){
+  const row = Math.floor(i / 12);
+  const col = i % 12;
+  rails.push({
+    baseY: (col - 5.5) * RAIL_SPACING * 3.2,
+    baseZ: (row - 5) * RAIL_SPACING * 2.8,
+    phase: Math.random() * Math.PI * 2,
+    warpAmount: 0,
+    targetWarp: 0
+  });
+}
+
+// Particle system
+const positions = new Float32Array(TOTAL_PARTICLES * 3);
+const railIds = new Float32Array(TOTAL_PARTICLES);
+const offsets = new Float32Array(TOTAL_PARTICLES);
+const seeds = new Float32Array(TOTAL_PARTICLES);
+
+let pIdx = 0;
+for (let r = 0; r < RAIL_COUNT; r++){
+  const rail = rails[r];
+  for (let p = 0; p < PARTICLES_PER_RAIL; p++){
+    const t = p / PARTICLES_PER_RAIL;
+    positions[pIdx*3]     = (t - 0.5) * RAIL_LENGTH;
+    positions[pIdx*3 + 1] = rail.baseY;
+    positions[pIdx*3 + 2] = rail.baseZ;
+    railIds[pIdx] = r;
+    offsets[pIdx] = t;
+    seeds[pIdx] = Math.random();
+    pIdx++;
+  }
+}
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uMouseVel: { value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, 
+  depthWrite: false, 
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uMouseVel;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      
+      // Drift along rail
+      float drift = mod(uTime * 0.4 + seed * 100.0, 1.0);
+      float pulse = sin(drift * 3.14159 * 2.0) * 0.5 + 0.5;
+      
+      // Color variation
+      vec3 amber1 = vec3(1.0, 0.663, 0.302); // bright
+      vec3 amber2 = vec3(0.831, 0.647, 0.455); // mid
+      vec3 amber3 = vec3(0.545, 0.451, 0.333); // dim
+      
+      float colorPhase = seed * 3.0 + uTime * 0.2;
+      float blend1 = smoothstep(0.0, 0.5, sin(colorPhase));
+      float blend2 = smoothstep(0.5, 1.0, sin(colorPhase + 1.57));
+      vCol = mix(amber3, amber2, blend1);
+      vCol = mix(vCol, amber1, blend2);
+      
+      // Alpha based on position along rail and mouse activity
+      float edgeFade = 1.0 - smoothstep(0.7, 1.0, abs(p.x) / 25.0);
+      vAlpha = (0.3 + pulse * 0.4 + uMouseVel * 0.3) * edgeFade;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + pulse * 0.8 + uMouseVel * 1.5) * uPixel * (50.0/dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      float core = exp(-r * 12.0);
+      float glow = exp(-r * 3.0);
+      float a = (core * 0.7 + glow * 0.3) * vAlpha;
+      gl_FragColor = vec4(vCol * (core * 0.8 + 0.2), a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Connecting line segments between consecutive particles on same rail
+const linePositions = [];
+const lineColors = [];
+for (let r = 0; r < RAIL_COUNT; r++){
+  for (let p = 0; p < PARTICLES_PER_RAIL - 1; p++){
+    const idx = r * PARTICLES_PER_RAIL + p;
+    linePositions.push(
+      positions[idx*3], positions[idx*3+1], positions[idx*3+2],
+      positions[(idx+1)*3], positions[(idx+1)*3+1], positions[(idx+1)*3+2]
+    );
+    const c = AMBER_DIM;
+    lineColors.push(c.r, c.g, c.b, c.r, c.g, c.b);
+  }
+}
+
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
+lineGeom.setAttribute('color', new THREE.Float32BufferAttribute(lineColors, 3));
+
+const lineMat = new THREE.LineBasicMaterial({ 
+  vertexColors: true, 
+  transparent: true, 
+  opacity: 0.12,
+  blending: THREE.AdditiveBlending
+});
+const lines = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lines);
+
+// Mouse tracking
+addEventListener('mousemove', (e) => {
+  targetMouse.x = (e.clientX / innerWidth) * 2 - 1;
+  targetMouse.y = -(e.clientY / innerHeight) * 2 + 1;
+});
+
+addEventListener('touchmove', (e) => {
+  if (e.touches.length > 0){
+    targetMouse.x = (e.touches[0].clientX / innerWidth) * 2 - 1;
+    targetMouse.y = -(e.touches[0].clientY / innerHeight) * 2 + 1;
+  }
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Update rail warps based on viewer position
+function updateRails(dt){
+  // Smooth mouse follow
+  mouse.lerp(targetMouse, 0.08);
+  mouseVelocity.subVectors(targetMouse, mouse);
+  const velocity = mouseVelocity.length();
+  uniforms.uMouseVel.value = velocity * 2.5;
+  
+  // Project mouse position into 3D rail space
+  const mouseWorldY = mouse.y * 12;
+  const mouseWorldZ = mouse.x * 8;
+  
+  for (let r = 0; r < RAIL_COUNT; r++){
+    const rail = rails[r];
+    
+    // Distance from mouse to rail
+    const dy = rail.baseY - mouseWorldY;
+    const dz = rail.baseZ - mouseWorldZ;
+    const dist = Math.sqrt(dy*dy + dz*dz);
+    
+    // Warp amount falls off with distance
+    const influence = Math.max(0, 1.0 - dist / 8.0);
+    const warpDir = Math.atan2(dy, dz);
+    rail.targetWarp = influence * 3.5;
+    rail.warpDirection = warpDir;
+    
+    // Smooth warp interpolation
+    rail.warpAmount += (rail.targetWarp - rail.warpAmount) * 0.12;
+  }
+}
+
+function updatePositions(t){
+  for (let r = 0; r < RAIL_COUNT; r++){
+    const rail = rails[r];
+    const warp = rail.warpAmount;
+    const warpDir = rail.warpDirection || 0;
+    
+    for (let p = 0; p < PARTICLES_PER_RAIL; p++){
+      const idx = r * PARTICLES_PER_RAIL + p;
+      const x = positions[idx*3];
+      const baseY = rail.baseY;
+      const baseZ = rail.baseZ;
+      
+      // Drift along x-axis
+      const drift = (t * 0.4 + seeds[idx] * 100.0) % 1.0;
+      const newX = (drift - 0.5) * RAIL_LENGTH;
+      positions[idx*3] = newX;
+      
+      // Apply warp: pull toward mouse in y-z plane
+      // Warp is stronger at rail center (x=0)
+      const centerDist = Math.abs(newX) / (RAIL_LENGTH * 0.5);
+      const warpFactor = warp * (1.0 - centerDist * 0.6);
+      
+      positions[idx*3 + 1] = baseY + Math.cos(warpDir) * warpFactor;
+      positions[idx*3 + 2] = baseZ + Math.sin(warpDir) * warpFactor;
+    }
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+  
+  // Update line segments
+  let lineIdx = 0;
+  for (let r = 0; r < RAIL_COUNT; r++){
+    for (let p = 0; p < PARTICLES_PER_RAIL - 1; p++){
+      const idx = r * PARTICLES_PER_RAIL + p;
+      linePositions[lineIdx++] = positions[idx*3];
+      linePositions[lineIdx++] = positions[idx*3+1];
+      linePositions[lineIdx++] = positions[idx*3+2];
+      linePositions[lineIdx++] = positions[(idx+1)*3];
+      linePositions[lineIdx++] = positions[(idx+1)*3+1];
+      linePositions[lineIdx++] = positions[(idx+1)*3+2];
+    }
+  }
+  lineGeom.attributes.position.needsUpdate = true;
+}
+
+// Camera gentle drift
+function updateCamera(t){
+  camera.position.y = 2 + Math.sin(t * 0.15) * 1.5;
+  camera.position.x = Math.cos(t * 0.08) * 4;
+  camera.lookAt(0, 0, 0);
+}
+
+let lastTime = performance.now();
+const start = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+  const t = (now - start) / 1000;
+  
+  uniforms.uTime.value = t;
+  updateRails(dt);
+  updatePositions(t);
+  updateCamera(t);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
