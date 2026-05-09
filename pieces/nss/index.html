@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nss · suminagashi — the ink that remembers where it came from</title>
+<!-- MOTION: flow, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background: #ede8dc;
+    background-image: 
+      radial-gradient(circle at 20% 30%, rgba(250,248,242,0.4) 0%, transparent 40%),
+      radial-gradient(circle at 80% 70%, rgba(245,242,235,0.3) 0%, transparent 35%),
+      url("data:image/svg+xml,%3Csvg width='100' height='100' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' /%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100' height='100' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; 
+          letter-spacing: 0.06em; color:#3a3a3a; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 10px; 
+          letter-spacing: 0.04em; color:#4a4a4a; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.38; font-size: 10px; 
+          letter-spacing: 0.04em; color:#5a5a5a; }
+</style>
+</head>
+<body>
+<div class="id">nss · suminagashi — the ink that remembers where it came from</div>
+<div class="hint">mouse/touch drags the surface · watch the rings bloom and comb</div>
+<div class="src">amanda ghassaei digital marbling · descended from sav</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Suminagashi: ink dropped onto water, ripples outward, then dragged with a stylus.
+// Sharp boundaries, layered rings, combed peacock-eye spirals.
+// 
+// TECHNICAL: Semi-Lagrangian fluid solver on 2D grid with NO diffusion (keeps edges sharp).
+// advect(velocity, velocity), advect(velocity, dye) — dye is multi-channel (R,G,B,A each
+// a separate ink color). User/camera motion adds Gaussian impulses to velocity field.
+// Periodic drops of new ink rings keep the composition evolving.
+// Render the dye field as a textured plane with slight wave displacement so it reads
+// as liquid surface, not flat print.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0xede8dc, 14, 32);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 9, 12);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xede8dc, 1);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── 2D fluid simulation (ping-pong render targets)
+const RES = 256;
+const rtOptions = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+                    format: THREE.RGBAFormat, type: THREE.FloatType };
+let velocityRT = new THREE.WebGLRenderTarget(RES, RES, rtOptions);
+let velocityRT2 = new THREE.WebGLRenderTarget(RES, RES, rtOptions);
+let dyeRT = new THREE.WebGLRenderTarget(RES, RES, rtOptions);
+let dyeRT2 = new THREE.WebGLRenderTarget(RES, RES, rtOptions);
+
+const quadGeom = new THREE.PlaneGeometry(2, 2);
+const fluidScene = new THREE.Scene();
+const fluidCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+// advection shader — semi-Lagrangian, no diffusion
+const advectShader = {
+  uniforms: {
+    uTexture: { value: null },
+    uVelocity: { value: null },
+    uDt: { value: 0.016 },
+    uDissipation: { value: 1.0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uTexture;
+    uniform sampler2D uVelocity;
+    uniform float uDt;
+    uniform float uDissipation;
+    varying vec2 vUv;
+    void main(){
+      vec2 vel = texture2D(uVelocity, vUv).xy;
+      vec2 coord = vUv - vel * uDt;
+      vec4 val = texture2D(uTexture, coord);
+      gl_FragColor = val * uDissipation;
+    }
+  `
+};
+
+// splat shader — add Gaussian impulse to field
+const splatShader = {
+  uniforms: {
+    uTexture: { value: null },
+    uCenter: { value: new THREE.Vector2(0.5, 0.5) },
+    uRadius: { value: 0.04 },
+    uValue: { value: new THREE.Vector4(0, 0, 0, 0) }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uTexture;
+    uniform vec2 uCenter;
+    uniform float uRadius;
+    uniform vec4 uValue;
+    varying vec2 vUv;
+    void main(){
+      vec4 base = texture2D(uTexture, vUv);
+      float d = distance(vUv, uCenter);
+      float splat = exp(-d * d / (uRadius * uRadius));
+      gl_FragColor = base + uValue * splat;
+    }
+  `
+};
+
+const advectMat = new THREE.ShaderMaterial(advectShader);
+const splatMat = new THREE.ShaderMaterial(splatShader);
+const quad = new THREE.Mesh(quadGeom, advectMat);
+fluidScene.add(quad);
+
+function advect(source, velocity, dest, dissipation = 1.0){
+  advectMat.uniforms.uTexture.value = source.texture;
+  advectMat.uniforms.uVelocity.value = velocity.texture;
+  advectMat.uniforms.uDissipation.value = dissipation;
+  quad.material = advectMat;
+  renderer.setRenderTarget(dest);
+  renderer.render(fluidScene, fluidCam);
+}
+
+function splat(target, center, radius, value){
+  splatMat.uniforms.uTexture.value = target.texture;
+  splatMat.uniforms.uCenter.value.copy(center);
+  splatMat.uniforms.uRadius.value = radius;
+  splatMat.uniforms.uValue.value.copy(value);
+  quad.material = splatMat;
+  const temp = new THREE.WebGLRenderTarget(RES, RES, rtOptions);
+  renderer.setRenderTarget(temp);
+  renderer.render(fluidScene, fluidCam);
+  [target.texture, temp.texture] = [temp.texture, target.texture];
+  temp.dispose();
+}
+
+// ────────────── display plane
+const planeW = 12, planeH = 12;
+const planeGeom = new THREE.PlaneGeometry(planeW, planeH, 128, 128);
+const planeMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uDye: { value: dyeRT.texture },
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    varying float vElevation;
+    void main(){
+      vUv = uv;
+      vec3 p = position;
+      // gentle wave displacement so it reads as liquid, not print
+      float wave = sin(p.x * 0.8 + uTime * 0.3) * cos(p.y * 0.6 + uTime * 0.25) * 0.08;
+      p.z += wave;
+      vElevation = wave;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uDye;
+    varying vec2 vUv;
+    varying float vElevation;
+    void main(){
+      vec4 dye = texture2D(uDye, vUv);
+      // paper-cream base with ink overlay
+      vec3 paper = vec3(0.93, 0.91, 0.86);
+      vec3 col = mix(paper, dye.rgb, dye.a);
+      // slight specular on wave peaks
+      float spec = smoothstep(0.04, 0.08, vElevation) * 0.12;
+      col += vec3(spec);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+  side: THREE.DoubleSide
+});
+const plane = new THREE.Mesh(planeGeom, planeMat);
+plane.rotation.x = -Math.PI * 0.12;
+scene.add(plane);
+
+// ambient + directional light
+const ambient = new THREE.AmbientLight(0xffffff, 0.65);
+scene.add(ambient);
+const dir = new THREE.DirectionalLight(0xfff8f0, 0.5);
+dir.position.set(3, 6, 4);
+scene.add(dir);
+
+// ────────────── drop ink rings periodically
+const inkColors = [
+  new THREE.Vector4(0.12, 0.14, 0.18, 0.75),  // indigo
+  new THREE.Vector4(0.08, 0.08, 0.10, 0.85),  // black
+  new THREE.Vector4(0.18, 0.10, 0.08, 0.65),  // burnt sienna
+  new THREE.Vector4(0.10, 0.16, 0.14, 0.70)   // deep teal
+];
+let lastDrop = 0;
+function dropInkRing(time){
+  if (time - lastDrop < 2200) return;
+  lastDrop = time;
+  const x = 0.3 + Math.random() * 0.4;
+  const y = 0.3 + Math.random() * 0.4;
+  const color = inkColors[Math.floor(Math.random() * inkColors.length)];
+  // series of concentric rings
+  for (let i = 0; i < 4; i++){
+    setTimeout(() => {
+      splat(dyeRT, new THREE.Vector2(x, y), 0.02 + i * 0.015, color);
+    }, i * 180);
+  }
+}
+
+// ────────────── user interaction (drag = stylus comb)
+let mouse = new THREE.Vector2(-1, -1);
+let mousePrev = new THREE.Vector2(-1, -1);
+let mouseDown = false;
+
+function onPointer(e){
+  const x = (e.clientX / innerWidth);
+  const y = 1.0 - (e.clientY / innerHeight);
+  mousePrev.copy(mouse);
+  mouse.set(x, y);
+  if (e.type === 'pointerdown') mouseDown = true;
+  if (e.type === 'pointerup') mouseDown = false;
+}
+addEventListener('pointerdown', onPointer);
+addEventListener('pointermove', onPointer);
+addEventListener('pointerup', onPointer);
+
+function applyMouseDrag(){
+  if (!mouseDown || mousePrev.x < 0) return;
+  const dx = mouse.x - mousePrev.x;
+  const dy = mouse.y - mousePrev.y;
+  if (Math.abs(dx) < 1e-5 && Math.abs(dy) < 1e-5) return;
+  // add velocity impulse
+  splat(velocityRT, mouse.clone(), 0.035, new THREE.Vector4(dx * 8, dy * 8, 0, 0));
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm: drop a few ink rings so thumbnail isn't blank
+splat(dyeRT, new THREE.Vector2(0.5, 0.5), 0.05, inkColors[0]);
+splat(dyeRT, new THREE.Vector2(0.38, 0.62), 0.04, inkColors[1]);
+splat(dyeRT, new THREE.Vector2(0.65, 0.45), 0.045, inkColors[2]);
+// add gentle initial velocity field — diagonal combing
+for (let i = 0; i < 8; i++){
+  const x = 0.2 + i * 0.1;
+  const y = 0.3 + i * 0.08;
+  splat(velocityRT, new THREE.Vector2(x, y), 0.06, new THREE.Vector4(0.15, -0.12, 0, 0));
+}
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.033, (now - lastT) / 1000);
+  lastT = now;
+
+  // drop new ink rings
+  dropInkRing(now);
+
+  // apply mouse drag
+  applyMouseDrag();
+
+  // fluid step
+  advectMat.uniforms.uDt.value = dt * 0.5;
+  advect(velocityRT, velocityRT, velocityRT2, 0.998);
+  [velocityRT, velocityRT2] = [velocityRT2, velocityRT];
+  advect(dyeRT, velocityRT, dyeRT2, 0.9995);
+  [dyeRT, dyeRT2] = [dyeRT2, dyeRT];
+
+  // update display
+  planeMat.uniforms.uDye.value = dyeRT.texture;
+  planeMat.uniforms.uTime.value = now / 1000;
+
+  // gentle auto-orbit
+  const ang = now * 0.00008;
+  camera.position.x = Math.sin(ang) * 12;
+  camera.position.z = Math.cos(ang) * 12;
+  camera.lookAt(0, 0, 0);
+
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
