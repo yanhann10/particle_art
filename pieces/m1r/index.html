@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>m1r · soak calyx (Frankenthaler plane-field)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#e8e4dc; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+</style>
+</head>
+<body>
+<div class="id">m1r</div>
+<div class="hint">orbit drag · click to regenerate</div>
+<div class="src">Frankenthaler · soak-stain · 12k planes</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 10, 20);
+camera.lookAt(0, 3, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xe8e4dc, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 12000;
+let instancedMesh;
+
+const uniforms = {
+  uTime: { value: 0 },
+  uMorph: { value: 0 },
+  uColor1: { value: new THREE.Color(0.15, 0.08, 0.22) },  // deep indigo
+  uColor2: { value: new THREE.Color(0.72, 0.18, 0.28) },  // crimson
+  uWaveSpeed: { value: 0.15 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uMorph;
+    attribute vec3 offset;
+    attribute float seed;
+    attribute float layer;
+    attribute vec2 waveParam;
+    varying float vLayer;
+    varying float vSeed;
+    varying vec2 vWaveParam;
+
+    void main(){
+      vLayer = layer;
+      vSeed = seed;
+      vWaveParam = waveParam;
+
+      vec3 pos = position;
+      
+      // Parent calyx shape embedded in offset
+      float r = length(offset.xy);
+      float maxR = 12.0;
+      float nr = clamp(r / maxR, 0.0, 1.0);
+      float theta = atan(offset.y, offset.x);
+      
+      // Petal lobes
+      float petals = 5.0;
+      float petalShape = 0.5 + 0.5 * cos(theta * petals);
+      float cupDepth = 4.0;
+      float cupProfile = cupDepth * nr * nr * (0.6 + 0.4 * petalShape);
+      
+      // Wave interference
+      float rowWave = sin(offset.y * waveParam.x + uTime * 1.2 + seed * 6.28) * 0.5;
+      float colWave = sin(offset.x * waveParam.y + uTime * 0.7) * 0.5;
+      
+      // Form position
+      float flare = 1.0 + 0.15 * nr * nr * uMorph;
+      vec3 calyxPos = vec3(
+        offset.x * flare + rowWave * (1.0 - 0.5 * uMorph),
+        offset.y * flare + colWave * (1.0 - 0.5 * uMorph),
+        cupProfile * uMorph + rowWave * 0.3
+      );
+      
+      // Layer depth offset (planes stack in z)
+      calyxPos.z += layer * 0.08;
+      
+      // Drift motion
+      float drift = sin(uTime * 0.4 + seed * 6.28) * 0.3;
+      calyxPos.x += drift * (1.0 - nr);
+      
+      vec3 worldPos = calyxPos + pos;
+      vec4 mvPos = modelViewMatrix * vec4(worldPos, 1.0);
+      gl_Position = projectionMatrix * mvPos;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor1;
+    uniform vec3 uColor2;
+    varying float vLayer;
+    varying float vSeed;
+    varying vec2 vWaveParam;
+
+    void main(){
+      // Frankenthaler soak-stain: soft feathered edge
+      vec2 uv = gl_PointCoord * 2.0 - 1.0;
+      float d = length(uv);
+      
+      // Very soft falloff — watercolor bleed
+      float alpha = smoothstep(1.0, 0.3, d);
+      
+      // Color zones by layer + seed
+      float colorMix = fract(vLayer * 0.3 + vSeed);
+      vec3 col = mix(uColor1, uColor2, colorMix);
+      
+      // Dilute opacity — overlap builds saturation
+      float opacity = 0.05 + 0.03 * vSeed;
+      
+      gl_FragColor = vec4(col, alpha * opacity);
+    }
+  `
+});
+
+function buildPlaneField(seed){
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const offsets = new Float32Array(N * 3);
+  const seeds = new Float32Array(N);
+  const layers = new Float32Array(N);
+  const waveParams = new Float32Array(N * 2);
+
+  const rows = 100;
+  const cols = 100;
+  const width = 24, height = 24;
+  const cellW = width / cols, cellH = height / rows;
+
+  let idx = 0;
+  for (let i = 0; i < rows && idx < N; i++){
+    for (let j = 0; j < cols && idx < N; j++){
+      const pointsPerCell = Math.floor(N / (rows * cols));
+      for (let k = 0; k < pointsPerCell && idx < N; k++){
+        const x = (j + rng() - 0.5) * cellW - width * 0.5;
+        const y = (i + rng() - 0.5) * cellH - height * 0.5;
+        offsets[idx * 3] = x;
+        offsets[idx * 3 + 1] = y;
+        offsets[idx * 3 + 2] = 0;
+        seeds[idx] = rng();
+        layers[idx] = Math.floor(rng() * 40);
+        waveParams[idx * 2] = 0.8 + rng() * 1.0;
+        waveParams[idx * 2 + 1] = 0.8 + rng() * 1.0;
+        idx++;
+      }
+    }
+  }
+  while (idx < N){
+    const x = (rng() - 0.5) * width;
+    const y = (rng() - 0.5) * height;
+    offsets[idx * 3] = x;
+    offsets[idx * 3 + 1] = y;
+    offsets[idx * 3 + 2] = 0;
+    seeds[idx] = rng();
+    layers[idx] = Math.floor(rng() * 40);
+    waveParams[idx * 2] = 0.8 + rng() * 1.0;
+    waveParams[idx * 2 + 1] = 0.8 + rng() * 1.0;
+    idx++;
+  }
+
+  return { offsets, seeds, layers, waveParams };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random() * 1e9);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  // Color palette: two related hues, low value contrast
+  const hue1 = rng() * 360;
+  const hue2 = hue1 + 30 + rng() * 60;
+  uniforms.uColor1.value.setHSL((hue1 % 360) / 360, 0.7 + rng() * 0.2, 0.15 + rng() * 0.1);
+  uniforms.uColor2.value.setHSL((hue2 % 360) / 360, 0.6 + rng() * 0.3, 0.3 + rng() * 0.15);
+  uniforms.uWaveSpeed.value = 0.1 + rng() * 0.2;
+
+  const { offsets, seeds, layers, waveParams } = buildPlaneField(seed);
+
+  if (!instancedMesh){
+    const planeSize = 0.6 + rng() * 0.4;
+    const geom = new THREE.PlaneGeometry(planeSize, planeSize, 1, 1);
+    geom.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
+    geom.setAttribute('seed', new THREE.InstancedBufferAttribute(seeds, 1));
+    geom.setAttribute('layer', new THREE.InstancedBufferAttribute(layers, 1));
+    geom.setAttribute('waveParam', new THREE.InstancedBufferAttribute(waveParams, 2));
+
+    instancedMesh = new THREE.InstancedMesh(geom, mat, N);
+    
+    // Instance transforms: random rotation on each plane
+    const dummy = new THREE.Object3D();
+    for (let i = 0; i < N; i++){
+      dummy.rotation.set(
+        (rng() - 0.5) * Math.PI * 0.3,
+        (rng() - 0.5) * Math.PI * 0.3,
+        rng() * Math.PI * 2
+      );
+      dummy.updateMatrix();
+      instancedMesh.setMatrixAt(i, dummy.matrix);
+    }
+    instancedMesh.instanceMatrix.needsUpdate = true;
+
+    scene.add(instancedMesh);
+  } else {
+    instancedMesh.geometry.attributes.offset.array.set(offsets);
+    instancedMesh.geometry.attributes.offset.needsUpdate = true;
+    instancedMesh.geometry.attributes.seed.array.set(seeds);
+    instancedMesh.geometry.attributes.seed.needsUpdate = true;
+    instancedMesh.geometry.attributes.layer.array.set(layers);
+    instancedMesh.geometry.attributes.layer.needsUpdate = true;
+    instancedMesh.geometry.attributes.waveParam.array.set(waveParams);
+    instancedMesh.geometry.attributes.waveParam.needsUpdate = true;
+
+    const dummy = new THREE.Object3D();
+    for (let i = 0; i < N; i++){
+      dummy.rotation.set(
+        (rng() - 0.5) * Math.PI * 0.3,
+        (rng() - 0.5) * Math.PI * 0.3,
+        rng() * Math.PI * 2
+      );
+      dummy.updateMatrix();
+      instancedMesh.setMatrixAt(i, dummy.matrix);
+    }
+    instancedMesh.instanceMatrix.needsUpdate = true;
+  }
+
+  uniforms.uMorph.value = 0;
+}
+
+regenerate();
+
+addEventListener('click', (e) => {
+  if (e.target.tagName === 'CANVAS') regenerate();
+});
+
+/* --- Orbit drag --- */
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 0.6;
+const canvas = renderer.domElement;
+
+canvas.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi = Math.max(0.1, Math.min(1.4, orbitPhi - (e.clientY - prevY) * 0.005));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Turrell-style light projection
+const spotLight = new THREE.SpotLight(0xfff5e8, 1.2, 50, Math.PI * 0.35, 0.6);
+spotLight.position.set(-8, 12, 8);
+spotLight.target.position.set(0, 2, 0);
+scene.add(spotLight);
+scene.add(spotLight.target);
+
+// Ambient for base visibility
+const ambient = new THREE.AmbientLight(0xf5f2ec, 0.4);
+scene.add(ambient);
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Morph: flat → calyx over 8 seconds
+  const morphTarget = 1.0;
+  uniforms.uMorph.value += (morphTarget - uniforms.uMorph.value) * 0.012;
+
+  // Light drift to reveal curvature
+  const lightOrbit = t * 0.12;
+  spotLight.position.set(
+    Math.cos(lightOrbit) * 10,
+    10 + Math.sin(t * 0.18) * 2,
+    Math.sin(lightOrbit) * 10
+  );
+  spotLight.target.position.set(0, 2 + uniforms.uMorph.value * 2, 0);
+
+  // Auto-orbit (slow) + manual
+  const autoTheta = t * 0.06;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 20;
+
+  const centroidY = 2.5 * uniforms.uMorph.value;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    centroidY + radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, centroidY, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
