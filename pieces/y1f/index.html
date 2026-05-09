@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>y1f · flow ribbons (tyler hobbs)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">y1f · flow ribbons</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 35, 55);
+camera.lookAt(0, 0, 0);
+
+// muted earth palette (Luxe mode)
+const palette = [
+  new THREE.Color(0xc7956d), // warm sand
+  new THREE.Color(0x8b6f47), // darker ochre
+  new THREE.Color(0x4a5d5e), // dusty teal
+  new THREE.Color(0x7a5c52), // clay red
+  new THREE.Color(0x9b8b7e), // taupe
+];
+
+// simple 2D Perlin-like noise using sin
+function noise2d(x, y){
+  return (Math.sin(x * 2.1 + y * 1.7) + Math.sin(x * 1.3 - y * 2.3)) * 0.5;
+}
+
+// flow field: returns a vec2 at any (x,y)
+function flowVec(x, y){
+  const scale = 0.15;
+  const n1 = noise2d(x * scale, y * scale);
+  const n2 = noise2d(x * scale + 100, y * scale + 100);
+  const angle = n1 * Math.PI * 2.0 + n2 * Math.PI * 0.5;
+  return { x: Math.cos(angle), y: Math.sin(angle) };
+}
+
+// integrate a streamline from (sx, sy), return list of points
+function traceStreamline(sx, sy, maxSteps, stepSize){
+  const pts = [];
+  let x = sx, y = sy;
+  for (let i = 0; i < maxSteps; i++){
+    pts.push({ x, y });
+    const fv = flowVec(x, y);
+    x += fv.x * stepSize;
+    y += fv.y * stepSize;
+    // bounds check
+    if (x < -50 || x > 50 || y < -50 || y > 50) break;
+  }
+  return pts;
+}
+
+// collision grid: 100×100 cells covering [-50, 50]²
+const gridRes = 100;
+const gridCellSize = 100 / gridRes;
+const grid = Array.from({ length: gridRes * gridRes }, () => []);
+
+function gridIndex(x, y){
+  const gx = Math.floor((x + 50) / gridCellSize);
+  const gy = Math.floor((y + 50) / gridCellSize);
+  if (gx < 0 || gx >= gridRes || gy < 0 || gy >= gridRes) return null;
+  return gy * gridRes + gx;
+}
+
+function checkCollision(x, y, radius){
+  const idx = gridIndex(x, y);
+  if (idx === null) return false;
+  // check neighbors
+  const gx = Math.floor((x + 50) / gridCellSize);
+  const gy = Math.floor((y + 50) / gridCellSize);
+  for (let dy = -1; dy <= 1; dy++){
+    for (let dx = -1; dx <= 1; dx++){
+      const nx = gx + dx, ny = gy + dy;
+      if (nx < 0 || nx >= gridRes || ny < 0 || ny >= gridRes) continue;
+      const nidx = ny * gridRes + nx;
+      for (const existing of grid[nidx]){
+        const dist = Math.hypot(existing.x - x, existing.y - y);
+        if (dist < radius + existing.r) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function insertIntoGrid(x, y, r){
+  const idx = gridIndex(x, y);
+  if (idx !== null) grid[idx].push({ x, y, r });
+}
+
+// generate non-overlapping streamlines
+const streamlines = [];
+const attempts = 3000;
+const maxStreams = 60;
+for (let i = 0; i < attempts && streamlines.length < maxStreams; i++){
+  const sx = (Math.random() - 0.5) * 90;
+  const sy = (Math.random() - 0.5) * 90;
+  const baseRadius = 0.8 + Math.random() * 1.2;
+  // trace candidate
+  const pts = traceStreamline(sx, sy, 120, 0.4);
+  if (pts.length < 20) continue;
+  // check collision along the path
+  let collides = false;
+  for (const p of pts){
+    if (checkCollision(p.x, p.y, baseRadius * 1.3)){
+      collides = true;
+      break;
+    }
+  }
+  if (!collides){
+    streamlines.push({ pts, baseRadius, color: palette[Math.floor(Math.random() * palette.length)].clone() });
+    // insert into grid
+    for (const p of pts){
+      insertIntoGrid(p.x, p.y, baseRadius * 1.3);
+    }
+  }
+}
+
+// build geometry: each streamline → TubeGeometry-like ribbon
+streamlines.forEach((stream, idx) => {
+  const { pts, baseRadius, color } = stream;
+  const curve = new THREE.CatmullRomCurve3(
+    pts.map((p, i) => {
+      // vary height slightly along streamline
+      const z = noise2d(p.x * 0.05, p.y * 0.05) * 2.5;
+      return new THREE.Vector3(p.x, z, p.y);
+    })
+  );
+  // vary radius: fatter in middle, taper at ends
+  const radialSegments = 8;
+  const tubularSegments = Math.min(pts.length * 2, 200);
+  const radiusFunc = (u) => {
+    const mid = Math.abs(u - 0.5) * 2.0;
+    const taper = 1.0 - Math.pow(mid, 1.8);
+    const wobble = 1.0 + noise2d(u * 10.0, idx * 3.1) * 0.15;
+    return baseRadius * taper * wobble;
+  };
+  const geom = new THREE.TubeGeometry(curve, tubularSegments, baseRadius, radialSegments, false);
+  // manually adjust radii
+  const pos = geom.attributes.position;
+  for (let i = 0; i <= tubularSegments; i++){
+    const u = i / tubularSegments;
+    const r = radiusFunc(u) / baseRadius;
+    for (let j = 0; j < radialSegments; j++){
+      const vIdx = i * radialSegments + j;
+      const pt = curve.getPointAt(u);
+      const dx = pos.getX(vIdx) - pt.x;
+      const dy = pos.getY(vIdx) - pt.y;
+      const dz = pos.getZ(vIdx) - pt.z;
+      pos.setXYZ(vIdx, pt.x + dx * r, pt.y + dy * r, pt.z + dz * r);
+    }
+  }
+  pos.needsUpdate = true;
+
+  // flat painterly material
+  const mat = new THREE.MeshBasicMaterial({
+    color: color,
+    side: THREE.DoubleSide
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  scene.add(mesh);
+});
+
+// subtle ambient
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.4);
+dirLight.position.set(10, 20, 15);
+scene.add(dirLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// slow rotation
+let t = 0;
+function loop(){
+  t += 0.003;
+  camera.position.x = Math.sin(t) * 55;
+  camera.position.z = Math.cos(t) * 55;
+  camera.lookAt(0, 0, 0);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
