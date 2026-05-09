@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>znz · ancestral morph (Nouf Aljowaysir)</title>
+<!-- MOTION: morphing, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#d4b5a0; }
+</style>
+</head>
+<body>
+<div class="id">znz</div>
+<div class="hint">ancestral features migrating across latent space</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x1a1612, 8, 22);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0, 14);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+
+// Generate three facial anchors — great-grandparent, grandparent, self
+// Each face is a radial distribution with Fibonacci lattice structure
+function generateFaceAnchor(seed, depthShift, featureScale) {
+  const positions = new Float32Array(N * 3);
+  const colors = new Float32Array(N * 3);
+  
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  
+  const phi = (1 + Math.sqrt(5)) / 2;
+  const goldenAngle = 2 * Math.PI / (phi * phi);
+  
+  for (let i = 0; i < N; i++) {
+    const t = i / N;
+    const angle = i * goldenAngle;
+    
+    // Radial fibonacci lattice base
+    const r = Math.sqrt(t) * 3.5;
+    let x = r * Math.cos(angle);
+    let y = r * Math.sin(angle) - 0.5; // slight downward shift
+    
+    // Feature zones — eyes, nose, mouth
+    const eyeL = Math.exp(-Math.pow((x + 1.2) / 0.6, 2) - Math.pow((y + 1.0) / 0.5, 2)) * featureScale.eyes;
+    const eyeR = Math.exp(-Math.pow((x - 1.2) / 0.6, 2) - Math.pow((y + 1.0) / 0.5, 2)) * featureScale.eyes;
+    const nose = Math.exp(-Math.pow(x / 0.4, 2) - Math.pow((y + 0.2) / 1.2, 2)) * featureScale.nose;
+    const mouth = Math.exp(-Math.pow(x / 1.0, 2) - Math.pow((y - 1.2) / 0.4, 2)) * featureScale.mouth;
+    
+    const featureDepth = (eyeL + eyeR) * 0.8 + nose * 1.2 + mouth * 0.6;
+    const z = featureDepth + (rng() - 0.5) * 0.15 + depthShift;
+    
+    // Slight asymmetry per generation
+    x += (rng() - 0.5) * 0.1 * featureScale.asymmetry;
+    y += (rng() - 0.5) * 0.1 * featureScale.asymmetry;
+    
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+    
+    // Color gradient — sepia to rose to ink
+    const radialFactor = r / 3.5;
+    const c1 = new THREE.Color(0xd4b5a0); // sepia
+    const c2 = new THREE.Color(0xc98b7a); // rose
+    const c3 = new THREE.Color(0x3d2f2a); // ink
+    
+    let col = c1.clone();
+    if (radialFactor < 0.5) {
+      col.lerp(c2, radialFactor * 2);
+    } else {
+      col.copy(c2).lerp(c3, (radialFactor - 0.5) * 2);
+    }
+    
+    colors[i * 3] = col.r;
+    colors[i * 3 + 1] = col.g;
+    colors[i * 3 + 2] = col.b;
+  }
+  
+  return { positions, colors };
+}
+
+// Three generations with varying feature emphasis
+const anchor1 = generateFaceAnchor(12345, 0.0, { eyes: 1.0, nose: 0.9, mouth: 0.8, asymmetry: 1.2 }); // great-grandparent
+const anchor2 = generateFaceAnchor(67890, 0.0, { eyes: 1.1, nose: 1.0, mouth: 1.0, asymmetry: 1.0 }); // grandparent
+const anchor3 = generateFaceAnchor(24680, 0.0, { eyes: 1.2, nose: 1.1, mouth: 1.1, asymmetry: 0.8 }); // self
+
+const geom = new THREE.BufferGeometry();
+const currentPos = new Float32Array(N * 3);
+const targetPos = new Float32Array(N * 3);
+const lagFactors = new Float32Array(N);
+const colors = new Float32Array(N * 3);
+
+// Initialize with first anchor
+currentPos.set(anchor1.positions);
+targetPos.set(anchor2.positions);
+colors.set(anchor1.colors);
+
+// Per-particle lag — memory catching up at different speeds
+for (let i = 0; i < N; i++) {
+  lagFactors[i] = 0.3 + Math.random() * 0.7;
+}
+
+geom.setAttribute('position', new THREE.BufferAttribute(currentPos, 3));
+geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+const mat = new THREE.PointsMaterial({
+  size: 0.04,
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.7,
+  sizeAttenuation: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Ambient light to slightly illuminate fog
+const ambient = new THREE.AmbientLight(0x3d2f2a, 0.3);
+scene.add(ambient);
+
+// Morph cycle state
+let morphPhase = 0; // 0: anchor1→anchor2, 1: anchor2→anchor3, 2: anchor3→anchor1
+let morphProgress = 0;
+const morphDuration = 8.0; // seconds per transition
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let lastTime = start;
+
+function loop() {
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.1);
+  lastTime = now;
+  
+  // Advance morph progress
+  morphProgress += dt / morphDuration;
+  if (morphProgress >= 1.0) {
+    morphProgress = 0;
+    morphPhase = (morphPhase + 1) % 3;
+    
+    // Update target anchor
+    const newTarget = morphPhase === 0 ? anchor2 : morphPhase === 1 ? anchor3 : anchor1;
+    targetPos.set(newTarget.positions);
+  }
+  
+  // Smooth interpolation with per-particle lag
+  const t = morphProgress;
+  const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // easeInOutQuad
+  
+  for (let i = 0; i < N; i++) {
+    const lag = lagFactors[i];
+    const effectiveT = Math.max(0, Math.min(1, (eased - (1 - lag) * 0.3) / lag));
+    
+    // Lerp with jitter
+    const jitterX = (Math.sin(now / 1000 + i * 0.01) * 0.02) * (1 - effectiveT);
+    const jitterY = (Math.cos(now / 1000 + i * 0.013) * 0.02) * (1 - effectiveT);
+    
+    const srcIdx = morphPhase === 0 ? 0 : morphPhase === 1 ? 1 : 2;
+    const srcAnchor = srcIdx === 0 ? anchor1 : srcIdx === 1 ? anchor2 : anchor3;
+    
+    currentPos[i * 3] = THREE.MathUtils.lerp(
+      srcAnchor.positions[i * 3],
+      targetPos[i * 3],
+      effectiveT
+    ) + jitterX;
+    
+    currentPos[i * 3 + 1] = THREE.MathUtils.lerp(
+      srcAnchor.positions[i * 3 + 1],
+      targetPos[i * 3 + 1],
+      effectiveT
+    ) + jitterY;
+    
+    currentPos[i * 3 + 2] = THREE.MathUtils.lerp(
+      srcAnchor.positions[i * 3 + 2],
+      targetPos[i * 3 + 2],
+      effectiveT
+    );
+    
+    // Color interpolation
+    colors[i * 3] = THREE.MathUtils.lerp(srcAnchor.colors[i * 3], targetPos[i * 3], effectiveT * 0.6);
+    colors[i * 3 + 1] = THREE.MathUtils.lerp(srcAnchor.colors[i * 3 + 1], targetPos[i * 3 + 1], effectiveT * 0.6);
+    colors[i * 3 + 2] = THREE.MathUtils.lerp(srcAnchor.colors[i * 3 + 2], targetPos[i * 3 + 2], effectiveT * 0.6);
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.color.needsUpdate = true;
+  geom.computeBoundingSphere();
+  
+  // Track centroid
+  const centroid = new THREE.Vector3();
+  for (let i = 0; i < Math.min(1000, N); i++) {
+    centroid.x += currentPos[i * 3];
+    centroid.y += currentPos[i * 3 + 1];
+    centroid.z += currentPos[i * 3 + 2];
+  }
+  centroid.multiplyScalar(1 / Math.min(1000, N));
+  
+  camera.position.lerp(new THREE.Vector3(centroid.x * 0.1, centroid.y * 0.1, 14), 0.02);
+  camera.lookAt(centroid);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
