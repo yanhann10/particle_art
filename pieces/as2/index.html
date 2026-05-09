@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parallels · audience silhouette as drifting parallel-line fields</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; cursor:none; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">as2 · parallels</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Marc Da Costa & Matthew Niederhauser 'Parallels' — LED volume re-rendering
+// audience silhouettes as parallel-line fields. Particles constrained to
+// vertical rails; mouse presence warps rails into figure-shaped bulges that
+// decay when attention moves. Monochrome LED amber on black.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0a, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+camera.lookAt(0, 0, 0);
+
+// Rail system: 80 vertical rails across the frame, particles slide up/down
+// each rail. Mouse proximity warps rail positions laterally creating
+// silhouette-shaped bulges.
+const RAIL_COUNT = 80;
+const PARTICLES_PER_RAIL = 140;
+const TOTAL = RAIL_COUNT * PARTICLES_PER_RAIL;
+
+// Rail X positions (evenly spaced across -10 to +10)
+const railBaseX = [];
+for (let i = 0; i < RAIL_COUNT; i++){
+  railBaseX.push(-10 + (i / (RAIL_COUNT - 1)) * 20);
+}
+
+// Particle state: each belongs to a rail, has a Y position and velocity
+const particles = [];
+for (let r = 0; r < RAIL_COUNT; r++){
+  for (let p = 0; p < PARTICLES_PER_RAIL; p++){
+    particles.push({
+      rail: r,
+      y: -8 + Math.random() * 16,
+      vy: 0.3 + Math.random() * 0.5,
+      phase: Math.random() * Math.PI * 2
+    });
+  }
+}
+
+// Warp state: each rail has a lateral offset (warpX) that decays toward zero
+const railWarp = new Array(RAIL_COUNT).fill(0);
+const railWarpVel = new Array(RAIL_COUNT).fill(0);
+
+// Instanced line geometry: each instance is a short vertical segment
+const segmentGeom = new THREE.BufferGeometry();
+const segY = 0.18;
+segmentGeom.setAttribute('position', new THREE.Float32BufferAttribute([
+  0, -segY, 0,
+  0,  segY, 0
+], 3));
+
+const instancedGeom = new THREE.InstancedBufferGeometry();
+instancedGeom.index = segmentGeom.index;
+instancedGeom.attributes.position = segmentGeom.attributes.position;
+
+const offsets = new Float32Array(TOTAL * 3);
+const opacities = new Float32Array(TOTAL);
+instancedGeom.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
+instancedGeom.setAttribute('opacity', new THREE.InstancedBufferAttribute(opacities, 1));
+
+const lineMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uColor: { value: new THREE.Color(0.95, 0.62, 0.18) } // LED amber
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute vec3 offset;
+    attribute float opacity;
+    varying float vOpacity;
+    uniform float uTime;
+    void main(){
+      vOpacity = opacity;
+      vec3 pos = position + offset;
+      // slight horizontal sway per particle
+      float sway = sin(uTime * 0.6 + offset.y * 0.3 + offset.x * 0.2) * 0.03;
+      pos.x += sway;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    varying float vOpacity;
+    void main(){
+      gl_FragColor = vec4(uColor, vOpacity);
+    }
+  `
+});
+
+const lines = new THREE.LineSegments(instancedGeom, lineMat);
+scene.add(lines);
+
+// Mouse tracking (normalized device coords)
+let mouseNDC = new THREE.Vector2(0, 0);
+let mouseVel = new THREE.Vector2(0, 0);
+let lastMouse = new THREE.Vector2(0, 0);
+
+addEventListener('mousemove', (e) => {
+  const x = (e.clientX / innerWidth) * 2 - 1;
+  const y = -(e.clientY / innerHeight) * 2 + 1;
+  mouseNDC.set(x, y);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Cursor indicator (small cross-hair that follows mouse)
+const cursorGeom = new THREE.BufferGeometry();
+cursorGeom.setAttribute('position', new THREE.Float32BufferAttribute([
+  -0.15, 0, 0,  0.15, 0, 0,
+  0, -0.15, 0,  0, 0.15, 0
+], 3));
+const cursorMat = new THREE.LineBasicMaterial({ color: 0xffa030, transparent: true, opacity: 0.35 });
+const cursor = new THREE.LineSegments(cursorGeom, cursorMat);
+scene.add(cursor);
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  lineMat.uniforms.uTime.value = now / 1000;
+
+  // Mouse velocity
+  mouseVel.x = mouseNDC.x - lastMouse.x;
+  mouseVel.y = mouseNDC.y - lastMouse.y;
+  lastMouse.copy(mouseNDC);
+
+  // Project mouse NDC into world XY plane at z=0
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(mouseNDC, camera);
+  const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  const intersection = new THREE.Vector3();
+  raycaster.ray.intersectPlane(plane, intersection);
+  const mouseWorldX = intersection.x;
+  const mouseWorldY = intersection.y;
+
+  // Update cursor position
+  cursor.position.set(mouseWorldX, mouseWorldY, 0);
+
+  // Apply mouse-proximity warp to rails
+  // Each rail feels a lateral pull when mouse is nearby in X, intensity depends on Y proximity
+  for (let r = 0; r < RAIL_COUNT; r++){
+    const baseX = railBaseX[r];
+    const dx = mouseWorldX - baseX;
+    const distX = Math.abs(dx);
+    
+    // Warp strength: Gaussian in X, modulated by mouse velocity
+    const sigma = 2.0;
+    const warpStrength = Math.exp(-(distX * distX) / (2 * sigma * sigma));
+    const velMag = Math.sqrt(mouseVel.x * mouseVel.x + mouseVel.y * mouseVel.y);
+    const targetWarp = Math.sign(dx) * warpStrength * 1.2 * (1.0 + velMag * 8.0);
+    
+    // Spring toward target warp
+    const k = 6.0;
+    const damping = 0.88;
+    const force = (targetWarp - railWarp[r]) * k;
+    railWarpVel[r] += force * dt;
+    railWarpVel[r] *= damping;
+    railWarp[r] += railWarpVel[r] * dt;
+    
+    // Decay toward zero when mouse not present
+    if (warpStrength < 0.01){
+      railWarp[r] *= 0.96;
+    }
+  }
+
+  // Update particle positions
+  for (let i = 0; i < particles.length; i++){
+    const p = particles[i];
+    p.y += p.vy * dt;
+    
+    // Wrap Y
+    if (p.y > 8) p.y -= 16;
+    if (p.y < -8) p.y += 16;
+    
+    // Compute opacity: fade near edges, brighten near mouse Y
+    let opacity = 1.0 - Math.abs(p.y) / 8.0;
+    opacity = Math.max(0.15, opacity);
+    
+    // Proximity to mouse in Y boosts opacity
+    const dyMouse = Math.abs(p.y - mouseWorldY);
+    if (dyMouse < 3.0){
+      const proximityBoost = 1.0 - (dyMouse / 3.0);
+      opacity += proximityBoost * 0.6;
+    }
+    opacity = Math.min(1.0, opacity);
+    
+    // Pulse
+    const pulse = 0.85 + 0.15 * Math.sin(now / 1000 + p.phase);
+    opacity *= pulse;
+    
+    // Write to instance attributes
+    const railX = railBaseX[p.rail] + railWarp[p.rail];
+    offsets[i * 3] = railX;
+    offsets[i * 3 + 1] = p.y;
+    offsets[i * 3 + 2] = 0;
+    opacities[i] = opacity;
+  }
+  
+  instancedGeom.attributes.offset.needsUpdate = true;
+  instancedGeom.attributes.opacity.needsUpdate = true;
+
+  // Slow camera drift
+  const ang = now * 0.00012;
+  camera.position.x = Math.sin(ang) * 2.0;
+  camera.position.y = Math.sin(ang * 0.7) * 1.5;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
