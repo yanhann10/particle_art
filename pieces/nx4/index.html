@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nx4 · genealogy</title>
+<!-- MOTION: morph, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#100e0d; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">nx4</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── Nouf Aljowaysir genealogy — leaf-faces morphing across generations ── */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x100e0d, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── three ancestor archetypes as leaf-face point clouds ── */
+function makeLeafFace(seed, archetype){
+  const s = seed >>> 0;
+  let rng = s;
+  const rand = () => {
+    rng |= 0; rng = rng + 0x9E3779B9 | 0;
+    let t = Math.imul(rng ^ rng >>> 16, 0x21F0AAAD);
+    t = Math.imul(t ^ t >>> 15, 0x735A2D97);
+    return ((t ^ t >>> 15) >>> 0) / 4294967296;
+  };
+
+  const N = 22000;
+  const positions = new Float32Array(N * 3);
+  const seeds = new Float32Array(N);
+  const leafIndices = new Float32Array(N);
+
+  let written = 0;
+
+  /* ── single oval face outline as baseline ── */
+  const faceW = 2.8 + archetype * 0.3;
+  const faceH = 4.0 - archetype * 0.4;
+  const faceR = Math.min(faceW, faceH) * 0.5;
+  const faceCtrY = 0;
+
+  /* ── five leaf-cluster regions: forehead, left cheek, right cheek, chin, nose ── */
+  const leafCenters = [
+    { x: 0,      y: faceH * 0.28, z: 0,    n: 4800, w: 1.6, h: 1.2, twist: 0.5 },  // forehead
+    { x: -faceW*0.3, y: 0.2, z: 0.2, n: 4200, w: 1.3, h: 1.4, twist: -0.4 }, // left cheek
+    { x: faceW*0.3,  y: 0.2, z: 0.2, n: 4200, w: 1.3, h: 1.4, twist: 0.4 },  // right cheek
+    { x: 0,      y: -faceH*0.32, z: 0.1, n: 4000, w: 1.5, h: 1.1, twist: -0.3 }, // chin
+    { x: 0,      y: 0.5, z: 0.5, n: 4800, w: 0.9, h: 1.8, twist: 0 },       // nose
+  ];
+
+  for (let li = 0; li < leafCenters.length; li++){
+    const lc = leafCenters[li];
+    const angle = (archetype * 0.8 + li * 0.3) * Math.PI * 2;
+    const cos_a = Math.cos(angle), sin_a = Math.sin(angle);
+
+    for (let i = 0; i < lc.n && written < N; i++){
+      const u = rand() * 2 - 1;
+      const v = rand() * 2 - 1;
+      const t = rand();
+
+      /* leaf-sheet curved geometry */
+      const leafX = u * lc.w;
+      const leafY = v * lc.h;
+      const leafZ = Math.pow(Math.abs(u), 1.8) * lc.twist * 0.6;
+
+      /* rotate each leaf slightly per archetype */
+      const rx = leafX * cos_a - leafY * sin_a;
+      const ry = leafX * sin_a + leafY * cos_a;
+
+      positions[written*3]   = lc.x + rx;
+      positions[written*3+1] = lc.y + ry;
+      positions[written*3+2] = lc.z + leafZ;
+
+      seeds[written] = rand();
+      leafIndices[written] = li;
+      written++;
+    }
+  }
+
+  return { positions, seeds, leafIndices };
+}
+
+const ancestor1 = makeLeafFace(0x1a3b, 0); // great-grandparent
+const ancestor2 = makeLeafFace(0x4c7e, 1); // grandparent
+const ancestor3 = makeLeafFace(0x8d2f, 2); // self
+
+const N = ancestor1.positions.length / 3;
+const positions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const leafIndices = new Float32Array(N);
+const targetA = new Float32Array(N * 3);
+const targetB = new Float32Array(N * 3);
+
+positions.set(ancestor1.positions);
+seeds.set(ancestor1.seeds);
+leafIndices.set(ancestor1.leafIndices);
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('leafIndex', new THREE.BufferAttribute(leafIndices, 1));
+geom.setAttribute('targetA', new THREE.BufferAttribute(targetA, 3));
+geom.setAttribute('targetB', new THREE.BufferAttribute(targetB, 3));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uMorph: { value: 0 },
+  uPhase: { value: 0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uMorph;
+    uniform float uPhase;
+    attribute float seed;
+    attribute float leafIndex;
+    attribute vec3 targetA;
+    attribute vec3 targetB;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    vec3 palette(float t, float arch){
+      vec3 sepia   = vec3(0.70, 0.55, 0.38);
+      vec3 rose    = vec3(0.82, 0.48, 0.52);
+      vec3 ink     = vec3(0.15, 0.12, 0.14);
+      vec3 parch   = vec3(0.92, 0.88, 0.78);
+
+      /* ancestors blend sepia to rose; self shifts toward ink/parch */
+      vec3 old = mix(sepia, rose, arch * 0.6);
+      vec3 young = mix(parch, ink, arch * 0.4);
+      return mix(old, young, t);
+    }
+
+    void main(){
+      /* morph between targetA and targetB with per-particle lag */
+      float lag = seed * 0.15;
+      float localMorph = clamp((uMorph - lag) / (1.0 - lag), 0.0, 1.0);
+      localMorph = localMorph * localMorph * (3.0 - 2.0 * localMorph);
+
+      vec3 p = mix(targetA, targetB, localMorph);
+
+      /* memory drift: particles searching for their next position */
+      float drift = (1.0 - localMorph) * 0.8;
+      float driftPhase = uTime * 0.6 + seed * 6.28;
+      p.x += drift * 0.15 * sin(driftPhase * 1.3 + leafIndex);
+      p.y += drift * 0.12 * cos(driftPhase * 0.9 + leafIndex * 1.5);
+      p.z += drift * 0.08 * sin(driftPhase * 1.7 + leafIndex * 0.8);
+
+      /* leaf tremor */
+      float tremor = 0.02 * sin(uTime * 4.0 + seed * 40.0);
+      p.x += tremor;
+      p.z += tremor * 0.6;
+
+      /* palette keyed to morph position and phase */
+      float colorT = localMorph;
+      float arch = uPhase / 2.0;
+      vCol = palette(colorT, arch);
+
+      /* particles at transition points (mid-morph) brighten */
+      float transitionGlow = smoothstep(0.3, 0.5, localMorph) * (1.0 - smoothstep(0.5, 0.7, localMorph));
+      vCol += transitionGlow * 0.25 * vec3(0.85, 0.75, 0.65);
+
+      vAlpha = 0.45 + 0.35 * (1.0 - drift);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * (38.0 / dist) * (0.8 + 0.4 * (1.0 - drift));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── morph schedule: 1→2→3→1→... ── */
+const morphDuration = 12.0; // seconds per transition
+let morphPhase = 0; // 0, 1, 2
+let morphStartTime = 0;
+
+function updateMorphTargets(){
+  const datasets = [ancestor1, ancestor2, ancestor3];
+  const fromIdx = morphPhase;
+  const toIdx = (morphPhase + 1) % 3;
+
+  targetA.set(datasets[fromIdx].positions);
+  targetB.set(datasets[toIdx].positions);
+  geom.attributes.targetA.needsUpdate = true;
+  geom.attributes.targetB.needsUpdate = true;
+
+  uniforms.uPhase.value = morphPhase;
+}
+
+updateMorphTargets();
+morphStartTime = performance.now() / 1000;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* gentle auto-orbit */
+let orbitAngle = 0;
+
+function loop(){
+  const now = performance.now() / 1000;
+  uniforms.uTime.value = now;
+
+  /* morph cycle */
+  const elapsed = now - morphStartTime;
+  const t = Math.min(1.0, elapsed / morphDuration);
+  uniforms.uMorph.value = t;
+
+  if (t >= 1.0){
+    morphPhase = (morphPhase + 1) % 3;
+    updateMorphTargets();
+    morphStartTime = now;
+  }
+
+  /* camera slowly orbits the face */
+  orbitAngle += 0.004;
+  const r = 14;
+  camera.position.x = r * Math.sin(orbitAngle);
+  camera.position.z = r * Math.cos(orbitAngle);
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
