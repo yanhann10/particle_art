@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>y3x · glitch-attractor · lorenz/datamosh</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0812; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; image-rendering: pixelated; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em;
+           font-family: "Courier New", monospace; }
+</style>
+</head>
+<body>
+<div class="id">y3x</div>
+<div class="hint">click to corrupt · glitch aesthetics · rosa menkman</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Single attractor (Lorenz) but rendered through a deliberate JPEG-style 8x8 block
+// quantizer + RGB channel separation + frame-skip jitter + posterization gate.
+// Click injects corruption events: zalgo vertical stretches, block-swap scrambles,
+// chromatic-aberration bursts. The piece asserts datamosh/glitch as primary language.
+
+const W = 256, H = 256;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0812, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+function makeInitTexture(){
+  const init = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++){
+    init[i*4]   = (Math.random() - 0.5) * 8;
+    init[i*4+1] = (Math.random() - 0.5) * 8;
+    init[i*4+2] = 27 + (Math.random() - 0.5) * 8;
+    init[i*4+3] = Math.random();
+  }
+  const t = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+  t.needsUpdate = true; return t;
+}
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: makeInitTexture() } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+
+blitMat.uniforms.tex.value = makeInitTexture();
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(rtB); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt:   { value: 0.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    varying vec2 vUv;
+
+    vec3 lorenz(vec3 p){
+      return vec3(10.0*(p.y-p.x), p.x*(28.0-p.z)-p.y, p.x*p.y - (8.0/3.0)*p.z);
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vec3 dp = lorenz(p);
+      p += dp * uDt * 0.15;
+      age = mod(age + uDt * 0.06, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// ─────────────────────────── render scene ───────────────────────────
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 50);
+camera.position.set(0, 1.2, 6);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+// corruption state
+let corruptionLevel = 0.0;
+let corruptionDecay = 0.0;
+let zalgoActive = false;
+let zalgoStart = 0;
+let blockScramble = 0.0;
+let chromaShift = 0.0;
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtA.texture },
+    uPixel: { value: 1.0 },
+    uCorruption: { value: 0.0 },
+    uZalgo:      { value: 0.0 },
+    uBlockScramble: { value: 0.0 },
+    uChromaShift:   { value: 0.0 },
+    uTime:          { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uCorruption;
+    uniform float uZalgo;
+    uniform float uBlockScramble;
+    uniform float uChromaShift;
+    uniform float uTime;
+    attribute vec2 uvIdx;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vBlock;
+    varying vec2 vUvIdx;
+    void main(){
+      vUvIdx = uvIdx;
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      // map Lorenz → unit cube
+      vec3 disp = (p - vec3(0, 0, 25.0)) / 25.0;
+
+      // 8x8 block quantization (JPEG-style)
+      float blockSize = 8.0;
+      vec2 screenUV = uvIdx * vec2(256.0);
+      vec2 blockID = floor(screenUV / blockSize);
+      float blockNoise = fract(sin(dot(blockID, vec2(12.9898, 78.233))) * 43758.5453);
+      vBlock = blockNoise;
+
+      // block-scramble: swap blocks randomly
+      if (uBlockScramble > 0.5){
+        float swapProb = fract(blockNoise * 7.123);
+        if (swapProb < 0.3){
+          disp.xy += vec2(sin(blockNoise*123.0), cos(blockNoise*456.0)) * 0.3;
+        }
+      }
+
+      // zalgo vertical stretch
+      if (uZalgo > 0.5){
+        float stretchProb = fract(blockNoise * 3.142);
+        if (stretchProb < 0.15){
+          disp.y += sin(uTime * 0.5 + blockNoise * 6.28) * 0.8;
+        }
+      }
+
+      // posterize age to 6 levels
+      float agePoster = floor(age * 6.0) / 6.0;
+
+      // 4-color palette (glitch posterization)
+      vec3 pal[4];
+      pal[0] = vec3(0.92, 0.12, 0.38);  // hot pink
+      pal[1] = vec3(0.08, 0.92, 0.88);  // cyan
+      pal[2] = vec3(0.98, 0.95, 0.08);  // yellow
+      pal[3] = vec3(0.15, 0.08, 0.62);  // deep purple
+
+      int idx = int(mod(agePoster * 4.0, 4.0));
+      vec3 col = pal[idx];
+
+      // chromatic aberration: shift channels
+      if (uChromaShift > 0.5){
+        float shift = blockNoise * 0.4;
+        col.r = pal[int(mod(float(idx) + shift * 4.0, 4.0))].r;
+        col.b = pal[int(mod(float(idx) - shift * 4.0, 4.0))].b;
+      }
+
+      vCol = col;
+      vAlpha = 1.0;
+
+      vec4 mv = modelViewMatrix * vec4(disp, 1.0);
+      gl_PointSize = 3.5 * uPixel;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vBlock;
+    varying vec2 vUvIdx;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+
+      // hard-edge square instead of soft circle (pixel aesthetic)
+      float a = 1.0;
+      gl_FragColor = vec4(vCol * a * vAlpha, a * vAlpha);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// corruption events on click
+addEventListener('click', () => {
+  corruptionLevel = 1.0;
+  corruptionDecay = Math.random();
+
+  // 50% chance zalgo
+  if (Math.random() < 0.5){
+    zalgoActive = true;
+    zalgoStart = performance.now();
+  }
+
+  // 40% chance block scramble
+  if (Math.random() < 0.4){
+    blockScramble = 1.0;
+  }
+
+  // 60% chance chromatic shift
+  if (Math.random() < 0.6){
+    chromaShift = 1.0;
+  }
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+let frameSkip = 0;
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+
+  pointsMat.uniforms.uTime.value = now / 1000;
+
+  // frame-skip jitter: occasionally skip rendering to create datamosh stutter
+  frameSkip = (frameSkip + 1) % 60;
+  if (corruptionLevel > 0.3 && frameSkip % 7 === 0){
+    // skip this frame, hold previous image
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  // decay corruption
+  corruptionLevel = Math.max(0, corruptionLevel - dt * 0.5);
+  blockScramble = Math.max(0, blockScramble - dt * 0.8);
+  chromaShift = Math.max(0, chromaShift - dt * 0.6);
+
+  // zalgo timeout
+  if (zalgoActive && now - zalgoStart > 800){
+    zalgoActive = false;
+  }
+
+  pointsMat.uniforms.uCorruption.value = corruptionLevel;
+  pointsMat.uniforms.uZalgo.value = zalgoActive ? 1.0 : 0.0;
+  pointsMat.uniforms.uBlockScramble.value = blockScramble;
+  pointsMat.uniforms.uChromaShift.value = chromaShift;
+
+  simUniforms.uDt.value = dt;
+
+  // sim 4 substeps
+  for (let i = 0; i < 4; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+
+  // slow drift camera
+  const ang = now * 0.00012;
+  camera.position.x = Math.sin(ang) * 6;
+  camera.position.z = Math.cos(ang) * 6;
+  camera.position.y = Math.sin(ang * 0.4) * 1.5;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
