@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h4m · folded leaves · reaction-diffusion</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0806; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">h4m</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── folded leaf geometry builder ── */
+function createFoldedLeaf(length, width, curlStrength, segments){
+  const geom = new THREE.BufferGeometry();
+  const verts = [];
+  const uvs = [];
+  const indices = [];
+  const rxU = Math.floor(segments * 1.5);
+  const rxV = segments;
+  for (let v = 0; v <= rxV; v++){
+    const t = v / rxV;
+    const x = t * length;
+    const curlAngle = curlStrength * t * t;
+    const cr = Math.cos(curlAngle), sr = Math.sin(curlAngle);
+    const localWidth = width * (1.0 - t * 0.4);
+    for (let u = 0; u <= rxU; u++){
+      const s = (u / rxU) * 2 - 1;
+      const y = s * localWidth;
+      const z = 0;
+      const yRot = y * cr - z * sr;
+      const zRot = y * sr + z * cr;
+      verts.push(x, yRot, zRot);
+      uvs.push(u / rxU, t);
+    }
+  }
+  for (let v = 0; v < rxV; v++){
+    for (let u = 0; u < rxU; u++){
+      const a = v * (rxU + 1) + u;
+      const b = a + 1;
+      const c = (v + 1) * (rxU + 1) + u;
+      const d = c + 1;
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geom.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
+}
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 8, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0806, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 2, 0);
+
+/* ── reaction-diffusion simulation on 64×64 grid ── */
+const RD_SIZE = 64;
+const rdU = new Float32Array(RD_SIZE * RD_SIZE);
+const rdV = new Float32Array(RD_SIZE * RD_SIZE);
+const rdU2 = new Float32Array(RD_SIZE * RD_SIZE);
+const rdV2 = new Float32Array(RD_SIZE * RD_SIZE);
+
+function rdIndex(x, y){
+  return ((y + RD_SIZE) % RD_SIZE) * RD_SIZE + ((x + RD_SIZE) % RD_SIZE);
+}
+
+function initRD(){
+  for (let i = 0; i < RD_SIZE * RD_SIZE; i++){
+    rdU[i] = 1.0;
+    rdV[i] = 0.0;
+  }
+  const cx = RD_SIZE / 2, cy = RD_SIZE / 2;
+  for (let dy = -4; dy <= 4; dy++){
+    for (let dx = -4; dx <= 4; dx++){
+      const idx = rdIndex(cx + dx, cy + dy);
+      rdV[idx] = 0.5 + Math.random() * 0.3;
+      rdU[idx] = 0.3 + Math.random() * 0.2;
+    }
+  }
+  for (let i = 0; i < 3; i++){
+    const rx = Math.floor(Math.random() * RD_SIZE);
+    const ry = Math.floor(Math.random() * RD_SIZE);
+    for (let dy = -2; dy <= 2; dy++){
+      for (let dx = -2; dx <= 2; dx++){
+        const idx = rdIndex(rx + dx, ry + dy);
+        rdV[idx] = 0.4 + Math.random() * 0.2;
+      }
+    }
+  }
+}
+initRD();
+
+function stepRD(dt){
+  const Du = 0.14, Dv = 0.07;
+  const f = 0.035, k = 0.062;
+  for (let y = 0; y < RD_SIZE; y++){
+    for (let x = 0; x < RD_SIZE; x++){
+      const idx = rdIndex(x, y);
+      const u = rdU[idx], v = rdV[idx];
+      const uL = rdU[rdIndex(x-1, y)];
+      const uR = rdU[rdIndex(x+1, y)];
+      const uD = rdU[rdIndex(x, y-1)];
+      const uU = rdU[rdIndex(x, y+1)];
+      const vL = rdV[rdIndex(x-1, y)];
+      const vR = rdV[rdIndex(x+1, y)];
+      const vD = rdV[rdIndex(x, y-1)];
+      const vU = rdV[rdIndex(x, y+1)];
+      const lapU = uL + uR + uD + uU - 4*u;
+      const lapV = vL + vR + vD + vU - 4*v;
+      const uvv = u * v * v;
+      rdU2[idx] = u + dt * (Du * lapU - uvv + f * (1 - u));
+      rdV2[idx] = v + dt * (Dv * lapV + uvv - (f + k) * v);
+    }
+  }
+  for (let i = 0; i < RD_SIZE * RD_SIZE; i++){
+    rdU[i] = Math.max(0, Math.min(1, rdU2[i]));
+    rdV[i] = Math.max(0, Math.min(1, rdV2[i]));
+  }
+}
+
+/* ── build 7 folded-leaf elements arranged in spiral ── */
+const leaves = [];
+const leafSpecs = [
+  { length: 5.0, width: 1.8, curl: 1.8, angle: 0.0,   radius: 0,   yOff: 0 },
+  { length: 4.2, width: 1.5, curl: 2.2, angle: 0.9,   radius: 2.8, yOff: -0.5 },
+  { length: 3.8, width: 1.4, curl: 1.5, angle: 2.1,   radius: 3.2, yOff: 1.2 },
+  { length: 4.5, width: 1.6, curl: 2.0, angle: 3.5,   radius: 2.5, yOff: -1.0 },
+  { length: 3.5, width: 1.3, curl: 2.5, angle: 4.8,   radius: 3.5, yOff: 0.8 },
+  { length: 4.0, width: 1.5, curl: 1.7, angle: 6.0,   radius: 2.2, yOff: -1.5 },
+  { length: 3.2, width: 1.2, curl: 2.3, angle: 1.4,   radius: 3.8, yOff: 2.0 },
+];
+
+const N_PART = 11000;
+const particleCount = N_PART * leafSpecs.length;
+const positions = new Float32Array(particleCount * 3);
+const seeds = new Float32Array(particleCount);
+const leafIds = new Float32Array(particleCount);
+let writeIdx = 0;
+
+for (let lIdx = 0; lIdx < leafSpecs.length; lIdx++){
+  const spec = leafSpecs[lIdx];
+  const geom = createFoldedLeaf(spec.length, spec.width, spec.curl, 18);
+  const posArr = geom.attributes.position.array;
+  const mat = new THREE.MeshBasicMaterial({ color: 0x888888, side: THREE.DoubleSide, transparent: true, opacity: 0 });
+  const mesh = new THREE.Mesh(geom, mat);
+  const ca = Math.cos(spec.angle), sa = Math.sin(spec.angle);
+  mesh.position.set(ca * spec.radius, spec.yOff, sa * spec.radius);
+  mesh.rotation.y = spec.angle + Math.PI * 0.5;
+  mesh.rotation.x = (Math.random() - 0.5) * 0.3;
+  scene.add(mesh);
+  leaves.push({ mesh, geom, spec });
+  for (let i = 0; i < N_PART; i++){
+    const vIdx = Math.floor(Math.random() * (posArr.length / 3)) * 3;
+    const lx = posArr[vIdx], ly = posArr[vIdx+1], lz = posArr[vIdx+2];
+    const wp = new THREE.Vector3(lx, ly, lz).applyMatrix4(mesh.matrixWorld);
+    positions[writeIdx * 3] = wp.x;
+    positions[writeIdx * 3 + 1] = wp.y;
+    positions[writeIdx * 3 + 2] = wp.z;
+    seeds[writeIdx] = Math.random();
+    leafIds[writeIdx] = lIdx;
+    writeIdx++;
+  }
+}
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uRDData: { value: new THREE.DataTexture(rdV, RD_SIZE, RD_SIZE, THREE.RedFormat, THREE.FloatType) }
+};
+uniforms.uRDData.value.needsUpdate = true;
+
+const partGeom = new THREE.BufferGeometry();
+partGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+partGeom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+partGeom.setAttribute('leafId', new THREE.BufferAttribute(leafIds, 1));
+
+const partMat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform sampler2D uRDData;
+    attribute float seed;
+    attribute float leafId;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    vec3 hash3(float p){
+      vec3 p3 = fract(vec3(p) * vec3(0.1031, 0.1030, 0.0973));
+      p3 += dot(p3, p3.yxz + 33.33);
+      return fract((p3.xxy + p3.yxx) * p3.zyx);
+    }
+
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.3 + seed * 6.28;
+
+      /* map particle world-pos to RD grid coords — centered on origin, scale 8 units = full grid */
+      vec2 rdUV = (p.xz + 16.0) / 32.0;
+      rdUV = clamp(rdUV, 0.0, 1.0);
+      float rdVal = texture2D(uRDData, rdUV).r;
+
+      /* reaction-diffusion drives displacement: high V → outward drift, low V → inward pull */
+      vec2 gradX = vec2(
+        texture2D(uRDData, rdUV + vec2(0.01, 0.0)).r,
+        texture2D(uRDData, rdUV - vec2(0.01, 0.0)).r
+      );
+      vec2 gradZ = vec2(
+        texture2D(uRDData, rdUV + vec2(0.0, 0.01)).r,
+        texture2D(uRDData, rdUV - vec2(0.0, 0.01)).r
+      );
+      vec2 grad = vec2(gradX.x - gradX.y, gradZ.x - gradZ.y);
+      float drift = (rdVal - 0.45) * 1.8;
+      p.xz += grad * drift;
+      p.y += drift * 0.2;
+
+      /* per-leaf micro-tremor tied to rdVal */
+      vec3 shake = hash3(leafId * 7.13 + seed);
+      float intensity = rdVal * rdVal;
+      p += shake * intensity * 0.08 * sin(uTime * 4.0 + seed * 12.0);
+
+      /* warm amber palette — El Anatsui ochre metal */
+      vec3 ochre = vec3(0.82, 0.62, 0.32);
+      vec3 sienna = vec3(0.55, 0.36, 0.24);
+      vec3 copper = vec3(0.76, 0.48, 0.30);
+      vec3 dust = vec3(0.90, 0.82, 0.64);
+
+      vec3 col = mix(sienna, ochre, rdVal);
+      col = mix(col, copper, smoothstep(0.5, 0.8, rdVal));
+      col = mix(col, dust, smoothstep(0.8, 1.0, rdVal) * 0.4);
+
+      vCol = col;
+      vAlpha = 0.6 + 0.4 * rdVal;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + 0.5 * rdVal) * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(partGeom, partMat);
+scene.add(points);
+
+/* ── ambient light ── */
+const ambient = new THREE.AmbientLight(0x1a1612, 0.3);
+scene.add(ambient);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let lastRDStep = start;
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  if (now - lastRDStep > 50){
+    stepRD(1.0);
+    for (let i = 0; i < RD_SIZE * RD_SIZE; i++){
+      uniforms.uRDData.value.image.data[i] = rdV[i];
+    }
+    uniforms.uRDData.value.needsUpdate = true;
+    lastRDStep = now;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
