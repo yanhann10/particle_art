@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kxu · calyx trails (Riley → botanical cup with motion memory)</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#2a2621; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#9a8f82; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#9a8f82; }
+</style>
+</head>
+<body>
+<div class="id">kxu</div>
+<div class="hint">click to regenerate · orbit drag</div>
+<div class="src">Riley · calyx interference · motion trails · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x2a2621, 0.012);
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 12, 18);
+camera.lookAt(0, 2, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x2a2621, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+let geom, points, trailGeom, trailLines;
+
+const uniforms = {
+  uTime:    { value: 0 },
+  uPhase:   { value: 0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+  uRowFreq: { value: 1.2 },
+  uColFreq: { value: 1.0 },
+  uWaveAmp: { value: 0.5 },
+  uTwist:   { value: 0.0 },
+  uMorph:   { value: 0.0 },
+  uPetals:  { value: 5.0 },
+  uCupDepth:{ value: 4.0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPhase;
+    uniform float uRowFreq;
+    uniform float uColFreq;
+    uniform float uWaveAmp;
+    uniform float uTwist;
+    uniform float uMorph;
+    uniform float uPetals;
+    uniform float uCupDepth;
+
+    attribute vec2 gridPos;
+    attribute float seed;
+
+    varying float vDensity;
+    varying float vHeight;
+
+    void main(){
+      vec2 gp = gridPos;
+
+      float rowWave = sin(gp.y * uRowFreq + uTime * 1.2 + uPhase) * uWaveAmp;
+      float colWave = sin(gp.x * uColFreq + uTime * 0.7) * uWaveAmp;
+
+      float twist = uTwist * length(gp) * 0.04;
+      float ct = cos(twist); float st = sin(twist);
+      vec2 twisted = vec2(gp.x * ct - gp.y * st, gp.x * st + gp.y * ct);
+
+      float r = length(gp);
+      float maxR = 12.0;
+      float nr = clamp(r / maxR, 0.0, 1.0);
+      float theta = atan(gp.y, gp.x);
+
+      float petalShape = 0.5 + 0.5 * cos(theta * uPetals);
+      float cupProfile = uCupDepth * nr * nr * (0.6 + 0.4 * petalShape);
+      float flare = 1.0 + 0.15 * nr * nr * uMorph;
+
+      float m = uMorph;
+      vec3 flatPos = vec3(twisted.x + rowWave, twisted.y + colWave, 0.0);
+
+      float cx = twisted.x * flare + rowWave * (1.0 - 0.5 * m);
+      float cy = twisted.y * flare + colWave * (1.0 - 0.5 * m);
+      float cz = cupProfile * m;
+
+      vec3 p = mix(flatPos, vec3(cx, cy, cz), m);
+
+      float interference = sin(gp.y * uRowFreq * 2.0 + uTime * 1.2)
+                         * sin(gp.x * uColFreq * 2.0 + uTime * 0.7);
+      float vein = sin(theta * uPetals * 3.0 + r * 1.5 + uTime * 0.4);
+      vDensity = mix(interference, interference * 0.6 + vein * 0.4, m);
+      vHeight = cz;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * max(1.8, 3.5 - dist * 0.06);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDensity;
+    varying float vHeight;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      float val = step(0.0, vDensity);
+      float tint = smoothstep(0.0, 4.0, vHeight);
+      vec3 dark  = mix(vec3(0.16, 0.13, 0.10), vec3(0.20, 0.22, 0.14), tint * 0.5);
+      vec3 light = mix(vec3(0.92, 0.88, 0.78), vec3(0.86, 0.88, 0.76), tint * 0.3);
+      vec3 col = mix(dark, light, val);
+
+      float alpha = (1.0 - smoothstep(0.18, 0.25, r)) * 0.85;
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+const trailMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uMorph: { value: 0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uMorph;
+    attribute float trailAge;
+    varying float vAge;
+    varying float vHeight;
+
+    void main(){
+      vAge = trailAge;
+      vHeight = position.z;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vHeight;
+
+    void main(){
+      float tint = smoothstep(0.0, 4.0, vHeight);
+      vec3 trailColor = mix(vec3(0.22, 0.18, 0.14), vec3(0.28, 0.30, 0.20), tint * 0.4);
+      float alpha = (1.0 - vAge) * 0.12;
+      gl_FragColor = vec4(trailColor, alpha);
+    }
+  `
+});
+
+const HISTORY_LENGTH = 8;
+const posHistory = [];
+
+function buildGrid(rows, cols, seed){
+  const positions = new Float32Array(N * 3);
+  const gridPositions = new Float32Array(N * 2);
+  const seeds = new Float32Array(N);
+
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const width = 24, height = 24;
+  const cellW = width / cols, cellH = height / rows;
+
+  let idx = 0;
+  for (let i = 0; i < rows && idx < N; i++){
+    for (let j = 0; j < cols && idx < N; j++){
+      const pointsPerCell = Math.floor(N / (rows * cols));
+      for (let k = 0; k < pointsPerCell && idx < N; k++){
+        const x = (j + rng() - 0.5) * cellW - width * 0.5;
+        const y = (i + rng() - 0.5) * cellH - height * 0.5;
+        positions[idx * 3] = x;
+        positions[idx * 3 + 1] = y;
+        positions[idx * 3 + 2] = 0;
+        gridPositions[idx * 2] = x;
+        gridPositions[idx * 2 + 1] = y;
+        seeds[idx] = rng();
+        idx++;
+      }
+    }
+  }
+  while (idx < N){
+    const x = (rng() - 0.5) * width;
+    const y = (rng() - 0.5) * height;
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = 0;
+    gridPositions[idx * 2] = x;
+    gridPositions[idx * 2 + 1] = y;
+    seeds[idx] = rng();
+    idx++;
+  }
+  return { positions, gridPositions, seeds };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random() * 1e9);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const rows = 80 + Math.floor(rng() * 60);
+  const cols = 80 + Math.floor(rng() * 60);
+
+  uniforms.uRowFreq.value = 0.8 + rng() * 1.0;
+  uniforms.uColFreq.value = 0.8 + rng() * 1.0;
+  uniforms.uWaveAmp.value = 0.3 + rng() * 0.5;
+  uniforms.uTwist.value = rng() * 4.0;
+  uniforms.uPhase.value = rng() * 6.28;
+  uniforms.uPetals.value = 4 + Math.floor(rng() * 4);
+  uniforms.uCupDepth.value = 3.0 + rng() * 3.0;
+
+  const { positions, gridPositions, seeds } = buildGrid(rows, cols, seed);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('gridPos', new THREE.BufferAttribute(gridPositions, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.gridPos.array.set(gridPositions);
+    geom.attributes.gridPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);
+    geom.attributes.seed.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+
+  posHistory.length = 0;
+  if (trailLines) scene.remove(trailLines);
+  trailGeom = null;
+  trailLines = null;
+}
+
+regenerate();
+addEventListener('click', (e) => {
+  if (e.target.tagName === 'CANVAS') regenerate();
+});
+
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 0.55;
+const canvas = renderer.domElement;
+
+canvas.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi = Math.max(0.1, Math.min(1.4, orbitPhi - (e.clientY - prevY) * 0.005));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+scene.add(ambientLight);
+
+const spotLight = new THREE.SpotLight(0xffd4a3, 2.5);
+spotLight.position.set(-8, 15, 10);
+spotLight.target.position.set(0, 0, 0);
+spotLight.angle = Math.PI / 5;
+spotLight.penumbra = 0.7;
+spotLight.distance = 40;
+spotLight.decay = 1.8;
+scene.add(spotLight);
+scene.add(spotLight.target);
+
+const start = performance.now();
+let lastTrailUpdate = 0;
+
+function updateTrails(){
+  if (!geom) return;
+
+  const positions = geom.attributes.position.array;
+  const currentFrame = new Float32Array(positions);
+  posHistory.push(currentFrame);
+
+  if (posHistory.length > HISTORY_LENGTH) {
+    posHistory.shift();
+  }
+
+  if (posHistory.length < 2) return;
+
+  const SAMPLE_RATE = 20;
+  const linePositions = [];
+  const ages = [];
+
+  for (let i = 0; i < N; i += SAMPLE_RATE) {
+    for (let h = 0; h < posHistory.length - 1; h++) {
+      const age = (posHistory.length - 1 - h) / HISTORY_LENGTH;
+      const curr = posHistory[h];
+      const next = posHistory[h + 1];
+
+      linePositions.push(
+        curr[i * 3], curr[i * 3 + 1], curr[i * 3 + 2],
+        next[i * 3], next[i * 3 + 1], next[i * 3 + 2]
+      );
+      ages.push(age, age);
+    }
+  }
+
+  if (trailLines) scene.remove(trailLines);
+
+  trailGeom = new THREE.BufferGeometry();
+  trailGeom.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
+  trailGeom.setAttribute('trailAge', new THREE.Float32BufferAttribute(ages, 1));
+  trailLines = new THREE.LineSegments(trailGeom, trailMat);
+  scene.add(trailLines);
+}
+
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+  trailMat.uniforms.uTime.value = t;
+
+  const morphTarget = 1.0;
+  uniforms.uMorph.value += (morphTarget - uniforms.uMorph.value) * 0.015;
+  trailMat.uniforms.uMorph.value = uniforms.uMorph.value;
+
+  if (now - lastTrailUpdate > 100) {
+    updateTrails();
+    lastTrailUpdate = now;
+  }
+
+  const autoTheta = t * 0.08;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 22;
+
+  const centroidY = 1.5 * uniforms.uMorph.value;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    centroidY + radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, centroidY, 0);
+
+  spotLight.position.set(
+    -8 + Math.sin(t * 0.15) * 3,
+    15 + Math.cos(t * 0.1) * 2,
+    10 + Math.sin(t * 0.12) * 3
+  );
+  spotLight.target.position.set(0, centroidY, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
