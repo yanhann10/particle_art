@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>td6 · fidenza structured flow · non-overlapping ribbons</title>
+<!-- MOTION: flow, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">td6</div>
+<div class="hint">drag to orbit</div>
+<div class="src">tyler hobbs · fidenza packing · collision-aware flow ribbons</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Tyler Hobbs Fidenza: 2D flow-field streamlines that PACK without overlap.
+// Each streamline starts at a random seed, follows simplex-noise flow vectors,
+// but stops when it would cross an existing ribbon. Thickness varies along
+// each stroke (pressure simulation). Result: a calm delta of confident curves
+// in muted earth palette, lifted to 3D as sculptural planes + slow rotation.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xeae4d8); // warm paper ground
+const camera = new THREE.PerspectiveCamera(35, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 24, 32);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+// ─────── simplex noise (inlined)
+const G2 = (3 - Math.sqrt(3)) / 6, G22 = 2 * G2 - 1;
+const grad3 = [[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],[0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];
+const p = [151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,40,244,102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,81,51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180];
+const perm = new Uint8Array(512); for(let i=0;i<512;i++) perm[i]=p[i&255];
+function dot2(g, x, y){ return g[0]*x + g[1]*y; }
+function noise2(x, y){
+  const s = (x+y)*0.5*(Math.sqrt(3)-1), i=Math.floor(x+s), j=Math.floor(y+s);
+  const t = (i+j)*G2, X0=i-t, Y0=j-t, x0=x-X0, y0=y-Y0;
+  const i1 = x0>y0?1:0, j1 = x0>y0?0:1;
+  const x1=x0-i1+G2, y1=y0-j1+G2, x2=x0+G22, y2=y0+G22;
+  const ii=i&255, jj=j&255;
+  const gi0=perm[ii+perm[jj]]%12, gi1=perm[ii+i1+perm[jj+j1]]%12, gi2=perm[ii+1+perm[jj+1]]%12;
+  let n0=0, n1=0, n2=0;
+  let t0=0.5-x0*x0-y0*y0; if(t0>=0){ t0*=t0; n0=t0*t0*dot2(grad3[gi0],x0,y0); }
+  let t1=0.5-x1*x1-y1*y1; if(t1>=0){ t1*=t1; n1=t1*t1*dot2(grad3[gi1],x1,y1); }
+  let t2=0.5-x2*x2-y2*y2; if(t2>=0){ t2*=t2; n2=t2*t2*dot2(grad3[gi2],x2,y2); }
+  return 70*(n0+n1+n2);
+}
+
+// ─────── flow-field sampling
+const FIELD_SCALE = 0.09;
+function flowVector(x, y){
+  const angle = noise2(x*FIELD_SCALE, y*FIELD_SCALE) * Math.PI * 3;
+  return { x: Math.cos(angle), y: Math.sin(angle) };
+}
+
+// ─────── streamline integration with collision detection
+const W = 30, H = 30; // world bounds
+const CELL_SIZE = 0.4;
+const COLS = Math.ceil(W / CELL_SIZE);
+const ROWS = Math.ceil(H / CELL_SIZE);
+const grid = Array.from({ length: ROWS }, () => Array(COLS).fill(null).map(() => []));
+
+function cellCoords(x, y){
+  return {
+    c: Math.max(0, Math.min(COLS - 1, Math.floor((x + W/2) / CELL_SIZE))),
+    r: Math.max(0, Math.min(ROWS - 1, Math.floor((y + H/2) / CELL_SIZE)))
+  };
+}
+
+function recordPoint(x, y, ribbonId){
+  const { c, r } = cellCoords(x, y);
+  grid[r][c].push({ x, y, ribbonId });
+}
+
+function checkCollision(x, y, ribbonId, minDist){
+  const { c, r } = cellCoords(x, y);
+  for (let dr = -1; dr <= 1; dr++){
+    for (let dc = -1; dc <= 1; dc++){
+      const rr = r + dr, cc = c + dc;
+      if (rr < 0 || rr >= ROWS || cc < 0 || cc >= COLS) continue;
+      for (const pt of grid[rr][cc]){
+        if (pt.ribbonId === ribbonId) continue; // same ribbon
+        const dx = pt.x - x, dy = pt.y - y;
+        if (dx*dx + dy*dy < minDist*minDist) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function integrateStreamline(sx, sy, ribbonId){
+  const path = [{ x: sx, y: sy }];
+  let x = sx, y = sy;
+  const STEP = 0.15, MAX_STEPS = 180, MIN_DIST = 0.65;
+  recordPoint(x, y, ribbonId);
+  for (let s = 0; s < MAX_STEPS; s++){
+    const v = flowVector(x, y);
+    const nx = x + v.x * STEP;
+    const ny = y + v.y * STEP;
+    if (Math.abs(nx) > W/2 - 1 || Math.abs(ny) > H/2 - 1) break;
+    if (checkCollision(nx, ny, ribbonId, MIN_DIST)) break;
+    x = nx; y = ny;
+    path.push({ x, y });
+    recordPoint(x, y, ribbonId);
+    if (path.length % 4 === 0){
+      if (checkCollision(x, y, ribbonId, MIN_DIST * 0.8)) break;
+    }
+  }
+  return path;
+}
+
+// ─────── generate non-overlapping ribbons
+const ribbons = [];
+const PALETTE_LUXE = [
+  0x8b7355, // warm brown
+  0xa68a6d, // tan
+  0x6b5d52, // dark earth
+  0xc9b18a, // sand
+  0x4a403a, // charcoal
+  0x9c8772, // taupe
+];
+
+const NUM_RIBBONS = 32;
+const seeds = [];
+for (let i = 0; i < NUM_RIBBONS * 4; i++){
+  seeds.push({
+    x: (Math.random() - 0.5) * (W - 4),
+    y: (Math.random() - 0.5) * (H - 4)
+  });
+}
+
+for (let i = 0; i < seeds.length && ribbons.length < NUM_RIBBONS; i++){
+  const s = seeds[i];
+  if (checkCollision(s.x, s.y, -1, 1.2)) continue; // seed too close to existing
+  const path = integrateStreamline(s.x, s.y, ribbons.length);
+  if (path.length < 20) continue; // too short
+  ribbons.push({
+    path,
+    color: PALETTE_LUXE[Math.floor(Math.random() * PALETTE_LUXE.length)]
+  });
+}
+
+// ─────── build 3D ribbon geometry
+function buildRibbon(path, color){
+  const pts = [];
+  for (let i = 0; i < path.length; i++){
+    const p = path[i];
+    // height modulation from flow magnitude + noise
+    const mag = Math.abs(noise2(p.x * 0.15, p.y * 0.15));
+    const z = mag * 1.8 + (Math.random() - 0.5) * 0.2;
+    pts.push(new THREE.Vector3(p.x, z, p.y));
+  }
+  if (pts.length < 4) return null;
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.3);
+  
+  // variable thickness: pressure simulation
+  const N = Math.min(pts.length * 3, 300);
+  const radii = new Float32Array(N);
+  for (let i = 0; i < N; i++){
+    const t = i / (N - 1);
+    const phase = Math.sin(t * Math.PI); // taper ends
+    const wobble = 0.5 + 0.5 * noise2(t * 12 + color, t * 8);
+    radii[i] = (0.18 + wobble * 0.22) * phase;
+  }
+  
+  // build tube manually
+  const RADIAL = 5;
+  const positions = new Float32Array(N * RADIAL * 3);
+  const indices = [];
+  const up = new THREE.Vector3(0, 1, 0);
+  for (let i = 0; i < N; i++){
+    const t = i / (N - 1);
+    const p = curve.getPointAt(t);
+    const tangent = curve.getTangentAt(t).normalize();
+    const normal = new THREE.Vector3().crossVectors(up, tangent).normalize();
+    if (normal.lengthSq() < 0.001) normal.set(1, 0, 0);
+    const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+    const r = radii[i];
+    for (let j = 0; j < RADIAL; j++){
+      const ang = (j / RADIAL) * Math.PI * 2;
+      const v = new THREE.Vector3()
+        .copy(normal).multiplyScalar(Math.cos(ang) * r)
+        .add(binormal.clone().multiplyScalar(Math.sin(ang) * r))
+        .add(p);
+      positions[(i * RADIAL + j) * 3] = v.x;
+      positions[(i * RADIAL + j) * 3 + 1] = v.y;
+      positions[(i * RADIAL + j) * 3 + 2] = v.z;
+    }
+  }
+  for (let i = 0; i < N - 1; i++){
+    for (let j = 0; j < RADIAL; j++){
+      const nj = (j + 1) % RADIAL;
+      const a = i * RADIAL + j, b = i * RADIAL + nj;
+      const c = (i + 1) * RADIAL + j, d = (i + 1) * RADIAL + nj;
+      indices.push(a, b, c);
+      indices.push(b, d, c);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  g.setIndex(indices);
+  g.computeVertexNormals();
+  
+  const mat = new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.95,
+    metalness: 0.0,
+    flatShading: false,
+  });
+  return new THREE.Mesh(g, mat);
+}
+
+const meshes = [];
+for (const ribbon of ribbons){
+  const mesh = buildRibbon(ribbon.path, ribbon.color);
+  if (mesh){
+    scene.add(mesh);
+    meshes.push(mesh);
+  }
+}
+
+// ─────── lighting
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
+scene.add(ambientLight);
+const dirLight = new THREE.DirectionalLight(0xfff9f0, 0.55);
+dirLight.position.set(5, 12, 8);
+scene.add(dirLight);
+
+// ─────── slow rotation
+const pivot = new THREE.Group();
+for (const m of meshes){
+  scene.remove(m);
+  pivot.add(m);
+}
+scene.add(pivot);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(t){
+  pivot.rotation.y = t * 0.00008;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop(0);
+</script>
+</body>
+</html>
