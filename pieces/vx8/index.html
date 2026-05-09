@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vx8 · physarum network · agent trails</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08080d; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">vx8</div>
+<div class="hint">physarum slime-mold agent system · self-organizing network</div>
+<div class="src">mutation from ajo · sage jenson directive · trail deposition + chemotaxis</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Sage Jenson / mxsage physarum directive:
+// Each agent deposits pheromone, senses ahead-left/ahead/ahead-right,
+// steers toward strongest. Ping-pong render targets with diffusion+decay.
+// Trail rendered as glowing lines on midnight — biological intelligence emerging.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x08080d, 0.012);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080d, 1);
+document.body.appendChild(renderer.domElement);
+
+const W = 1024, H = 1024;
+
+// ───── pheromone field (ping-pong render targets)
+const trailA = new THREE.WebGLRenderTarget(W, H, {
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat, type: THREE.FloatType
+});
+const trailB = new THREE.WebGLRenderTarget(W, H, {
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat, type: THREE.FloatType
+});
+
+let trailRead = trailA, trailWrite = trailB;
+function swapTrails(){ [trailRead, trailWrite] = [trailWrite, trailRead]; }
+
+const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const quadGeo = new THREE.PlaneGeometry(2, 2);
+
+// ───── diffusion + decay shader
+const diffuseMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tTrail: { value: null },
+    decay: { value: 0.985 },
+    diffuse: { value: 0.16 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTrail;
+    uniform float decay, diffuse;
+    varying vec2 vUv;
+    void main() {
+      vec2 px = 1.0 / vec2(${W}.0, ${H}.0);
+      float c = texture2D(tTrail, vUv).r;
+      float n = texture2D(tTrail, vUv + vec2(0.0, px.y)).r;
+      float s = texture2D(tTrail, vUv - vec2(0.0, px.y)).r;
+      float e = texture2D(tTrail, vUv + vec2(px.x, 0.0)).r;
+      float w = texture2D(tTrail, vUv - vec2(px.x, 0.0)).r;
+      float avg = (c + n + s + e + w) / 5.0;
+      float val = mix(c, avg, diffuse) * decay;
+      gl_FragColor = vec4(val, val, val, 1.0);
+    }
+  `
+});
+const diffuseQuad = new THREE.Mesh(quadGeo, diffuseMat);
+const diffuseScene = new THREE.Scene();
+diffuseScene.add(diffuseQuad);
+
+// ───── agent deposition shader (additive point-splat)
+const N_AGENTS = 4500;
+const agentPositions = new Float32Array(N_AGENTS * 3);
+const agentAngles = new Float32Array(N_AGENTS);
+const agentVelocities = new Float32Array(N_AGENTS * 2);
+
+// Initialize agents in a loose cluster (arabesque heritage — ring shape)
+for (let i = 0; i < N_AGENTS; i++){
+  const th = (i / N_AGENTS) * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
+  const r = 0.24 + Math.random() * 0.08;
+  agentPositions[i*3]   = 0.5 + Math.cos(th) * r;
+  agentPositions[i*3+1] = 0.5 + Math.sin(th) * r;
+  agentPositions[i*3+2] = 0.0;
+  agentAngles[i] = th + Math.PI + (Math.random() - 0.5) * 0.4;
+  agentVelocities[i*2] = 0;
+  agentVelocities[i*2+1] = 0;
+}
+
+const depositGeo = new THREE.BufferGeometry();
+depositGeo.setAttribute('position', new THREE.BufferAttribute(agentPositions, 3));
+const depositMat = new THREE.ShaderMaterial({
+  uniforms: { depositStrength: { value: 0.15 } },
+  vertexShader: `
+    void main() {
+      gl_Position = vec4(position.xy * 2.0 - 1.0, 0.0, 1.0);
+      gl_PointSize = 3.5;
+    }
+  `,
+  fragmentShader: `
+    uniform float depositStrength;
+    void main() {
+      float d = length(gl_PointCoord - 0.5);
+      if (d > 0.5) discard;
+      float a = (1.0 - d * 2.0) * depositStrength;
+      gl_FragColor = vec4(a, a, a, 1.0);
+    }
+  `,
+  blending: THREE.AdditiveBlending,
+  depthTest: false,
+  depthWrite: false
+});
+const depositPoints = new THREE.Points(depositGeo, depositMat);
+const depositScene = new THREE.Scene();
+depositScene.add(depositPoints);
+
+// ───── agent update (CPU — sample trail texture, steer, move)
+const SPEED = 0.0014;
+const SENSOR_ANGLE = 0.36;
+const SENSOR_DIST = 0.008;
+const ROTATE_ANGLE = 0.12;
+
+const canvas2d = document.createElement('canvas');
+canvas2d.width = W; canvas2d.height = H;
+const ctx = canvas2d.getContext('2d', { willReadFrequently: true });
+
+function sampleTrail(x, y){
+  const ix = Math.floor(x * W), iy = Math.floor(y * H);
+  if (ix < 0 || ix >= W || iy < 0 || iy >= H) return 0;
+  const idx = (iy * W + ix) * 4;
+  return ctx.getImageData(ix, iy, 1, 1).data[0] / 255.0;
+}
+
+function updateAgents(){
+  // read current trail into canvas2d
+  renderer.readRenderTargetPixels(trailRead, 0, 0, W, H, new Uint8Array(W * H * 4));
+  const pixels = new Uint8Array(W * H * 4);
+  renderer.readRenderTargetPixels(trailRead, 0, 0, W, H, pixels);
+  const imgData = ctx.createImageData(W, H);
+  imgData.data.set(pixels);
+  ctx.putImageData(imgData, 0, 0);
+
+  for (let i = 0; i < N_AGENTS; i++){
+    const x = agentPositions[i*3], y = agentPositions[i*3+1];
+    const angle = agentAngles[i];
+
+    // sense three directions
+    const aheadX = x + Math.cos(angle) * SENSOR_DIST;
+    const aheadY = y + Math.sin(angle) * SENSOR_DIST;
+    const leftX  = x + Math.cos(angle + SENSOR_ANGLE) * SENSOR_DIST;
+    const leftY  = y + Math.sin(angle + SENSOR_ANGLE) * SENSOR_DIST;
+    const rightX = x + Math.cos(angle - SENSOR_ANGLE) * SENSOR_DIST;
+    const rightY = y + Math.sin(angle - SENSOR_ANGLE) * SENSOR_DIST;
+
+    const ahead = sampleTrail(aheadX, aheadY);
+    const left  = sampleTrail(leftX, leftY);
+    const right = sampleTrail(rightX, rightY);
+
+    // steer toward strongest
+    if (ahead > left && ahead > right){
+      // continue straight
+    } else if (ahead < left && ahead < right){
+      // choose random
+      agentAngles[i] += (Math.random() < 0.5 ? 1 : -1) * ROTATE_ANGLE;
+    } else if (left > right){
+      agentAngles[i] += ROTATE_ANGLE;
+    } else if (right > left){
+      agentAngles[i] -= ROTATE_ANGLE;
+    }
+
+    // move forward
+    agentPositions[i*3]   += Math.cos(agentAngles[i]) * SPEED;
+    agentPositions[i*3+1] += Math.sin(agentAngles[i]) * SPEED;
+
+    // wrap edges
+    if (agentPositions[i*3] < 0) agentPositions[i*3] += 1.0;
+    if (agentPositions[i*3] > 1) agentPositions[i*3] -= 1.0;
+    if (agentPositions[i*3+1] < 0) agentPositions[i*3+1] += 1.0;
+    if (agentPositions[i*3+1] > 1) agentPositions[i*3+1] -= 1.0;
+  }
+  depositGeo.attributes.position.needsUpdate = true;
+}
+
+// ───── visualization — render trail texture as glowing plane
+const visMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tTrail: { value: null },
+    time: { value: 0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTrail;
+    uniform float time;
+    varying vec2 vUv;
+
+    void main() {
+      float val = texture2D(tTrail, vUv).r;
+      
+      // gradient: teal → warm gold at peaks
+      vec3 base = vec3(0.05, 0.12, 0.16);     // deep teal-gray
+      vec3 mid  = vec3(0.18, 0.24, 0.28);     // lighter teal
+      vec3 peak = vec3(0.82, 0.68, 0.42);     // warm gold (arabesque heritage)
+      
+      vec3 col = base;
+      if (val > 0.02) col = mix(base, mid, smoothstep(0.02, 0.15, val));
+      if (val > 0.15) col = mix(mid, peak, smoothstep(0.15, 0.55, val));
+      
+      // emissive glow at high density
+      col += vec3(0.9, 0.7, 0.4) * pow(val, 3.0) * 1.2;
+      
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+  side: THREE.DoubleSide
+});
+
+const visPlane = new THREE.Mesh(new THREE.PlaneGeometry(18, 18), visMat);
+scene.add(visPlane);
+
+// ambient architectural light
+scene.add(new THREE.AmbientLight(0x1a1520, 0.3));
+const keyLight = new THREE.DirectionalLight(0x3a4555, 0.6);
+keyLight.position.set(4, 8, 6);
+scene.add(keyLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let frame = 0;
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  frame++;
+
+  // agent update every frame
+  updateAgents();
+
+  // deposit pheromone
+  renderer.setRenderTarget(trailWrite);
+  renderer.render(depositScene, orthoCamera);
+
+  // diffuse + decay
+  diffuseMat.uniforms.tTrail.value = trailWrite.texture;
+  renderer.setRenderTarget(trailRead);
+  renderer.render(diffuseScene, orthoCamera);
+  
+  swapTrails();
+
+  // visualize
+  visMat.uniforms.tTrail.value = trailRead.texture;
+  visMat.uniforms.time.value = t;
+  
+  // gentle camera drift (biological drift, not orbit)
+  camera.position.x = Math.sin(t * 0.08) * 2.4;
+  camera.position.y = Math.cos(t * 0.11) * 1.8;
+  camera.lookAt(0, 0, 0);
+
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
