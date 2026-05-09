@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cbd · mycelial anastomosis · fungal network merger</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0a08; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">cbd</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// MYCELIAL ANASTOMOSIS — fungal hyphal tip-fusion network growth
+// Two competing fungal colonies (different species) grow toward nutrient sources
+// scattered in the substrate. Where hyphae meet, they sometimes FUSE (anastomosis)
+// creating a hybrid network zone. Camera watches from substrate level, oblique,
+// as if embedded in the dirt. No human-centric framing — the action is distributed,
+// edge-biased, never centered. Inspired by Physarum polycephalum + Armillaria ostoyae.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0d0a08, 0.22);
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 60);
+camera.position.set(-8.5, 0.6, 3.2);  // low, oblique — worm's-eye view
+camera.lookAt(2, 0.3, -1);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0d0a08, 1);
+document.body.appendChild(renderer.domElement);
+
+// side-raking light from below-left (simulates bioluminescence from decomposing wood)
+const light1 = new THREE.PointLight(0x4a3828, 0.7, 30);
+light1.position.set(-6, -0.5, 4);
+scene.add(light1);
+const light2 = new THREE.PointLight(0x2a3a2f, 0.5, 25);
+light2.position.set(5, -0.3, -3);
+scene.add(light2);
+scene.add(new THREE.AmbientLight(0x1a1410, 0.15));
+
+// substrate plane (dark loam)
+const substrate = new THREE.Mesh(
+  new THREE.PlaneGeometry(40, 40, 1, 1),
+  new THREE.MeshStandardMaterial({ color: 0x12100d, roughness: 0.95, metalness: 0 })
+);
+substrate.rotation.x = -Math.PI / 2;
+substrate.position.y = -0.05;
+scene.add(substrate);
+
+// nutrient sources (small amber spheres — decomposing matter)
+const nutrients = [];
+for (let i = 0; i < 18; i++){
+  const x = (Math.random() - 0.5) * 16;
+  const z = (Math.random() - 0.5) * 16;
+  nutrients.push({ x, z, consumed: 0 });
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.12, 6, 6),
+    new THREE.MeshStandardMaterial({
+      color: 0x8a6a3a,
+      emissive: 0x3a2a1a,
+      emissiveIntensity: 0.4,
+      roughness: 0.6
+    })
+  );
+  sphere.position.set(x, 0, z);
+  scene.add(sphere);
+}
+
+// hyphal tip struct
+class Tip {
+  constructor(x, z, species, parent){
+    this.x = x; this.z = z;
+    this.y = 0;
+    this.species = species;  // 0 or 1
+    this.parent = parent;
+    this.age = 0;
+    this.alive = true;
+    this.fused = false;
+  }
+}
+
+const species0 = []; // colony A (ochre)
+const species1 = []; // colony B (pale gray-green)
+// seed two initial tips far apart
+species0.push(new Tip(-5, -4, 0, null));
+species1.push(new Tip(4, 5, 1, null));
+
+const allSegments = []; // {a, b, species, opacity} for rendering
+
+const CHEMOTAXIS_R = 3.5;
+const BRANCH_PROB = 0.012;
+const FUSE_DIST = 0.25;
+const STEP_LEN = 0.08;
+const MAX_TIPS_PER_SPECIES = 600;
+
+function growTips(tips, species){
+  const newTips = [];
+  for (const tip of tips){
+    if (!tip.alive) continue;
+    tip.age++;
+    if (tip.age > 800) { tip.alive = false; continue; }
+
+    // chemotaxis toward nearest nutrient
+    let closestNutrient = null, closestD = Infinity;
+    for (const n of nutrients){
+      if (n.consumed > 0.9) continue;
+      const d = Math.hypot(tip.x - n.x, tip.z - n.z);
+      if (d < closestD){ closestD = d; closestNutrient = n; }
+    }
+    let dx = (Math.random() - 0.5) * 0.5;
+    let dz = (Math.random() - 0.5) * 0.5;
+    if (closestNutrient && closestD < CHEMOTAXIS_R){
+      const attract = 1.2 * (1 - closestD / CHEMOTAXIS_R);
+      dx += (closestNutrient.x - tip.x) / closestD * attract;
+      dz += (closestNutrient.z - tip.z) / closestD * attract;
+    }
+    const len = Math.hypot(dx, dz) + 1e-6;
+    dx = (dx / len) * STEP_LEN;
+    dz = (dz / len) * STEP_LEN;
+
+    const nx = tip.x + dx;
+    const nz = tip.z + dz;
+
+    // consume nutrient if reached
+    if (closestNutrient && closestD < 0.4){
+      closestNutrient.consumed = Math.min(1, closestNutrient.consumed + 0.04);
+    }
+
+    const child = new Tip(nx, nz, species, tip);
+    allSegments.push({ a: tip, b: child, species, opacity: 1.0 });
+    newTips.push(child);
+
+    // branching
+    if (Math.random() < BRANCH_PROB && tips.length + newTips.length < MAX_TIPS_PER_SPECIES){
+      const ang = (Math.random() - 0.5) * 1.2;
+      const bx = nx + Math.cos(ang) * STEP_LEN * 0.8;
+      const bz = nz + Math.sin(ang) * STEP_LEN * 0.8;
+      const branch = new Tip(bx, bz, species, tip);
+      allSegments.push({ a: tip, b: branch, species, opacity: 1.0 });
+      newTips.push(branch);
+    }
+
+    tip.alive = false;
+  }
+
+  // anastomosis check (tip fusion between species)
+  const otherTips = (species === 0) ? species1 : species0;
+  for (const nt of newTips){
+    for (const ot of otherTips){
+      if (!ot.alive && !ot.fused) continue;
+      const d = Math.hypot(nt.x - ot.x, nt.z - ot.z);
+      if (d < FUSE_DIST && Math.random() < 0.3){
+        // create fusion segment
+        allSegments.push({ a: nt, b: ot, species: 2, opacity: 1.0 }); // species 2 = hybrid
+        nt.fused = true;
+        ot.fused = true;
+        break;
+      }
+    }
+  }
+
+  for (const t of newTips) tips.push(t);
+}
+
+// render lines
+const lineMat0 = new THREE.LineBasicMaterial({ color: 0x9a7a4a, transparent: true, opacity: 0.7 });
+const lineMat1 = new THREE.LineBasicMaterial({ color: 0x6a7a6a, transparent: true, opacity: 0.7 });
+const lineMat2 = new THREE.LineBasicMaterial({ color: 0x8a8a7a, transparent: true, opacity: 0.85 }); // hybrid
+
+let lineObj0 = null, lineObj1 = null, lineObj2 = null;
+
+function rebuildLines(){
+  const pts0 = [], pts1 = [], pts2 = [];
+  for (const seg of allSegments){
+    seg.opacity *= 0.998; // slow fade
+    if (seg.opacity < 0.05) continue;
+    const arr = (seg.species === 0) ? pts0 : (seg.species === 1) ? pts1 : pts2;
+    arr.push(new THREE.Vector3(seg.a.x, seg.a.y, seg.a.z));
+    arr.push(new THREE.Vector3(seg.b.x, seg.b.y, seg.b.z));
+  }
+
+  if (lineObj0){ scene.remove(lineObj0); lineObj0.geometry.dispose(); }
+  if (lineObj1){ scene.remove(lineObj1); lineObj1.geometry.dispose(); }
+  if (lineObj2){ scene.remove(lineObj2); lineObj2.geometry.dispose(); }
+
+  if (pts0.length > 0){
+    const g0 = new THREE.BufferGeometry().setFromPoints(pts0);
+    lineObj0 = new THREE.LineSegments(g0, lineMat0);
+    scene.add(lineObj0);
+  }
+  if (pts1.length > 0){
+    const g1 = new THREE.BufferGeometry().setFromPoints(pts1);
+    lineObj1 = new THREE.LineSegments(g1, lineMat1);
+    scene.add(lineObj1);
+  }
+  if (pts2.length > 0){
+    const g2 = new THREE.BufferGeometry().setFromPoints(pts2);
+    lineObj2 = new THREE.LineSegments(g2, lineMat2);
+    scene.add(lineObj2);
+  }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let frame = 0;
+function loop(){
+  frame++;
+  if (frame % 2 === 0){
+    growTips(species0, 0);
+    growTips(species1, 1);
+  }
+  if (frame % 8 === 0) rebuildLines();
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
