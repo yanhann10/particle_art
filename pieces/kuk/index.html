@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kuk · process · contact accumulation</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f8f8f4; overflow:hidden;
+               color:#1a1a1a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#1a1a1a; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; color:#1a1a1a; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#1a1a1a; }
+</style>
+</head>
+<body>
+<div class="id">kuk · process · contact accumulation</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">casey reas process 18 · agent contact tessellation on sphere</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Casey Reas Process 18: Elements travel in circular paths on a surface;
+// when two elements come within threshold distance, a connecting quadrilateral
+// is drawn between their current and prior positions. Over time the canvas
+// accumulates a dense tessellated field from agent contacts. Lifted to 3D:
+// agents move on the surface of a torus, quads drawn in 3D space. Additive
+// blending, no buffer clear (fade very slowly). Sumi-ink black + one accent.
+
+const scene = new THREE.Scene();
+scene.fog = null;
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf8f8f4, 1);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, 0, 0);
+controls.minDistance = 8;
+controls.maxDistance = 40;
+
+// ─────────── agent system
+const N = 350;
+const CONTACT_THRESHOLD = 0.8;
+const MAJOR_R = 6.0, MINOR_R = 2.4;  // torus radii
+
+class Element {
+  constructor(){
+    // each element has a circular path on the torus surface
+    // path defined by: major angle (theta), minor angle (phi0), angular velocity
+    this.theta = Math.random() * Math.PI * 2;
+    this.phi0 = Math.random() * Math.PI * 2;  // starting phi
+    this.phiSpeed = (Math.random() - 0.5) * 0.006 + 0.003; // angular velocity around minor circle
+    this.thetaSpeed = (Math.random() - 0.5) * 0.001; // drift along major circle
+    this.phiOffset = 0;
+    this.pos = new THREE.Vector3();
+    this.prevPos = new THREE.Vector3();
+    this.updatePos();
+    this.prevPos.copy(this.pos);
+    this.color = Math.random() < 0.95 ? 0 : 1; // 95% black, 5% accent
+  }
+  
+  updatePos(){
+    this.prevPos.copy(this.pos);
+    this.phiOffset += this.phiSpeed;
+    this.theta += this.thetaSpeed;
+    const phi = this.phi0 + this.phiOffset;
+    // torus parametric: x = (R + r cos(phi)) cos(theta), y = (R + r cos(phi)) sin(theta), z = r sin(phi)
+    const rad = MAJOR_R + MINOR_R * Math.cos(phi);
+    this.pos.x = rad * Math.cos(this.theta);
+    this.pos.y = rad * Math.sin(this.theta);
+    this.pos.z = MINOR_R * Math.sin(phi);
+  }
+}
+
+const elements = [];
+for (let i = 0; i < N; i++) elements.push(new Element());
+
+// ─────────── accumulation mesh
+// We'll build geometry incrementally: each contact generates a quad
+// Use a growing BufferGeometry with positions + colors
+const maxQuads = 80000;
+const positions = new Float32Array(maxQuads * 4 * 3);
+const colors = new Float32Array(maxQuads * 4 * 3);
+const indices = [];
+for (let i = 0; i < maxQuads; i++){
+  const base = i * 4;
+  indices.push(base, base+1, base+2);
+  indices.push(base, base+2, base+3);
+}
+let quadCount = 0;
+
+const accGeom = new THREE.BufferGeometry();
+accGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+accGeom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+accGeom.setIndex(indices);
+accGeom.setDrawRange(0, 0);
+
+const accMat = new THREE.MeshBasicMaterial({
+  vertexColors: true,
+  side: THREE.DoubleSide,
+  transparent: true,
+  opacity: 0.12,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+const accMesh = new THREE.Mesh(accGeom, accMat);
+scene.add(accMesh);
+
+const colorBlack = new THREE.Color(0x0a0a0a);
+const colorAccent = new THREE.Color(0x8b4513); // burnt sienna
+
+function addQuad(p1, p2, p3, p4, col){
+  if (quadCount >= maxQuads) return;
+  const base = quadCount * 4 * 3;
+  const c = col === 0 ? colorBlack : colorAccent;
+  
+  positions[base]   = p1.x; positions[base+1] = p1.y; positions[base+2] = p1.z;
+  positions[base+3] = p2.x; positions[base+4] = p2.y; positions[base+5] = p2.z;
+  positions[base+6] = p3.x; positions[base+7] = p3.y; positions[base+8] = p3.z;
+  positions[base+9] = p4.x; positions[base+10]= p4.y; positions[base+11]= p4.z;
+  
+  colors[base]   = c.r; colors[base+1] = c.g; colors[base+2] = c.b;
+  colors[base+3] = c.r; colors[base+4] = c.g; colors[base+5] = c.b;
+  colors[base+6] = c.r; colors[base+7] = c.g; colors[base+8] = c.b;
+  colors[base+9] = c.r; colors[base+10]= c.g; colors[base+11]= c.b;
+  
+  quadCount++;
+  accGeom.setDrawRange(0, quadCount * 6);
+  accGeom.attributes.position.needsUpdate = true;
+  accGeom.attributes.color.needsUpdate = true;
+}
+
+// ─────────── contact detection
+function checkContacts(){
+  for (let i = 0; i < N; i++){
+    for (let j = i + 1; j < N; j++){
+      const ei = elements[i], ej = elements[j];
+      const dist = ei.pos.distanceTo(ej.pos);
+      if (dist < CONTACT_THRESHOLD){
+        // draw quad: ei.prevPos → ei.pos → ej.pos → ej.prevPos
+        // pick color: if either is accent, use accent; else black
+        const col = (ei.color === 1 || ej.color === 1) ? 1 : 0;
+        addQuad(ei.prevPos, ei.pos, ej.pos, ej.prevPos, col);
+      }
+    }
+  }
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let frameCount = 0;
+function loop(){
+  if (!paused){
+    for (const el of elements) el.updatePos();
+    checkContacts();
+  }
+  
+  // Very slow fade: every 3 frames, clear with a 0.997 alpha white rect
+  frameCount++;
+  if (frameCount % 3 === 0){
+    renderer.clearColor(0xf8f8f4, 0.003);
+    renderer.clear(true, true, false);
+  }
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+// pre-seed some history
+for (let step = 0; step < 120; step++){
+  for (const el of elements) el.updatePos();
+  checkContacts();
+}
+
+loop();
+</script>
+</body>
+</html>
