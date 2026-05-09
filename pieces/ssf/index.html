@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fidenza flow-field · packed streamlines</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#e8e4dc; overflow:hidden;
+               color:#3a3530; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; 
+        letter-spacing: 0.06em; color:#3a3530; }
+</style>
+</head>
+<body>
+<div class="id">ssf · fidenza flow-field</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Tyler Hobbs Fidenza: thick non-overlapping flow curves packing a plane.
+// Flow field from 2D simplex noise, streamlines integrated, collision-detect
+// via spatial grid, varying thickness tubes, muted palette, slow 3D tilt.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xe8e4dc, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 18, 35);
+camera.lookAt(0, 0, 0);
+
+// ──────────────────── SIMPLEX NOISE (2D) ────────────────────
+function SimplexNoise(){
+  const p = [];
+  for (let i = 0; i < 256; i++) p.push(i);
+  for (let i = 255; i > 0; i--){
+    const j = Math.floor(Math.random() * (i + 1));
+    [p[i], p[j]] = [p[j], p[i]];
+  }
+  for (let i = 0; i < 256; i++) p.push(p[i]);
+  this.p = p;
+}
+SimplexNoise.prototype.noise2D = function(x, y){
+  const F2 = 0.5 * (Math.sqrt(3) - 1);
+  const G2 = (3 - Math.sqrt(3)) / 6;
+  const s = (x + y) * F2;
+  const i = Math.floor(x + s), j = Math.floor(y + s);
+  const t = (i + j) * G2;
+  const X0 = i - t, Y0 = j - t;
+  const x0 = x - X0, y0 = y - Y0;
+  const i1 = x0 > y0 ? 1 : 0, j1 = x0 > y0 ? 0 : 1;
+  const x1 = x0 - i1 + G2, y1 = y0 - j1 + G2;
+  const x2 = x0 - 1 + 2 * G2, y2 = y0 - 1 + 2 * G2;
+  const ii = i & 255, jj = j & 255;
+  const gi0 = this.p[ii + this.p[jj]] % 12;
+  const gi1 = this.p[ii + i1 + this.p[jj + j1]] % 12;
+  const gi2 = this.p[ii + 1 + this.p[jj + 1]] % 12;
+  const grad3 = [[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[1,0,1],[-1,0,1],
+                 [1,0,-1],[-1,0,-1],[0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];
+  let n0 = 0, n1 = 0, n2 = 0;
+  let t0 = 0.5 - x0*x0 - y0*y0;
+  if (t0 >= 0){
+    t0 *= t0;
+    const g0 = grad3[gi0];
+    n0 = t0 * t0 * (g0[0]*x0 + g0[1]*y0);
+  }
+  let t1 = 0.5 - x1*x1 - y1*y1;
+  if (t1 >= 0){
+    t1 *= t1;
+    const g1 = grad3[gi1];
+    n1 = t1 * t1 * (g1[0]*x1 + g1[1]*y1);
+  }
+  let t2 = 0.5 - x2*x2 - y2*y2;
+  if (t2 >= 0){
+    t2 *= t2;
+    const g2 = grad3[gi2];
+    n2 = t2 * t2 * (g2[0]*x2 + g2[1]*y2);
+  }
+  return 70 * (n0 + n1 + n2);
+};
+
+const noise = new SimplexNoise();
+
+// flow field on a 40×40 grid covering -20..20 × -20..20
+const GRID_RES = 40;
+const GRID_SIZE = 40;
+const GRID_CELL = GRID_SIZE / GRID_RES;
+const flowField = [];
+for (let gy = 0; gy < GRID_RES; gy++){
+  for (let gx = 0; gx < GRID_RES; gx++){
+    const wx = -GRID_SIZE/2 + gx * GRID_CELL;
+    const wy = -GRID_SIZE/2 + gy * GRID_CELL;
+    const n = noise.noise2D(wx * 0.08, wy * 0.08);
+    const angle = n * Math.PI * 2;
+    flowField.push({ x: Math.cos(angle), y: Math.sin(angle) });
+  }
+}
+
+function getFlow(x, y){
+  const gx = Math.floor((x + GRID_SIZE/2) / GRID_CELL);
+  const gy = Math.floor((y + GRID_SIZE/2) / GRID_CELL);
+  if (gx < 0 || gx >= GRID_RES || gy < 0 || gy >= GRID_RES) return { x: 0, y: 0 };
+  return flowField[gy * GRID_RES + gx];
+}
+
+// spatial grid for collision-detect: 80×80 cells covering -20..20 × -20..20
+const COLL_RES = 80;
+const COLL_CELL = GRID_SIZE / COLL_RES;
+const collGrid = Array.from({ length: COLL_RES * COLL_RES }, () => []);
+
+function cellKey(x, y){
+  const cx = Math.floor((x + GRID_SIZE/2) / COLL_CELL);
+  const cy = Math.floor((y + GRID_SIZE/2) / COLL_CELL);
+  if (cx < 0 || cx >= COLL_RES || cy < 0 || cy >= COLL_RES) return -1;
+  return cy * COLL_RES + cx;
+}
+
+function checkCollision(x, y, r, ignoreIdx){
+  const k = cellKey(x, y);
+  if (k < 0) return false;
+  for (let dy = -1; dy <= 1; dy++){
+    for (let dx = -1; dx <= 1; dx++){
+      const nk = k + dy * COLL_RES + dx;
+      if (nk < 0 || nk >= collGrid.length) continue;
+      for (const pt of collGrid[nk]){
+        if (pt.idx === ignoreIdx) continue;
+        const d2 = (pt.x - x)**2 + (pt.y - y)**2;
+        if (d2 < (pt.r + r)**2) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function addToGrid(x, y, r, idx){
+  const k = cellKey(x, y);
+  if (k >= 0) collGrid[k].push({ x, y, r, idx });
+}
+
+// ──────────────────── STREAMLINE INTEGRATION ────────────────────
+function integrateStreamline(sx, sy, maxLen, baseRadius, colIdx){
+  const path = [{ x: sx, y: sy }];
+  let x = sx, y = sy;
+  const stepSize = 0.18;
+  for (let i = 0; i < maxLen; i++){
+    const f = getFlow(x, y);
+    if (f.x === 0 && f.y === 0) break;
+    const nx = x + f.x * stepSize;
+    const ny = y + f.y * stepSize;
+    // radius varies: thicker in middle
+    const t = i / maxLen;
+    const radiusHere = baseRadius * (0.6 + 0.8 * Math.sin(t * Math.PI));
+    // collision check
+    if (checkCollision(nx, ny, radiusHere, colIdx)) break;
+    addToGrid(nx, ny, radiusHere, colIdx);
+    x = nx; y = ny;
+    path.push({ x, y });
+    if (x < -GRID_SIZE/2 || x > GRID_SIZE/2 || y < -GRID_SIZE/2 || y > GRID_SIZE/2) break;
+  }
+  return path;
+}
+
+// palette: muted earth tones (Luxe mode)
+const PALETTE = [
+  new THREE.Color(0.90, 0.82, 0.70), // cream
+  new THREE.Color(0.75, 0.60, 0.48), // tan
+  new THREE.Color(0.55, 0.45, 0.35), // brown
+  new THREE.Color(0.35, 0.30, 0.28), // dark brown
+  new THREE.Color(0.50, 0.55, 0.52), // sage
+];
+
+// generate 140 streamlines
+const NUM_STREAMS = 140;
+let streamIdx = 0;
+for (let i = 0; i < NUM_STREAMS; i++){
+  const sx = (Math.random() - 0.5) * GRID_SIZE * 0.95;
+  const sy = (Math.random() - 0.5) * GRID_SIZE * 0.95;
+  const maxLen = Math.floor(80 + Math.random() * 120);
+  const baseRadius = 0.15 + Math.random() * 0.25;
+  const path = integrateStreamline(sx, sy, maxLen, baseRadius, streamIdx);
+  if (path.length < 10) continue;
+  
+  // build TubeGeometry
+  const curve = new THREE.CatmullRomCurve3(
+    path.map(p => new THREE.Vector3(p.x, 0, p.y))
+  );
+  const tubeSegs = Math.min(path.length * 2, 400);
+  const radialSegs = 8;
+  const radiusFunc = t => {
+    const k = Math.sin(t * Math.PI);
+    return baseRadius * (0.6 + 0.8 * k);
+  };
+  const geom = new THREE.TubeGeometry(curve, tubeSegs, 1, radialSegs, false);
+  // modulate radius per-vertex
+  const pos = geom.attributes.position;
+  for (let j = 0; j < pos.count; j++){
+    const segIdx = Math.floor(j / (radialSegs + 1));
+    const tVal = segIdx / tubeSegs;
+    const r = radiusFunc(tVal);
+    const cx = curve.getPointAt(tVal);
+    const vx = pos.getX(j), vy = pos.getY(j), vz = pos.getZ(j);
+    const dx = vx - cx.x, dz = vz - cx.z;
+    const len = Math.sqrt(dx*dx + dz*dz);
+    if (len > 0.001){
+      pos.setX(j, cx.x + (dx/len)*r);
+      pos.setZ(j, cx.z + (dz/len)*r);
+    }
+  }
+  pos.needsUpdate = true;
+  
+  const col = PALETTE[Math.floor(Math.random() * PALETTE.length)].clone();
+  // subtle brightness variation
+  col.multiplyScalar(0.92 + Math.random() * 0.16);
+  
+  const mat = new THREE.MeshStandardMaterial({
+    color: col,
+    flatShading: true,
+    roughness: 0.95,
+    metalness: 0.05
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  scene.add(mesh);
+  streamIdx++;
+}
+
+// lighting: soft ambient + directional
+const ambLight = new THREE.AmbientLight(0xffffff, 0.7);
+scene.add(ambLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.4);
+dirLight.position.set(5, 8, 3);
+scene.add(dirLight);
+
+// ground plane (matte)
+const planeGeom = new THREE.PlaneGeometry(GRID_SIZE, GRID_SIZE);
+planeGeom.rotateX(-Math.PI / 2);
+const planeMat = new THREE.MeshStandardMaterial({
+  color: 0xe0dcd4,
+  roughness: 1.0,
+  metalness: 0
+});
+const plane = new THREE.Mesh(planeGeom, planeMat);
+plane.position.y = -0.2;
+scene.add(plane);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let t = 0;
+function loop(){
+  t += 0.002;
+  // slow rotation and subtle vertical drift
+  camera.position.x = Math.sin(t * 0.5) * 35;
+  camera.position.z = Math.cos(t * 0.5) * 35;
+  camera.position.y = 18 + Math.sin(t * 0.7) * 2;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
