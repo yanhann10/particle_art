@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7jk · jpeg glitch · vernacular file formats</title>
+<!-- MOTION: snap, intensity: vigorous -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#2a2c31; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">7jk</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Rosa Menkman · JPEG FROM A VERNACULAR OF FILE FORMATS · Lumen Prize 2023
+// The tower growth becomes a JPEG compression artifact tower: 50k particles
+// snap to 8x8 macroblock lattices stacked vertically. Each block oscillates
+// with cosine-basis DCT ripples. Random bit-flip events teleport entire blocks
+// horizontally (JPEG data corruption). Palette: chroma-subsampled magenta/cyan/yellow
+// on ringing-artifact gray — the color bleeding and banding that defines lossy compression.
+// The tower READS as a stack of glitched image blocks ascending into the void.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x2a2c31, 0.032);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(16, 10, 20);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x2a2c31, 1);
+document.body.appendChild(renderer.domElement);
+
+// ─────────────────────────── macroblock state
+// Each block: 8x8 particles arranged in a grid, position (bx, by, bz), DCT-basis index
+const BLOCK_SIZE = 8;
+const PARTICLE_SPACE = 0.22;
+const blocks = [];
+const MAX_BLOCKS = 200;
+const BIT_FLIP_PROB = 0.004;  // per-block per-frame chance of horizontal teleport (data corruption)
+
+// Spawn initial base layer — 5x5 grid of blocks at y=0
+for (let gx = -2; gx <= 2; gx++) {
+  for (let gz = -2; gz <= 2; gz++) {
+    const bx = gx * (BLOCK_SIZE * PARTICLE_SPACE + 0.6);
+    const bz = gz * (BLOCK_SIZE * PARTICLE_SPACE + 0.6);
+    blocks.push({
+      bx, by: 0, bz,
+      dctBasis: Math.floor(Math.random() * 8),  // which cosine frequency for ripple
+      chromaShift: Math.random() * 6.28,        // phase for chroma subsampling drift
+      age: 0,
+      bitFlipTarget: null                       // if non-null: target x for teleport
+    });
+  }
+}
+
+// Growth: periodically spawn new blocks above existing ones (tower stacking)
+let spawnTimer = 0;
+function spawnBlock() {
+  if (blocks.length >= MAX_BLOCKS) return;
+  // Pick a random existing block and spawn above it
+  const parent = blocks[Math.floor(Math.random() * blocks.length)];
+  const yOffset = (BLOCK_SIZE * PARTICLE_SPACE + 0.5);
+  blocks.push({
+    bx: parent.bx + (Math.random() - 0.5) * 0.8,
+    by: parent.by + yOffset,
+    bz: parent.bz + (Math.random() - 0.5) * 0.8,
+    dctBasis: Math.floor(Math.random() * 8),
+    chromaShift: Math.random() * 6.28,
+    age: 0,
+    bitFlipTarget: null
+  });
+}
+
+// ─────────────────────────── render particles (50k distributed across blocks)
+const N_RENDER = 50000;
+const rPos = new Float32Array(N_RENDER * 3);
+const rDCT = new Float32Array(N_RENDER);      // DCT basis index
+const rChroma = new Float32Array(N_RENDER);   // chroma phase
+const rBlockSeed = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rBlockSeed[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('dct', new THREE.BufferAttribute(rDCT, 1));
+geom.setAttribute('chroma', new THREE.BufferAttribute(rChroma, 1));
+geom.setAttribute('blockSeed', new THREE.BufferAttribute(rBlockSeed, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float dct;
+    attribute float chroma;
+    attribute float blockSeed;
+    varying vec3 vCol;
+    void main(){
+      vec3 p = position;
+      
+      // DCT-basis ripple: cosine oscillation based on dct index
+      float freq = (dct + 1.0);
+      float ripple = cos(uTime * 1.2 + blockSeed * 6.28 + freq * 0.5) * 0.08;
+      p.y += ripple;
+
+      // Chroma-subsampled palette drift: Y/Cb/Cr color separation
+      // Magenta (ff00ff) · Cyan (00ffff) · Yellow (ffff00) · ringing gray
+      float phase = chroma + uTime * 0.3;
+      vec3 magenta = vec3(1.0, 0.0, 1.0);
+      vec3 cyan = vec3(0.0, 1.0, 1.0);
+      vec3 yellow = vec3(1.0, 1.0, 0.0);
+      vec3 gray = vec3(0.55, 0.58, 0.62);   // ringing-artifact gray
+      
+      // Mix based on chroma phase (simulating chroma subsampling bleed)
+      float t1 = sin(phase);
+      float t2 = sin(phase + 2.094);
+      vec3 col = gray;
+      if (t1 > 0.3) col = mix(col, magenta, (t1 - 0.3) * 1.2);
+      if (t2 > 0.3) col = mix(col, cyan, (t2 - 0.3) * 1.2);
+      if (t1 < -0.3 && t2 < -0.3) col = mix(col, yellow, 0.5);
+      
+      vCol = col;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 1.6 * uPixel * (30.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      // Hard-edged blocky particles (jpeg pixel feel)
+      float a = step(r, 0.2) * 0.75;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Camera tracks tower centroid
+function updateCamera() {
+  if (blocks.length === 0) return;
+  let ySum = 0;
+  for (const b of blocks) ySum += b.by;
+  const yMean = ySum / blocks.length;
+  const targetY = Math.max(yMean, 4.0);
+  camera.position.y += (targetY + 6 - camera.position.y) * 0.03;
+  camera.lookAt(0, targetY, 0);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  uniforms.uTime.value = (performance.now() - start) / 1000;
+
+  // Spawn new blocks periodically
+  spawnTimer++;
+  if (spawnTimer > 45 && blocks.length < MAX_BLOCKS) {
+    spawnBlock();
+    spawnTimer = 0;
+  }
+
+  // Age blocks and trigger bit-flip events (horizontal teleport)
+  for (const b of blocks) {
+    b.age += 0.01;
+    
+    // Bit-flip corruption: teleport entire block horizontally
+    if (b.bitFlipTarget === null && Math.random() < BIT_FLIP_PROB) {
+      b.bitFlipTarget = b.bx + (Math.random() - 0.5) * 12;
+    }
+    if (b.bitFlipTarget !== null) {
+      // Snap toward target (instantaneous teleport feel)
+      const dx = b.bitFlipTarget - b.bx;
+      if (Math.abs(dx) < 0.1) {
+        b.bx = b.bitFlipTarget;
+        b.bitFlipTarget = null;
+      } else {
+        b.bx += dx * 0.85;  // fast snap
+      }
+    }
+  }
+
+  // Distribute render particles across blocks' 8x8 grids
+  if (blocks.length > 0) {
+    const pPerBlock = Math.floor(N_RENDER / blocks.length);
+    let written = 0;
+    for (let bi = 0; bi < blocks.length && written < N_RENDER; bi++) {
+      const b = blocks[bi];
+      const count = (bi === blocks.length - 1) ? (N_RENDER - written) : pPerBlock;
+      for (let k = 0; k < count && written < N_RENDER; k++) {
+        // Place particle in 8x8 grid within block
+        const gx = Math.floor(Math.random() * BLOCK_SIZE);
+        const gy = Math.floor(Math.random() * BLOCK_SIZE);
+        const px = b.bx + (gx - BLOCK_SIZE/2) * PARTICLE_SPACE + (Math.random()-0.5)*0.02;
+        const py = b.by + (gy - BLOCK_SIZE/2) * PARTICLE_SPACE + (Math.random()-0.5)*0.02;
+        const pz = b.bz + (Math.random()-0.5)*0.05;
+        rPos[written*3]   = px;
+        rPos[written*3+1] = py;
+        rPos[written*3+2] = pz;
+        rDCT[written] = b.dctBasis;
+        rChroma[written] = b.chromaShift + gx * 0.2 + gy * 0.2;
+        written++;
+      }
+    }
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.dct.needsUpdate = true;
+    geom.attributes.chroma.needsUpdate = true;
+  }
+
+  updateCamera();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
