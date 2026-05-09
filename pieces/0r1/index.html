@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0r1 · five-band listening shells</title>
+<!-- MOTION: pulsation, intensity: vigorous -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08050d; overflow:hidden;
+               color:#e5d6f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size: 11px; letter-spacing: 0.04em; color:#b8a5c8; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #1a0f28; color:#e5d6f0; border:1px solid #5a3a7a;
+                 padding: 14px 28px; border-radius: 6px; cursor: pointer;
+                 font-family: inherit; font-size: 14px; letter-spacing: 0.08em; 
+                 transition: all 0.2s; }
+  button.start:hover { background:#2a1f38; border-color:#7a5a9a; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · speak or clap</button>
+<div class="id">0r1</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x08050d, 0.012);
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 3, 32);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08050d, 1);
+document.body.appendChild(renderer.domElement);
+
+// Five nested shells, each tuned to one frequency band
+const SHELLS = 5;
+const PER_SHELL = 4000;
+const N = SHELLS * PER_SHELL;
+const positions = new Float32Array(N * 3);
+const shellIdx  = new Float32Array(N);
+const seeds     = new Float32Array(N);
+const phases    = new Float32Array(N);
+
+for (let s = 0; s < SHELLS; s++) {
+  const baseRadius = 5.5 + s * 3.2;
+  for (let i = 0; i < PER_SHELL; i++) {
+    const idx = s * PER_SHELL + i;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const r = baseRadius * (0.92 + Math.random() * 0.16);
+    positions[idx*3]   = r * Math.sin(phi) * Math.cos(theta);
+    positions[idx*3+1] = r * Math.sin(phi) * Math.sin(theta);
+    positions[idx*3+2] = r * Math.cos(phi);
+    shellIdx[idx] = s;
+    seeds[idx]    = Math.random();
+    phases[idx]   = Math.random() * Math.PI * 2;
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('shellIdx', new THREE.BufferAttribute(shellIdx, 1));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('phase',    new THREE.BufferAttribute(phases, 1));
+
+const uBands = new THREE.Vector4(0, 0, 0, 0);
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBands: { value: uBands },
+  uTreble: { value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, 
+  depthWrite: false, 
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec4  uBands;
+    uniform float uTreble;
+    attribute float shellIdx;
+    attribute float seed;
+    attribute float phase;
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    vec3 palette(float t, float energy) {
+      // hand-tuned five-color palette: deep purple → amber → cyan → violet → white
+      vec3 a = vec3(0.15, 0.08, 0.22);
+      vec3 b = vec3(0.98, 0.62, 0.18);
+      vec3 c = vec3(0.22, 0.88, 0.92);
+      vec3 d = vec3(0.72, 0.38, 0.88);
+      vec3 e = vec3(0.95, 0.95, 0.98);
+      
+      float seg = t * 4.0;
+      if (seg < 1.0) return mix(a, b, fract(seg));
+      if (seg < 2.0) return mix(b, c, fract(seg));
+      if (seg < 3.0) return mix(c, d, fract(seg));
+      return mix(d, e, fract(seg));
+    }
+    
+    void main() {
+      float e;
+      if (shellIdx < 0.5)      e = uBands.x;      // bass
+      else if (shellIdx < 1.5) e = uBands.y;      // low-mid
+      else if (shellIdx < 2.5) e = uBands.z;      // mid
+      else if (shellIdx < 3.5) e = uBands.w;      // high-mid
+      else                     e = uTreble;       // treble
+      
+      vec3 p = position;
+      float r = length(p);
+      vec3 dir = normalize(p);
+      
+      // radial breathing driven by band energy
+      float breathe = 1.0 + e * 1.2;
+      p = dir * r * breathe;
+      
+      // tangential orbit with phase offset
+      float orbitTime = uTime * 0.5 + phase;
+      vec3 tangent = normalize(cross(dir, vec3(0.0, 1.0, 0.0) + vec3(sin(seed*13.7), 0.0, cos(seed*17.3)) * 0.3));
+      float orbitAmt = 0.6 + e * 1.8;
+      p += tangent * sin(orbitTime + shellIdx * 0.9) * orbitAmt;
+      
+      // micro-jitter per particle
+      float jitter = sin(uTime * 3.0 + seed * 62.8) * 0.08 * e;
+      p += dir * jitter;
+      
+      // color assignment: shell index → palette position, boosted by energy
+      float colorT = (shellIdx + 0.5) / 5.0;
+      vCol = palette(colorT, e);
+      vCol *= (0.5 + e * 1.5);
+      
+      // alpha falloff with energy boost
+      vAlpha = 0.35 + e * 0.65;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 1.0);
+      float baseSize = 1.6 + e * 2.8;
+      gl_PointSize = baseSize * uPixel * (60.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      
+      // soft radial falloff
+      float falloff = 1.0 - smoothstep(0.0, 0.5, r);
+      falloff = pow(falloff, 1.8);
+      
+      float a = falloff * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ambient key light
+const keyLight = new THREE.PointLight(0x5a3a7a, 0.4, 80);
+keyLight.position.set(-12, 18, 25);
+scene.add(keyLight);
+
+// rim light
+const rimLight = new THREE.PointLight(0x2288aa, 0.3, 60);
+rimLight.position.set(15, -10, 20);
+scene.add(rimLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Audio system
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+let analyser = null, freqData = null, micActive = false;
+
+async function startAudio() {
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting microphone access…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      audio: { 
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      } 
+    });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.75;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    micActive = true;
+    hint.textContent = 'listening · five frequency bands';
+  } catch (e) {
+    hint.textContent = 'mic access denied · fallback synthetic mode';
+    micActive = false;
+  }
+}
+
+startBtn.addEventListener('click', startAudio);
+
+function bandEnergy(arr, lo, hi) {
+  let sum = 0;
+  for (let i = lo; i < hi; i++) sum += arr[i];
+  return (sum / (hi - lo)) / 255;
+}
+
+const start = performance.now();
+const centroid = new THREE.Vector3();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  
+  // slow planetary rotation
+  points.rotation.y = t * 0.06;
+  points.rotation.x = Math.sin(t * 0.04) * 0.15;
+  
+  if (micActive && analyser) {
+    analyser.getByteFrequencyData(freqData);
+    const bins = freqData.length;
+    // Five perceptually-tuned bands
+    uBands.x = bandEnergy(freqData, 0, Math.floor(bins * 0.05));                    // bass
+    uBands.y = bandEnergy(freqData, Math.floor(bins * 0.05), Math.floor(bins * 0.15)); // low-mid
+    uBands.z = bandEnergy(freqData, Math.floor(bins * 0.15), Math.floor(bins * 0.35)); // mid
+    uBands.w = bandEnergy(freqData, Math.floor(bins * 0.35), Math.floor(bins * 0.60)); // high-mid
+    uniforms.uTreble.value = bandEnergy(freqData, Math.floor(bins * 0.60), bins);      // treble
+  } else {
+    // synthetic fallback with intentional imperfect sync
+    uBands.x = 0.30 + 0.30 * Math.sin(t * 1.1);
+    uBands.y = 0.28 + 0.28 * Math.sin(t * 1.9 + 0.7);
+    uBands.z = 0.24 + 0.24 * Math.sin(t * 2.7 + 1.3);
+    uBands.w = 0.20 + 0.20 * Math.sin(t * 4.1 + 2.1);
+    uniforms.uTreble.value = 0.16 + 0.16 * Math.sin(t * 6.3 + 3.4);
+  }
+  
+  // camera tracks weighted centroid of shell energies
+  const energySum = uBands.x + uBands.y + uBands.z + uBands.w + uniforms.uTreble.value;
+  if (energySum > 0.01) {
+    centroid.set(0, 0, 0);
+    centroid.y += (uBands.x - uBands.w) * 2.0;
+    centroid.x += (uBands.y - uniforms.uTreble.value) * 1.5;
+    camera.position.lerp(
+      new THREE.Vector3(centroid.x * 0.4, 3 + centroid.y * 0.3, 32 + centroid.z * 0.2),
+      0.02
+    );
+  }
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
