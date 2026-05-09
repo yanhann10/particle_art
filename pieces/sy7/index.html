@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sy7 · action-field</title>
+<!-- MOTION: splatter, intensity: frenetic -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0a08; overflow:hidden;
+               color:#e5d6f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #1a0f08; color:#e5d6f0; border:1px solid #5a3a2a;
+                 padding: 14px 28px; border-radius: 6px; cursor: pointer;
+                 font-family: inherit; font-size: 14px; letter-spacing: 0.08em; 
+                 transition: all 0.2s; }
+  button.start:hover { background:#2a1f18; border-color:#7a5a4a; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · become the action</button>
+<div class="id">sy7</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0d0a08, 0.006);
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 400);
+camera.position.set(0, 0, 45);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0d0a08, 1);
+document.body.appendChild(renderer.domElement);
+
+// Pollock approach: whole-canvas coverage, no center, all-over gesture
+// 25,000 particles in continuous drip-trail arcs across the field
+const N = 25000;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const trails = new Float32Array(N); // trail index 0-1
+const gestures = new Float32Array(N); // gesture family (5 distinct arm motions)
+const phases = new Float32Array(N);
+const seeds = new Float32Array(N);
+
+// Five gesture families — each a different arm motion rhythm
+for (let i = 0; i < N; i++) {
+  const g = Math.floor(Math.random() * 5);
+  gestures[i] = g;
+  
+  // Initialize across entire field, no center bias
+  const span = 60;
+  positions[i*3]   = (Math.random() - 0.5) * span;
+  positions[i*3+1] = (Math.random() - 0.5) * span;
+  positions[i*3+2] = (Math.random() - 0.5) * span;
+  
+  // Velocity from gesture type
+  const speed = 0.8 + Math.random() * 1.2;
+  const angle = Math.random() * Math.PI * 2;
+  velocities[i*3]   = Math.cos(angle) * speed;
+  velocities[i*3+1] = Math.sin(angle) * speed;
+  velocities[i*3+2] = (Math.random() - 0.5) * speed * 0.4;
+  
+  trails[i] = Math.random();
+  phases[i] = Math.random() * Math.PI * 2;
+  seeds[i] = Math.random();
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('velocity', new THREE.BufferAttribute(velocities, 3));
+geom.setAttribute('trail', new THREE.BufferAttribute(trails, 1));
+geom.setAttribute('gesture', new THREE.BufferAttribute(gestures, 1));
+geom.setAttribute('phase', new THREE.BufferAttribute(phases, 1));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+
+const uBands = new THREE.Vector4(0, 0, 0, 0);
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBands: { value: uBands },
+  uTreble: { value: 0 },
+  fogColor: { value: scene.fog.color },
+  fogDensity: { value: scene.fog.density }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, 
+  depthWrite: false, 
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec4 uBands;
+    uniform float uTreble;
+    attribute vec3 velocity;
+    attribute float trail;
+    attribute float gesture;
+    attribute float phase;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    // Pollock palette: raw umber, aluminum, cadmium yellow, titanium white, lampblack
+    vec3 palette(float t, float energy) {
+      vec3 umber = vec3(0.28, 0.18, 0.10);
+      vec3 aluminum = vec3(0.65, 0.68, 0.72);
+      vec3 cadmium = vec3(0.98, 0.85, 0.22);
+      vec3 white = vec3(0.95, 0.95, 0.92);
+      vec3 black = vec3(0.08, 0.06, 0.05);
+      
+      float seg = t * 4.0;
+      if (seg < 1.0) return mix(umber, black, fract(seg));
+      if (seg < 2.0) return mix(black, aluminum, fract(seg));
+      if (seg < 3.0) return mix(aluminum, cadmium, fract(seg));
+      return mix(cadmium, white, fract(seg));
+    }
+    
+    void main() {
+      // Map gesture to band energy
+      float e;
+      if (gesture < 0.5) e = uBands.x;
+      else if (gesture < 1.5) e = uBands.y;
+      else if (gesture < 2.5) e = uBands.z;
+      else if (gesture < 3.5) e = uBands.w;
+      else e = uTreble;
+      
+      vec3 p = position;
+      vec3 v = velocity;
+      
+      // Whole-body rhythm: large sweeping arcs modulated by audio
+      float gestureTime = uTime * (0.7 + gesture * 0.3) + phase;
+      float sweep = sin(gestureTime) * (8.0 + e * 16.0);
+      float arc = cos(gestureTime * 0.6) * (6.0 + e * 12.0);
+      
+      // Apply gesture motion perpendicular to velocity
+      vec3 perp1 = normalize(cross(v, vec3(0.0, 1.0, 0.0)));
+      vec3 perp2 = normalize(cross(v, perp1));
+      p += perp1 * sweep;
+      p += perp2 * arc;
+      
+      // Drip: controlled chaos along velocity vector
+      float drip = sin(uTime * 4.0 + seed * 31.4) * (1.0 + e * 4.0);
+      p += normalize(v) * drip * trail;
+      
+      // Splatter impulse on high energy
+      float splatter = step(0.85, e) * sin(uTime * 20.0 + seed * 62.8) * 3.0;
+      p += vec3(
+        sin(seed * 13.7 + uTime * 11.0),
+        cos(seed * 17.3 + uTime * 9.0),
+        sin(seed * 23.1 + uTime * 13.0)
+      ) * splatter;
+      
+      // Color: gesture → palette, energy boosts saturation
+      float colorT = (gesture + 0.5) / 5.0;
+      vCol = palette(colorT, e);
+      vCol *= (0.4 + e * 1.6);
+      
+      // Alpha: trail position + energy
+      vAlpha = (0.2 + trail * 0.4) * (0.3 + e * 0.7);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 1.0);
+      float baseSize = 0.8 + e * 3.2 + trail * 1.5;
+      gl_PointSize = baseSize * uPixel * (70.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 fogColor;
+    uniform float fogDensity;
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      
+      // Soft organic edge like wet paint
+      float falloff = 1.0 - smoothstep(0.0, 0.5, r);
+      falloff = pow(falloff, 1.5);
+      
+      float a = falloff * vAlpha;
+      vec4 color = vec4(vCol * a, a);
+      
+      // Fog mixing
+      float depth = gl_FragCoord.z / gl_FragCoord.w;
+      float fogFactor = exp(-fogDensity * fogDensity * depth * depth);
+      fogFactor = clamp(fogFactor, 0.0, 1.0);
+      color.rgb = mix(fogColor, color.rgb, fogFactor);
+      
+      gl_FragColor = color;
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Audio system
+const startBtn = document.getElementById('startBtn');
+let analyser = null, freqData = null, micActive = false;
+
+async function startAudio() {
+  startBtn.style.display = 'none';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      audio: { 
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      } 
+    });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.7;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    micActive = true;
+  } catch (e) {
+    micActive = false;
+  }
+}
+
+startBtn.addEventListener('click', startAudio);
+
+function bandEnergy(arr, lo, hi) {
+  let sum = 0;
+  for (let i = lo; i < hi; i++) sum += arr[i];
+  return (sum / (hi - lo)) / 255;
+}
+
+const start = performance.now();
+const centroid = new THREE.Vector3();
+const targetPos = new THREE.Vector3();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  
+  // Canvas rotation: slow roll like walking around the work
+  points.rotation.y = t * 0.08;
+  points.rotation.x = Math.sin(t * 0.05) * 0.12;
+  
+  if (micActive && analyser) {
+    analyser.getByteFrequencyData(freqData);
+    const bins = freqData.length;
+    uBands.x = bandEnergy(freqData, 0, Math.floor(bins * 0.05));
+    uBands.y = bandEnergy(freqData, Math.floor(bins * 0.05), Math.floor(bins * 0.15));
+    uBands.z = bandEnergy(freqData, Math.floor(bins * 0.15), Math.floor(bins * 0.35));
+    uBands.w = bandEnergy(freqData, Math.floor(bins * 0.35), Math.floor(bins * 0.60));
+    uniforms.uTreble.value = bandEnergy(freqData, Math.floor(bins * 0.60), bins);
+  } else {
+    // Synthetic: five independent rhythms
+    uBands.x = 0.35 + 0.35 * Math.sin(t * 1.3);
+    uBands.y = 0.30 + 0.30 * Math.sin(t * 2.1 + 0.8);
+    uBands.z = 0.28 + 0.28 * Math.sin(t * 3.4 + 1.5);
+    uBands.w = 0.24 + 0.24 * Math.sin(t * 5.2 + 2.3);
+    uniforms.uTreble.value = 0.20 + 0.20 * Math.sin(t * 7.6 + 3.7);
+  }
+  
+  // Camera: track weighted energy centroid across the field
+  const totalE = uBands.x + uBands.y + uBands.z + uBands.w + uniforms.uTreble.value;
+  if (totalE > 0.01) {
+    centroid.set(
+      (uBands.y - uBands.w) * 8.0,
+      (uBands.x - uniforms.uTreble.value) * 6.0,
+      (uBands.z - uBands.y) * 4.0
+    );
+    targetPos.set(centroid.x * 0.3, centroid.y * 0.3, 45 + centroid.z * 0.2);
+    camera.position.lerp(targetPos, 0.015);
+  }
+  camera.lookAt(centroid.x * 0.15, centroid.y * 0.15, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
