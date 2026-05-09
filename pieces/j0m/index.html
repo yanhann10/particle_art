@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>j0m · seismic vessel · real-time earthquake feed</title>
+<!-- MOTION: swelling, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0805; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; line-height:1.5; text-align:right; }
+  .status { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 9px; letter-spacing: 0.03em; }
+</style>
+</head>
+<body>
+<div class="id">j0m</div>
+<div class="src">
+  data: USGS Earthquake API<br>
+  M2.5+ events past hour<br>
+  updates every 30s
+</div>
+<div class="status">connecting...</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Seismic vessel — each earthquake from USGS past hour becomes a bulge node
+// on the vascular structure. Magnitude → bulge radius. Depth → height.
+// The vessel pulses at frequency = mean magnitude of recent events.
+// Colors shift red→orange based on time since event (fresh = hot).
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0d0805, 0.038);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(9, 7, 13);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0d0805, 1);
+document.body.appendChild(renderer.domElement);
+
+const lightKey  = new THREE.DirectionalLight(0xfff5e8, 0.85);
+lightKey.position.set(6, 11, 4);
+scene.add(lightKey);
+scene.add(new THREE.AmbientLight(0x2a1418, 0.65));
+const lightRim  = new THREE.DirectionalLight(0x7799bb, 0.38);
+lightRim.position.set(-6, 2, -6);
+scene.add(lightRim);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+// ─────────── seismic data state
+let earthquakes = [];
+let lastFetch = 0;
+let meanMagnitude = 3.0;
+const statusEl = document.querySelector('.status');
+
+async function fetchEarthquakes(){
+  try {
+    statusEl.textContent = 'fetching USGS...';
+    const url = 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_hour.geojson';
+    const res = await fetch(url);
+    const data = await res.json();
+    earthquakes = data.features.map(f => ({
+      mag: f.properties.mag || 2.5,
+      depth: f.geometry.coordinates[2] || 10,  // km
+      time: f.properties.time || Date.now(),   // ms since epoch
+      place: f.properties.place || 'unknown'
+    }));
+    if (earthquakes.length > 0){
+      meanMagnitude = earthquakes.reduce((sum, e) => sum + e.mag, 0) / earthquakes.length;
+    }
+    lastFetch = Date.now();
+    statusEl.textContent = `${earthquakes.length} events · M̄=${meanMagnitude.toFixed(1)}`;
+  } catch (err) {
+    statusEl.textContent = 'fetch failed';
+    console.error(err);
+  }
+}
+fetchEarthquakes();
+setInterval(fetchEarthquakes, 30000);
+
+// ─────────── differential growth (simplified 3D ring)
+const MAX_VERTS = 1200;
+const ATTRACT   = 0.065;
+const REPEL_R   = 0.48;
+const REPEL_STR = 0.14;
+const NOISE     = 0.0025;
+const PRESSURE  = 0.0032;
+const RISE      = 0.0050;
+const MAX_D     = 0.38;
+
+const verts = [];
+for (let i = 0; i < 18; i++){
+  const th = i / 18 * Math.PI * 2;
+  const r = 1.5 + (Math.random() - 0.5) * 0.12;
+  verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+}
+
+const CELL = REPEL_R, grid = new Map();
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i];
+    const k = Math.floor(v.x/CELL)+','+Math.floor(v.y/CELL)+','+Math.floor(v.z/CELL);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++){
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+function step(){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    for (const j of neighbors(v)){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d/REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x + b.x - 2*v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2*v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2*v.z) * ATTRACT;
+  }
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++){ cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x - cx, oy = verts[i].y - cy, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox/d) * PRESSURE;
+    dy[i] += (oy/d) * PRESSURE * 0.35;
+    dz[i] += (oz/d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[i].age;
+    const upward = RISE * (0.25 + 1.3 * Math.min(a * 1.4, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE;
+    verts[i].y += dy[i] + (Math.random()-0.5)*NOISE * 0.5 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE;
+    verts[i].age += 0.0016;
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if (ex*ex+ey*ey+ez*ez > MAX_D*MAX_D && verts.length + grown.length < MAX_VERTS){
+      grown.push({
+        x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5 - 0.06, z:(a.z+b.z)*0.5,
+        age: Math.max(a.age, b.age) * 0.48
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+for (let s = 0; s < 550; s++) step();
+addEventListener('click', () => { paused = !paused; });
+
+// ─────────── vascular tube with seismic bulges
+let tubeMesh = null;
+const tubeMat = new THREE.MeshStandardMaterial({
+  color:    0xb84030,
+  emissive: 0x2e0a06,
+  roughness: 0.48,
+  metalness: 0.08,
+  vertexColors: true
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  for (let s = 0; s < 2; s++) step();
+
+  if (verts.length > 8){
+    let yMin = Infinity, yMax = -Infinity;
+    for (const v of verts){ if (v.y < yMin) yMin = v.y; if (v.y > yMax) yMax = v.y; }
+    const yRange = Math.max(yMax - yMin, 0.1);
+
+    const pts = verts.map(v => new THREE.Vector3(v.x, v.y, v.z));
+    const curve = new THREE.CatmullRomCurve3(pts, true, 'catmullrom', 0.5);
+
+    const N_SAMPLES = Math.min(650, verts.length * 2);
+    const RADIAL = 9;
+    const positions = new Float32Array(N_SAMPLES * RADIAL * 3);
+    const colors = new Float32Array(N_SAMPLES * RADIAL * 3);
+    const indices = [];
+    const up = new THREE.Vector3(0, 1, 0);
+    
+    // pulse frequency = mean magnitude (Hz ≈ mag/2)
+    const pulseFreq = meanMagnitude * 0.5;
+    const pulse = 1.0 + 0.12 * Math.sin(t * pulseFreq * Math.PI * 2);
+
+    const now = Date.now();
+    for (let i = 0; i < N_SAMPLES; i++){
+      const tt = i / N_SAMPLES;
+      const p = curve.getPointAt(tt);
+      const heightFrac = Math.max(0, Math.min(1, (p.y - yMin) / yRange));
+      let r = 0.42 * (1 - heightFrac * 0.76);
+
+      // find nearest earthquake by height match (depth → height mapping)
+      let closestEq = null, closestDist = Infinity;
+      for (const eq of earthquakes){
+        // map depth (0–700km) → height (0–yRange)
+        const eqHeight = yMin + (eq.depth / 700) * yRange;
+        const dist = Math.abs(p.y - eqHeight);
+        if (dist < closestDist){ closestDist = dist; closestEq = eq; }
+      }
+
+      let nodeBulge = 0;
+      let heatFactor = 0;
+      if (closestEq && closestDist < yRange * 0.15){
+        // magnitude → bulge size
+        const magScale = Math.max(0, (closestEq.mag - 2.5) / 5.0); // 0 at M2.5, 1 at M7.5
+        nodeBulge = magScale * 0.35;
+        // time freshness → color heat
+        const age = (now - closestEq.time) / 3600000; // hours
+        heatFactor = Math.max(0, 1 - age / 1.0); // fade over 1 hour
+      }
+
+      r *= (1.0 + nodeBulge);
+      r *= pulse;
+
+      // color: base red → orange for fresh events
+      const baseR = 0.72, baseG = 0.25, baseB = 0.19;
+      const heatR = 0.95, heatG = 0.50, heatB = 0.10;
+      const cr = baseR + (heatR - baseR) * heatFactor;
+      const cg = baseG + (heatG - baseG) * heatFactor;
+      const cb = baseB + (heatB - baseB) * heatFactor;
+
+      const tangent = curve.getTangentAt(tt).normalize();
+      const normal = new THREE.Vector3().crossVectors(tangent, up).normalize();
+      if (normal.lengthSq() < 0.001) normal.set(1, 0, 0);
+      const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+      
+      for (let j = 0; j < RADIAL; j++){
+        const ang = (j / RADIAL) * Math.PI * 2;
+        const v = new THREE.Vector3()
+          .copy(normal).multiplyScalar(Math.cos(ang) * r)
+          .add(binormal.clone().multiplyScalar(Math.sin(ang) * r))
+          .add(p);
+        const idx = (i * RADIAL + j) * 3;
+        positions[idx]     = v.x;
+        positions[idx + 1] = v.y;
+        positions[idx + 2] = v.z;
+        colors[idx]     = cr;
+        colors[idx + 1] = cg;
+        colors[idx + 2] = cb;
+      }
+    }
+    for (let i = 0; i < N_SAMPLES; i++){
+      const ni = (i + 1) % N_SAMPLES;
+      for (let j = 0; j < RADIAL; j++){
+        const nj = (j + 1) % RADIAL;
+        const a = i * RADIAL + j, b = i * RADIAL + nj;
+        const c = ni * RADIAL + j, d = ni * RADIAL + nj;
+        indices.push(a, b, c);
+        indices.push(b, d, c);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    g.setIndex(indices);
+    g.computeVertexNormals();
+
+    if (tubeMesh){ scene.remove(tubeMesh); tubeMesh.geometry.dispose(); }
+    tubeMesh = new THREE.Mesh(g, tubeMat);
+    scene.add(tubeMesh);
+  }
+
+  let yMean = 0; for (const v of verts) yMean += v.y; yMean /= Math.max(verts.length, 1);
+  const targetY = Math.max(yMean, 2.2);
+  controls.target.y += (targetY - controls.target.y) * 0.045;
+  const desiredCamY = targetY + 3.8;
+  camera.position.y += (desiredCamY - camera.position.y) * 0.045;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
