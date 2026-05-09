@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>p9y · JPEG vernacular glitch</title>
+<!-- MOTION: snap, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#2b2a29; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">p9y</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Rosa Menkman · JPEG vernacular · engineered glitch</div>
+<div class="stat" id="stat">blocks=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Rosa Menkman JPEG vernacular — engineered glitch as visual language.
+   40k particles snap to 8×8 DCT macroblock lattice, drift in cosine ripples,
+   occasional bit-flip teleports entire blocks. Chroma-subsampled palette. */
+
+const BG = 0x2b2a29; // ringing-artifact gray
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(BG, 0.012);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 8, 28);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+controls.dampingFactor = 0.05;
+
+// --- macroblock grid parameters ---
+const GRID_W = 18;
+const GRID_H = 14;
+const BLOCK_SIZE = 1.2;
+const BLOCKS = GRID_W * GRID_H;
+
+// each block: center position, glitch state, DCT phase offset
+const blocks = [];
+for (let gy = 0; gy < GRID_H; gy++) {
+  for (let gx = 0; gx < GRID_W; gx++) {
+    blocks.push({
+      gx, gy,
+      cx: (gx - GRID_W * 0.5 + 0.5) * BLOCK_SIZE,
+      cy: (gy - GRID_H * 0.5 + 0.5) * BLOCK_SIZE,
+      glitchTimer: 0,
+      glitchActive: false,
+      dctPhase: Math.random() * Math.PI * 2,
+      chromaShift: Math.random() * 0.3 // chroma subsampling offset per block
+    });
+  }
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+// --- 40k particles ---
+const N = 40000;
+const PPB = Math.ceil(N / BLOCKS); // particles per block
+
+const pos   = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const blockIDs = new Float32Array(N); // which macroblock owns this particle
+
+let written = 0;
+for (let b = 0; b < BLOCKS && written < N; b++) {
+  const block = blocks[b];
+  const count = Math.min(PPB, N - written);
+  for (let p = 0; p < count; p++) {
+    // distribute within 8×8 sub-grid (DCT basis structure)
+    const lx = Math.floor(Math.random() * 8);
+    const ly = Math.floor(Math.random() * 8);
+    const sx = (lx - 3.5) / 8 * BLOCK_SIZE;
+    const sy = (ly - 3.5) / 8 * BLOCK_SIZE;
+    pos[written * 3]     = block.cx + sx + (Math.random() - 0.5) * 0.05;
+    pos[written * 3 + 1] = block.cy + sy + (Math.random() - 0.5) * 0.05;
+    pos[written * 3 + 2] = (Math.random() - 0.5) * 0.3;
+    seeds[written] = Math.random();
+    blockIDs[written] = b;
+    written++;
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('blockID',  new THREE.BufferAttribute(blockIDs, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBlockData: { value: new Float32Array(BLOCKS * 4) } // cx, cy, glitch, chromaShift per block
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uBlockData[${BLOCKS * 4}];
+    attribute float seed;
+    attribute float blockID;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    // chroma-subsampled palette (JPEG YCbCr quantization artifacts)
+    vec3 chromaM = vec3(0.96, 0.18, 0.58); // magenta
+    vec3 chromaC = vec3(0.12, 0.82, 0.88); // cyan
+    vec3 chromaY = vec3(0.98, 0.92, 0.28); // yellow
+    vec3 chromaG = vec3(0.44, 0.44, 0.42); // desaturated gray (banding)
+
+    void main() {
+      int bid = int(blockID);
+      int offset = bid * 4;
+      float bcx = uBlockData[offset];
+      float bcy = uBlockData[offset + 1];
+      float glitch = uBlockData[offset + 2];
+      float chromaShift = uBlockData[offset + 3];
+
+      vec3 p = position;
+
+      // DCT cosine ripple per block
+      float t = uTime * 0.4 + chromaShift * 6.28;
+      float dctWave = sin(p.x * 3.14 + t) * cos(p.y * 3.14 + t * 0.7);
+      p.z += dctWave * 0.08;
+
+      // glitch bit-flip: teleport block
+      if (glitch > 0.5) {
+        float flipT = uTime * 2.0 + seed * 10.0;
+        p.x += sin(flipT) * 0.4;
+        p.y += cos(flipT * 1.3) * 0.3;
+      }
+
+      // snap particles back toward block center (lattice quantization)
+      float snapStrength = 0.002;
+      p.x += (bcx - p.x) * snapStrength;
+      p.y += (bcy - p.y) * snapStrength;
+
+      // palette: cycle through chroma channels with banding artifacts
+      float k = fract(seed + chromaShift + uTime * 0.05);
+      vec3 col;
+      if (k < 0.25) col = chromaM;
+      else if (k < 0.5) col = chromaC;
+      else if (k < 0.75) col = chromaY;
+      else col = chromaG;
+
+      // glitched blocks: oversaturate magenta (chroma overflow)
+      if (glitch > 0.5) {
+        col = mix(col, chromaM * 1.4, 0.6);
+      }
+
+      vCol = col;
+      vAlpha = 0.45 + 0.15 * sin(uTime * 1.5 + seed * 20.0);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 1.6 * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // soft glow
+      float core = exp(-r * 20.0);
+      float halo = exp(-r * 6.0) * 0.3;
+      float a = (core + halo) * vAlpha;
+
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// block outlines (thin lines showing 8×8 macroblock grid)
+const outlineGeom = new THREE.BufferGeometry();
+const outlineVerts = [];
+for (let b = 0; b < BLOCKS; b++) {
+  const block = blocks[b];
+  const x0 = block.cx - BLOCK_SIZE * 0.5;
+  const x1 = block.cx + BLOCK_SIZE * 0.5;
+  const y0 = block.cy - BLOCK_SIZE * 0.5;
+  const y1 = block.cy + BLOCK_SIZE * 0.5;
+  outlineVerts.push(x0, y0, 0,  x1, y0, 0);
+  outlineVerts.push(x1, y0, 0,  x1, y1, 0);
+  outlineVerts.push(x1, y1, 0,  x0, y1, 0);
+  outlineVerts.push(x0, y1, 0,  x0, y0, 0);
+}
+outlineGeom.setAttribute('position', new THREE.Float32BufferAttribute(outlineVerts, 3));
+const outlineMat = new THREE.LineBasicMaterial({
+  color: 0x5a5856,
+  transparent: true,
+  opacity: 0.2
+});
+const outlineLines = new THREE.LineSegments(outlineGeom, outlineMat);
+scene.add(outlineLines);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (!paused) {
+    // bit-flip events: randomly glitch a block for 1.2 seconds
+    if (Math.random() < 0.008) {
+      const b = Math.floor(Math.random() * BLOCKS);
+      blocks[b].glitchActive = true;
+      blocks[b].glitchTimer = 1.2;
+    }
+
+    // update block glitch timers
+    for (let b = 0; b < BLOCKS; b++) {
+      if (blocks[b].glitchActive) {
+        blocks[b].glitchTimer -= 0.016;
+        if (blocks[b].glitchTimer <= 0) blocks[b].glitchActive = false;
+      }
+    }
+  }
+
+  // upload block data to shader
+  const blockData = uniforms.uBlockData.value;
+  for (let b = 0; b < BLOCKS; b++) {
+    const block = blocks[b];
+    blockData[b * 4]     = block.cx;
+    blockData[b * 4 + 1] = block.cy;
+    blockData[b * 4 + 2] = block.glitchActive ? 1.0 : 0.0;
+    blockData[b * 4 + 3] = block.chromaShift;
+  }
+
+  // camera tracks grid center gently
+  controls.target.lerp(new THREE.Vector3(0, 0, 0), 0.015);
+
+  const glitchCount = blocks.filter(b => b.glitchActive).length;
+  statEl.textContent = `blocks=${BLOCKS} · glitched=${glitchCount}${paused ? ' · paused' : ''}`;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
