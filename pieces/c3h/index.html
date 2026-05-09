@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>c3h · oceanic drift</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d1419; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+<!-- MOTION: drift, intensity: calm -->
+</head>
+<body>
+<div class="id">c3h</div>
+<div class="hint">mouse to nudge current · click to pulse</div>
+<div class="src">Memo Akten · differential growth · oceanic depth</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* Oceanic drift — differential growth with physics momentum,
+   slow environment rotation, layered atmospheric depth.
+   Memo Akten style: patient, sublime, deep blue palette. */
+
+const BG = 0x0d1419;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 1, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- curve parameters with momentum ---
+const MAX_VERTS = 2800;
+const ATTRACT   = 0.03;
+const REPEL_R   = 0.52;
+const REPEL_STR = 0.08;
+const NOISE     = 0.001;
+const PRESSURE  = 0.0015;
+const CURRENT   = 0.002;       // slow horizontal drift like underwater current
+const MAX_D     = 0.40;
+const DAMPING   = 0.96;        // momentum damping
+
+// initialize: circular ring
+const verts = [];
+const NV0 = 32;
+for (let i = 0; i < NV0; i++) {
+  const th = (i / NV0) * Math.PI * 2;
+  const r = 3.5;
+  verts.push({
+    x: Math.cos(th) * r,
+    z: Math.sin(th) * r,
+    y: Math.sin(th * 3) * 0.4,
+    vx: 0, vz: 0, vy: 0,
+    age: 0
+  });
+}
+
+// spatial hash
+const CELL = REPEL_R;
+const grid = new Map();
+function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i], k = gridKey(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function nearby(v) {
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+// mouse/pointer state — smooth integration over time
+let mouseTarget = { x: 0, y: 0 };
+let mouseCurrent = { x: 0, y: 0 };
+let pulseStrength = 0;
+
+addEventListener('mousemove', (e) => {
+  mouseTarget.x = (e.clientX / innerWidth) * 2 - 1;
+  mouseTarget.y = -(e.clientY / innerHeight) * 2 + 1;
+});
+addEventListener('click', () => {
+  pulseStrength = 0.8;
+});
+
+let paused = false;
+
+function step(dt) {
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+
+  // smooth mouse integration
+  mouseCurrent.x += (mouseTarget.x - mouseCurrent.x) * 0.015;
+  mouseCurrent.y += (mouseTarget.y - mouseCurrent.y) * 0.015;
+  pulseStrength *= 0.97;
+
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  // repulsion
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z, ey = v.y - u.y;
+      const d2 = ex * ex + ez * ez + ey * ey;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+      dy[i] += ey * f * 0.5;
+    }
+  }
+
+  // attraction toward polyline neighbors (closed loop)
+  for (let i = 0; i < n; i++) {
+    const prev = verts[(i - 1 + n) % n];
+    const next = verts[(i + 1) % n];
+    const v = verts[i];
+    dx[i] += (prev.x - v.x) * ATTRACT;
+    dz[i] += (prev.z - v.z) * ATTRACT;
+    dy[i] += (prev.y - v.y) * ATTRACT;
+    dx[i] += (next.x - v.x) * ATTRACT;
+    dz[i] += (next.z - v.z) * ATTRACT;
+    dy[i] += (next.y - v.y) * ATTRACT;
+  }
+
+  // light pressure outward
+  let cx = 0, cz = 0, cy = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cz += verts[i].z; cy += verts[i].y; }
+  cx /= n; cz /= n; cy /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - cx, oz = verts[i].z - cz, oy = verts[i].y - cy;
+    const d = Math.sqrt(ox * ox + oz * oz + oy * oy) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dz[i] += (oz / d) * PRESSURE;
+    dy[i] += (oy / d) * PRESSURE * 0.3;
+  }
+
+  // slow horizontal current + mouse influence + pulse
+  const currentAngle = performance.now() / 8000;
+  const currentX = Math.cos(currentAngle) * CURRENT;
+  const currentZ = Math.sin(currentAngle) * CURRENT;
+  const mouseForceX = mouseCurrent.x * 0.0008;
+  const mouseForceY = mouseCurrent.y * 0.0006;
+  const pulseForce = pulseStrength * 0.002;
+
+  // integrate forces into velocity (momentum)
+  for (let i = 0; i < n; i++) {
+    verts[i].vx += dx[i] + currentX + mouseForceX + (Math.random() - 0.5) * NOISE;
+    verts[i].vz += dz[i] + currentZ + (Math.random() - 0.5) * NOISE;
+    verts[i].vy += dy[i] + mouseForceY + (Math.random() - 0.5) * NOISE * 0.5;
+    
+    // pulse expands radially from center
+    if (pulseStrength > 0.01) {
+      const ox = verts[i].x - cx, oz = verts[i].z - cz;
+      const d = Math.sqrt(ox * ox + oz * oz) + 1e-6;
+      verts[i].vx += (ox / d) * pulseForce;
+      verts[i].vz += (oz / d) * pulseForce;
+    }
+
+    // damping
+    verts[i].vx *= DAMPING;
+    verts[i].vz *= DAMPING;
+    verts[i].vy *= DAMPING;
+
+    // integrate velocity into position
+    verts[i].x += verts[i].vx;
+    verts[i].z += verts[i].vz;
+    verts[i].y += verts[i].vy;
+    verts[i].age += 0.0003;
+  }
+
+  // subdivide (closed loop)
+  const grown = [];
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    grown.push(a);
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    if (ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({
+        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.015,
+        z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.015,
+        y: (a.y + b.y) * 0.5 + (Math.random() - 0.5) * 0.01,
+        vx: (a.vx + b.vx) * 0.5,
+        vz: (a.vz + b.vz) * 0.5,
+        vy: (a.vy + b.vy) * 0.5,
+        age: Math.max(a.age, b.age) * 0.75
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// --- rendering: 40k particles with layered depth ---
+const N_RENDER = 40000;
+const rPos   = new Float32Array(N_RENDER * 3);
+const rSeeds = new Float32Array(N_RENDER);
+const rAge   = new Float32Array(N_RENDER);
+const rDepth = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) {
+  rSeeds[i] = Math.random();
+  rDepth[i] = Math.random(); // depth layer assignment
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('depth',    new THREE.BufferAttribute(rDepth, 1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.028 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float age;
+    attribute float depth;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform float uFogDensity;
+
+    void main() {
+      vec3 p = position;
+
+      // layered depth parallax — foreground particles drift slower
+      float parallax = mix(1.0, 0.3, depth);
+      float drift = uTime * 0.08 * parallax;
+      p.x += sin(drift + seed * 6.28) * 0.4 * depth;
+      p.z += cos(drift * 0.7 + seed * 4.0) * 0.35 * depth;
+      p.y += sin(drift * 1.3 + seed * 8.0) * 0.15 * (1.0 - depth);
+
+      // palette: deep oceanic blues and teals (Memo Akten sublime)
+      vec3 deepBlue = vec3(0.08, 0.15, 0.28);
+      vec3 teal     = vec3(0.12, 0.32, 0.42);
+      vec3 ice      = vec3(0.45, 0.65, 0.75);
+      
+      float k = clamp(age * 1.5, 0.0, 1.0);
+      vCol = mix(deepBlue, teal, k);
+      vCol = mix(vCol, ice, smoothstep(0.6, 1.0, k) * 0.4);
+      
+      // foreground brighter, background dimmer
+      vCol *= mix(0.5, 1.2, 1.0 - depth);
+
+      // gentle pulse
+      float pulse = 0.9 + 0.1 * sin(uTime * 0.6 + seed * 20.0);
+      vCol *= pulse;
+
+      vAlpha = mix(0.35, 0.65, 1.0 - depth) * pulse;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // size variation by depth layer
+      float sz = mix(1.2, 2.8, 1.0 - depth);
+      gl_PointSize = sz * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      // atmospheric fog
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // soft oceanic glow
+      float core = exp(-r * 18.0);
+      float halo = exp(-r * 6.0) * 0.4;
+      float a = (core + halo) * vAlpha;
+
+      vec3 col = vCol;
+      col = mix(col, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.7);
+
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// thin wire between vertices
+const wireGeom = new THREE.BufferGeometry();
+const wirePositions = new Float32Array(MAX_VERTS * 3);
+wireGeom.setAttribute('position', new THREE.BufferAttribute(wirePositions, 3));
+const wireMat = new THREE.LineBasicMaterial({
+  color: 0x1a2a36,
+  transparent: true,
+  opacity: 0.25
+});
+const wireLine = new THREE.LineLoop(wireGeom, wireMat);
+scene.add(wireLine);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow
+for (let s = 0; s < 400; s++) step(1);
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+let lastT = start;
+
+// slow environment rotation — camera on rail
+const cameraOrbitRadius = 18;
+const cameraOrbitSpeed = 0.00008; // very slow
+
+function loop() {
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  const dt = now - lastT;
+  lastT = now;
+  uniforms.uTime.value = t;
+
+  for (let s = 0; s < 2; s++) step(dt);
+
+  const n = verts.length;
+
+  // update wire (closed loop)
+  for (let i = 0; i < n; i++) {
+    wirePositions[i * 3]     = verts[i].x;
+    wirePositions[i * 3 + 1] = verts[i].y;
+    wirePositions[i * 3 + 2] = verts[i].z;
+  }
+  wireGeom.setDrawRange(0, n);
+  wireGeom.attributes.position.needsUpdate = true;
+
+  // camera tracks centroid with slow LERP
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) {
+    cx += verts[i].x; cy += verts[i].y; cz += verts[i].z;
+  }
+  cx /= n; cy /= n; cz /= n;
+
+  // slow orbital rotation
+  const orbitAngle = t * cameraOrbitSpeed;
+  const targetX = cx + Math.cos(orbitAngle) * cameraOrbitRadius;
+  const targetZ = cz + Math.sin(orbitAngle) * cameraOrbitRadius;
+  const targetY = cy + 2;
+
+  camera.position.x += (targetX - camera.position.x) * 0.008;
+  camera.position.y += (targetY - camera.position.y) * 0.008;
+  camera.position.z += (targetZ - camera.position.z) * 0.008;
+  camera.lookAt(cx, cy, cz);
+
+  // distribute particles along closed loop
+  const lengths = [];
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    const L = Math.sqrt(
+      (b.x - a.x) ** 2 + (b.z - a.z) ** 2 + (b.y - a.y) ** 2
+    );
+    lengths.push(L);
+    total += L;
+  }
+  if (total > 0) {
+    let written = 0;
+    for (let i = 0; i < n; i++) {
+      const share = Math.max(1, Math.floor(N_RENDER * lengths[i] / total));
+      const a = verts[i], b = verts[(i + 1) % n];
+      for (let k = 0; k < share && written < N_RENDER; k++) {
+        const u = Math.random();
+        const spread = 0.018;
+        rPos[written * 3]     = a.x + (b.x - a.x) * u + (Math.random() - 0.5) * spread;
+        rPos[written * 3 + 1] = a.y + (b.y - a.y) * u + (Math.random() - 0.5) * spread * 0.6;
+        rPos[written * 3 + 2] = a.z + (b.z - a.z) * u + (Math.random() - 0.5) * spread;
+        rAge[written] = Math.max(a.age, b.age);
+        written++;
+      }
+    }
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.age.needsUpdate = true;
+  }
+
+  statEl.textContent = `vertices=${n}${paused ? ' · paused' : ''}`;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
