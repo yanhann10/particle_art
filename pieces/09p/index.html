@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09p · rebound (coral)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#070a09; overflow:hidden;
+               color:#dde6d8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">09p · rebound</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">differential growth with elastic boundary</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// SURPRISE: The differential growth system evolves normally until ANY vertex
+// hits a cylindrical boundary at radius R_WALL. At that moment, the entire
+// structure rebounds: pressure reverses to inward contraction, and the form
+// compresses both horizontally and vertically. After a fixed duration, the
+// system resumes outward expansion. This cycle repeats indefinitely, creating
+// a breathing coral that pulses between growth and recoil.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x070a09, 0.04);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 8, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x070a09, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+// curve state
+const MAX_VERTS = 4000;
+const ATTRACT  = 0.06;
+const REPEL_R  = 0.42;
+const REPEL_STR= 0.12;
+const NOISE    = 0.003;
+const PRESSURE_BASE = 0.0035;
+const MAX_D    = 0.32;
+const R_WALL   = 6.5;         // cylindrical boundary radius
+const REBOUND_DURATION = 180; // frames of contraction before returning to growth
+
+// rebound state
+let rebounding = false;
+let reboundTimer = 0;
+
+const verts = [];
+const NV0 = 24;
+for (let i = 0; i < NV0; i++){
+  const th = i / NV0 * Math.PI * 2;
+  const r  = 1.4 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th) * r, z: Math.sin(th) * r, y: 0, age: 0 });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function key(x, z){ return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i]; const k = key(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++){
+    const arr = grid.get((cx+dx) + ',' + (cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function step(){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+
+  rebuildGrid();
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  // check if any vertex has breached the wall → trigger rebound
+  if (!rebounding){
+    for (let i = 0; i < n; i++){
+      const v = verts[i];
+      const r = Math.hypot(v.x, v.z);
+      if (r > R_WALL){
+        rebounding = true;
+        reboundTimer = REBOUND_DURATION;
+        break;
+      }
+    }
+  } else {
+    reboundTimer--;
+    if (reboundTimer <= 0) rebounding = false;
+  }
+
+  // repulsion
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    const cands = neighbors(v);
+    for (const j of cands){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex*ex + ez*ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+    }
+  }
+  // attraction
+  for (let i = 0; i < n; i++){
+    const a = verts[(i - 1 + n) % n];
+    const b = verts[(i + 1) % n];
+    const v = verts[i];
+    dx[i] += (a.x + b.x - 2 * v.x) * ATTRACT;
+    dz[i] += (a.z + b.z - 2 * v.z) * ATTRACT;
+  }
+
+  // pressure: reversed when rebounding
+  let cx = 0, cz = 0;
+  for (let i = 0; i < n; i++){ cx += verts[i].x; cz += verts[i].z; }
+  cx /= n; cz /= n;
+  const pressureSign = rebounding ? -1.0 : 1.0;
+  const pressureMag  = rebounding ? 0.008 : PRESSURE_BASE; // stronger contraction
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x - cx, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * pressureMag * pressureSign;
+    dz[i] += (oz / d) * pressureMag * pressureSign;
+  }
+
+  // vertical compression during rebound
+  const yTarget = rebounding ? 0.0 : -Math.min(verts[0].age * 0.6, 1.4);
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    const yGoal = rebounding ? 0.0 : -Math.min(v.age * 0.6, 1.4);
+    dy[i] = (yGoal - v.y) * (rebounding ? 0.08 : 0.03);
+  }
+
+  // apply motion
+  for (let i = 0; i < n; i++){
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].y += dy[i];
+    verts[i].age += 0.0006;
+  }
+
+  // subdivide
+  if (!rebounding){
+    const grown = [];
+    for (let i = 0; i < n; i++){
+      const a = verts[i], b = verts[(i + 1) % n];
+      grown.push(a);
+      const ex = b.x - a.x, ez = b.z - a.z;
+      if (ex*ex + ez*ez > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS){
+        grown.push({ x: (a.x + b.x) * 0.5, z: (a.z + b.z) * 0.5,
+                     y: (a.y + b.y) * 0.5, age: Math.max(a.age, b.age) * 0.85 });
+      }
+    }
+    verts.length = 0;
+    for (const v of grown) verts.push(v);
+  }
+}
+
+const N_RENDER = 40000;
+const rPositions = new Float32Array(N_RENDER * 3);
+const rSeeds     = new Float32Array(N_RENDER);
+const rAge       = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPositions, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uRebound: { value: 0.0 }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uRebound;
+    attribute float seed;
+    attribute float age;
+    varying vec3 vCol;
+    varying float vAge;
+    void main(){
+      vec3 p = position;
+      vAge = age;
+      float t = uTime * 0.5 + seed * 6.28;
+      p += 0.005 * vec3(sin(t), 0.0, cos(t));
+
+      // palette: orange coral (growth) → saturated cyan (rebound)
+      vec3 growthCol = vec3(0.95, 0.52, 0.32);
+      vec3 reboundCol = vec3(0.15, 0.88, 0.92);
+      float k = clamp(age * 0.8, 0.0, 1.0);
+      vec3 baseCol = mix(growthCol, vec3(0.92, 0.88, 0.78), smoothstep(0.85, 1.0, k) * 0.4);
+      vCol = mix(baseCol, reboundCol, uRebound);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sizeMult = 1.0 + uRebound * 0.6;
+      gl_PointSize = 1.4 * uPixel * (40.0 / dist) * sizeMult;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAge;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 18.0) * 0.65;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+for (let s = 0; s < 600; s++) step();
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  for (let s = 0; s < 4; s++) step();
+
+  // update rebound uniform for color/scale transition
+  const reboundPhase = rebounding ? (1.0 - reboundTimer / REBOUND_DURATION) : 0.0;
+  uniforms.uRebound.value = reboundPhase;
+
+  const n = verts.length;
+  const lengths = [];
+  let total = 0;
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i + 1) % n];
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    const L = Math.sqrt(ex*ex + ez*ez + ey*ey);
+    lengths.push(L); total += L;
+  }
+  if (total > 0){
+    let written = 0;
+    for (let i = 0; i < n; i++){
+      const share = (i === n - 1)
+        ? N_RENDER - written
+        : Math.max(1, Math.floor(N_RENDER * lengths[i] / total));
+      const a = verts[i], b = verts[(i + 1) % n];
+      for (let k = 0; k < share && written < N_RENDER; k++){
+        const u = Math.random();
+        rPositions[written*3]   = a.x + (b.x - a.x) * u + (Math.random()-0.5) * 0.02;
+        rPositions[written*3+1] = a.y + (b.y - a.y) * u;
+        rPositions[written*3+2] = a.z + (b.z - a.z) * u + (Math.random()-0.5) * 0.02;
+        rAge[written] = Math.max(a.age, b.age);
+        written++;
+      }
+    }
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.age.needsUpdate = true;
+  }
+  const modeStr = rebounding ? ' · contracting' : ' · expanding';
+  statEl.textContent = `vertices=${n}${modeStr}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
