@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8ft · parallel silhouette rails</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<!-- MOTION: drift, intensity: gentle -->
+<div class="id">8ft</div>
+<div class="hint">move mouse to shape presence · click to scatter</div>
+<div class="src">Marc Da Costa & Matthew Niederhauser · Parallels (Lumen Prize 2024)</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* Parallel silhouette rails — particles constrained to parallel horizontal lines
+   that warp toward pointer presence, creating figure-shaped attention fields
+   that dissolve when the viewer moves away. Monochrome LED amber on black. */
+
+const BG = 0x0a0807;
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(BG, 0.012);
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- parallel rails system ---
+const RAIL_COUNT = 120;
+const RAIL_SPACING = 0.18;
+const RAIL_WIDTH = 24;
+const PARTICLES_PER_RAIL = 340;
+const TOTAL_PARTICLES = RAIL_COUNT * PARTICLES_PER_RAIL;
+
+// rails run horizontally (X-axis), stacked in Y
+const rails = [];
+for (let i = 0; i < RAIL_COUNT; i++) {
+  const baseY = (i - RAIL_COUNT * 0.5) * RAIL_SPACING;
+  rails.push({
+    baseY,
+    currentY: baseY,
+    targetY: baseY,
+    particles: []
+  });
+}
+
+// pointer state
+const pointer = new THREE.Vector2(0, 0);
+const pointerWorld = new THREE.Vector3(0, 0, 0);
+let pointerStrength = 0;
+
+addEventListener('mousemove', (e) => {
+  pointer.x = (e.clientX / innerWidth) * 2 - 1;
+  pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+  pointerStrength = 1.0;
+});
+
+addEventListener('click', () => {
+  // scatter impulse
+  for (let i = 0; i < RAIL_COUNT; i++) {
+    rails[i].targetY = rails[i].baseY + (Math.random() - 0.5) * 3.0;
+  }
+});
+
+// --- particle system ---
+const positions = new Float32Array(TOTAL_PARTICLES * 3);
+const seeds = new Float32Array(TOTAL_PARTICLES);
+const ages = new Float32Array(TOTAL_PARTICLES);
+
+let idx = 0;
+for (let r = 0; r < RAIL_COUNT; r++) {
+  for (let p = 0; p < PARTICLES_PER_RAIL; p++) {
+    const x = (p / PARTICLES_PER_RAIL - 0.5) * RAIL_WIDTH;
+    const z = (Math.random() - 0.5) * 0.8;
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = rails[r].currentY;
+    positions[idx * 3 + 2] = z;
+    seeds[idx] = Math.random();
+    ages[idx] = Math.random();
+    rails[r].particles.push(idx);
+    idx++;
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('age', new THREE.BufferAttribute(ages, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float age;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec3 p = position;
+      
+      // gentle drift along X-axis (rail direction)
+      float drift = uTime * 0.08 + seed * 6.28;
+      p.x += sin(drift) * 0.12;
+      
+      // subtle Z oscillation (depth breathing)
+      p.z += sin(uTime * 0.4 + seed * 10.0) * 0.04;
+
+      // LED amber palette — warm but not incandescent
+      vec3 amber = vec3(1.0, 0.65, 0.20);
+      vec3 pale = vec3(1.0, 0.82, 0.55);
+      float k = clamp(age * 0.8, 0.0, 1.0);
+      vCol = mix(amber, pale, k);
+      
+      // pulse per-particle
+      float pulse = 0.75 + 0.25 * sin(uTime * 0.9 + seed * 50.0);
+      vCol *= pulse;
+      vAlpha = 0.45 * pulse;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 1.4 * uPixel * (50.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      
+      // LED glow — sharper core than incandescent
+      float core = exp(-r * 32.0);
+      float halo = exp(-r * 10.0) * 0.25;
+      float a = (core + halo) * vAlpha;
+      
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// rail visualization — thin lines showing the constraint structure
+const railLineGeom = new THREE.BufferGeometry();
+const railLinePositions = new Float32Array(RAIL_COUNT * 2 * 3);
+for (let i = 0; i < RAIL_COUNT; i++) {
+  const y = rails[i].currentY;
+  railLinePositions[i * 6] = -RAIL_WIDTH * 0.5;
+  railLinePositions[i * 6 + 1] = y;
+  railLinePositions[i * 6 + 2] = 0;
+  railLinePositions[i * 6 + 3] = RAIL_WIDTH * 0.5;
+  railLinePositions[i * 6 + 4] = y;
+  railLinePositions[i * 6 + 5] = 0;
+}
+railLineGeom.setAttribute('position', new THREE.BufferAttribute(railLinePositions, 3));
+const railLineMat = new THREE.LineBasicMaterial({
+  color: 0x3a2818,
+  transparent: true,
+  opacity: 0.15
+});
+const railLines = new THREE.LineSegments(railLineGeom, railLineMat);
+scene.add(railLines);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // decay pointer strength
+  pointerStrength *= 0.92;
+
+  // update pointer world position
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(pointer, camera);
+  const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  raycaster.ray.intersectPlane(plane, pointerWorld);
+
+  // warp rails toward pointer presence
+  for (let i = 0; i < RAIL_COUNT; i++) {
+    const rail = rails[i];
+    const distY = Math.abs(rail.baseY - pointerWorld.y);
+    const influence = Math.exp(-distY * 1.2) * pointerStrength;
+    
+    // pointer pulls rails toward it (figure-shaping)
+    const pull = (pointerWorld.y - rail.baseY) * influence * 0.6;
+    rail.targetY = rail.baseY + pull;
+    
+    // elastic return to base
+    rail.targetY += (rail.baseY - rail.targetY) * 0.05;
+    
+    // smooth interpolation
+    rail.currentY += (rail.targetY - rail.currentY) * 0.08;
+  }
+
+  // update particle positions along rails
+  for (let r = 0; r < RAIL_COUNT; r++) {
+    const rail = rails[r];
+    for (const pIdx of rail.particles) {
+      positions[pIdx * 3 + 1] = rail.currentY;
+    }
+  }
+  geom.attributes.position.needsUpdate = true;
+
+  // update rail line visualization
+  for (let i = 0; i < RAIL_COUNT; i++) {
+    const y = rails[i].currentY;
+    railLinePositions[i * 6 + 1] = y;
+    railLinePositions[i * 6 + 4] = y;
+  }
+  railLineGeom.attributes.position.needsUpdate = true;
+
+  // gentle camera sway
+  camera.position.x = Math.sin(t * 0.15) * 0.8;
+  camera.position.y = Math.cos(t * 0.22) * 0.5;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
