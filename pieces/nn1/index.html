@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nn1 · LiDAR tree dissolution · Quayola Remains</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0b; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 11px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">nn1</div>
+<div class="hint">measurement uncertainty as aesthetic · LiDAR falloff</div>
+<div class="src">Quayola · Remains: Provence (2018)</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 8, 35);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0b, 1);
+document.body.appendChild(renderer.domElement);
+
+// L-system tree generator
+function generateTree(){
+  const rules = {
+    'F': 'FF',
+    'X': 'F[+X]F[-X]+X'
+  };
+  let axiom = 'X';
+  const iterations = 5;
+  
+  for (let i = 0; i < iterations; i++){
+    let next = '';
+    for (const char of axiom){
+      next += rules[char] || char;
+    }
+    axiom = next;
+  }
+  
+  return axiom;
+}
+
+function interpretLSystem(instructions){
+  const branches = [];
+  const stack = [];
+  let pos = new THREE.Vector3(0, 0, 0);
+  let dir = new THREE.Vector3(0, 1, 0);
+  const angleStep = 25 * Math.PI / 180;
+  const stepLength = 0.4;
+  
+  for (const char of instructions){
+    if (char === 'F'){
+      const start = pos.clone();
+      pos.add(dir.clone().multiplyScalar(stepLength));
+      const end = pos.clone();
+      branches.push({ start, end, depth: stack.length });
+    } else if (char === '+'){
+      dir.applyAxisAngle(new THREE.Vector3(0, 0, 1), angleStep);
+    } else if (char === '-'){
+      dir.applyAxisAngle(new THREE.Vector3(0, 0, 1), -angleStep);
+    } else if (char === '['){
+      stack.push({ pos: pos.clone(), dir: dir.clone() });
+    } else if (char === ']'){
+      const state = stack.pop();
+      pos = state.pos;
+      dir = state.dir;
+    }
+  }
+  
+  return branches;
+}
+
+// Generate tree structure
+const treeInstructions = generateTree();
+const branches = interpretLSystem(treeInstructions);
+
+// Sample points along branches with LiDAR-style noise
+const allPoints = [];
+const maxDepth = Math.max(...branches.map(b => b.depth));
+
+for (const branch of branches){
+  const { start, end, depth } = branch;
+  const length = start.distanceTo(end);
+  const samplesPerUnit = 20 + (maxDepth - depth) * 5; // denser at trunk
+  const numSamples = Math.max(3, Math.floor(length * samplesPerUnit));
+  
+  // Occlusion simulation: randomly drop entire branches
+  if (Math.random() < 0.15 && depth > 2) continue;
+  
+  for (let i = 0; i <= numSamples; i++){
+    const t = i / numSamples;
+    const point = new THREE.Vector3().lerpVectors(start, end, t);
+    
+    // Add radial samples around branch axis (simulate cylinder surface)
+    const branchRadius = 0.15 * (1 - depth / maxDepth) + 0.02;
+    const radialSamples = depth === 0 ? 6 : (depth < 2 ? 4 : 2);
+    
+    for (let r = 0; r < radialSamples; r++){
+      const angle = (r / radialSamples) * Math.PI * 2;
+      const offset = new THREE.Vector3(
+        Math.cos(angle) * branchRadius,
+        0,
+        Math.sin(angle) * branchRadius
+      );
+      
+      const samplePoint = point.clone().add(offset);
+      
+      // Calculate distance from camera start position for noise scaling
+      const distFromCam = samplePoint.distanceTo(new THREE.Vector3(0, 8, 35));
+      
+      // LiDAR noise: Gaussian displacement that increases with distance
+      const noiseScale = 0.08 + (distFromCam / 40) * 0.25;
+      const gaussianNoise = () => {
+        let u = 0, v = 0;
+        while(u === 0) u = Math.random();
+        while(v === 0) v = Math.random();
+        return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+      };
+      
+      samplePoint.x += gaussianNoise() * noiseScale;
+      samplePoint.y += gaussianNoise() * noiseScale;
+      samplePoint.z += gaussianNoise() * noiseScale;
+      
+      // Random point dropout (missing returns)
+      if (Math.random() > 0.88 && depth > 1) continue;
+      
+      // Depth-dependent dropout
+      if (Math.random() < (distFromCam / 60) * 0.4) continue;
+      
+      allPoints.push({
+        position: samplePoint,
+        depth: depth,
+        distFromCam: distFromCam
+      });
+    }
+  }
+}
+
+// Create point cloud geometry
+const positions = new Float32Array(allPoints.length * 3);
+const depths = new Float32Array(allPoints.length);
+const distances = new Float32Array(allPoints.length);
+
+for (let i = 0; i < allPoints.length; i++){
+  positions[i * 3] = allPoints[i].position.x;
+  positions[i * 3 + 1] = allPoints[i].position.y;
+  positions[i * 3 + 2] = allPoints[i].position.z;
+  depths[i] = allPoints[i].depth / maxDepth;
+  distances[i] = allPoints[i].distFromCam;
+}
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float depth;
+    attribute float distance;
+    varying float vAlpha;
+    varying float vDepth;
+    
+    void main(){
+      vec3 p = position;
+      
+      // Subtle breathing motion (simulating scan drift)
+      float breathe = sin(uTime * 0.3 + depth * 3.0) * 0.015;
+      p.y += breathe;
+      
+      vDepth = depth;
+      
+      // Alpha falloff with distance
+      float distFalloff = 1.0 - smoothstep(20.0, 50.0, distance);
+      vAlpha = 0.25 + distFalloff * 0.4;
+      
+      // Reduced alpha for deeper branches (canopy occlusion)
+      vAlpha *= 1.0 - depth * 0.3;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float camDist = -mv.z;
+      
+      // Point size with distance attenuation + noise blur
+      float baseSize = 1.2 + depth * 0.4;
+      float blur = 1.0 + (distance / 35.0) * 1.5; // LiDAR defocus
+      gl_PointSize = baseSize * blur * uPixel * (50.0 / camDist);
+      
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying float vDepth;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      
+      // Soft Gaussian falloff
+      float alpha = exp(-r * 12.0) * vAlpha;
+      
+      // Near-monochrome palette: pale gray with slight warm tint
+      // Trunk slightly warmer, canopy cooler
+      vec3 col = mix(
+        vec3(0.72, 0.71, 0.68), // warm gray trunk
+        vec3(0.68, 0.70, 0.72), // cool gray canopy
+        vDepth
+      );
+      
+      gl_FragColor = vec4(col * alpha, alpha * 0.9);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('depth', new THREE.BufferAttribute(depths, 1));
+geom.setAttribute('distance', new THREE.BufferAttribute(distances, 1));
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Add ground plane reference (subtle grid)
+const gridGeom = new THREE.PlaneGeometry(60, 60, 30, 30);
+const gridMat = new THREE.MeshBasicMaterial({ 
+  color: 0x1a1a1c, 
+  wireframe: true, 
+  transparent: true, 
+  opacity: 0.08 
+});
+const grid = new THREE.Mesh(gridGeom, gridMat);
+grid.rotation.x = -Math.PI / 2;
+grid.position.y = -0.5;
+scene.add(grid);
+
+// Compute centroid for camera targeting
+const centroid = new THREE.Vector3();
+for (let i = 0; i < allPoints.length; i++){
+  centroid.add(allPoints[i].position);
+}
+centroid.multiplyScalar(1 / allPoints.length);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  
+  // Slow camera orbit around tree
+  const radius = 32;
+  const angle = t * 0.04;
+  const height = 8 + Math.sin(t * 0.03) * 3;
+  
+  camera.position.x = centroid.x + Math.cos(angle) * radius;
+  camera.position.z = centroid.z + Math.sin(angle) * radius;
+  camera.position.y = height;
+  camera.lookAt(centroid);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
