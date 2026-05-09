@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lqj · physarum transport network</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0a08; overflow:hidden;
+               color:#b5a89f; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.6; font-size: 11px; letter-spacing: 0.04em; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #1a1410; color:#b5a89f; border:1px solid #3a2f24;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; }
+  button.start:hover { background:#2a1f18; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · observe foraging</button>
+<div class="id">lqj</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(14, 22, 38);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0d0a08, 1);
+document.body.appendChild(renderer.domElement);
+
+// Physarum polycephalum foraging model:
+// agents leave trail deposits, sense local gradients, converge on nutrient sources
+// audio bands = nutrient sources scattered in 3D substrate
+const AGENTS = 18000;
+const SOURCES = 5;
+const positions = new Float32Array(AGENTS * 3);
+const velocities = new Float32Array(AGENTS * 3);
+const trails = new Float32Array(AGENTS);
+const agentSeeds = new Float32Array(AGENTS);
+
+// scatter agents in oblique volume (not centered, off-kilter)
+for (let i = 0; i < AGENTS; i++) {
+  const theta = Math.random() * Math.PI * 2;
+  const r = 8 + Math.random() * 14;
+  const ySpread = (Math.random() - 0.5) * 18;
+  positions[i*3]   = r * Math.cos(theta) - 6;
+  positions[i*3+1] = ySpread + 2;
+  positions[i*3+2] = r * Math.sin(theta) + 4;
+  const vAngle = Math.random() * Math.PI * 2;
+  velocities[i*3]   = Math.cos(vAngle) * 0.4;
+  velocities[i*3+1] = (Math.random()-0.5) * 0.2;
+  velocities[i*3+2] = Math.sin(vAngle) * 0.4;
+  trails[i] = 0;
+  agentSeeds[i] = Math.random();
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('trail', new THREE.BufferAttribute(trails, 1));
+geom.setAttribute('seed', new THREE.BufferAttribute(agentSeeds, 1));
+
+// nutrient sources positioned asymmetrically
+const sourcePos = new Float32Array(SOURCES * 3);
+const angles = [0.3, 1.9, 3.4, 4.7, 5.8];
+const radii = [9, 16, 12, 18, 10];
+const yOffs = [-4, 3, -1, 5, 1];
+for (let i = 0; i < SOURCES; i++) {
+  sourcePos[i*3]   = radii[i] * Math.cos(angles[i]) - 5;
+  sourcePos[i*3+1] = yOffs[i];
+  sourcePos[i*3+2] = radii[i] * Math.sin(angles[i]) + 3;
+}
+
+const uBands = new Float32Array(SOURCES);
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBands: { value: uBands },
+  uSourcePos: { value: sourcePos }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uBands[5];
+    uniform vec3 uSourcePos[5];
+    attribute float trail;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      // find nearest nutrient source
+      float minD = 1e6;
+      int nearIdx = 0;
+      for (int i = 0; i < 5; i++){
+        float d = distance(p, uSourcePos[i]);
+        if (d < minD){ minD = d; nearIdx = i; }
+      }
+      float energy = uBands[nearIdx];
+      // trail intensity = local pheromone deposit
+      float t = trail * (0.5 + energy * 0.8);
+      // color: substrate brown → mycelial yellow (non-human palette)
+      vec3 subBrown = vec3(0.18, 0.14, 0.10);
+      vec3 mycelYellow = vec3(0.92, 0.82, 0.45);
+      float k = clamp(t + energy * 0.3, 0.0, 1.0);
+      vCol = mix(subBrown, mycelYellow, k);
+      vAlpha = 0.3 + t * 0.7;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (0.6 + t * 1.8 + energy * 1.2) * uPixel * (60.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// substrate plane (forest floor analog)
+const planeG = new THREE.PlaneGeometry(80, 80, 1, 1);
+const planeM = new THREE.MeshBasicMaterial({ color: 0x0a0806, side: THREE.DoubleSide, transparent: true, opacity: 0.6 });
+const plane = new THREE.Mesh(planeG, planeM);
+plane.rotation.x = -Math.PI / 2;
+plane.position.y = -8;
+scene.add(plane);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// audio
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+let analyser = null, freqData = null;
+async function startAudio(){
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting mic…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.75;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'foraging · 5 nutrient gradients';
+  } catch (e) {
+    hint.textContent = 'mic denied — synthetic substrate';
+  }
+}
+startBtn.addEventListener('click', startAudio);
+
+function bandEnergy(arr, lo, hi){
+  let s = 0;
+  for (let i = lo; i < hi; i++) s += arr[i];
+  return (s / (hi-lo)) / 255;
+}
+
+// agent decision rules (Physarum-inspired):
+// 1. sense forward-left, forward, forward-right
+// 2. turn toward highest gradient
+// 3. deposit trail
+const SENSE_DIST = 2.2;
+const SENSE_ANGLE = 0.52; // ~30deg
+const TURN_RATE = 0.14;
+const DECAY = 0.985;
+
+const start = performance.now();
+let frameCount = 0;
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  frameCount++;
+
+  // camera slow drift (oblique, non-human POV)
+  camera.position.x = 14 + Math.sin(t * 0.08) * 5;
+  camera.position.z = 38 + Math.cos(t * 0.06) * 6;
+  camera.position.y = 22 + Math.sin(t * 0.05) * 3;
+  camera.lookAt(0, 0, 0);
+
+  if (analyser){
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    uBands[0] = bandEnergy(freqData, 0, Math.floor(n*0.08));
+    uBands[1] = bandEnergy(freqData, Math.floor(n*0.08), Math.floor(n*0.20));
+    uBands[2] = bandEnergy(freqData, Math.floor(n*0.20), Math.floor(n*0.40));
+    uBands[3] = bandEnergy(freqData, Math.floor(n*0.40), Math.floor(n*0.65));
+    uBands[4] = bandEnergy(freqData, Math.floor(n*0.65), n);
+  } else {
+    uBands[0] = 0.25 + 0.25 * Math.sin(t*0.9);
+    uBands[1] = 0.22 + 0.22 * Math.sin(t*1.4 + 1.2);
+    uBands[2] = 0.20 + 0.20 * Math.sin(t*2.1 + 2.3);
+    uBands[3] = 0.18 + 0.18 * Math.sin(t*3.2 + 0.7);
+    uBands[4] = 0.15 + 0.15 * Math.sin(t*4.8);
+  }
+
+  // agent update (every 2nd frame for performance)
+  if (frameCount % 2 === 0){
+    for (let i = 0; i < AGENTS; i++){
+      const px = positions[i*3];
+      const py = positions[i*3+1];
+      const pz = positions[i*3+2];
+      const vx = velocities[i*3];
+      const vy = velocities[i*3+1];
+      const vz = velocities[i*3+2];
+      const len = Math.sqrt(vx*vx + vy*vy + vz*vz);
+      const dx = vx / len, dy = vy / len, dz = vz / len;
+
+      // sense forward, left, right
+      const perpX = -dz, perpZ = dx; // perpendicular in xz
+      const senseF = senseGradient(px + dx*SENSE_DIST, py, pz + dz*SENSE_DIST);
+      const cosA = Math.cos(SENSE_ANGLE), sinA = Math.sin(SENSE_ANGLE);
+      const lx = dx*cosA - perpX*sinA, lz = dz*cosA - perpZ*sinA;
+      const rx = dx*cosA + perpX*sinA, rz = dz*cosA + perpZ*sinA;
+      const senseL = senseGradient(px + lx*SENSE_DIST, py, pz + lz*SENSE_DIST);
+      const senseR = senseGradient(px + rx*SENSE_DIST, py, pz + rz*SENSE_DIST);
+
+      // steer toward max
+      let turnAngle = 0;
+      if (senseL > senseF && senseL > senseR) turnAngle = -TURN_RATE;
+      else if (senseR > senseF && senseR > senseL) turnAngle = TURN_RATE;
+      else if (senseF < Math.max(senseL, senseR)) turnAngle = (Math.random()-0.5)*TURN_RATE*2;
+
+      const c = Math.cos(turnAngle), s = Math.sin(turnAngle);
+      const nvx = vx*c - vz*s;
+      const nvz = vx*s + vz*c;
+      velocities[i*3] = nvx;
+      velocities[i*3+2] = nvz;
+
+      // move
+      positions[i*3]   += nvx;
+      positions[i*3+1] += vy;
+      positions[i*3+2] += nvz;
+
+      // boundary (torus wrap)
+      if (positions[i*3] < -40) positions[i*3] += 80;
+      if (positions[i*3] > 40) positions[i*3] -= 80;
+      if (positions[i*3+1] < -20) positions[i*3+1] += 40;
+      if (positions[i*3+1] > 20) positions[i*3+1] -= 40;
+      if (positions[i*3+2] < -40) positions[i*3+2] += 80;
+      if (positions[i*3+2] > 40) positions[i*3+2] -= 80;
+
+      // deposit trail
+      trails[i] = Math.min(1, trails[i] + 0.08);
+      // decay
+      trails[i] *= DECAY;
+    }
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.trail.needsUpdate = true;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+function senseGradient(x, y, z){
+  let sum = 0;
+  for (let i = 0; i < SOURCES; i++){
+    const dx = x - sourcePos[i*3];
+    const dy = y - sourcePos[i*3+1];
+    const dz = z - sourcePos[i*3+2];
+    const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    sum += uBands[i] / (1 + d*0.3);
+  }
+  return sum;
+}
+
+loop();
+</script>
+</body>
+</html>
