@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ps7 · the flock that loses one and finds it again</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a14; overflow:hidden;
+               color:#a8b8d0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background:
+      radial-gradient(ellipse at 50% 70%, rgba(42,31,58,0.4) 0%, transparent 65%),
+      linear-gradient(to bottom,
+        #14141c 0%,
+        #1a1624 18%,
+        #221b28 38%,
+        #342630 62%,
+        #4a3535 82%,
+        #5a4040 100%);
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-image: 
+      radial-gradient(1px 1px at 12% 8%, rgba(255,255,255,0.08), transparent),
+      radial-gradient(1px 1px at 88% 22%, rgba(255,255,255,0.06), transparent),
+      radial-gradient(1px 1px at 34% 76%, rgba(255,255,255,0.07), transparent),
+      radial-gradient(1px 1px at 72% 44%, rgba(255,255,255,0.05), transparent),
+      radial-gradient(1px 1px at 18% 92%, rgba(255,255,255,0.06), transparent),
+      radial-gradient(1px 1px at 66% 14%, rgba(255,255,255,0.08), transparent);
+    background-size: 100% 100%;
+    background-repeat: no-repeat;
+    pointer-events: none;
+    opacity: 0.35;
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size: 10px; letter-spacing: 0.06em;
+          color: #d09060; }
+</style>
+</head>
+<body>
+<div class="id">ps7 · the flock that loses one and finds it again</div>
+<div class="hint">motion trails remember each bird's journey — watch the paths accumulate and fade</div>
+<div class="src">descended from sav · feedback-texture trail memory · textured sky</div>
+<div class="arc" id="arc">together · 100%</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x14141c, 0.016);
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 26);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+const trailScene = new THREE.Scene();
+const trailCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const trailRenderTarget = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.UnsignedByteType
+});
+const trailBackBuffer = new THREE.WebGLRenderTarget(innerWidth, innerHeight, {
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.UnsignedByteType
+});
+
+const feedbackMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    tDiffuse: { value: null },
+    uFade: { value: 0.975 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float uFade;
+    varying vec2 vUv;
+    void main(){
+      vec4 col = texture2D(tDiffuse, vUv);
+      gl_FragColor = vec4(col.rgb * uFade, col.a * uFade);
+    }
+  `,
+  depthTest: false,
+  depthWrite: false
+});
+const feedbackPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2),
+  feedbackMaterial
+);
+trailScene.add(feedbackPlane);
+
+const N = 481;
+const STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+
+for (let i = 0; i < N; i++){
+  const r = Math.random() * 1.6 + 0.4;
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.random() * Math.PI - Math.PI * 0.5;
+  pos[i*3]     = Math.cos(th) * Math.cos(ph) * r;
+  pos[i*3 + 1] = Math.sin(ph) * r;
+  pos[i*3 + 2] = Math.sin(th) * Math.cos(ph) * r;
+  vel[i*3]     = 0.3 + (Math.random() - 0.5) * 0.4;
+  vel[i*3 + 1] = (Math.random() - 0.5) * 0.3;
+  vel[i*3 + 2] = (Math.random() - 0.5) * 0.4;
+}
+pos[STRAGGLER * 3]     = -1.2;
+pos[STRAGGLER * 3 + 1] =  0.6;
+pos[STRAGGLER * 3 + 2] =  0.0;
+
+const PERCEPTION_R   = 4.0;
+const SEPARATION_R   = 0.9;
+const W_COH = 0.018;
+const W_ALI = 0.060;
+const W_SEP = 0.080;
+const MAX_SPEED = 1.4;
+const MAX_FORCE = 0.030;
+
+let cohesion = 1.0;
+let arcStage = 'together';
+const arcEl = document.getElementById('arc');
+
+function step(dt){
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 1; i < N; i++){
+    cx += pos[i*3]; cy += pos[i*3 + 1]; cz += pos[i*3 + 2];
+  }
+  cx /= (N - 1); cy /= (N - 1); cz /= (N - 1);
+
+  const sx = pos[STRAGGLER*3] - cx;
+  const sy = pos[STRAGGLER*3+1] - cy;
+  const sz = pos[STRAGGLER*3+2] - cz;
+  const stragDist = Math.sqrt(sx*sx + sy*sy + sz*sz);
+  const targetCohesion = Math.max(0.0, Math.min(1.0, 1.0 - stragDist / 8.0));
+  cohesion += (targetCohesion - cohesion) * dt * 0.45;
+
+  if (cohesion > 0.85) arcStage = 'together';
+  else if (cohesion > 0.5 && stragDist > 4.5) arcStage = 'loss';
+  else if (cohesion < 0.5) arcStage = 'seeking';
+  else if (arcStage === 'seeking' && cohesion > 0.65) arcStage = 'return';
+
+  arcEl.textContent = `${arcStage} · ${Math.round(cohesion * 100)}%`;
+
+  const acc = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++){
+    let cohX = 0, cohY = 0, cohZ = 0, cohN = 0;
+    let aliX = 0, aliY = 0, aliZ = 0, aliN = 0;
+    let sepX = 0, sepY = 0, sepZ = 0;
+    const px = pos[i*3], py = pos[i*3+1], pz = pos[i*3+2];
+
+    const isStraggler = (i === STRAGGLER);
+    const perceptionR = isStraggler ? PERCEPTION_R * 0.55 : PERCEPTION_R;
+
+    for (let j = 0; j < N; j++){
+      if (i === j) continue;
+      const dx = pos[j*3] - px;
+      const dy = pos[j*3+1] - py;
+      const dz = pos[j*3+2] - pz;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 > perceptionR * perceptionR || d2 < 1e-6) continue;
+      cohX += pos[j*3]; cohY += pos[j*3+1]; cohZ += pos[j*3+2]; cohN++;
+      aliX += vel[j*3]; aliY += vel[j*3+1]; aliZ += vel[j*3+2]; aliN++;
+      if (d2 < SEPARATION_R * SEPARATION_R){
+        const inv = 1.0 / Math.sqrt(d2);
+        sepX -= dx * inv; sepY -= dy * inv; sepZ -= dz * inv;
+      }
+    }
+
+    if (isStraggler){
+      const drift = Math.sin(performance.now() * 0.0003) * 0.4;
+      acc[i*3]     += drift;
+      acc[i*3+1]   += -0.25 + Math.cos(performance.now() * 0.0002) * 0.2;
+      acc[i*3+2]   += drift * 0.6;
+    }
+
+    if (!isStraggler){
+      if (arcStage === 'seeking' || arcStage === 'return'){
+        const tx = pos[STRAGGLER*3] - px;
+        const ty = pos[STRAGGLER*3+1] - py;
+        const tz = pos[STRAGGLER*3+2] - pz;
+        const td = Math.sqrt(tx*tx + ty*ty + tz*tz) + 1e-3;
+        const seek = arcStage === 'seeking' ? 0.020 : 0.012;
+        acc[i*3]     += (tx / td) * seek;
+        acc[i*3+1]   += (ty / td) * seek;
+        acc[i*3+2]   += (tz / td) * seek;
+      }
+    }
+
+    if (cohN > 0){
+      cohX = cohX/cohN - px;
+      cohY = cohY/cohN - py;
+      cohZ = cohZ/cohN - pz;
+      acc[i*3]     += cohX * W_COH;
+      acc[i*3+1]   += cohY * W_COH;
+      acc[i*3+2]   += cohZ * W_COH;
+    }
+    if (aliN > 0){
+      aliX = aliX/aliN - vel[i*3];
+      aliY = aliY/aliN - vel[i*3+1];
+      aliZ = aliZ/aliN - vel[i*3+2];
+      acc[i*3]     += aliX * W_ALI;
+      acc[i*3+1]   += aliY * W_ALI;
+      acc[i*3+2]   += aliZ * W_ALI;
+    }
+    acc[i*3]   += sepX * W_SEP;
+    acc[i*3+1] += sepY * W_SEP;
+    acc[i*3+2] += sepZ * W_SEP;
+
+    const d2c = px*px + py*py + pz*pz;
+    if (d2c > 90){
+      const inv = 0.012 / Math.sqrt(d2c);
+      acc[i*3]   += -px * inv;
+      acc[i*3+1] += -py * inv;
+      acc[i*3+2] += -pz * inv;
+    }
+  }
+
+  const speedMul = (arcStage === 'loss' || arcStage === 'seeking') ? 0.55
+                  : arcStage === 'return' ? 0.85 : 1.0;
+  for (let i = 0; i < N; i++){
+    let ax = acc[i*3], ay = acc[i*3+1], az = acc[i*3+2];
+    const af = Math.sqrt(ax*ax + ay*ay + az*az);
+    if (af > MAX_FORCE){ ax = ax * MAX_FORCE / af; ay = ay * MAX_FORCE / af; az = az * MAX_FORCE / af; }
+    vel[i*3]     += ax;
+    vel[i*3 + 1] += ay;
+    vel[i*3 + 2] += az;
+    let vx = vel[i*3], vy = vel[i*3+1], vz = vel[i*3+2];
+    const sp = Math.sqrt(vx*vx + vy*vy + vz*vz);
+    if (sp > MAX_SPEED){ vx *= MAX_SPEED/sp; vy *= MAX_SPEED/sp; vz *= MAX_SPEED/sp; vel[i*3]=vx; vel[i*3+1]=vy; vel[i*3+2]=vz; }
+    pos[i*3]     += vel[i*3]   * dt * speedMul;
+    pos[i*3+1]   += vel[i*3+1] * dt * speedMul;
+    pos[i*3+2]   += vel[i*3+2] * dt * speedMul;
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+const seedArr = new Float32Array(N);
+for (let i = 0; i < N; i++) seedArr[i] = Math.random();
+geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+const isStraggler = new Float32Array(N);
+isStraggler[STRAGGLER] = 1.0;
+geom.setAttribute('strag', new THREE.BufferAttribute(isStraggler, 1));
+
+const uniforms = {
+  uTime:     { value: 0 },
+  uPixel:    { value: renderer.getPixelRatio() },
+  uCohesion: { value: 1.0 }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uCohesion;
+    attribute float seed;
+    attribute float strag;
+    varying vec3  vCol;
+    varying float vFade;
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.6 + seed * 6.28;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float baseSize = 1.8 + 0.8 * sin(t);
+      float stragSize = strag * 2.6;
+      gl_PointSize = (baseSize + stragSize) * uPixel * (16.0 / dist);
+      vFade = clamp(1.0 - (dist - 24.0) / 28.0, 0.0, 1.0);
+
+      vec3 warm  = vec3(0.96, 0.65, 0.32);
+      vec3 hot   = vec3(1.00, 0.92, 0.78);
+      vec3 cool  = vec3(0.42, 0.55, 0.78);
+      vec3 lost  = vec3(0.55, 0.32, 0.62);
+      vec3 cohCol = mix(cool, warm, smoothstep(0.0, 1.0, uCohesion));
+      vec3 highCol = mix(lost, hot, smoothstep(0.0, 1.0, uCohesion));
+      vCol = mix(cohCol, highCol, strag * 0.7 + smoothstep(0.6, 1.0, sin(t * 0.4)) * 0.18);
+      vCol *= (1.0 + strag * 0.4);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vFade;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * vFade;
+      gl_FragColor = vec4(vCol * a * 0.95, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const displayUniforms = {
+  tTrails: { value: trailRenderTarget.texture }
+};
+const displayMaterial = new THREE.ShaderMaterial({
+  uniforms: displayUniforms,
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTrails;
+    varying vec2 vUv;
+    void main(){
+      vec4 col = texture2D(tTrails, vUv);
+      gl_FragColor = vec4(col.rgb, 1.0);
+    }
+  `,
+  depthTest: false,
+  depthWrite: false,
+  transparent: false
+});
+const displayPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2),
+  displayMaterial
+);
+
+const compositeScene = new THREE.Scene();
+compositeScene.add(displayPlane);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  trailRenderTarget.setSize(innerWidth, innerHeight);
+  trailBackBuffer.setSize(innerWidth, innerHeight);
+});
+
+for (let s = 0; s < 250; s++) step(0.05);
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = (now / 1000);
+  uniforms.uCohesion.value = cohesion;
+  step(dt);
+  geom.attributes.position.needsUpdate = true;
+
+  const ang = now * 0.00010;
+  camera.position.x = Math.sin(ang) * 26;
+  camera.position.z = Math.cos(ang) * 26;
+  camera.lookAt(0, 0, 0);
+
+  feedbackMaterial.uniforms.tDiffuse.value = trailBackBuffer.texture;
+  renderer.setRenderTarget(trailRenderTarget);
+  renderer.render(trailScene, trailCamera);
+
+  renderer.setRenderTarget(trailRenderTarget);
+  renderer.autoClear = false;
+  renderer.render(scene, camera);
+  renderer.autoClear = true;
+
+  const temp = trailBackBuffer;
+  trailBackBuffer.texture = trailRenderTarget.texture;
+  trailRenderTarget.texture = temp.texture;
+
+  renderer.setRenderTarget(null);
+  renderer.render(compositeScene, trailCamera);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
