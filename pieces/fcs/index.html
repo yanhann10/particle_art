@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fcs · courier heatmap (Ayoung Kim)</title>
+<!-- MOTION: traverse, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1d24; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">fcs · courier heatmap (Ayoung Kim)</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Ayoung Kim: fictive Seoul — city graph + courier trails from above
+// Voronoi building footprints → wireframe extrusions + street graph + courier particles
+// Chartreuse/magenta on slate, high-angle overhead camera, trails accumulate
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1d24, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x1a1d24, 12, 30);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 60);
+camera.position.set(0, 18, 12);
+camera.lookAt(0, 0, 0);
+
+// ground plane
+const groundGeo = new THREE.PlaneGeometry(60, 60, 1, 1);
+groundGeo.rotateX(-Math.PI/2);
+const groundMat = new THREE.MeshBasicMaterial({ color: 0x0f1118, side: THREE.DoubleSide });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+scene.add(ground);
+
+// Voronoi sites for building footprints
+const sites = [];
+const nSites = 32;
+for (let i=0; i<nSites; i++){
+  const ang = (i/nSites) * Math.PI * 2 + Math.random()*0.4;
+  const rad = 3 + Math.random()*10;
+  sites.push(new THREE.Vector2(
+    Math.cos(ang)*rad + (Math.random()-0.5)*2,
+    Math.sin(ang)*rad + (Math.random()-0.5)*2
+  ));
+}
+
+// build city graph: nodes = sites, edges = Delaunay dual (approximate street connectivity)
+const nodes = sites.map(s => ({ pos: s, edges: [] }));
+for (let i=0; i<nodes.length; i++){
+  for (let j=i+1; j<nodes.length; j++){
+    const dist = nodes[i].pos.distanceTo(nodes[j].pos);
+    if (dist < 8){
+      nodes[i].edges.push(j);
+      nodes[j].edges.push(i);
+    }
+  }
+}
+
+// street graph lines
+const streetGeo = new THREE.BufferGeometry();
+const streetPos = [];
+nodes.forEach((n,i) => {
+  n.edges.forEach(j => {
+    if (j > i){
+      streetPos.push(n.pos.x, 0.02, n.pos.y);
+      streetPos.push(nodes[j].pos.x, 0.02, nodes[j].pos.y);
+    }
+  });
+});
+streetGeo.setAttribute('position', new THREE.Float32BufferAttribute(streetPos, 3));
+const streetMat = new THREE.LineBasicMaterial({ color: 0x3a3f4d, transparent:true, opacity:0.4 });
+const streets = new THREE.LineSegments(streetGeo, streetMat);
+scene.add(streets);
+
+// building wireframe extrusions
+nodes.forEach(n => {
+  const h = 0.4 + Math.random()*2.2;
+  const bGeo = new THREE.BoxGeometry(0.8, h, 0.8);
+  bGeo.translate(0, h/2, 0);
+  const edges = new THREE.EdgesGeometry(bGeo);
+  const bMat = new THREE.LineBasicMaterial({ color: 0x5a6078, transparent:true, opacity:0.65 });
+  const building = new THREE.LineSegments(edges, bMat);
+  building.position.set(n.pos.x, 0, n.pos.y);
+  scene.add(building);
+});
+
+// courier particles
+const couriers = [];
+const maxTrailLength = 120;
+
+function spawnCourier(){
+  const src = Math.floor(Math.random()*nodes.length);
+  let dst = Math.floor(Math.random()*nodes.length);
+  while (dst === src) dst = Math.floor(Math.random()*nodes.length);
+  
+  const path = [src];
+  let cur = src;
+  const visited = new Set([src]);
+  while (cur !== dst && path.length < 40){
+    const neighbors = nodes[cur].edges.filter(e => !visited.has(e));
+    if (neighbors.length === 0) break;
+    // greedy toward dst
+    neighbors.sort((a,b) => {
+      const dA = nodes[a].pos.distanceTo(nodes[dst].pos);
+      const dB = nodes[b].pos.distanceTo(nodes[dst].pos);
+      return dA - dB;
+    });
+    cur = neighbors[0];
+    visited.add(cur);
+    path.push(cur);
+  }
+  
+  if (path.length < 2) return;
+  
+  const trailGeo = new THREE.BufferGeometry();
+  const trailPos = new Float32Array(maxTrailLength * 3);
+  trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPos, 3));
+  trailGeo.setDrawRange(0, 0);
+  
+  const col = Math.random() < 0.5 ? 0xa0ff6e : 0xff4d94; // chartreuse / magenta
+  const trailMat = new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: new THREE.Color(col) } },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexShader: `
+      varying float vAlpha;
+      void main(){
+        vAlpha = 1.0 - (float(gl_VertexID) / ${maxTrailLength.toFixed(1)});
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      varying float vAlpha;
+      void main(){
+        float a = vAlpha * vAlpha * 0.7;
+        gl_FragColor = vec4(uColor, a);
+      }
+    `
+  });
+  
+  const trailLine = new THREE.Line(trailGeo, trailMat);
+  scene.add(trailLine);
+  
+  couriers.push({
+    path,
+    pathIdx: 0,
+    t: 0,
+    speed: 0.012 + Math.random()*0.008,
+    trailLine,
+    trailPos,
+    trailIdx: 0
+  });
+}
+
+for (let i=0; i<18; i++) spawnCourier();
+
+function updateCouriers(dt){
+  couriers.forEach((c,idx) => {
+    if (c.pathIdx >= c.path.length - 1){
+      scene.remove(c.trailLine);
+      c.trailLine.geometry.dispose();
+      c.trailLine.material.dispose();
+      couriers[idx] = null;
+      return;
+    }
+    
+    c.t += c.speed * dt;
+    if (c.t >= 1.0){
+      c.t = 0;
+      c.pathIdx++;
+    }
+    
+    if (c.pathIdx < c.path.length - 1){
+      const n0 = nodes[c.path[c.pathIdx]];
+      const n1 = nodes[c.path[c.pathIdx+1]];
+      const x = THREE.MathUtils.lerp(n0.pos.x, n1.pos.x, c.t);
+      const z = THREE.MathUtils.lerp(n0.pos.y, n1.pos.y, c.t);
+      const y = 0.1 + Math.sin(c.t * Math.PI)*0.15;
+      
+      if (c.trailIdx < maxTrailLength){
+        c.trailPos[c.trailIdx*3]   = x;
+        c.trailPos[c.trailIdx*3+1] = y;
+        c.trailPos[c.trailIdx*3+2] = z;
+        c.trailIdx++;
+        c.trailLine.geometry.setDrawRange(0, c.trailIdx);
+      } else {
+        // shift trail
+        for (let i=0; i<maxTrailLength-1; i++){
+          c.trailPos[i*3]   = c.trailPos[(i+1)*3];
+          c.trailPos[i*3+1] = c.trailPos[(i+1)*3+1];
+          c.trailPos[i*3+2] = c.trailPos[(i+1)*3+2];
+        }
+        c.trailPos[(maxTrailLength-1)*3]   = x;
+        c.trailPos[(maxTrailLength-1)*3+1] = y;
+        c.trailPos[(maxTrailLength-1)*3+2] = z;
+      }
+      c.trailLine.geometry.attributes.position.needsUpdate = true;
+    }
+  });
+  
+  // remove nulls
+  for (let i=couriers.length-1; i>=0; i--){
+    if (couriers[i] === null) couriers.splice(i,1);
+  }
+  
+  // spawn new
+  while (couriers.length < 18){
+    spawnCourier();
+  }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const t0 = performance.now();
+let lastT = t0;
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastT)/16, 2);
+  lastT = now;
+  
+  updateCouriers(dt);
+  
+  const elapsed = (now - t0)*0.001;
+  const ang = elapsed * 0.08;
+  camera.position.x = Math.sin(ang) * 16;
+  camera.position.z = Math.cos(ang) * 16;
+  camera.position.y = 18 + Math.sin(elapsed*0.15)*2;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
