@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6ph · tender light strings</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">6ph</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Felix Gonzalez-Torres · Lucy draped in lights · differential growth</div>
+<div class="stat" id="stat">loading...</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+/* Tender light strings — differential growth reimagined as
+   Felix Gonzalez-Torres draped incandescent bulb strands
+   wrapped around Stanford Lucy. The self-avoiding curve
+   grows and drapes across the figure's surface. */
+
+const BG = 0x0a0807;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 2, 20);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+// --- curve parameters, tuned for draping on surface ---
+const MAX_VERTS = 3200;
+const ATTRACT   = 0.05;
+const REPEL_R   = 0.48;
+const REPEL_STR = 0.10;
+const NOISE     = 0.002;
+const PRESSURE  = 0.002;
+const SURFACE_PULL = 0.015; // pull toward nearest surface point
+const MAX_D     = 0.36;
+
+let verts = [];
+let lucySampler = null;
+let lucyPoints = [];
+const LUCY_SAMPLES = 60000;
+
+// spatial hash
+const CELL = REPEL_R;
+const grid = new Map();
+function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i], k = gridKey(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function nearby(v) {
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function step() {
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  // repulsion
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z, ey = v.y - u.y;
+      const d2 = ex * ex + ez * ez + ey * ey;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+      dy[i] += ey * f;
+    }
+  }
+  // attraction toward polyline neighbors
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? verts[i - 1] : null;
+    const next = i < n - 1 ? verts[i + 1] : null;
+    const v = verts[i];
+    if (prev) {
+      dx[i] += (prev.x - v.x) * ATTRACT;
+      dz[i] += (prev.z - v.z) * ATTRACT;
+      dy[i] += (prev.y - v.y) * ATTRACT;
+    }
+    if (next) {
+      dx[i] += (next.x - v.x) * ATTRACT;
+      dz[i] += (next.z - v.z) * ATTRACT;
+      dy[i] += (next.y - v.y) * ATTRACT;
+    }
+  }
+  // light pressure outward
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - cx, oy = verts[i].y - cy, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dy[i] += (oy / d) * PRESSURE;
+    dz[i] += (oz / d) * PRESSURE;
+  }
+
+  // pull toward Lucy surface
+  if (lucyPoints.length > 0) {
+    for (let i = 0; i < n; i++) {
+      const v = verts[i];
+      let nearest = null;
+      let minD2 = Infinity;
+      for (let k = 0; k < lucyPoints.length; k += 50) { // sample subset for speed
+        const p = lucyPoints[k];
+        const d2 = (v.x - p.x) ** 2 + (v.y - p.y) ** 2 + (v.z - p.z) ** 2;
+        if (d2 < minD2) { minD2 = d2; nearest = p; }
+      }
+      if (nearest && minD2 < 4) {
+        dx[i] += (nearest.x - v.x) * SURFACE_PULL;
+        dy[i] += (nearest.y - v.y) * SURFACE_PULL;
+        dz[i] += (nearest.z - v.z) * SURFACE_PULL;
+      }
+    }
+  }
+
+  // apply + noise
+  for (let i = 0; i < n; i++) {
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].y += dy[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].age += 0.0004;
+  }
+
+  // subdivide
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    grown.push(a);
+    const ex = b.x - a.x, ey = b.y - a.y, ez = b.z - a.z;
+    if (ex * ex + ey * ey + ez * ez > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({
+        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.02,
+        y: (a.y + b.y) * 0.5 + (Math.random() - 0.5) * 0.02,
+        z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.02,
+        age: Math.max(a.age, b.age) * 0.7
+      });
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// --- rendering: 40k particles as warm incandescent bulbs ---
+const N_RENDER = 40000;
+const rPos   = new Float32Array(N_RENDER * 3);
+const rSeeds = new Float32Array(N_RENDER);
+const rAge   = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.035 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float age;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform float uFogDensity;
+
+    void main() {
+      vec3 p = position;
+
+      // gentle sway
+      float t = uTime * 0.3 + seed * 6.28;
+      float sway = sin(t) * 0.008 * (1.0 + seed);
+      p.x += sway;
+      p.z += cos(t * 0.7) * 0.005;
+
+      // pulse per-bulb
+      float pulse = 0.85 + 0.15 * sin(uTime * 1.2 + seed * 40.0);
+
+      // palette: warm filament amber → soft white
+      vec3 amber  = vec3(1.0, 0.72, 0.32);
+      vec3 warm   = vec3(1.0, 0.88, 0.72);
+      vec3 white  = vec3(1.0, 0.96, 0.92);
+      float k = clamp(age * 1.2, 0.0, 1.0);
+      vCol = mix(amber, warm, k);
+      vCol = mix(vCol, white, smoothstep(0.7, 1.0, k) * 0.3);
+      vCol *= pulse;
+
+      vAlpha = 0.55 + 0.2 * pulse;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      gl_PointSize = 1.8 * uPixel * (45.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      float core = exp(-r * 24.0);
+      float halo = exp(-r * 8.0) * 0.35;
+      float a = (core + halo) * vAlpha;
+
+      vec3 col = vCol;
+      col = mix(col, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.8);
+
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// faint wire between vertices
+const wireGeom = new THREE.BufferGeometry();
+const wirePositions = new Float32Array(MAX_VERTS * 3);
+wireGeom.setAttribute('position', new THREE.BufferAttribute(wirePositions, 3));
+const wireMat = new THREE.LineBasicMaterial({
+  color: 0x2a2420,
+  transparent: true,
+  opacity: 0.3
+});
+const wireLine = new THREE.Line(wireGeom, wireMat);
+scene.add(wireLine);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+let loaded = false;
+
+// Load Lucy
+const loader = new PLYLoader();
+loader.load(
+  'https://raw.githubusercontent.com/mrdoob/three.js/r160/examples/models/ply/binary/Lucy100k.ply',
+  (geometry) => {
+    geometry.computeVertexNormals();
+    
+    // normalize to fit camera
+    geometry.computeBoundingBox();
+    const box = geometry.boundingBox;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const scale = 10 / maxDim;
+    
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+    
+    // sample surface
+    const mesh = new THREE.Mesh(geometry);
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tempPos = new THREE.Vector3();
+    
+    for (let i = 0; i < LUCY_SAMPLES; i++) {
+      sampler.sample(tempPos);
+      lucyPoints.push({ x: tempPos.x, y: tempPos.y, z: tempPos.z });
+    }
+    
+    // initialize curve wrapped around Lucy's torso
+    const NV0 = 40;
+    for (let i = 0; i < NV0; i++) {
+      const t = (i / (NV0 - 1)) * Math.PI * 2;
+      const r = 2.5;
+      verts.push({
+        x: Math.cos(t) * r,
+        y: Math.sin(t * 0.5) * 1.5,
+        z: Math.sin(t) * r,
+        age: 0
+      });
+    }
+    
+    // pre-grow
+    for (let s = 0; s < 500; s++) step();
+    
+    loaded = true;
+    statEl.textContent = 'vertices=0';
+  },
+  undefined,
+  (err) => {
+    console.error('Failed to load Lucy:', err);
+    // fallback: initialize without surface
+    const NV0 = 40;
+    for (let i = 0; i < NV0; i++) {
+      const t = (i / (NV0 - 1)) * 2 - 1;
+      const x = t * 6;
+      const y = -Math.abs(t) * 1.2 + Math.sin(t * Math.PI * 2) * 0.3;
+      verts.push({ x, z: 0, y, age: 0 });
+    }
+    for (let s = 0; s < 500; s++) step();
+    loaded = true;
+    statEl.textContent = 'vertices=0 (fallback)';
+  }
+);
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (loaded) {
+    for (let s = 0; s < 3; s++) step();
+
+    const n = verts.length;
+
+    // update wire
+    for (let i = 0; i < n; i++) {
+      wirePositions[i * 3]     = verts[i].x;
+      wirePositions[i * 3 + 1] = verts[i].y;
+      wirePositions[i * 3 + 2] = verts[i].z;
+    }
+    wireGeom.setDrawRange(0, n);
+    wireGeom.attributes.position.needsUpdate = true;
+
+    // camera tracks centroid
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < n; i++) {
+      cx += verts[i].x; cy += verts[i].y; cz += verts[i].z;
+    }
+    cx /= n; cy /= n; cz /= n;
+    controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.02);
+
+    // distribute particles along curve
+    const lengths = [];
+    let total = 0;
+    for (let i = 0; i < n - 1; i++) {
+      const a = verts[i], b = verts[i + 1];
+      const L = Math.sqrt(
+        (b.x - a.x) ** 2 + (b.y - a.y) ** 2 + (b.z - a.z) ** 2
+      );
+      lengths.push(L);
+      total += L;
+    }
+    if (total > 0) {
+      let written = 0;
+      for (let i = 0; i < n - 1; i++) {
+        const share = (i === n - 2)
+          ? N_RENDER - written
+          : Math.max(1, Math.floor(N_RENDER * lengths[i] / total));
+        const a = verts[i], b = verts[i + 1];
+        for (let k = 0; k < share && written < N_RENDER; k++) {
+          const u = Math.random();
+          const cu = u < 0.5 ? u * u * 2 : 1 - (1 - u) * (1 - u) * 2;
+          const spread = 0.015;
+          rPos[written * 3]     = a.x + (b.x - a.x) * cu + (Math.random() - 0.5) * spread;
+          rPos[written * 3 + 1] = a.y + (b.y - a.y) * cu + (Math.random() - 0.5) * spread * 0.5;
+          rPos[written * 3 + 2] = a.z + (b.z - a.z) * cu + (Math.random() - 0.5) * spread;
+          rAge[written] = Math.max(a.age, b.age);
+          written++;
+        }
+      }
+      geom.attributes.position.needsUpdate = true;
+      geom.attributes.age.needsUpdate = true;
+    }
+
+    statEl.textContent = `vertices=${n}${paused ? ' · paused' : ''}`;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
