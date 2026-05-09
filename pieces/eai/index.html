@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eai · folded leaves (Morakana border-drift)</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0806; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">eai</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0806, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.enablePan = false;
+controls.minDistance = 10;
+controls.maxDistance = 40;
+controls.target.set(0, 0, 0);
+
+/* ── CURL NOISE for wind advection ── */
+function curlNoise(x, y, z, t, freq=0.3, amp=1.0){
+  const eps = 0.01;
+  const n = (px, py, pz) => {
+    const s = Math.sin(px*freq+t*0.1) * Math.cos(py*freq+t*0.15) * Math.sin(pz*freq+t*0.12);
+    return s * amp;
+  };
+  const dx = (n(x+eps,y,z) - n(x-eps,y,z))/(2*eps);
+  const dy = (n(x,y+eps,z) - n(x,y-eps,z))/(2*eps);
+  const dz = (n(x,y,z+eps) - n(x,y,z-eps))/(2*eps);
+  return new THREE.Vector3(dz - dy, dx - dz, dy - dx);
+}
+
+/* ── FOLDED LEAF geometry builder ── */
+function createFoldedLeaf(width, length, curlIntensity, segments=32){
+  const verts = [];
+  const uvs = [];
+  const indices = [];
+  const segs = segments;
+  for (let i = 0; i <= segs; i++){
+    const t = i / segs;
+    const y = (t - 0.5) * length;
+    const twist = curlIntensity * Math.sin(t * Math.PI);
+    const w = width * Math.sin(t * Math.PI);
+    const z = curlIntensity * 0.8 * Math.pow(Math.sin(t * Math.PI), 2);
+    verts.push(-w * 0.5, y, z + twist * 0.4);
+    verts.push( w * 0.5, y, z - twist * 0.4);
+    uvs.push(0, t);
+    uvs.push(1, t);
+    if (i < segs){
+      const base = i * 2;
+      indices.push(base, base+1, base+2);
+      indices.push(base+1, base+3, base+2);
+    }
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geom.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
+}
+
+/* ── LEAF ARRANGEMENT: 7 folded elements, bouquet-like ── */
+const leafConfigs = [
+  { w: 2.2, l: 6.0, curl: 1.2, pos: [0, 0, 0], rot: [0, 0, 0], scale: 1.0 },
+  { w: 1.8, l: 5.0, curl: 1.5, pos: [-1.5, -1.0, 0.3], rot: [0.3, -0.5, 0.6], scale: 0.85 },
+  { w: 2.0, l: 5.5, curl: 1.0, pos: [1.8, -0.8, -0.2], rot: [-0.2, 0.6, -0.4], scale: 0.9 },
+  { w: 1.6, l: 4.5, curl: 1.8, pos: [-1.0, 2.0, 0.5], rot: [0.5, -0.8, 1.0], scale: 0.75 },
+  { w: 1.9, l: 5.2, curl: 1.3, pos: [1.2, 1.5, -0.4], rot: [-0.4, 0.7, -0.8], scale: 0.8 },
+  { w: 1.5, l: 4.0, curl: 2.0, pos: [0.3, -2.5, 0.2], rot: [0.8, 0.2, 0.3], scale: 0.7 },
+  { w: 1.7, l: 4.8, curl: 1.4, pos: [-0.5, 1.0, -0.6], rot: [-0.6, -0.3, 0.5], scale: 0.82 },
+];
+
+/* ── PARTICLE SYSTEM: sample from leaf surfaces ── */
+const N = 80000;
+const positions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const leafIDs = new Float32Array(N);
+const velocities = new Float32Array(N * 3);
+
+let idx = 0;
+leafConfigs.forEach((cfg, leafID) => {
+  const geom = createFoldedLeaf(cfg.w, cfg.l, cfg.curl);
+  const posAttr = geom.attributes.position;
+  const count = posAttr.count;
+  const perLeaf = Math.floor(N / leafConfigs.length);
+  const obj = new THREE.Object3D();
+  obj.position.set(...cfg.pos);
+  obj.rotation.set(...cfg.rot);
+  obj.scale.setScalar(cfg.scale);
+  obj.updateMatrixWorld();
+  for (let i = 0; i < perLeaf && idx < N; i++){
+    const tri = Math.floor(Math.random() * (count / 3)) * 3;
+    const a = new THREE.Vector3().fromBufferAttribute(posAttr, tri);
+    const b = new THREE.Vector3().fromBufferAttribute(posAttr, tri+1);
+    const c = new THREE.Vector3().fromBufferAttribute(posAttr, tri+2);
+    const u = Math.random(), v = Math.random();
+    const w = 1 - u - v > 0 ? [u, v, 1-u-v] : [1-u, 1-v, u+v-1];
+    const p = new THREE.Vector3(
+      a.x*w[0] + b.x*w[1] + c.x*w[2],
+      a.y*w[0] + b.y*w[1] + c.y*w[2],
+      a.z*w[0] + b.z*w[1] + c.z*w[2]
+    );
+    p.applyMatrix4(obj.matrixWorld);
+    positions[idx*3] = p.x;
+    positions[idx*3+1] = p.y;
+    positions[idx*3+2] = p.z;
+    seeds[idx] = Math.random();
+    leafIDs[idx] = leafID / leafConfigs.length;
+    velocities[idx*3] = 0;
+    velocities[idx*3+1] = 0;
+    velocities[idx*3+2] = 0;
+    idx++;
+  }
+});
+while(idx < N){
+  positions[idx*3] = (Math.random()-0.5)*10;
+  positions[idx*3+1] = (Math.random()-0.5)*10;
+  positions[idx*3+2] = (Math.random()-0.5)*10;
+  seeds[idx] = Math.random();
+  leafIDs[idx] = Math.random();
+  velocities[idx*3] = 0;
+  velocities[idx*3+1] = 0;
+  velocities[idx*3+2] = 0;
+  idx++;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('leafID', new THREE.BufferAttribute(leafIDs, 1));
+geom.setAttribute('velocity', new THREE.BufferAttribute(velocities, 3));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBorderX: { value: 0 },
+  uWindPhase: { value: 0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uBorderX;
+    uniform float uWindPhase;
+    attribute float seed;
+    attribute float leafID;
+    attribute vec3 velocity;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    vec3 hash3(float n){
+      return fract(sin(vec3(n, n+1.0, n+2.0)) * vec3(43758.5453, 22578.1459, 19134.6543));
+    }
+
+    void main(){
+      vec3 p = position + velocity;
+
+      /* ── Morakana palette: bone-white, dust, oxidized red for border-crossers ── */
+      vec3 bone = vec3(0.94, 0.92, 0.88);
+      vec3 dust = vec3(0.82, 0.76, 0.68);
+      vec3 oxidized = vec3(0.72, 0.28, 0.22);
+
+      /* base color per leaf — warm amber spectrum */
+      vec3 amber = mix(vec3(0.78, 0.58, 0.30), vec3(0.92, 0.84, 0.66), leafID);
+      vec3 col = mix(dust, amber, 0.7 + 0.3 * sin(seed * 6.28));
+
+      /* ── BORDER CROSSING: invisible line at x=uBorderX ── */
+      float crossDist = p.x - uBorderX;
+      float crossed = smoothstep(-0.2, 0.2, crossDist);
+      col = mix(col, oxidized, crossed * 0.85);
+
+      /* atmospheric softness — slight glow */
+      float glow = 0.5 + 0.5 * sin(uTime * 0.4 + seed * 6.28);
+      col = mix(col, bone, glow * 0.15);
+
+      vCol = col;
+      vAlpha = 0.5 + 0.3 * glow;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + 0.4 * glow) * uPixel * (35.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float soft = exp(-r * 12.0);
+      float a = soft * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── WIND SIMULATION: curl-noise advection ── */
+const posAttr = geom.attributes.position;
+const velAttr = geom.attributes.velocity;
+
+function updateWind(dt, time){
+  const windDir = new THREE.Vector3(1, 0, 0.05).normalize();
+  const windBase = 0.35 * Math.sin(time * 0.18) * 0.5 + 0.5;
+  const windGust = 0.15 * Math.sin(time * 0.6 + 1.5);
+  const windStrength = windBase + windGust;
+
+  for (let i = 0; i < N; i++){
+    const px = posAttr.array[i*3];
+    const py = posAttr.array[i*3+1];
+    const pz = posAttr.array[i*3+2];
+    const seed = seeds[i];
+
+    const curl = curlNoise(px, py, pz, time, 0.25, 0.4);
+    const vx = velAttr.array[i*3];
+    const vy = velAttr.array[i*3+1];
+    const vz = velAttr.array[i*3+2];
+
+    const dragFactor = 0.92;
+    const accel = new THREE.Vector3(
+      windDir.x * windStrength + curl.x * 0.5,
+      windDir.y * windStrength + curl.y * 0.5 - 0.02,
+      windDir.z * windStrength + curl.z * 0.5
+    );
+
+    velAttr.array[i*3]   = (vx + accel.x * dt) * dragFactor;
+    velAttr.array[i*3+1] = (vy + accel.y * dt) * dragFactor;
+    velAttr.array[i*3+2] = (vz + accel.z * dt) * dragFactor;
+
+    posAttr.array[i*3]   += velAttr.array[i*3] * dt;
+    posAttr.array[i*3+1] += velAttr.array[i*3+1] * dt;
+    posAttr.array[i*3+2] += velAttr.array[i*3+2] * dt;
+
+    /* wrap-around: particles that drift far rightward reset to left */
+    if (posAttr.array[i*3] > 15){
+      posAttr.array[i*3] = -15 + (Math.random()-0.5)*4;
+      posAttr.array[i*3+1] = (Math.random()-0.5)*12;
+      posAttr.array[i*3+2] = (Math.random()-0.5)*5;
+      velAttr.array[i*3] = 0;
+      velAttr.array[i*3+1] = 0;
+      velAttr.array[i*3+2] = 0;
+    }
+    if (posAttr.array[i*3+1] < -12){
+      posAttr.array[i*3+1] = 10;
+      velAttr.array[i*3+1] = 0;
+    }
+  }
+  posAttr.needsUpdate = true;
+  velAttr.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let lastFrame = start;
+
+function loop(now){
+  const elapsed = (now - start) / 1000;
+  const dt = Math.min((now - lastFrame) / 1000, 0.05);
+  lastFrame = now;
+
+  uniforms.uTime.value = elapsed;
+  uniforms.uWindPhase.value = elapsed * 0.3;
+
+  /* border drifts slowly — the geopolitical line is not fixed */
+  uniforms.uBorderX.value = 1.5 * Math.sin(elapsed * 0.08);
+
+  updateWind(dt, elapsed);
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop(start);
+</script>
+</body>
+</html>
