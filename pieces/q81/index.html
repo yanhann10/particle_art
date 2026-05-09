@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>q81 · rothko field</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a0a0f; overflow:hidden;
+               color:#e5d6f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size: 11px; letter-spacing: 0.04em; color:#998a92; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #2a1418; color:#e5d6f0; border:1px solid #5a3a42;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; }
+  button.start:hover { background:#3a1a22; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · breathe sound</button>
+<div class="id">q81</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a0a0f, 1);
+document.body.appendChild(renderer.domElement);
+
+// Three bands: deep band (vermilion-rust), mid band (plum), top band (faded orange-rust)
+const BANDS = [
+  { y: -6.5, h: 5.5, col: new THREE.Color(0.82, 0.18, 0.12), count: 1200 },
+  { y: -0.5, h: 4.0, col: new THREE.Color(0.48, 0.22, 0.38), count: 900 },
+  { y: 3.8,  h: 3.2, col: new THREE.Color(0.75, 0.35, 0.18), count: 700 }
+];
+
+const planeGeo = new THREE.PlaneGeometry(0.22, 0.22);
+const bands = [];
+
+BANDS.forEach(band => {
+  const mesh = new THREE.InstancedMesh(planeGeo, null, band.count);
+  mesh.material = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uEnergy: { value: 0 },
+      uBaseColor: { value: band.col }
+    },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    vertexShader: `
+      uniform float uTime;
+      uniform float uEnergy;
+      varying vec2 vUv;
+      varying float vDepth;
+      varying float vOpacity;
+      void main(){
+        vUv = uv;
+        vec3 p = position;
+        vec4 mvPos = modelViewMatrix * instanceMatrix * vec4(p, 1.0);
+        vDepth = -mvPos.z;
+        vOpacity = 0.045 + uEnergy * 0.065;
+        gl_Position = projectionMatrix * mvPos;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uBaseColor;
+      varying vec2 vUv;
+      varying float vDepth;
+      varying float vOpacity;
+      void main(){
+        vec2 d = vUv - 0.5;
+        float r = dot(d,d) * 4.0;
+        float edge = smoothstep(0.9, 0.3, r);
+        float alpha = edge * vOpacity;
+        vec3 col = uBaseColor * (1.0 + 0.15 / max(vDepth, 1.0));
+        gl_FragColor = vec4(col * alpha, alpha);
+      }
+    `
+  });
+
+  const dummy = new THREE.Object3D();
+  const instances = [];
+  for (let i = 0; i < band.count; i++) {
+    const yBase = band.y + (Math.random() - 0.5) * band.h;
+    const yJitter = (Math.random() - 0.5) * 0.8;
+    const x = (Math.random() - 0.5) * 18;
+    const z = (Math.random() - 0.5) * 12;
+    dummy.position.set(x, yBase + yJitter, z);
+    dummy.rotation.z = (Math.random() - 0.5) * 0.3;
+    dummy.scale.setScalar(1.6 + Math.random() * 1.4);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+    instances.push({ yBase, yJitter, x, z, rot: dummy.rotation.z, scale: dummy.scale.x });
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  scene.add(mesh);
+  bands.push({ mesh, instances, band });
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+let analyser = null, freqData = null;
+async function startAudio(){
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting mic…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.75;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'live · three color fields';
+  } catch (e) {
+    hint.textContent = 'passive mode · synthetic breath';
+  }
+}
+startBtn.addEventListener('click', startAudio);
+
+function bandEnergy(arr, lo, hi){
+  let s = 0;
+  for (let i = lo; i < hi; i++) s += arr[i];
+  return (s / (hi-lo)) / 255;
+}
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+
+  let e0 = 0.3, e1 = 0.25, e2 = 0.2;
+  if (analyser){
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    e0 = bandEnergy(freqData, 0, Math.floor(n*0.15));
+    e1 = bandEnergy(freqData, Math.floor(n*0.15), Math.floor(n*0.45));
+    e2 = bandEnergy(freqData, Math.floor(n*0.45), n);
+  } else {
+    e0 = 0.3 + 0.2 * Math.sin(t*0.6);
+    e1 = 0.25 + 0.15 * Math.sin(t*0.8 + 1.2);
+    e2 = 0.2 + 0.1 * Math.sin(t*1.1 + 2.4);
+  }
+
+  const energies = [e0, e1, e2];
+  bands.forEach((b, idx) => {
+    const e = energies[idx];
+    b.mesh.material.uniforms.uTime.value = t;
+    b.mesh.material.uniforms.uEnergy.value = e;
+
+    const dummy = new THREE.Object3D();
+    b.instances.forEach((inst, i) => {
+      const drift = Math.sin(t * 0.3 + inst.x * 0.1) * 0.4 * e;
+      const yPulse = Math.sin(t * 0.5 + inst.z * 0.08) * 0.15 * e;
+      dummy.position.set(inst.x, inst.yBase + inst.yJitter + drift + yPulse, inst.z);
+      dummy.rotation.z = inst.rot + Math.sin(t * 0.2 + inst.x * 0.05) * 0.08;
+      dummy.scale.setScalar(inst.scale * (1.0 + e * 0.15));
+      dummy.updateMatrix();
+      b.mesh.setMatrixAt(i, dummy.matrix);
+    });
+    b.mesh.instanceMatrix.needsUpdate = true;
+  });
+
+  camera.position.z = 18 + Math.sin(t * 0.15) * 0.8;
+  camera.position.y = Math.sin(t * 0.12) * 0.4;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
