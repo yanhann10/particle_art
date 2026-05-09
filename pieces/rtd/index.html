@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rtd · parallels (Da Costa/Niederhauser)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; cursor:crosshair; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">rtd</div>
+<div class="hint">move cursor · rails warp to presence · snap back to parallel</div>
+<div class="src">Marc Da Costa & Matthew Niederhauser · Parallels (Lumen Prize 2024)</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* Parallels — LED volume re-rendering presence as parallel-line fields.
+   Mouse position warps horizontal rails into figure-shaped distortions;
+   when attention moves away, geometry snaps back to parallel. 
+   Particles drift along their rails; viewer presence is the anomaly. */
+
+const BG = 0x0a0807;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 24);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- rail configuration ---
+const RAIL_COUNT = 120;
+const RAIL_HEIGHT = 18;
+const RAIL_SPACING = RAIL_HEIGHT / RAIL_COUNT;
+const PARTICLES_PER_RAIL = 340;
+const TOTAL_PARTICLES = RAIL_COUNT * PARTICLES_PER_RAIL;
+
+// each rail: horizontal line Y=constant, X sweeps left-to-right
+// rail has N control points that can be warped by presence
+const RAIL_CONTROL_POINTS = 18;
+const RAIL_WIDTH = 28;
+
+// rail state: for each rail, store control-point X-offsets (warped by mouse)
+const rails = [];
+for (let i = 0; i < RAIL_COUNT; i++) {
+  const y = (i / (RAIL_COUNT - 1)) * RAIL_HEIGHT - RAIL_HEIGHT * 0.5;
+  const controlOffsets = new Float32Array(RAIL_CONTROL_POINTS);
+  const targetOffsets  = new Float32Array(RAIL_CONTROL_POINTS);
+  rails.push({ y, controlOffsets, targetOffsets });
+}
+
+// particle state: each particle belongs to a rail, has a position along X, drifts slowly
+const particles = [];
+for (let r = 0; r < RAIL_COUNT; r++) {
+  for (let p = 0; p < PARTICLES_PER_RAIL; p++) {
+    const x = (Math.random() - 0.5) * RAIL_WIDTH;
+    const phase = Math.random() * Math.PI * 2;
+    const speed = 0.08 + Math.random() * 0.08; // gentle drift
+    particles.push({ rail: r, x, phase, speed });
+  }
+}
+
+// mouse tracking
+let mouseX = 0, mouseY = 0;
+let mousePresent = false;
+addEventListener('mousemove', (e) => {
+  mouseX = (e.clientX / innerWidth) * 2 - 1;
+  mouseY = -(e.clientY / innerHeight) * 2 + 1;
+  mousePresent = true;
+});
+addEventListener('mouseleave', () => { mousePresent = false; });
+
+// --- rendering: instanced line segments ---
+// each particle is a short horizontal line segment along its rail
+const segmentGeom = new THREE.BufferGeometry();
+const segW = 0.18; // segment half-width
+const segVerts = new Float32Array([
+  -segW, 0, 0,
+   segW, 0, 0
+]);
+segmentGeom.setAttribute('position', new THREE.BufferAttribute(segVerts, 3));
+
+const instancedGeom = new THREE.InstancedBufferGeometry();
+instancedGeom.index = segmentGeom.index;
+instancedGeom.attributes.position = segmentGeom.attributes.position;
+
+const offsets = new Float32Array(TOTAL_PARTICLES * 3);
+const ages    = new Float32Array(TOTAL_PARTICLES);
+for (let i = 0; i < TOTAL_PARTICLES; i++) ages[i] = Math.random();
+
+instancedGeom.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
+instancedGeom.setAttribute('age',    new THREE.InstancedBufferAttribute(ages, 1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute vec3 offset;
+    attribute float age;
+    varying float vAlpha;
+
+    void main() {
+      // position from instance offset
+      vec3 p = position + offset;
+
+      // gentle wave along rail — subtle undulation
+      float wave = sin(p.x * 0.4 + uTime * 0.5 + age * 6.28) * 0.02;
+      p.y += wave;
+
+      // pulse per-particle
+      float pulse = 0.7 + 0.3 * sin(uTime * 1.5 + age * 40.0);
+      vAlpha = 0.6 * pulse;
+
+      // LED amber glow: brighter at center, dimmer at edges
+      // distance from Y=0 (center rail height)
+      float centerDist = abs(offset.y) / 9.0;
+      vAlpha *= mix(1.0, 0.4, smoothstep(0.0, 1.0, centerDist));
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+
+    void main() {
+      // LED amber on black
+      vec3 amber = vec3(1.0, 0.65, 0.2);
+      gl_FragColor = vec4(amber * vAlpha, vAlpha);
+    }
+  `
+});
+
+const lines = new THREE.LineSegments(instancedGeom, mat);
+scene.add(lines);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// --- rail warping logic ---
+function updateRailTargets() {
+  if (!mousePresent) {
+    // no presence → all rails return to parallel (zero offset)
+    for (let r = 0; r < RAIL_COUNT; r++) {
+      for (let cp = 0; cp < RAIL_CONTROL_POINTS; cp++) {
+        rails[r].targetOffsets[cp] = 0;
+      }
+    }
+    return;
+  }
+
+  // mouse projects onto XY plane at Z=0
+  const mouseWorldX = mouseX * (RAIL_WIDTH * 0.5);
+  const mouseWorldY = mouseY * (RAIL_HEIGHT * 0.5);
+
+  // presence warps rails: control points near mouse position pull inward (figure distortion)
+  const influenceRadius = 4.5;
+  const warpStrength = 1.8;
+
+  for (let r = 0; r < RAIL_COUNT; r++) {
+    const rail = rails[r];
+    const yDist = Math.abs(rail.y - mouseWorldY);
+    const yFalloff = Math.exp(-yDist * yDist / (influenceRadius * influenceRadius));
+
+    for (let cp = 0; cp < RAIL_CONTROL_POINTS; cp++) {
+      const cpX = (cp / (RAIL_CONTROL_POINTS - 1)) * RAIL_WIDTH - RAIL_WIDTH * 0.5;
+      const xDist = Math.abs(cpX - mouseWorldX);
+      const xFalloff = Math.exp(-xDist * xDist / (influenceRadius * influenceRadius));
+      const influence = yFalloff * xFalloff;
+
+      // pull control point toward mouse X (creating a concave warp)
+      const offset = (mouseWorldX - cpX) * influence * warpStrength;
+      rail.targetOffsets[cp] = offset;
+    }
+  }
+}
+
+// smooth rail offsets toward targets (snap-back when presence moves)
+function smoothRails(dt) {
+  const snapSpeed = 3.5; // fast snap-back when mouse leaves or moves
+  for (let r = 0; r < RAIL_COUNT; r++) {
+    const rail = rails[r];
+    for (let cp = 0; cp < RAIL_CONTROL_POINTS; cp++) {
+      const diff = rail.targetOffsets[cp] - rail.controlOffsets[cp];
+      rail.controlOffsets[cp] += diff * snapSpeed * dt;
+    }
+  }
+}
+
+// interpolate control-point offsets to get X-offset at any position along rail
+function getRailOffset(rail, x) {
+  const t = (x + RAIL_WIDTH * 0.5) / RAIL_WIDTH; // 0..1
+  const idx = t * (RAIL_CONTROL_POINTS - 1);
+  const i0 = Math.floor(idx);
+  const i1 = Math.min(i0 + 1, RAIL_CONTROL_POINTS - 1);
+  const frac = idx - i0;
+  const offset0 = rail.controlOffsets[i0];
+  const offset1 = rail.controlOffsets[i1];
+  return offset0 + (offset1 - offset0) * frac;
+}
+
+const start = performance.now();
+let lastT = 0;
+
+function loop() {
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  const dt = Math.min(t - lastT, 0.1);
+  lastT = t;
+  uniforms.uTime.value = t;
+
+  updateRailTargets();
+  smoothRails(dt);
+
+  // update particle positions: drift along rail + wrap
+  for (let i = 0; i < TOTAL_PARTICLES; i++) {
+    const p = particles[i];
+    p.x += p.speed * dt;
+    if (p.x > RAIL_WIDTH * 0.5) p.x -= RAIL_WIDTH;
+    if (p.x < -RAIL_WIDTH * 0.5) p.x += RAIL_WIDTH;
+
+    const rail = rails[p.rail];
+    const xOffset = getRailOffset(rail, p.x);
+
+    offsets[i * 3]     = p.x + xOffset;
+    offsets[i * 3 + 1] = rail.y;
+    offsets[i * 3 + 2] = 0;
+  }
+
+  instancedGeom.attributes.offset.needsUpdate = true;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
