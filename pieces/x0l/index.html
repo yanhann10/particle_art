@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>x0l · physarum slime-mold · agent trail network</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">x0l · physarum slime-mold · agent trail network</div>
+<div class="hint">click to pause/resume</div>
+<div class="src">descended from 2iy · physarum agent steering + pheromone feedback</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Sage Jenson (mxsage) physarum slime-mold agent-based system.
+// Each agent deposits pheromone into a 2D texture, senses ahead-left/ahead/ahead-right,
+// steers toward strongest signal. Pheromone texture has diffusion + decay.
+// Render the accumulated trail as the visual — organic web structure.
+
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0e, 1);
+document.body.appendChild(renderer.domElement);
+
+// ─────────── physarum parameters
+const AGENT_COUNT = 12000;
+const SENSOR_ANGLE = 0.42;      // ±22.5° sensor offset
+const SENSOR_DIST = 9.0;        // how far ahead to sense
+const TURN_SPEED = 0.48;        // radians per step when turning
+const MOVE_SPEED = 1.8;         // pixels per step
+const DEPOSIT = 5.0;            // pheromone strength per deposit
+const DECAY = 0.92;             // per-frame trail decay
+const DIFFUSE = 0.14;           // diffusion blur weight
+
+// ─────────── texture setup (ping-pong render targets for pheromone field)
+const W = 1024, H = 1024;
+const rtA = new THREE.WebGLRenderTarget(W, H, {
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.FloatType,
+});
+const rtB = new THREE.WebGLRenderTarget(W, H, {
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat,
+  type: THREE.FloatType,
+});
+let readRT = rtA, writeRT = rtB;
+
+// ─────────── agents (x, y, angle)
+const agents = new Float32Array(AGENT_COUNT * 3);
+for (let i = 0; i < AGENT_COUNT; i++){
+  const angle = Math.random() * Math.PI * 2;
+  const r = 80 + Math.random() * 60;
+  const x = W * 0.5 + Math.cos(angle) * r;
+  const y = H * 0.5 + Math.sin(angle) * r;
+  agents[i * 3]     = x;
+  agents[i * 3 + 1] = y;
+  agents[i * 3 + 2] = angle + (Math.random() - 0.5) * 0.4;
+}
+
+// ─────────── shader: deposit agents as white dots onto pheromone field
+const depositGeo = new THREE.BufferGeometry();
+const depositPos = new Float32Array(AGENT_COUNT * 3);
+const depositUV = new Float32Array(AGENT_COUNT * 2);
+for (let i = 0; i < AGENT_COUNT; i++){
+  depositPos[i * 3] = depositPos[i * 3 + 1] = depositPos[i * 3 + 2] = 0;
+  depositUV[i * 2] = depositUV[i * 2 + 1] = 0;
+}
+depositGeo.setAttribute('position', new THREE.BufferAttribute(depositPos, 3));
+depositGeo.setAttribute('uv', new THREE.BufferAttribute(depositUV, 2));
+
+const depositMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+      gl_PointSize = 3.0;
+    }
+  `,
+  fragmentShader: `
+    uniform float uDeposit;
+    void main(){
+      float d = length(gl_PointCoord - 0.5);
+      if (d > 0.5) discard;
+      gl_FragColor = vec4(uDeposit, 0.0, 0.0, 1.0);
+    }
+  `,
+  uniforms: { uDeposit: { value: DEPOSIT } },
+  blending: THREE.AdditiveBlending,
+  depthTest: false,
+  depthWrite: false,
+  transparent: true,
+});
+const depositPoints = new THREE.Points(depositGeo, depositMat);
+const depositScene = new THREE.Scene();
+depositScene.add(depositPoints);
+
+// ─────────── shader: diffuse + decay pass
+const diffuseGeo = new THREE.PlaneGeometry(2, 2);
+const diffuseMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTrail;
+    uniform vec2 uRes;
+    uniform float uDecay;
+    uniform float uDiffuse;
+    varying vec2 vUv;
+    void main(){
+      vec2 px = 1.0 / uRes;
+      float c = texture2D(tTrail, vUv).r;
+      float blur = 0.0;
+      blur += texture2D(tTrail, vUv + vec2(-px.x, 0.0)).r;
+      blur += texture2D(tTrail, vUv + vec2( px.x, 0.0)).r;
+      blur += texture2D(tTrail, vUv + vec2(0.0, -px.y)).r;
+      blur += texture2D(tTrail, vUv + vec2(0.0,  px.y)).r;
+      blur *= 0.25;
+      float val = mix(c, blur, uDiffuse) * uDecay;
+      gl_FragColor = vec4(val, 0.0, 0.0, 1.0);
+    }
+  `,
+  uniforms: {
+    tTrail: { value: null },
+    uRes: { value: new THREE.Vector2(W, H) },
+    uDecay: { value: DECAY },
+    uDiffuse: { value: DIFFUSE },
+  },
+  depthTest: false,
+  depthWrite: false,
+});
+const diffuseMesh = new THREE.Mesh(diffuseGeo, diffuseMat);
+const diffuseScene = new THREE.Scene();
+diffuseScene.add(diffuseMesh);
+
+// ─────────── shader: display pass (color-map the pheromone field)
+const displayGeo = new THREE.PlaneGeometry(2, 2);
+const displayMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTrail;
+    varying vec2 vUv;
+    void main(){
+      float val = texture2D(tTrail, vUv).r;
+      float brightness = smoothstep(0.0, 1.2, val);
+      // warm organic palette: amber to pale yellow on dark
+      vec3 col = mix(vec3(0.04, 0.04, 0.06), vec3(0.92, 0.86, 0.68), brightness);
+      col = mix(col, vec3(0.98, 0.94, 0.82), smoothstep(0.8, 1.0, brightness));
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+  uniforms: { tTrail: { value: null } },
+  depthTest: false,
+  depthWrite: false,
+});
+const displayMesh = new THREE.Mesh(displayGeo, displayMat);
+const displayScene = new THREE.Scene();
+displayScene.add(displayMesh);
+
+// ─────────── read pheromone field from GPU (we sample the texture CPU-side)
+const pheromonePixels = new Float32Array(W * H * 4);
+function samplePheromone(x, y){
+  const ix = Math.floor(x), iy = Math.floor(y);
+  if (ix < 0 || ix >= W || iy < 0 || iy >= H) return 0;
+  return pheromonePixels[(iy * W + ix) * 4];
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(){
+  if (!paused){
+    // read current pheromone field into CPU buffer
+    renderer.readRenderTargetPixels(readRT, 0, 0, W, H, pheromonePixels);
+
+    // agent motor + sensor stage
+    for (let i = 0; i < AGENT_COUNT; i++){
+      let x = agents[i * 3];
+      let y = agents[i * 3 + 1];
+      let angle = agents[i * 3 + 2];
+
+      // sense ahead-left, ahead, ahead-right
+      const sL = samplePheromone(
+        x + Math.cos(angle - SENSOR_ANGLE) * SENSOR_DIST,
+        y + Math.sin(angle - SENSOR_ANGLE) * SENSOR_DIST
+      );
+      const sC = samplePheromone(
+        x + Math.cos(angle) * SENSOR_DIST,
+        y + Math.sin(angle) * SENSOR_DIST
+      );
+      const sR = samplePheromone(
+        x + Math.cos(angle + SENSOR_ANGLE) * SENSOR_DIST,
+        y + Math.sin(angle + SENSOR_ANGLE) * SENSOR_DIST
+      );
+
+      // steering: turn toward strongest signal
+      if (sC > sL && sC > sR){
+        // continue straight
+      } else if (sC < sL && sC < sR){
+        // center is weakest: random turn
+        angle += (Math.random() - 0.5) * TURN_SPEED * 2;
+      } else if (sR > sL){
+        angle += TURN_SPEED;
+      } else if (sL > sR){
+        angle -= TURN_SPEED;
+      } else {
+        // tie: small random
+        angle += (Math.random() - 0.5) * TURN_SPEED * 0.5;
+      }
+
+      // move forward
+      x += Math.cos(angle) * MOVE_SPEED;
+      y += Math.sin(angle) * MOVE_SPEED;
+
+      // bounce at boundaries
+      if (x < 0 || x >= W){
+        x = Math.max(0, Math.min(W - 1, x));
+        angle = Math.PI - angle + (Math.random() - 0.5) * 0.3;
+      }
+      if (y < 0 || y >= H){
+        y = Math.max(0, Math.min(H - 1, y));
+        angle = -angle + (Math.random() - 0.5) * 0.3;
+      }
+
+      agents[i * 3] = x;
+      agents[i * 3 + 1] = y;
+      agents[i * 3 + 2] = angle;
+    }
+
+    // deposit: update point positions in NDC
+    for (let i = 0; i < AGENT_COUNT; i++){
+      const x = agents[i * 3];
+      const y = agents[i * 3 + 1];
+      depositPos[i * 3]     = (x / W) * 2 - 1;
+      depositPos[i * 3 + 1] = (y / H) * 2 - 1;
+      depositPos[i * 3 + 2] = 0;
+    }
+    depositGeo.attributes.position.needsUpdate = true;
+
+    // render deposit onto writeRT (additive)
+    renderer.setRenderTarget(writeRT);
+    renderer.render(depositScene, camera);
+
+    // diffuse + decay: read from writeRT, write to readRT
+    diffuseMat.uniforms.tTrail.value = writeRT.texture;
+    renderer.setRenderTarget(readRT);
+    renderer.render(diffuseScene, camera);
+
+    // swap
+    [readRT, writeRT] = [writeRT, readRT];
+  }
+
+  // display the trail texture to screen
+  displayMat.uniforms.tTrail.value = readRT.texture;
+  renderer.setRenderTarget(null);
+  renderer.render(displayScene, camera);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
