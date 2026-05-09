@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h8r · confetti burst · surprise pause-then-explode</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08080d; overflow:hidden;
+               color:#d8c895; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">h8r</div>
+<div class="hint">drag to orbit · click to pause/resume · wait for surprise</div>
+<div class="src">uis + confetti: orderly growth suddenly releases</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// SURPRISE: the ink-wash planes grow orderly for 8 seconds, then suddenly
+// freeze mid-motion and EXPLODE into colorful confetti — each plane shoots
+// outward radially with random rotation and a burst of hue. After 2s of
+// confetti chaos, the pieces gently fall and fade, then the cycle resets.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x08080d, 0.012);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080d, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+// ─────────── differential growth (3D)
+const MAX_VERTS = 1800;
+const ATTRACT   = 0.06;
+const REPEL_R   = 0.46;
+const REPEL_STR = 0.13;
+const NOISE     = 0.003;
+const PRESSURE  = 0.0028;
+const RISE      = 0.0042;
+const MAX_D     = 0.36;
+
+const verts = [];
+for (let i = 0; i < 18; i++){
+  const th = i / 18 * Math.PI * 2;
+  const r = 1.4 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+}
+
+const CELL = REPEL_R, grid = new Map();
+function key3(x, y, z){ return Math.floor(x/CELL)+','+Math.floor(y/CELL)+','+Math.floor(z/CELL); }
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i]; const k = key3(v.x, v.y, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++){
+    const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+function step(){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    for (const j of neighbors(v)){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d/REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x + b.x - 2*v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2*v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2*v.z) * ATTRACT;
+  }
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++){ cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x - cx, oy = verts[i].y - cy, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox/d) * PRESSURE;
+    dy[i] += (oy/d) * PRESSURE * 0.4;
+    dz[i] += (oz/d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[i].age;
+    const upward = RISE * (0.3 + 1.2 * Math.min(a * 1.5, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE;
+    verts[i].y += dy[i] + (Math.random()-0.5)*NOISE * 0.5 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE;
+    verts[i].age += 0.0014;
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if (ex*ex + ey*ey + ez*ez > MAX_D*MAX_D && verts.length + grown.length < MAX_VERTS){
+      grown.push({
+        x:(a.x+b.x)*0.5, y:(a.y+b.y)*0.5 - 0.05, z:(a.z+b.z)*0.5,
+        age: Math.max(a.age, b.age) * 0.5
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+for (let s = 0; s < 700; s++) step();
+addEventListener('click', () => { paused = !paused; });
+
+// ─────────── plane-sheet renderer WITH CONFETTI EXPLOSION
+const planeGeo = new THREE.PlaneGeometry(0.24, 0.24);
+const planeMat = new THREE.MeshBasicMaterial({
+  color: 0xe8dcc0,
+  transparent: true,
+  opacity: 0.08,
+  side: THREE.DoubleSide,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+
+const MAX_PLANES = MAX_VERTS * 5;
+const instancedPlanes = new THREE.InstancedMesh(planeGeo, planeMat, MAX_PLANES);
+instancedPlanes.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(instancedPlanes);
+
+const dummy = new THREE.Object3D();
+const upVec = new THREE.Vector3(0, 1, 0);
+
+// confetti state
+let confettiMode = false;
+let confettiStartTime = 0;
+const confetti = [];
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function updatePlanes(){
+  const n = verts.length;
+  if (n < 2) return;
+  let idx = 0;
+  for (let i = 0; i < n && idx < MAX_PLANES; i++){
+    const v = verts[i];
+    const prev = verts[(i - 1 + n) % n];
+    const next = verts[(i + 1) % n];
+    const tangent = new THREE.Vector3(
+      next.x - prev.x,
+      next.y - prev.y,
+      next.z - prev.z
+    ).normalize();
+    const normal = new THREE.Vector3().crossVectors(tangent, upVec).normalize();
+    if (normal.lengthSq() < 0.001) normal.set(1, 0, 0);
+    const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+
+    const numPlanes = 3 + Math.floor(Math.random() * 3);
+    for (let j = 0; j < numPlanes && idx < MAX_PLANES; j++){
+      const offsetScale = 0.08 + Math.random() * 0.14;
+      const offsetAngle = (j / numPlanes + Math.random() * 0.3) * Math.PI * 2;
+      const ox = normal.x * Math.cos(offsetAngle) + binormal.x * Math.sin(offsetAngle);
+      const oy = normal.y * Math.cos(offsetAngle) + binormal.y * Math.sin(offsetAngle);
+      const oz = normal.z * Math.cos(offsetAngle) + binormal.z * Math.sin(offsetAngle);
+      dummy.position.set(
+        v.x + ox * offsetScale,
+        v.y + oy * offsetScale,
+        v.z + oz * offsetScale
+      );
+      dummy.lookAt(
+        dummy.position.x + tangent.x,
+        dummy.position.y + tangent.y,
+        dummy.position.z + tangent.z
+      );
+      dummy.rotateZ((Math.random() - 0.5) * 0.6);
+      const s = 0.7 + Math.random() * 0.6;
+      dummy.scale.set(s, s, s);
+      dummy.updateMatrix();
+      instancedPlanes.setMatrixAt(idx, dummy.matrix);
+      idx++;
+    }
+  }
+  instancedPlanes.count = idx;
+  instancedPlanes.instanceMatrix.needsUpdate = true;
+}
+
+function triggerConfetti(){
+  confettiMode = true;
+  confettiStartTime = performance.now();
+  confetti.length = 0;
+  
+  // snapshot each plane into a confetti particle
+  const count = instancedPlanes.count;
+  for (let i = 0; i < count; i++){
+    const mat = new THREE.Matrix4();
+    instancedPlanes.getMatrixAt(i, mat);
+    const pos = new THREE.Vector3();
+    const quat = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    mat.decompose(pos, quat, scale);
+    
+    // radial explosion direction from centroid
+    let cx = 0, cy = 0, cz = 0;
+    for (const v of verts) { cx += v.x; cy += v.y; cz += v.z; }
+    cx /= verts.length; cy /= verts.length; cz /= verts.length;
+    
+    const dir = new THREE.Vector3(pos.x - cx, pos.y - cy, pos.z - cz).normalize();
+    const speed = 0.08 + Math.random() * 0.12;
+    
+    confetti.push({
+      pos: pos.clone(),
+      vel: dir.multiplyScalar(speed),
+      quat: quat.clone(),
+      spin: new THREE.Vector3(
+        (Math.random()-0.5)*0.2,
+        (Math.random()-0.5)*0.2,
+        (Math.random()-0.5)*0.2
+      ),
+      scale: scale.clone(),
+      hue: Math.random(),
+      alpha: 1.0
+    });
+  }
+}
+
+function updateConfetti(dt, elapsed){
+  const fadeStart = 1500; // ms
+  const fadeDuration = 800;
+  
+  for (let i = 0; i < confetti.length; i++){
+    const c = confetti[i];
+    c.pos.add(c.vel.clone().multiplyScalar(dt));
+    c.vel.y -= 0.002 * dt; // gravity
+    
+    const euler = new THREE.Euler().setFromQuaternion(c.quat);
+    euler.x += c.spin.x * dt;
+    euler.y += c.spin.y * dt;
+    euler.z += c.spin.z * dt;
+    c.quat.setFromEuler(euler);
+    
+    if (elapsed > fadeStart){
+      const fade = (elapsed - fadeStart) / fadeDuration;
+      c.alpha = Math.max(0, 1 - fade);
+    }
+    
+    dummy.position.copy(c.pos);
+    dummy.quaternion.copy(c.quat);
+    dummy.scale.copy(c.scale);
+    dummy.updateMatrix();
+    instancedPlanes.setMatrixAt(i, dummy.matrix);
+  }
+  
+  instancedPlanes.count = confetti.length;
+  instancedPlanes.instanceMatrix.needsUpdate = true;
+  
+  // update material color/opacity
+  if (confetti.length > 0){
+    const avgHue = confetti.reduce((sum, c) => sum + c.hue, 0) / confetti.length;
+    const avgAlpha = confetti.reduce((sum, c) => sum + c.alpha, 0) / confetti.length;
+    planeMat.color.setHSL(avgHue, 0.85, 0.65);
+    planeMat.opacity = avgAlpha * 0.3;
+  }
+}
+
+let startTime = performance.now();
+let lastTime = startTime;
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(now - lastTime, 100);
+  lastTime = now;
+  const elapsed = now - startTime;
+  
+  // SURPRISE TIMING: explode at 8s, reset at 11s
+  if (!confettiMode && elapsed > 8000){
+    triggerConfetti();
+  }
+  if (confettiMode && elapsed > 11000){
+    // reset
+    confettiMode = false;
+    startTime = now;
+    verts.length = 0;
+    for (let i = 0; i < 18; i++){
+      const th = i / 18 * Math.PI * 2;
+      const r = 1.4 + (Math.random() - 0.5) * 0.1;
+      verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+    }
+    for (let s = 0; s < 700; s++) step();
+    planeMat.color.set(0xe8dcc0);
+    planeMat.opacity = 0.08;
+  }
+  
+  if (confettiMode){
+    const confettiElapsed = now - confettiStartTime;
+    updateConfetti(dt, confettiElapsed);
+  } else {
+    for (let s = 0; s < 2; s++) step();
+    updatePlanes();
+    
+    // camera follow
+    let yMean = 0; for (const v of verts) yMean += v.y; yMean /= Math.max(verts.length, 1);
+    const targetY = Math.max(yMean, 2.0);
+    controls.target.y += (targetY - controls.target.y) * 0.04;
+    const desiredCamY = targetY + 4;
+    camera.position.y += (desiredCamY - camera.position.y) * 0.04;
+  }
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
