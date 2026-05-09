@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uji · Your Body Is A Space That Sees</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d2c54; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">uji</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Lia Halloran — Your Body Is A Space That Sees
+// Deep Prussian-blue cyanotype cosmos with white-glow stars and flowing brushstroke overlays.
+// Particles are distributed along a galactic band (Milky Way coordinate analogue) with sparse halos.
+// A second layer: animated brushstroke SDF (simplex-noise-driven growth/erosion) brightens particles where it touches.
+// Palette locked to cyanotype blue (#0d2c54) + paper-white (#f4f2ed).
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d2c54);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 0, 35);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Particle distribution: galactic plane + halo + core.
+// We use cylindrical coordinates (R, θ, Z) with most particles in |Z| < 2, R in [2, 18].
+// Milky Way band: concentrated along Z=0 with slight warp.
+const N_PARTICLES = 28000;
+const positions = new Float32Array(N_PARTICLES * 3);
+const seeds     = new Float32Array(N_PARTICLES);
+const types     = new Float32Array(N_PARTICLES);  // 0=band, 1=halo, 2=core
+
+for (let i = 0; i < N_PARTICLES; i++){
+  const roll = Math.random();
+  let x, y, z;
+  if (roll < 0.65){
+    // galactic band: concentrated along equatorial plane with slight warp
+    const theta = Math.random() * Math.PI * 2;
+    const r = 4 + Math.pow(Math.random(), 0.7) * 14;
+    const z_offset = Math.sin(theta * 3.2) * 0.8 + (Math.random() - 0.5) * 0.4;
+    x = r * Math.cos(theta);
+    y = (Math.random() - 0.5) * 1.2 + z_offset;
+    z = r * Math.sin(theta);
+    types[i] = 0;
+  } else if (roll < 0.90){
+    // halo: sparse, larger radius
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const r = 10 + Math.random() * 12;
+    x = r * Math.sin(phi) * Math.cos(theta);
+    y = r * Math.sin(phi) * Math.sin(theta);
+    z = r * Math.cos(phi);
+    types[i] = 1;
+  } else {
+    // core: dense center
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const r = Math.random() * 3;
+    x = r * Math.sin(phi) * Math.cos(theta);
+    y = r * Math.sin(phi) * Math.sin(theta);
+    z = r * Math.cos(phi);
+    types[i] = 2;
+  }
+  positions[i*3] = x;
+  positions[i*3+1] = y;
+  positions[i*3+2] = z;
+  seeds[i] = Math.random();
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('pType',    new THREE.BufferAttribute(types, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float pType;
+    varying float vBrightness;
+    varying float vType;
+
+    // simplex noise 2D
+    vec3 permute(vec3 x){ return mod(((x*34.0)+1.0)*x, 289.0); }
+    float snoise(vec2 v){
+      const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
+      vec2 i  = floor(v + dot(v, C.yy));
+      vec2 x0 = v -   i + dot(i, C.xx);
+      vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+      vec4 x12 = x0.xyxy + C.xxzz;
+      x12.xy -= i1;
+      i = mod(i, 289.0);
+      vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
+      vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+      m = m*m; m = m*m;
+      vec3 x = 2.0 * fract(p * C.www) - 1.0;
+      vec3 h = abs(x) - 0.5;
+      vec3 ox = floor(x + 0.5);
+      vec3 a0 = x - ox;
+      m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+      vec3 g;
+      g.x  = a0.x  * x0.x  + h.x  * x0.y;
+      g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+      return 130.0 * dot(m, g);
+    }
+
+    void main(){
+      vec3 p = position;
+      vType = pType;
+
+      // flowing brushstroke SDF: compute 2D position on projected plane + time
+      // The brushstroke is a vertical sinuous curve that drifts and pulses.
+      vec2 uv = p.xy * 0.08;
+      float t = uTime * 0.15 + seed * 6.28;
+      
+      // brushstroke center: a vertical curve that meanders horizontally
+      float brushX = sin(uv.y * 1.8 + uTime * 0.3) * 1.2 + cos(uv.y * 0.6 + uTime * 0.2) * 0.8;
+      
+      // add noise-driven erosion/growth: brushstroke width modulates with noise
+      float noiseVal = snoise(vec2(uv.y * 2.0 + uTime * 0.25, uTime * 0.18));
+      float brushWidth = 0.6 + noiseVal * 0.4;
+      
+      // distance from particle to brushstroke
+      float distToBrush = abs(uv.x - brushX);
+      
+      // brightness boost if within brushstroke
+      float brushMask = smoothstep(brushWidth + 0.3, brushWidth - 0.1, distToBrush);
+      
+      // base brightness: band stars brighter than halo
+      float baseBright = (pType < 0.5) ? 1.0 : 0.4;
+      if (pType > 1.5) baseBright = 1.2;  // core brighter
+      
+      vBrightness = baseBright * (0.5 + brushMask * 1.8);
+
+      // gentle drift: particles slowly rotate around Y axis and bob vertically
+      float angle = uTime * 0.08 + seed * 6.28;
+      mat3 rot = mat3(
+        cos(angle), 0.0, sin(angle),
+        0.0, 1.0, 0.0,
+        -sin(angle), 0.0, cos(angle)
+      );
+      p = rot * p;
+      p.y += sin(uTime * 0.5 + seed * 6.28) * 0.15;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      
+      // size: band stars smaller, halo dimmer/smaller, core medium
+      float baseSize = (pType < 0.5) ? 1.0 : 0.6;
+      if (pType > 1.5) baseSize = 0.9;
+      
+      gl_PointSize = baseSize * uPixel * (60.0 / dist) * (0.8 + seed * 0.4);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vBrightness;
+    varying float vType;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      
+      // Gaussian falloff
+      float a = exp(-r * 16.0) * vBrightness;
+      
+      // cyanotype paper-white: #f4f2ed = (0.957, 0.949, 0.929)
+      vec3 white = vec3(0.957, 0.949, 0.929);
+      
+      // slight warmth variation per particle type
+      if (vType < 0.5){
+        // band: pure white
+      } else if (vType < 1.5){
+        // halo: slight blue tint
+        white = mix(white, vec3(0.8, 0.85, 0.95), 0.2);
+      } else {
+        // core: slight yellow warmth (ferric tone)
+        white = mix(white, vec3(1.0, 0.98, 0.92), 0.15);
+      }
+      
+      gl_FragColor = vec4(white * a, a * 0.85);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Add a second subtle layer: faint overlay geometry that traces the brushstroke path as connected line segments.
+// This gives the piece a hand-drawn skeleton underneath the particle field.
+const brushVerts = [];
+for (let i = 0; i < 120; i++){
+  const y = (i / 119) * 36 - 18;
+  const t_sample = 0;  // will animate
+  const x = Math.sin(y * 0.15 + t_sample * 0.3) * 12;
+  const z = 0;
+  brushVerts.push(new THREE.Vector3(x, y, z));
+}
+const brushCurve = new THREE.CatmullRomCurve3(brushVerts);
+const brushGeom = new THREE.BufferGeometry().setFromPoints(brushCurve.getPoints(200));
+const brushMat = new THREE.LineBasicMaterial({ color: 0xf4f2ed, transparent: true, opacity: 0.08, depthWrite: false });
+const brushLine = new THREE.Line(brushGeom, brushMat);
+scene.add(brushLine);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // update brushstroke line geometry to animate the meander
+  for (let i = 0; i < brushVerts.length; i++){
+    const y = (i / (brushVerts.length - 1)) * 36 - 18;
+    const x = Math.sin(y * 0.15 + t * 0.3) * 12 + Math.cos(y * 0.05 + t * 0.2) * 4;
+    brushVerts[i].set(x, y, 0);
+  }
+  const newCurve = new THREE.CatmullRomCurve3(brushVerts);
+  brushGeom.setFromPoints(newCurve.getPoints(200));
+
+  // gentle camera bob
+  camera.position.y = Math.sin(t * 0.3) * 1.2;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
