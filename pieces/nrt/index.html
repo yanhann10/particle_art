@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nrt · process (Reas sphere-contact tessellation)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f8f6f2; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+</style>
+</head>
+<body>
+<div class="id">nrt</div>
+<div class="hint">orbiting agent-contact tessellation · accumulating ink</div>
+<div class="src">Reas · Process 18 · sphere-scaffold</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0, 16);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf8f6f2, 1);
+document.body.appendChild(renderer.domElement);
+
+/* --- Agent system --- */
+const N = 400;
+const agents = [];
+const sphereRadius = 5.0;
+const contactThreshold = 0.35;
+const quads = [];
+const maxQuads = 12000;
+
+class Agent {
+  constructor(){
+    // Random great-circle path on sphere
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const axis = new THREE.Vector3(
+      Math.sin(phi) * Math.cos(theta),
+      Math.sin(phi) * Math.sin(theta),
+      Math.cos(phi)
+    );
+    this.axis = axis.normalize();
+    this.angle = Math.random() * Math.PI * 2;
+    this.speed = 0.008 + Math.random() * 0.012;
+    this.radius = sphereRadius;
+    this.position = new THREE.Vector3();
+    this.prevPosition = new THREE.Vector3();
+    this.updatePosition();
+  }
+
+  updatePosition(){
+    this.prevPosition.copy(this.position);
+    // Rotate around axis on sphere surface
+    const perp1 = new THREE.Vector3();
+    const perp2 = new THREE.Vector3();
+    if (Math.abs(this.axis.y) < 0.9){
+      perp1.set(this.axis.z, 0, -this.axis.x).normalize();
+    } else {
+      perp1.set(0, this.axis.z, -this.axis.y).normalize();
+    }
+    perp2.crossVectors(this.axis, perp1).normalize();
+
+    this.position.copy(this.axis)
+      .multiplyScalar(this.radius * Math.cos(this.angle))
+      .addScaledVector(perp1, this.radius * Math.sin(this.angle));
+  }
+
+  step(){
+    this.angle += this.speed;
+    this.updatePosition();
+  }
+}
+
+for (let i = 0; i < N; i++){
+  agents.push(new Agent());
+}
+
+/* --- Quad geometry (accumulated contacts) --- */
+const quadGeom = new THREE.BufferGeometry();
+const quadPositions = new Float32Array(maxQuads * 4 * 3);
+const quadAlphas = new Float32Array(maxQuads * 4);
+quadGeom.setAttribute('position', new THREE.BufferAttribute(quadPositions, 3));
+quadGeom.setAttribute('alpha', new THREE.BufferAttribute(quadAlphas, 1));
+quadGeom.setDrawRange(0, 0);
+
+const quadMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    attribute float alpha;
+    varying float vAlpha;
+    void main(){
+      vAlpha = alpha;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      // Sumi-ink black with additive blending builds density
+      vec3 col = vec3(0.02, 0.02, 0.02);
+      gl_FragColor = vec4(col, vAlpha * 0.08);
+    }
+  `
+});
+
+const quadMesh = new THREE.Mesh(quadGeom, quadMat);
+scene.add(quadMesh);
+
+/* --- Agent points (scaffold visualization) --- */
+const agentGeom = new THREE.BufferGeometry();
+const agentPositions = new Float32Array(N * 3);
+agentGeom.setAttribute('position', new THREE.BufferAttribute(agentPositions, 3));
+const agentMat = new THREE.PointsMaterial({ size: 3, color: 0x080808, transparent: true, opacity: 0.15 });
+const agentPoints = new THREE.Points(agentGeom, agentMat);
+scene.add(agentPoints);
+
+/* --- Contact detection and quad spawning --- */
+function updateAgents(){
+  for (let i = 0; i < N; i++){
+    agents[i].step();
+    agentPositions[i * 3] = agents[i].position.x;
+    agentPositions[i * 3 + 1] = agents[i].position.y;
+    agentPositions[i * 3 + 2] = agents[i].position.z;
+  }
+  agentGeom.attributes.position.needsUpdate = true;
+
+  // Check contacts
+  for (let i = 0; i < N; i++){
+    for (let j = i + 1; j < N; j++){
+      const dist = agents[i].position.distanceTo(agents[j].position);
+      if (dist < contactThreshold && quads.length < maxQuads){
+        // Spawn quad connecting current and previous positions
+        const p1 = agents[i].position;
+        const p2 = agents[j].position;
+        const p1prev = agents[i].prevPosition;
+        const p2prev = agents[j].prevPosition;
+
+        // Quad vertices: p1, p1prev, p2prev, p2 (winding)
+        const idx = quads.length * 4 * 3;
+        quadPositions[idx]     = p1.x;
+        quadPositions[idx + 1] = p1.y;
+        quadPositions[idx + 2] = p1.z;
+
+        quadPositions[idx + 3] = p1prev.x;
+        quadPositions[idx + 4] = p1prev.y;
+        quadPositions[idx + 5] = p1prev.z;
+
+        quadPositions[idx + 6] = p2prev.x;
+        quadPositions[idx + 7] = p2prev.y;
+        quadPositions[idx + 8] = p2prev.z;
+
+        quadPositions[idx + 9]  = p2.x;
+        quadPositions[idx + 10] = p2.y;
+        quadPositions[idx + 11] = p2.z;
+
+        // Alpha grows over contact duration (simulated by initial spawn alpha)
+        const baseAlpha = 1.0;
+        const alphaIdx = quads.length * 4;
+        quadAlphas[alphaIdx]     = baseAlpha;
+        quadAlphas[alphaIdx + 1] = baseAlpha;
+        quadAlphas[alphaIdx + 2] = baseAlpha;
+        quadAlphas[alphaIdx + 3] = baseAlpha;
+
+        quads.push({ age: 0 });
+      }
+    }
+  }
+
+  if (quads.length > 0){
+    quadGeom.attributes.position.needsUpdate = true;
+    quadGeom.attributes.alpha.needsUpdate = true;
+    quadGeom.setDrawRange(0, quads.length * 4);
+  }
+}
+
+/* --- Slow fade-out (optional — enable for perpetual turnover) --- */
+function fadeQuads(){
+  // Age quads and fade oldest
+  for (let i = 0; i < quads.length; i++){
+    quads[i].age++;
+    const fadeStart = 6000;
+    if (quads[i].age > fadeStart){
+      const fadeAmount = Math.max(0, 1.0 - (quads[i].age - fadeStart) / 2000);
+      const alphaIdx = i * 4;
+      for (let j = 0; j < 4; j++){
+        quadAlphas[alphaIdx + j] = fadeAmount;
+      }
+    }
+  }
+  quadGeom.attributes.alpha.needsUpdate = true;
+}
+
+/* --- Orbit controls (manual drag) --- */
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = Math.PI / 2;
+const canvas = renderer.domElement;
+
+canvas.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi = Math.max(0.1, Math.min(Math.PI - 0.1, orbitPhi - (e.clientY - prevY) * 0.005));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  quadMat.uniforms.uTime.value = t;
+
+  updateAgents();
+
+  // Slow auto-orbit
+  const autoTheta = t * 0.05;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 16;
+
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
