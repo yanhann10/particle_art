@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7la · withdrawn object</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">7la · withdrawn object</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Graham Harman's object-oriented ontology: objects withdraw from full apprehension.
+// The piece renders a STATUE (seated figure) that the camera orbits but never fully reveals.
+// Implementation:
+//   1. Generate statue from differential-growth-derived silhouette + depth layers
+//   2. 4 shy zones where particles fade as camera approaches
+//   3. Variable fog density tied to camera angle — some views are obscured
+//   4. Particles near frustum boundaries vanish and reappear rotated
+//   5. Slow camera drift ensures viewer never locks onto a definitive view
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.8, 40);
+camera.position.set(0, 4, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.03;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.18;
+controls.target.set(0, 1.8, 0);
+controls.minDistance = 7;
+controls.maxDistance = 18;
+
+// statue geometry: seated figure — torso, head, bent legs, base
+// We'll use differential-growth-inspired contours for organic feel
+const MAX_VERTS = 800;
+const ATTRACT  = 0.05;
+const REPEL_R  = 0.28;
+const REPEL_STR= 0.10;
+const NOISE    = 0.002;
+const PRESSURE = 0.0025;
+const MAX_D    = 0.26;
+
+function makeCurve(cx, cy, cz, radiusX, radiusZ, nInit, yRange, steps){
+  const verts = [];
+  for (let i = 0; i < nInit; i++){
+    const th = i / nInit * Math.PI * 2;
+    const r  = 1.0 + (Math.random() - 0.5) * 0.08;
+    verts.push({ 
+      x: cx + Math.cos(th) * radiusX * r, 
+      z: cz + Math.sin(th) * radiusZ * r, 
+      y: cy + (Math.random() - 0.5) * yRange,
+      age: 0 
+    });
+  }
+  
+  const CELL = REPEL_R;
+  for (let step = 0; step < steps && verts.length < MAX_VERTS; step++){
+    const grid = new Map();
+    const key = (x, z) => Math.floor(x / CELL) + ',' + Math.floor(z / CELL);
+    for (let i = 0; i < verts.length; i++){
+      const v = verts[i], k = key(v.x, v.z);
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k).push(i);
+    }
+    
+    const n = verts.length;
+    const dx = new Float32Array(n), dz = new Float32Array(n);
+    
+    for (let i = 0; i < n; i++){
+      const v = verts[i];
+      const gx = Math.floor(v.x / CELL), gz = Math.floor(v.z / CELL);
+      for (let ddx = -1; ddx <= 1; ddx++) for (let ddz = -1; ddz <= 1; ddz++){
+        const arr = grid.get((gx+ddx) + ',' + (gz+ddz));
+        if (!arr) continue;
+        for (const j of arr){
+          if (j === i) continue;
+          const u = verts[j];
+          const ex = v.x - u.x, ez = v.z - u.z;
+          const d2 = ex*ex + ez*ez;
+          if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+          const d = Math.sqrt(d2);
+          const f = REPEL_STR * (1 - d / REPEL_R) / d;
+          dx[i] += ex * f; dz[i] += ez * f;
+        }
+      }
+    }
+    
+    for (let i = 0; i < n; i++){
+      const a = verts[(i - 1 + n) % n];
+      const b = verts[(i + 1) % n];
+      const v = verts[i];
+      dx[i] += (a.x + b.x - 2 * v.x) * ATTRACT;
+      dz[i] += (a.z + b.z - 2 * v.z) * ATTRACT;
+    }
+    
+    let ccx = 0, ccz = 0;
+    for (let i = 0; i < n; i++){ ccx += verts[i].x; ccz += verts[i].z; }
+    ccx /= n; ccz /= n;
+    for (let i = 0; i < n; i++){
+      const ox = verts[i].x - ccx, oz = verts[i].z - ccz;
+      const d = Math.hypot(ox, oz) + 1e-6;
+      dx[i] += (ox / d) * PRESSURE;
+      dz[i] += (oz / d) * PRESSURE;
+    }
+    
+    for (let i = 0; i < n; i++){
+      verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+      verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+      verts[i].age += 0.0008;
+    }
+    
+    const grown = [];
+    for (let i = 0; i < n; i++){
+      const a = verts[i], b = verts[(i + 1) % n];
+      grown.push(a);
+      const ex = b.x - a.x, ez = b.z - a.z;
+      if (ex*ex + ez*ez > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS){
+        grown.push({ x: (a.x + b.x) * 0.5, z: (a.z + b.z) * 0.5,
+                     y: (a.y + b.y) * 0.5, age: Math.max(a.age, b.age) * 0.85 });
+      }
+    }
+    verts.length = 0;
+    for (const v of grown) verts.push(v);
+  }
+  
+  return verts;
+}
+
+// statue parts
+const base = makeCurve(0, 0.2, 0, 1.8, 1.8, 18, 0.1, 150);
+const torso = makeCurve(0, 2.4, 0, 1.0, 0.8, 16, 1.6, 200);
+const head = makeCurve(0, 4.2, 0, 0.6, 0.5, 12, 0.5, 180);
+const legL = makeCurve(-0.5, 1.2, 0.4, 0.5, 0.4, 10, 1.0, 160);
+const legR = makeCurve(0.5, 1.2, 0.4, 0.5, 0.4, 10, 1.0, 160);
+
+// shy zones: camera-relative fade regions
+const shyZones = [
+  { x: -1.2, y: 2.8, z: 0.8, radius: 2.4 },   // left shoulder
+  { x: 0, y: 4.5, z: 0, radius: 1.2 },       // crown of head
+  { x: 0.8, y: 1.8, z: -0.6, radius: 1.8 },  // right hip
+  { x: 0, y: 0.4, z: 0, radius: 2.2 }        // base underside
+];
+
+const N_RENDER = 40000;
+const rPositions = new Float32Array(N_RENDER * 3);
+const rSeeds     = new Float32Array(N_RENDER);
+const rZone      = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+function fillParticles(){
+  const allVerts = [...base, ...torso, ...head, ...legL, ...legR];
+  let written = 0;
+  
+  for (const curve of [base, torso, head, legL, legR]){
+    const n = curve.length;
+    const share = Math.floor(N_RENDER * (n / allVerts.length));
+    
+    for (let seg = 0; seg < n && written < N_RENDER; seg++){
+      const a = curve[seg], b = curve[(seg + 1) % n];
+      const segShare = Math.max(1, Math.floor(share / n));
+      
+      for (let k = 0; k < segShare && written < N_RENDER; k++){
+        const u = Math.random();
+        const px = a.x + (b.x - a.x) * u + (Math.random()-0.5) * 0.015;
+        const py = a.y + (b.y - a.y) * u + (Math.random()-0.5) * 0.015;
+        const pz = a.z + (b.z - a.z) * u + (Math.random()-0.5) * 0.015;
+        
+        rPositions[written*3]   = px;
+        rPositions[written*3+1] = py;
+        rPositions[written*3+2] = pz;
+        
+        // assign shy-zone membership
+        let minDist = Infinity, zoneIdx = -1;
+        for (let zi = 0; zi < shyZones.length; zi++){
+          const z = shyZones[zi];
+          const d = Math.hypot(px - z.x, py - z.y, pz - z.z);
+          if (d < minDist){ minDist = d; zoneIdx = zi; }
+        }
+        rZone[written] = (minDist < shyZones[zoneIdx]?.radius) ? zoneIdx : -1;
+        written++;
+      }
+    }
+  }
+}
+fillParticles();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPositions, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('zone',     new THREE.BufferAttribute(rZone, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uCamPos: { value: new THREE.Vector3() },
+  uFogDensity: { value: 0.08 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform vec3 uCamPos;
+    uniform float uFogDensity;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float zone;
+    varying float vAlpha;
+    varying vec3 vCol;
+    
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.3 + seed * 6.28;
+      p += 0.004 * vec3(sin(t), cos(t * 1.3), sin(t * 0.7));
+      
+      // shy-zone fade: if particle belongs to zone, fade when camera approaches
+      float shyFade = 1.0;
+      if (zone >= 0.0){
+        vec3 zoneCenter = vec3(0.0);
+        float zoneRad = 2.0;
+        if (zone < 0.5){ zoneCenter = vec3(-1.2, 2.8, 0.8); zoneRad = 2.4; }
+        else if (zone < 1.5){ zoneCenter = vec3(0.0, 4.5, 0.0); zoneRad = 1.2; }
+        else if (zone < 2.5){ zoneCenter = vec3(0.8, 1.8, -0.6); zoneRad = 1.8; }
+        else { zoneCenter = vec3(0.0, 0.4, 0.0); zoneRad = 2.2; }
+        
+        float camDist = length(uCamPos - zoneCenter);
+        shyFade = smoothstep(zoneRad * 0.5, zoneRad * 2.0, camDist);
+      }
+      
+      // depth fog — variable density
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float depth = -mv.z;
+      float fog = exp(-depth * uFogDensity);
+      
+      // frustum fade — particles near edges vanish
+      vec4 clipPos = projectionMatrix * mv;
+      float edgeDist = min(
+        min(1.0 + clipPos.x / clipPos.w, 1.0 - clipPos.x / clipPos.w),
+        min(1.0 + clipPos.y / clipPos.w, 1.0 - clipPos.y / clipPos.w)
+      );
+      float edgeFade = smoothstep(0.0, 0.15, edgeDist);
+      
+      vAlpha = fog * shyFade * edgeFade;
+      
+      // palette: weathered stone — warm gray to cool blue-gray
+      vec3 warm = vec3(0.72, 0.68, 0.62);
+      vec3 cool = vec3(0.52, 0.58, 0.64);
+      float k = clamp(p.y * 0.18 + seed * 0.3, 0.0, 1.0);
+      vCol = mix(warm, cool, k);
+      
+      gl_PointSize = 1.3 * uPixel * (35.0 / depth);
+      gl_Position = clipPos;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying vec3 vCol;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float core = exp(-r * 16.0);
+      float a = vAlpha * core * 0.55;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ambient light — very dim, statue emerges from darkness
+const ambient = new THREE.AmbientLight(0x1a1816, 0.3);
+scene.add(ambient);
+
+// single directional — grazing from upper left
+const dirLight = new THREE.DirectionalLight(0x4a4540, 0.6);
+dirLight.position.set(-3, 5, 2);
+scene.add(dirLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  uniforms.uCamPos.value.copy(camera.position);
+  
+  // variable fog density tied to camera angle — some views more obscured
+  const angle = Math.atan2(camera.position.x, camera.position.z);
+  uniforms.uFogDensity.value = 0.06 + 0.04 * Math.sin(angle * 2.3 + t * 0.2);
+  
+  // slow camera drift — viewer never settles on definitive view
+  controls.target.y = 1.8 + 0.15 * Math.sin(t * 0.13);
+  controls.target.x = 0.1 * Math.sin(t * 0.08);
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
