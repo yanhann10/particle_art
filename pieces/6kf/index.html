@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6kf · nest of you</title>
+<!-- MOTION: orbiting, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">6kf · nest of you</div>
+<div class="hint">move pointer · the nest remembers</div>
+<div class="src">wang & söderström · metaball accretion</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0e, 1);
+renderer.shadowMap.enabled = false;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a0e, 0.012);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 3, 18);
+camera.lookAt(0, 0, 0);
+
+// hemispherical ambient + key directional for pearl-sheen
+const ambLight = new THREE.HemisphereLight(0xc4c2d8, 0x1a1620, 0.6);
+scene.add(ambLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.85);
+dirLight.position.set(4, 8, 5);
+scene.add(dirLight);
+const rimLight = new THREE.DirectionalLight(0xb8a8d8, 0.4);
+rimLight.position.set(-3, -2, -6);
+scene.add(rimLight);
+
+// attractor state: current pointer-derived target position
+const attractor = { x: 0, y: 0, z: 0 };
+let pointerX = 0, pointerY = 0;
+
+addEventListener('pointermove', (e) => {
+  pointerX = ((e.clientX / innerWidth) - 0.5) * 16.0;
+  pointerY = -((e.clientY / innerHeight) - 0.5) * 12.0;
+});
+
+// metaball blob geometry: each an instanced sphere
+const sphereGeom = new THREE.SphereGeometry(1, 16, 12);
+const blobCount = 80;
+const blobMat = new THREE.MeshStandardMaterial({
+  color: 0xd8d3e8,
+  metalness: 0.32,
+  roughness: 0.25,
+  emissive: 0xb8a8d8,
+  emissiveIntensity: 0.08,
+  transparent: false
+});
+const blobMesh = new THREE.InstancedMesh(sphereGeom, blobMat, blobCount);
+scene.add(blobMesh);
+
+// per-blob state
+const blobs = [];
+for (let i = 0; i < blobCount; i++){
+  const angle = (i / blobCount) * Math.PI * 2;
+  const rad = 3.0 + Math.random() * 2.0;
+  blobs.push({
+    x: Math.cos(angle) * rad,
+    y: (Math.random() - 0.5) * 2.0,
+    z: Math.sin(angle) * rad,
+    vx: 0, vy: 0, vz: 0,
+    phase: Math.random() * Math.PI * 2,
+    size: 0.6 + Math.random() * 0.4,
+    speed: 0.0,
+    stuck: false,
+    stuckTime: 0
+  });
+}
+
+// trail residue: small spheres left behind when blob slows
+const trailGeom = new THREE.SphereGeometry(1, 8, 6);
+const trailMat = new THREE.MeshStandardMaterial({
+  color: 0xa896c8,
+  metalness: 0.5,
+  roughness: 0.4,
+  emissive: 0x6e5a88,
+  emissiveIntensity: 0.12,
+  transparent: true,
+  opacity: 0.75
+});
+const maxTrail = 200;
+const trailMesh = new THREE.InstancedMesh(trailGeom, trailMat, maxTrail);
+scene.add(trailMesh);
+const trails = [];
+for (let i = 0; i < maxTrail; i++){
+  trails.push({ x: 0, y: 0, z: 0, size: 0, age: 0, active: false });
+}
+let trailIndex = 0;
+
+const dummy = new THREE.Object3D();
+const tempMat = new THREE.Matrix4();
+
+// spawn a trail blob
+function spawnTrail(x, y, z, size){
+  trails[trailIndex] = { x, y, z, size: size * 0.6, age: 0, active: true };
+  trailIndex = (trailIndex + 1) % maxTrail;
+}
+
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+
+  // ease attractor toward pointer
+  attractor.x += (pointerX - attractor.x) * 0.08;
+  attractor.y += (pointerY - attractor.y) * 0.08;
+  attractor.z += (0.0 - attractor.z) * 0.08;
+
+  // update blobs: orbit + attractor seek
+  blobs.forEach((b, i) => {
+    const dx = attractor.x - b.x;
+    const dy = attractor.y - b.y;
+    const dz = attractor.z - b.z;
+    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+
+    // orbital drift + attractor pull
+    const orbitSpeed = 0.4 + Math.sin(b.phase + now * 0.0003) * 0.2;
+    const tangentX = -b.z * orbitSpeed;
+    const tangentZ =  b.x * orbitSpeed;
+
+    const pullStr = dist > 0 ? 1.2 / (dist + 1.0) : 0;
+    b.vx += (dx * pullStr + tangentX * 0.3) * dt * 8.0;
+    b.vy += (dy * pullStr) * dt * 8.0;
+    b.vz += (dz * pullStr + tangentZ * 0.3) * dt * 8.0;
+
+    // damping
+    b.vx *= 0.92;
+    b.vy *= 0.92;
+    b.vz *= 0.92;
+
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.z += b.vz * dt;
+
+    // measure speed
+    b.speed = Math.sqrt(b.vx*b.vx + b.vy*b.vy + b.vz*b.vz);
+
+    // stick logic: when slow near attractor, stick
+    if (dist < 2.5 && b.speed < 0.8 && !b.stuck){
+      b.stuck = true;
+      b.stuckTime = now;
+      spawnTrail(b.x, b.y, b.z, b.size);
+    }
+    // shed after 2s stuck
+    if (b.stuck && (now - b.stuckTime) > 2000){
+      b.stuck = false;
+      // kick outward gently
+      const angle = Math.random() * Math.PI * 2;
+      b.vx += Math.cos(angle) * 1.2;
+      b.vz += Math.sin(angle) * 1.2;
+      b.vy += (Math.random() - 0.5) * 0.6;
+    }
+
+    // visual size throb when stuck
+    const targetSize = b.stuck ? b.size * 1.3 : b.size;
+    const renderSize = b.size + (targetSize - b.size) * 0.1;
+
+    dummy.position.set(b.x, b.y, b.z);
+    dummy.scale.setScalar(renderSize);
+    dummy.updateMatrix();
+    blobMesh.setMatrixAt(i, dummy.matrix);
+  });
+  blobMesh.instanceMatrix.needsUpdate = true;
+
+  // update trail blobs: fade over 6s
+  trails.forEach((t, i) => {
+    if (!t.active) {
+      dummy.position.set(0, 0, 0);
+      dummy.scale.set(0, 0, 0);
+      dummy.updateMatrix();
+      trailMesh.setMatrixAt(i, dummy.matrix);
+      return;
+    }
+    t.age += dt;
+    if (t.age > 6.0){
+      t.active = false;
+      return;
+    }
+    const fade = 1.0 - (t.age / 6.0);
+    const scale = t.size * (0.3 + fade * 0.7);
+    dummy.position.set(t.x, t.y, t.z);
+    dummy.scale.setScalar(scale);
+    dummy.updateMatrix();
+    trailMesh.setMatrixAt(i, dummy.matrix);
+  });
+  trailMesh.instanceMatrix.needsUpdate = true;
+
+  // camera gentle orbit around nest centroid
+  const camAngle = now * 0.00015;
+  const camRadius = 18.0 + Math.sin(now * 0.0004) * 2.0;
+  camera.position.x = Math.sin(camAngle) * camRadius;
+  camera.position.z = Math.cos(camAngle) * camRadius;
+  camera.position.y = 3.0 + Math.sin(now * 0.0003) * 1.5;
+  camera.lookAt(attractor.x * 0.3, attractor.y * 0.3, attractor.z * 0.3);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+loop();
+</script>
+</body>
+</html>
