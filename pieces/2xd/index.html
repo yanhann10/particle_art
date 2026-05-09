@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2xd · Saraceno web scan</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">2xd</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 400);
+camera.position.set(0, 0, 35);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+// anchor nodes — sparse 3D volume
+const ANCHORS = 280;
+const VOLUME = 28;
+const anchors = [];
+for (let i = 0; i < ANCHORS; i++) {
+  anchors.push(new THREE.Vector3(
+    (Math.random()-0.5) * VOLUME,
+    (Math.random()-0.5) * VOLUME * 0.6,
+    (Math.random()-0.5) * VOLUME
+  ));
+}
+
+// spring velocities for breath
+const velocities = anchors.map(() => new THREE.Vector3(0,0,0));
+const restPositions = anchors.map(a => a.clone());
+
+// compute edges: connect each anchor to 2–4 nearest, plus a few long-range
+const edges = [];
+const MAX_LOCAL = 4;
+const MAX_DIST = 9;
+for (let i = 0; i < ANCHORS; i++) {
+  const distances = [];
+  for (let j = 0; j < ANCHORS; j++) {
+    if (i === j) continue;
+    distances.push({ idx: j, dist: anchors[i].distanceTo(anchors[j]) });
+  }
+  distances.sort((a,b) => a.dist - b.dist);
+  const nLocal = Math.floor(2 + Math.random() * 3);
+  for (let k = 0; k < Math.min(nLocal, distances.length); k++) {
+    if (distances[k].dist < MAX_DIST && Math.random() < 0.85) {
+      edges.push([i, distances[k].idx]);
+    }
+  }
+}
+
+// add ~15 long-range guy-lines
+for (let g = 0; g < 15; g++) {
+  const a = Math.floor(Math.random() * ANCHORS);
+  const b = Math.floor(Math.random() * ANCHORS);
+  if (a !== b) edges.push([a, b]);
+}
+
+// de-duplicate edges
+const edgeSet = new Set();
+const uniqueEdges = [];
+for (const [a,b] of edges) {
+  const key = a < b ? `${a},${b}` : `${b},${a}`;
+  if (!edgeSet.has(key)) {
+    edgeSet.add(key);
+    uniqueEdges.push([a,b]);
+  }
+}
+
+// render edges as LineSegments
+const linePositions = new Float32Array(uniqueEdges.length * 6);
+for (let i = 0; i < uniqueEdges.length; i++) {
+  const [a, b] = uniqueEdges[i];
+  linePositions[i*6]   = anchors[a].x;
+  linePositions[i*6+1] = anchors[a].y;
+  linePositions[i*6+2] = anchors[a].z;
+  linePositions[i*6+3] = anchors[b].x;
+  linePositions[i*6+4] = anchors[b].y;
+  linePositions[i*6+5] = anchors[b].z;
+}
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+const lineMat = new THREE.LineBasicMaterial({ color: 0xaabbc8, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending });
+const lineMesh = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lineMesh);
+
+// anchor nodes as tiny sprites
+const nodeGeom = new THREE.BufferGeometry();
+const nodePositions = new Float32Array(ANCHORS * 3);
+for (let i = 0; i < ANCHORS; i++) {
+  nodePositions[i*3]   = anchors[i].x;
+  nodePositions[i*3+1] = anchors[i].y;
+  nodePositions[i*3+2] = anchors[i].z;
+}
+nodeGeom.setAttribute('position', new THREE.BufferAttribute(nodePositions, 3));
+const nodeMat = new THREE.PointsMaterial({ color: 0xd4dfe8, size: 0.25, transparent: true, opacity: 0.65, blending: THREE.AdditiveBlending });
+const nodePoints = new THREE.Points(nodeGeom, nodeMat);
+scene.add(nodePoints);
+
+// light: single dim point
+const light = new THREE.PointLight(0x8899aa, 0.12, 120);
+light.position.set(12, 20, 20);
+scene.add(light);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// breathing web physics
+function updateAnchors(t, dt) {
+  const SPRING = 0.02;
+  const DAMPING = 0.92;
+  const WIND = 0.008;
+  for (let i = 0; i < ANCHORS; i++) {
+    const restForce = restPositions[i].clone().sub(anchors[i]).multiplyScalar(SPRING);
+    const windForce = new THREE.Vector3(
+      Math.sin(t * 0.4 + i * 0.3) * WIND,
+      Math.cos(t * 0.3 + i * 0.5) * WIND,
+      Math.sin(t * 0.5 + i * 0.7) * WIND
+    );
+    velocities[i].add(restForce).add(windForce).multiplyScalar(DAMPING);
+    anchors[i].add(velocities[i]);
+  }
+}
+
+function updateGeometry() {
+  const nodePos = nodeGeom.attributes.position.array;
+  for (let i = 0; i < ANCHORS; i++) {
+    nodePos[i*3]   = anchors[i].x;
+    nodePos[i*3+1] = anchors[i].y;
+    nodePos[i*3+2] = anchors[i].z;
+  }
+  nodeGeom.attributes.position.needsUpdate = true;
+
+  const linePos = lineGeom.attributes.position.array;
+  for (let i = 0; i < uniqueEdges.length; i++) {
+    const [a, b] = uniqueEdges[i];
+    linePos[i*6]   = anchors[a].x;
+    linePos[i*6+1] = anchors[a].y;
+    linePos[i*6+2] = anchors[a].z;
+    linePos[i*6+3] = anchors[b].x;
+    linePos[i*6+4] = anchors[b].y;
+    linePos[i*6+5] = anchors[b].z;
+  }
+  lineGeom.attributes.position.needsUpdate = true;
+}
+
+// centroid tracking
+function centroid() {
+  const c = new THREE.Vector3(0,0,0);
+  for (const a of anchors) c.add(a);
+  c.divideScalar(ANCHORS);
+  return c;
+}
+
+const start = performance.now();
+let lastT = 0;
+function loop() {
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  const dt = (now - lastT) / 1000;
+  lastT = now;
+
+  updateAnchors(t, dt);
+  updateGeometry();
+
+  // camera dolly through web — slow figure-8 orbit
+  const c = centroid();
+  camera.position.x = c.x + 18 * Math.cos(t * 0.08);
+  camera.position.y = c.y + 8 * Math.sin(t * 0.06);
+  camera.position.z = c.z + 32 + 10 * Math.sin(t * 0.05);
+  camera.lookAt(c);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
