@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zs1 · blind camera · sound-to-silhouette</title>
+<!-- MOTION: emergence, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#d4cbb5; overflow:hidden;
+               color:#5a5445; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">zs1 · blind camera · sound-to-silhouette</div>
+<div class="hint">click to start/stop microphone · city remembered through noise</div>
+<div class="src">diego trujillo pisanty · lumen prize 2024</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Diego Trujillo Pisanty 'Blind Camera' — neural hallucinations of Mexico City
+// reconstructed from ambient sound. Particle field where FFT spectral bins pull
+// points into emergent silhouettes (street vendor, building edge, traffic flow)
+// before dispersing. Geometry that feels like a city remembered through its noise.
+// Fallback: synthetic audio (sine chirps + Perlin) when mic unavailable.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0xd4cbb5, 8, 36);
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 1.8, 12);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xd4cbb5, 1);
+document.body.appendChild(renderer.domElement);
+
+// sun-bleached concrete palette + smog ochre
+const light1 = new THREE.DirectionalLight(0xfff8e8, 0.9);
+light1.position.set(3, 6, 4);
+scene.add(light1);
+scene.add(new THREE.AmbientLight(0xc9a873, 0.7));
+
+// depth-warped ground plane — concrete surface
+const groundGeo = new THREE.PlaneGeometry(28, 28, 60, 60);
+const groundMat = new THREE.MeshStandardMaterial({
+  color: 0xb5aa92,
+  roughness: 0.9,
+  metalness: 0.0,
+  flatShading: false,
+});
+const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+groundMesh.rotation.x = -Math.PI / 2;
+groundMesh.position.y = -1.5;
+const posArr = groundGeo.attributes.position.array;
+for (let i = 0; i < posArr.length; i += 3){
+  const x = posArr[i], y = posArr[i+1];
+  const d = Math.hypot(x, y);
+  posArr[i+2] = Math.sin(d * 0.12) * 0.3 - d * 0.02; // depth warp
+}
+groundGeo.attributes.position.needsUpdate = true;
+groundGeo.computeVertexNormals();
+scene.add(groundMesh);
+
+// paper-grain texture overlay (film imperfection)
+const grainCanvas = document.createElement('canvas');
+grainCanvas.width = 512; grainCanvas.height = 512;
+const gctx = grainCanvas.getContext('2d');
+const imgData = gctx.createImageData(512, 512);
+for (let i = 0; i < imgData.data.length; i += 4){
+  const v = Math.random() * 80;
+  imgData.data[i] = imgData.data[i+1] = imgData.data[i+2] = v;
+  imgData.data[i+3] = 25;
+}
+gctx.putImageData(imgData, 0, 0);
+const grainTex = new THREE.CanvasTexture(grainCanvas);
+grainTex.wrapS = grainTex.wrapT = THREE.RepeatWrapping;
+grainTex.repeat.set(4, 4);
+const grainMat = new THREE.MeshBasicMaterial({
+  map: grainTex,
+  transparent: true,
+  opacity: 0.12,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+const grainQuad = new THREE.Mesh(new THREE.PlaneGeometry(50, 50), grainMat);
+grainQuad.position.z = -5;
+scene.add(grainQuad);
+
+// ─────────── particle field (point cloud)
+const N_PARTICLES = 4200;
+const particles = [];
+const pGeo = new THREE.BufferGeometry();
+const pPos = new Float32Array(N_PARTICLES * 3);
+const pCol = new Float32Array(N_PARTICLES * 3);
+
+// seed positions: scattered horizontally, slight vertical spread
+for (let i = 0; i < N_PARTICLES; i++){
+  const angle = Math.random() * Math.PI * 2;
+  const r = 2 + Math.random() * 7;
+  const x = Math.cos(angle) * r;
+  const y = -0.5 + Math.random() * 4;
+  const z = Math.sin(angle) * r;
+  particles.push({
+    x, y, z,
+    homeX: x, homeY: y, homeZ: z,
+    vx: 0, vy: 0, vz: 0,
+  });
+  pPos[i*3] = x; pPos[i*3+1] = y; pPos[i*3+2] = z;
+  // base color: smog ochre + concrete gray
+  const t = Math.random();
+  pCol[i*3]   = 0.6 + t*0.2;
+  pCol[i*3+1] = 0.5 + t*0.2;
+  pCol[i*3+2] = 0.3 + t*0.1;
+}
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
+const pMat = new THREE.PointsMaterial({
+  size: 0.06,
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.75,
+  sizeAttenuation: true,
+  blending: THREE.NormalBlending,
+});
+const pMesh = new THREE.Points(pGeo, pMat);
+scene.add(pMesh);
+
+// ─────────── audio (mic or synthetic fallback)
+let audioCtx, analyser, dataArray, micActive = false;
+const FFT_SIZE = 512;
+const N_BINS = FFT_SIZE / 2;
+
+// synthetic audio fallback: sine chirps + Perlin noise envelope
+let synthTime = 0;
+function noise1D(x){
+  const X = Math.floor(x);
+  const t = x - X;
+  const fade = t * t * (3 - 2 * t);
+  const a = Math.sin(X * 12.9898 + 78.233) * 43758.5453;
+  const b = Math.sin((X+1) * 12.9898 + 78.233) * 43758.5453;
+  return (a - Math.floor(a)) * (1 - fade) + (b - Math.floor(b)) * fade;
+}
+function getSynthFFT(){
+  const arr = new Uint8Array(N_BINS);
+  synthTime += 0.016;
+  for (let i = 0; i < N_BINS; i++){
+    const freq = i / N_BINS;
+    // low-freq traffic rumble + mid chirps + high vendor calls
+    let val = 0;
+    val += 60 * (1 - freq) * (0.5 + 0.5 * Math.sin(synthTime * 1.2 + i * 0.1));
+    val += 80 * Math.exp(-Math.pow((freq - 0.3), 2) / 0.02) * (0.6 + 0.4 * noise1D(synthTime * 2 + i * 0.05));
+    val += 50 * Math.exp(-Math.pow((freq - 0.7), 2) / 0.01) * (0.5 + 0.5 * Math.sin(synthTime * 4 + i * 0.2));
+    arr[i] = Math.min(255, Math.max(0, val));
+  }
+  return arr;
+}
+
+async function startMic(){
+  if (micActive) { micActive = false; return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = FFT_SIZE;
+    source.connect(analyser);
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+    micActive = true;
+  } catch(e){
+    console.warn('Mic unavailable, using synthetic audio:', e);
+    micActive = false;
+  }
+}
+addEventListener('click', startMic);
+
+// attractor zones: 6 spectral bands define spatial regions
+const attractors = [
+  { freq: 0.08, x: -3.5, y: 1.2, z: 2.0, r: 2.5 },  // low rumble → left building edge
+  { freq: 0.18, x: 2.0, y: 0.5, z: 3.0, r: 2.2 },   // mid-low → street vendor stall
+  { freq: 0.32, x: 0.0, y: 2.5, z: 0.0, r: 3.0 },   // mid → overhead wires
+  { freq: 0.50, x: 3.5, y: 0.8, z: -2.0, r: 2.0 },  // mid-high → traffic flow
+  { freq: 0.68, x: -2.5, y: 1.5, z: -3.0, r: 1.8 }, // high → radio chatter
+  { freq: 0.85, x: 1.0, y: 3.2, z: 1.5, r: 1.5 },   // very high → bird call / whistle
+];
+
+function getFFTData(){
+  if (micActive && analyser){
+    analyser.getByteFrequencyData(dataArray);
+    return dataArray;
+  } else {
+    return getSynthFFT();
+  }
+}
+
+// emergence narrative: particles drift toward attractors when FFT bins are loud,
+// coalesce into silhouettes (street scene), then disperse as sound fades
+const ATTRACT_STRENGTH = 0.012;
+const DAMPING = 0.92;
+const RETURN_HOME = 0.003;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  const fft = getFFTData();
+
+  // map FFT bins to attractor strengths
+  const strengths = attractors.map(att => {
+    const idx = Math.floor(att.freq * N_BINS);
+    return fft[idx] / 255.0;
+  });
+
+  // update particles
+  for (let i = 0; i < N_PARTICLES; i++){
+    const p = particles[i];
+    // attractor forces
+    for (let j = 0; j < attractors.length; j++){
+      const att = attractors[j];
+      const str = strengths[j];
+      if (str < 0.15) continue; // only pull when sound is present
+      const dx = att.x - p.x, dy = att.y - p.y, dz = att.z - p.z;
+      const d = Math.hypot(dx, dy, dz) + 0.1;
+      if (d < att.r){
+        const force = ATTRACT_STRENGTH * str * (1 - d / att.r);
+        p.vx += (dx / d) * force;
+        p.vy += (dy / d) * force;
+        p.vz += (dz / d) * force;
+      }
+    }
+    // return to home (dispersal)
+    p.vx += (p.homeX - p.x) * RETURN_HOME;
+    p.vy += (p.homeY - p.y) * RETURN_HOME;
+    p.vz += (p.homeZ - p.z) * RETURN_HOME;
+    // damping
+    p.vx *= DAMPING; p.vy *= DAMPING; p.vz *= DAMPING;
+    // integrate
+    p.x += p.vx; p.y += p.vy; p.z += p.vz;
+    pPos[i*3] = p.x; pPos[i*3+1] = p.y; pPos[i*3+2] = p.z;
+  }
+  pGeo.attributes.position.needsUpdate = true;
+
+  // camera slow lateral drift (remembering a city walk)
+  camera.position.x = Math.sin(t * 0.08) * 1.2;
+  camera.position.y = 1.8 + Math.sin(t * 0.12) * 0.3;
+  camera.lookAt(0, 1, 0);
+
+  // ground subtle rise/fall with low-freq energy
+  const lowEnergy = fft[Math.floor(0.1 * N_BINS)] / 255.0;
+  groundMesh.position.y = -1.5 + lowEnergy * 0.15;
+
+  // grain texture slow scroll
+  grainTex.offset.x = (t * 0.002) % 1;
+  grainTex.offset.y = (t * 0.003) % 1;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
