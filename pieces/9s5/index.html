@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9s5 · critical foliation</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0d0f; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">9s5</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Folded-leaf arrangement: 7 distinct leaf elements in a small bouquet ── */
+/* Each leaf is a curved sheet with a calligraphic mid-vein and curling edges */
+
+function createLeafCurve(twistIntensity, curlDir, lengthScale){
+  const points = [];
+  const segs = 40;
+  for (let i = 0; i <= segs; i++){
+    const t = i / segs;
+    const u = t * lengthScale;
+    /* base curve — slight spiral upward */
+    const x = u * Math.cos(u * twistIntensity * Math.PI);
+    const y = u * 1.2;
+    const z = u * Math.sin(u * twistIntensity * Math.PI);
+    points.push(new THREE.Vector3(x, y, z));
+  }
+  return new THREE.CatmullRomCurve3(points);
+}
+
+function buildLeafGeometry(curve, widthFunc, segments){
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+  const steps = segments;
+  const rows = 9; // width subdivisions
+  
+  for (let i = 0; i <= steps; i++){
+    const t = i / steps;
+    const pt = curve.getPointAt(t);
+    const tangent = curve.getTangentAt(t);
+    const normal = new THREE.Vector3(0, 1, 0);
+    const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+    const width = widthFunc(t);
+    
+    for (let j = 0; j <= rows; j++){
+      const s = (j / rows) * 2 - 1; // -1 to 1
+      /* edge curl — edges lift and twist */
+      const edgeFactor = Math.abs(s);
+      const edgeLift = edgeFactor * edgeFactor * 0.3;
+      const edgeTwist = edgeFactor * 0.15 * Math.sin(t * Math.PI * 3);
+      
+      const offset = binormal.clone().multiplyScalar(s * width);
+      offset.y += edgeLift;
+      offset.x += edgeTwist;
+      
+      const p = pt.clone().add(offset);
+      positions.push(p.x, p.y, p.z);
+      uvs.push(t, (s + 1) / 2);
+    }
+  }
+  
+  for (let i = 0; i < steps; i++){
+    for (let j = 0; j < rows; j++){
+      const a = i * (rows + 1) + j;
+      const b = a + rows + 1;
+      indices.push(a, b, a + 1);
+      indices.push(b, b + 1, a + 1);
+    }
+  }
+  
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
+}
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0d0f, 0.035);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(6, 4, 10);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0d0f, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 3, 0);
+controls.maxDistance = 25;
+
+/* ── Palette: warm amber on near-black (El Anatsui continuation) ── */
+const leafColor1 = new THREE.Color(0.78, 0.58, 0.30); // ochre
+const leafColor2 = new THREE.Color(0.92, 0.72, 0.44); // pale gold
+const leafColor3 = new THREE.Color(0.58, 0.40, 0.26); // sienna
+const leafColor4 = new THREE.Color(0.88, 0.68, 0.38); // amber
+const veinColor = new THREE.Color(0.42, 0.28, 0.18);
+
+const uniforms = {
+  uTime: { value: 0 },
+  uColor: { value: leafColor1 },
+  uVeinColor: { value: veinColor },
+  uReady: { value: 0 },
+};
+
+const leafMat = new THREE.ShaderMaterial({
+  uniforms,
+  side: THREE.DoubleSide,
+  transparent: true,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uReady;
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    varying vec3 vPos;
+    
+    void main(){
+      vUv = uv;
+      vNormal = normalize(normalMatrix * normal);
+      vec3 p = position;
+      
+      /* gentle breathing motion */
+      float breath = sin(uTime * 0.4 + p.y * 0.3) * 0.03;
+      p.x += breath;
+      p.z += breath * 0.6;
+      
+      /* reveal animation — leaves unfurl from center */
+      vec3 center = vec3(0.0, 3.0, 0.0);
+      p = mix(center, p, smoothstep(0.0, 1.0, uReady));
+      
+      vPos = p;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    uniform vec3 uVeinColor;
+    uniform float uTime;
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    varying vec3 vPos;
+    
+    void main(){
+      /* mid-vein — calligraphic dark line */
+      float veinWidth = 0.008 + 0.004 * sin(vUv.x * 20.0);
+      float vein = smoothstep(veinWidth, 0.0, abs(vUv.y - 0.5));
+      
+      /* edge darkening */
+      float edgeDist = abs(vUv.y - 0.5) * 2.0;
+      float edgeDarken = pow(edgeDist, 1.8) * 0.3;
+      
+      /* subtle color variation along leaf length */
+      vec3 col = mix(uColor * 0.85, uColor * 1.1, vUv.x);
+      col = mix(col, uVeinColor, vein);
+      col *= (1.0 - edgeDarken);
+      
+      /* faint shimmer */
+      float shimmer = 0.08 * sin(vUv.x * 15.0 + uTime * 0.6);
+      col += shimmer;
+      
+      /* lighting — simple diffuse */
+      vec3 light = normalize(vec3(0.5, 1.0, 0.8));
+      float diff = max(0.0, dot(vNormal, light)) * 0.5 + 0.5;
+      col *= diff;
+      
+      /* alpha — edges slightly transparent */
+      float alpha = 0.92 - edgeDist * 0.15;
+      
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+/* ── Build 7 distinct folded-leaf elements ── */
+const leafGroup = new THREE.Group();
+
+const leafConfigs = [
+  { twist: 2.2, length: 3.8, width: t => 0.5 * Math.sin(t * Math.PI), 
+    pos: [0, 0.5, 0], rot: [0.1, 0, 0], col: leafColor1 },
+  { twist: 1.8, length: 3.2, width: t => 0.42 * Math.sin(t * Math.PI), 
+    pos: [1.2, 1.0, -0.8], rot: [0.2, 0.8, 0.3], col: leafColor2 },
+  { twist: 2.6, length: 4.2, width: t => 0.58 * Math.sin(t * Math.PI), 
+    pos: [-1.0, 0.8, 0.6], rot: [-0.15, -0.6, -0.2], col: leafColor3 },
+  { twist: 1.5, length: 2.8, width: t => 0.38 * Math.sin(t * Math.PI * 1.2), 
+    pos: [0.6, 2.2, 1.2], rot: [0.3, 0.4, 0.5], col: leafColor4 },
+  { twist: 2.0, length: 3.5, width: t => 0.48 * Math.sin(t * Math.PI), 
+    pos: [-0.9, 1.8, -1.0], rot: [-0.25, -0.9, -0.4], col: leafColor1 },
+  { twist: 2.4, length: 3.0, width: t => 0.44 * Math.sin(t * Math.PI), 
+    pos: [1.5, 0.3, 0.9], rot: [0.15, 1.2, 0.2], col: leafColor2 },
+  { twist: 1.7, length: 3.6, width: t => 0.52 * Math.sin(t * Math.PI), 
+    pos: [-0.3, 2.8, 0.2], rot: [-0.1, -0.3, 0.6], col: leafColor3 },
+];
+
+for (const cfg of leafConfigs){
+  const curve = createLeafCurve(cfg.twist, 1, cfg.length);
+  const geom = buildLeafGeometry(curve, cfg.width, 48);
+  const mat = leafMat.clone();
+  mat.uniforms.uColor.value = cfg.col;
+  mat.uniforms.uVeinColor.value = veinColor;
+  mat.uniforms.uTime = uniforms.uTime;
+  mat.uniforms.uReady = uniforms.uReady;
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.position.set(...cfg.pos);
+  mesh.rotation.set(...cfg.rot);
+  leafGroup.add(mesh);
+}
+
+scene.add(leafGroup);
+
+/* ── Ambient light ── */
+const ambient = new THREE.AmbientLight(0xffffff, 0.4);
+scene.add(ambient);
+const point = new THREE.PointLight(0xffeedd, 0.8, 30);
+point.position.set(4, 6, 5);
+scene.add(point);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let revealStart = start;
+
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+  uniforms.uReady.value = Math.min(1.0, (now - revealStart) / 2800);
+  
+  /* camera drift — very gentle orbit */
+  const drift = Math.sin(elapsed * 0.15) * 0.3;
+  controls.target.x = drift * 0.4;
+  controls.target.y = 3 + drift * 0.2;
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
