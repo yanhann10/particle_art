@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bu2 · wabi-sabi attractor · imperfect beauty</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em;
+           font-family: "Courier New", monospace; }
+</style>
+</head>
+<body>
+<div class="id">bu2</div>
+<div class="hint">click to age · wabi-sabi · leonard koren</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Wabi-sabi morph: the glitch attractor becomes weathered, aged, asymmetric.
+// Replace digital corruption with organic decay — particles fade unevenly,
+// palette shifts to earthen tones, gaps emerge in the flow, camera drift slows.
+// Click advances "seasons" — each click ages the system, introducing more
+// imperfection, more silence, more negative space.
+
+const W = 256, H = 256;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+function makeInitTexture(){
+  const init = new Float32Array(N * 4);
+  for (let i = 0; i < N; i++){
+    init[i*4]   = (Math.random() - 0.5) * 8;
+    init[i*4+1] = (Math.random() - 0.5) * 8;
+    init[i*4+2] = 27 + (Math.random() - 0.5) * 8;
+    init[i*4+3] = Math.random();
+  }
+  const t = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+  t.needsUpdate = true; return t;
+}
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: makeInitTexture() } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+
+blitMat.uniforms.tex.value = makeInitTexture();
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(rtB); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt:   { value: 0.0 },
+  uSeason: { value: 0.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uSeason;
+    varying vec2 vUv;
+
+    vec3 lorenz(vec3 p){
+      return vec3(10.0*(p.y-p.x), p.x*(28.0-p.z)-p.y, p.x*p.y - (8.0/3.0)*p.z);
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      
+      // wabi-sabi: slow the flow as seasons advance
+      float decay = 1.0 - uSeason * 0.15;
+      
+      vec3 dp = lorenz(p) * decay;
+      p += dp * uDt * 0.15;
+      
+      // age particles unevenly — some age faster (imperfection)
+      float ageRate = 0.06 + fract(sin(dot(vUv, vec2(12.9898, 78.233))) * 43758.5453) * 0.03;
+      age = mod(age + uDt * ageRate, 1.0);
+      
+      // as seasons advance, some particles "die" — reset to far state
+      float deathThreshold = 0.95 + uSeason * 0.01;
+      if (age > deathThreshold && uSeason > 1.0){
+        p = vec3((fract(sin(vUv.x*127.1+vUv.y*311.7)*43758.5453)-0.5)*12.0,
+                 (fract(sin(vUv.x*269.5+vUv.y*183.3)*43758.5453)-0.5)*12.0,
+                 27.0 + (fract(sin(vUv.x*419.2+vUv.y*371.9)*43758.5453)-0.5)*12.0);
+        age = 0.0;
+      }
+      
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// ─────────────────────────── render scene ───────────────────────────
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 50);
+camera.position.set(0, 1.2, 6);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+// wabi-sabi state
+let season = 0.0;
+let seasonTarget = 0.0;
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtA.texture },
+    uPixel: { value: 1.0 },
+    uSeason: { value: 0.0 },
+    uTime:   { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uSeason;
+    uniform float uTime;
+    attribute vec2 uvIdx;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vAge;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vAge = age;
+
+      // map Lorenz → unit cube with more space (wabi-sabi breathing room)
+      vec3 disp = (p - vec3(0, 0, 25.0)) / 28.0;
+
+      // asymmetry: slight random offset based on particle id
+      float idNoise = fract(sin(dot(uvIdx, vec2(12.9898, 78.233))) * 43758.5453);
+      disp.x += sin(idNoise * 6.28 + uTime * 0.1) * 0.05 * uSeason;
+      disp.y += cos(idNoise * 6.28 + uTime * 0.08) * 0.05 * uSeason;
+
+      // earthen palette (clay, rust, stone, aged wood)
+      vec3 pal[4];
+      pal[0] = vec3(0.42, 0.32, 0.28);  // clay
+      pal[1] = vec3(0.58, 0.42, 0.32);  // rust
+      pal[2] = vec3(0.48, 0.46, 0.42);  // stone
+      pal[3] = vec3(0.28, 0.24, 0.22);  // aged wood
+
+      // age determines color, but with imperfection
+      float colorIdx = mod(age * 4.0 + idNoise * 0.3, 4.0);
+      int idx = int(colorIdx);
+      float blend = fract(colorIdx);
+      int nextIdx = int(mod(float(idx) + 1.0, 4.0));
+      vec3 col = mix(pal[idx], pal[nextIdx], blend * 0.3);
+
+      // fade older particles unevenly
+      float fadeStart = 0.7 - uSeason * 0.1;
+      float alpha = 1.0;
+      if (age > fadeStart){
+        float fadeRange = 1.0 - fadeStart;
+        float fadeProg = (age - fadeStart) / fadeRange;
+        // uneven fade based on particle id
+        float fadeNoise = idNoise * 0.5 + 0.5;
+        alpha = 1.0 - fadeProg * fadeNoise;
+      }
+
+      // gaps emerge: hide some particles as seasons advance
+      if (idNoise < uSeason * 0.15){
+        alpha = 0.0;
+      }
+
+      vCol = col;
+      vAlpha = alpha;
+
+      vec4 mv = modelViewMatrix * vec4(disp, 1.0);
+      
+      // varied point sizes (wabi-sabi irregularity)
+      float sizeVar = 0.8 + idNoise * 0.6;
+      gl_PointSize = 3.0 * uPixel * sizeVar;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vAge;
+    void main(){
+      if (vAlpha < 0.01) discard;
+      
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      
+      // soft irregular edge (not perfect circle)
+      float edgeSoft = smoothstep(0.5, 0.35, r);
+      
+      gl_FragColor = vec4(vCol * edgeSoft * vAlpha, edgeSoft * vAlpha);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// advance seasons on click
+addEventListener('click', () => {
+  seasonTarget = Math.min(6.0, seasonTarget + 1.0);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+
+  // smooth season transition
+  season += (seasonTarget - season) * dt * 0.5;
+
+  pointsMat.uniforms.uTime.value = now / 1000;
+  pointsMat.uniforms.uSeason.value = season;
+  simUniforms.uSeason.value = season;
+  simUniforms.uDt.value = dt;
+
+  // sim substeps decrease as seasons advance (slowing)
+  const substeps = Math.max(1, Math.floor(4 - season * 0.3));
+  for (let i = 0; i < substeps; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+
+  // slower, more contemplative camera drift
+  const ang = now * 0.00005;
+  camera.position.x = Math.sin(ang) * 6;
+  camera.position.z = Math.cos(ang) * 6;
+  camera.position.y = Math.sin(ang * 0.3) * 1.2;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
