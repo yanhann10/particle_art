@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ceb · cursive binary stream · typography cascade</title>
+<!-- MOTION: cascade, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f8f4e8; overflow:hidden;
+               color:#1a1612; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#1a1612; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">ceb</div>
+<div class="hint">language dissolving into binary — click to pause — scroll for depth</div>
+<div class="src">Sasha Stiles · Words Beyond Words · glyphs cascading between script and code</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Sasha Stiles piece: a cascading ribbon of typographic glyphs that periodically
+// dissolve into binary streams and re-coalesce. Each glyph is an instanced quad
+// with an SDF-like texture (we fake via canvas for self-containment). The ribbon
+// flows along a 3D Bezier path from upper-left to lower-right. Glyphs transition
+// from English characters → 0/1 binary → back. Black ink on cream paper.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf8f4e8);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+addEventListener('wheel', e => {
+  camera.position.z = Math.max(10, Math.min(50, camera.position.z + e.deltaY * 0.01));
+});
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─────────────────────────── glyph atlas (fake SDF via canvas)
+// We'll render a set of English letters and 0/1 binary digits into a texture atlas
+const GLYPHS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,;:!? '.split('');
+const BINARY = ['0','1'];
+const ATLAS_SIZE = 512;
+const COLS = 10, ROWS = 10;
+const CELL = ATLAS_SIZE / COLS;
+const atlasCanvas = document.createElement('canvas');
+atlasCanvas.width = ATLAS_SIZE; atlasCanvas.height = ATLAS_SIZE;
+const actx = atlasCanvas.getContext('2d');
+actx.fillStyle = '#f8f4e8';
+actx.fillRect(0, 0, ATLAS_SIZE, ATLAS_SIZE);
+actx.fillStyle = '#1a1612';
+actx.font = `${CELL * 0.65}px "Times New Roman", serif`;
+actx.textAlign = 'center'; actx.textBaseline = 'middle';
+
+const glyphMap = new Map();
+let idx = 0;
+for (const ch of GLYPHS){
+  if (idx >= COLS * ROWS) break;
+  const col = idx % COLS, row = Math.floor(idx / COLS);
+  actx.fillText(ch, col * CELL + CELL/2, row * CELL + CELL/2);
+  glyphMap.set(ch, { u0: col/COLS, v0: row/ROWS, u1: (col+1)/COLS, v1: (row+1)/ROWS });
+  idx++;
+}
+const atlasTexture = new THREE.CanvasTexture(atlasCanvas);
+atlasTexture.minFilter = THREE.LinearFilter;
+atlasTexture.magFilter = THREE.LinearFilter;
+
+function randomGlyph(){
+  return GLYPHS[Math.floor(Math.random() * GLYPHS.length)];
+}
+function randomBinary(){
+  return BINARY[Math.floor(Math.random() * BINARY.length)];
+}
+
+// ─────────────────────────── ribbon path (3D Bezier cascade)
+// Start upper-left, end lower-right, with a gentle S-curve in Z for depth
+const P0 = new THREE.Vector3(-12, 10, 5);
+const P1 = new THREE.Vector3(-4, 3, -8);
+const P2 = new THREE.Vector3(4, -3, 8);
+const P3 = new THREE.Vector3(12, -10, -5);
+
+function bezier3(t, p0, p1, p2, p3){
+  const u = 1 - t;
+  return p0.clone().multiplyScalar(u*u*u)
+    .add(p1.clone().multiplyScalar(3*u*u*t))
+    .add(p2.clone().multiplyScalar(3*u*t*t))
+    .add(p3.clone().multiplyScalar(t*t*t));
+}
+
+// ─────────────────────────── particle system (instanced quads)
+const N_PARTICLES = 1200;
+const geom = new THREE.InstancedBufferGeometry();
+const quadVerts = new Float32Array([
+  -0.5, -0.5, 0,
+   0.5, -0.5, 0,
+   0.5,  0.5, 0,
+  -0.5, -0.5, 0,
+   0.5,  0.5, 0,
+  -0.5,  0.5, 0
+]);
+const quadUVs = new Float32Array([
+  0, 0,
+  1, 0,
+  1, 1,
+  0, 0,
+  1, 1,
+  0, 1
+]);
+geom.setAttribute('position', new THREE.BufferAttribute(quadVerts, 3));
+geom.setAttribute('uv', new THREE.BufferAttribute(quadUVs, 2));
+
+const offsets = new Float32Array(N_PARTICLES * 3);
+const scales = new Float32Array(N_PARTICLES);
+const alphas = new Float32Array(N_PARTICLES);
+const atlasUV = new Float32Array(N_PARTICLES * 4); // u0, v0, u1, v1 per quad
+
+const particles = [];
+for (let i = 0; i < N_PARTICLES; i++){
+  const t = i / N_PARTICLES;
+  const pos = bezier3(t, P0, P1, P2, P3);
+  // random lateral displacement for ribbon width
+  const spread = 0.6 + Math.random() * 0.8;
+  pos.x += (Math.random() - 0.5) * spread;
+  pos.y += (Math.random() - 0.5) * spread * 0.5;
+  offsets[i*3] = pos.x;
+  offsets[i*3+1] = pos.y;
+  offsets[i*3+2] = pos.z;
+  scales[i] = 0.4 + Math.random() * 0.2;
+  alphas[i] = 0.7 + Math.random() * 0.3;
+  
+  const ch = randomGlyph();
+  const uv = glyphMap.get(ch) || glyphMap.get('A');
+  atlasUV[i*4]   = uv.u0;
+  atlasUV[i*4+1] = uv.v0;
+  atlasUV[i*4+2] = uv.u1;
+  atlasUV[i*4+3] = uv.v1;
+
+  particles.push({
+    index: i,
+    t,
+    basePos: pos.clone(),
+    phase: Math.random() * 10,
+    transitionTime: Math.random() * 8,
+    isBinary: false,
+    char: ch
+  });
+}
+
+geom.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
+geom.setAttribute('scale', new THREE.InstancedBufferAttribute(scales, 1));
+geom.setAttribute('alpha', new THREE.InstancedBufferAttribute(alphas, 1));
+geom.setAttribute('atlasUV', new THREE.InstancedBufferAttribute(atlasUV, 4));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uAtlas: { value: atlasTexture },
+    uTime: { value: 0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    attribute vec3 offset;
+    attribute float scale;
+    attribute float alpha;
+    attribute vec4 atlasUV;
+    varying vec2 vUV;
+    varying float vAlpha;
+    void main(){
+      vUV = mix(atlasUV.xy, atlasUV.zw, uv);
+      vAlpha = alpha;
+      vec3 pos = position * scale + offset;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uAtlas;
+    varying vec2 vUV;
+    varying float vAlpha;
+    void main(){
+      vec4 tex = texture2D(uAtlas, vUV);
+      float ink = 1.0 - tex.r; // black text on cream
+      if (ink < 0.1) discard;
+      gl_FragColor = vec4(0.1, 0.09, 0.07, ink * vAlpha);
+    }
+  `
+});
+const mesh = new THREE.InstancedMesh(geom, mat, N_PARTICLES);
+scene.add(mesh);
+
+// ─────────────────────────── particle state transitions
+// Each particle cycles: English glyph → dissolve to binary → re-coalesce to English
+function updateParticle(p, t){
+  p.phase += 0.012;
+  p.transitionTime += 0.012;
+  
+  // transition cycle: every 6–10 seconds a glyph transitions
+  const cycleDur = 7 + Math.sin(p.index * 0.3) * 2;
+  if (p.transitionTime > cycleDur){
+    p.transitionTime = 0;
+    p.isBinary = !p.isBinary;
+    if (p.isBinary){
+      p.char = randomBinary();
+    } else {
+      p.char = randomGlyph();
+    }
+    const uv = glyphMap.get(p.char) || glyphMap.get('A');
+    atlasUV[p.index*4]   = uv.u0;
+    atlasUV[p.index*4+1] = uv.v0;
+    atlasUV[p.index*4+2] = uv.u1;
+    atlasUV[p.index*4+3] = uv.v1;
+  }
+  
+  // gentle undulation perpendicular to ribbon
+  const wave = Math.sin(p.phase + t * 0.5) * 0.15;
+  offsets[p.index*3]   = p.basePos.x + wave;
+  offsets[p.index*3+1] = p.basePos.y + wave * 0.3;
+  offsets[p.index*3+2] = p.basePos.z;
+  
+  // fade during transition: collapse to binary means brief fade
+  const fadePulse = Math.sin(p.transitionTime / cycleDur * Math.PI * 2);
+  alphas[p.index] = (0.65 + fadePulse * 0.15) * (0.7 + Math.random() * 0.3);
+  
+  // scale flicker: binary digits slightly smaller
+  const targetScale = p.isBinary ? 0.35 : 0.5;
+  scales[p.index] += (targetScale - scales[p.index]) * 0.05;
+}
+
+// ─────────────────────────── animation loop
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  mat.uniforms.uTime.value = t;
+  
+  if (!paused){
+    for (const p of particles) updateParticle(p, t);
+    geom.attributes.offset.needsUpdate = true;
+    geom.attributes.alpha.needsUpdate = true;
+    geom.attributes.scale.needsUpdate = true;
+    geom.attributes.atlasUV.needsUpdate = true;
+  }
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
