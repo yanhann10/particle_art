@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vw3 · streamline partition field</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">vw3</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ────────────── scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1612);
+const camera = new THREE.OrthographicCamera(-10, 10, 10, -10, 0.1, 100);
+camera.position.set(0, 0, 10);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── Tyler Hobbs structured flow field
+// NON-OVERLAPPING streamlines via domain partitioning.
+// Divide canvas into 8 vertical lanes. Each lane has ONE dominant flow curve.
+// Particles within a lane follow their lane's curve. Lanes are separated by negative space.
+// Palette: warm earth (umber, terracotta, ochre, oxide red) + one cool (teal shadow).
+
+const LANES = 8;
+const PARTICLES_PER_LANE = 8000;
+const N = LANES * PARTICLES_PER_LANE;
+
+// define 8 flow curves — each is a parametric path (t ∈ [0,1])
+// curves are VERTICAL-dominant (like Subscapes vertical color bands) but with organic sway
+const flowCurves = [
+  // lane 0: gentle S-curve, left edge
+  (t) => new THREE.Vector3(-8.5 + 0.6 * Math.sin(t * Math.PI * 2), -9 + t * 18, 0),
+  // lane 1: straight with subtle wobble
+  (t) => new THREE.Vector3(-6.2 + 0.3 * Math.sin(t * Math.PI * 4.5), -9 + t * 18, 0),
+  // lane 2: rightward drift then return
+  (t) => new THREE.Vector3(-4.0 + 1.2 * Math.sin(t * Math.PI), -9 + t * 18, 0),
+  // lane 3: tight sine weave
+  (t) => new THREE.Vector3(-1.8 + 0.8 * Math.sin(t * Math.PI * 5), -9 + t * 18, 0),
+  // lane 4: leftward arc, slow return
+  (t) => new THREE.Vector3(0.5 - 1.0 * Math.cos(t * Math.PI), -9 + t * 18, 0),
+  // lane 5: strong rightward then snap left
+  (t) => new THREE.Vector3(2.8 + 1.4 * (Math.sin(t * Math.PI * 1.5) - 0.3 * t), -9 + t * 18, 0),
+  // lane 6: gentle curve, right-center
+  (t) => new THREE.Vector3(5.0 + 0.5 * Math.cos(t * Math.PI * 3), -9 + t * 18, 0),
+  // lane 7: straight vertical, right edge
+  (t) => new THREE.Vector3(7.5, -9 + t * 18, 0),
+];
+
+// assign each lane a dominant hue zone (warm earths + one cool accent)
+const lanePalettes = [
+  // raw umber dark
+  { base: new THREE.Color(0.28, 0.20, 0.14), highlight: new THREE.Color(0.42, 0.32, 0.22) },
+  // terracotta
+  { base: new THREE.Color(0.68, 0.35, 0.24), highlight: new THREE.Color(0.85, 0.48, 0.35) },
+  // ochre yellow
+  { base: new THREE.Color(0.75, 0.58, 0.28), highlight: new THREE.Color(0.92, 0.75, 0.42) },
+  // oxide red
+  { base: new THREE.Color(0.62, 0.24, 0.18), highlight: new THREE.Color(0.82, 0.38, 0.28) },
+  // cool teal accent (lane 4 — center, acts as visual anchor)
+  { base: new THREE.Color(0.22, 0.38, 0.42), highlight: new THREE.Color(0.32, 0.52, 0.58) },
+  // burnt sienna
+  { base: new THREE.Color(0.55, 0.28, 0.18), highlight: new THREE.Color(0.72, 0.42, 0.28) },
+  // warm cream
+  { base: new THREE.Color(0.82, 0.72, 0.58), highlight: new THREE.Color(0.95, 0.88, 0.75) },
+  // deep umber shadow
+  { base: new THREE.Color(0.18, 0.14, 0.10), highlight: new THREE.Color(0.32, 0.24, 0.18) },
+];
+
+const positions = new Float32Array(N * 3);
+const colors = new Float32Array(N * 3);
+const sizes = new Float32Array(N);
+const progress = new Float32Array(N);  // each particle's position along its curve [0..1]
+const speeds = new Float32Array(N);    // speed along curve (varies per particle)
+
+let idx = 0;
+for (let lane = 0; lane < LANES; lane++) {
+  const pal = lanePalettes[lane];
+  const curve = flowCurves[lane];
+  
+  for (let i = 0; i < PARTICLES_PER_LANE; i++) {
+    // distribute particles along the curve (not uniformly — cluster near t=0.3..0.7 for compositional weight)
+    const t0 = 0.15 + Math.pow(Math.random(), 1.5) * 0.70;
+    progress[idx] = t0;
+    
+    // speed variation: some particles move 2x faster, creates visible layering within lane
+    speeds[idx] = 0.008 + Math.random() * 0.012;
+    
+    const p = curve(t0);
+    // add small perpendicular offset (creates lane WIDTH, not just a line)
+    const perpOffset = (Math.random() - 0.5) * 0.35;
+    // perpendicular direction is roughly horizontal (dx small, dy large in curve)
+    const dx = curve(Math.min(t0 + 0.01, 1)).x - p.x;
+    const dy = curve(Math.min(t0 + 0.01, 1)).y - p.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    const perpX = -dy / len * perpOffset;
+    const perpY =  dx / len * perpOffset;
+    
+    positions[idx * 3]     = p.x + perpX;
+    positions[idx * 3 + 1] = p.y + perpY;
+    positions[idx * 3 + 2] = 0;
+    
+    // color: lerp between base and highlight based on vertical position + random grain
+    const colorMix = Math.pow(t0, 0.7) * 0.6 + Math.random() * 0.4;
+    const col = pal.base.clone().lerp(pal.highlight, colorMix);
+    colors[idx * 3]     = col.r;
+    colors[idx * 3 + 1] = col.g;
+    colors[idx * 3 + 2] = col.b;
+    
+    // size variation: particles near curve center are larger (oil-paint impasto effect)
+    const centerDist = Math.abs(perpOffset);
+    sizes[idx] = (2.2 - centerDist * 1.5) * (0.7 + Math.random() * 0.6);
+    
+    idx++;
+  }
+}
+
+// ────────────── geometry + shader
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+geom.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: { uPixel: { value: renderer.getPixelRatio() } },
+  vertexColors: true,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uPixel;
+    attribute float size;
+    varying vec3 vColor;
+    varying float vSize;
+    void main() {
+      vColor = color;
+      vSize = size;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * uPixel * 8.0;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vSize;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      // soft-edge disc (oil-paint brush stroke)
+      float edge = smoothstep(0.5, 0.35, r);
+      // add texture grain (simulates canvas weave)
+      float grain = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+      float alpha = edge * (0.75 + grain * 0.25);
+      if (alpha < 0.02) discard;
+      gl_FragColor = vec4(vColor * (0.9 + grain * 0.1), alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── animation: particles flow along their curves
+function animate() {
+  const posArr = geom.attributes.position.array;
+  
+  for (let lane = 0; lane < LANES; lane++) {
+    const curve = flowCurves[lane];
+    const start = lane * PARTICLES_PER_LANE;
+    const end = start + PARTICLES_PER_LANE;
+    
+    for (let i = start; i < end; i++) {
+      // advance particle along curve
+      progress[i] += speeds[i];
+      if (progress[i] > 1.0) progress[i] -= 1.0;  // loop
+      
+      const p = curve(progress[i]);
+      
+      // recompute perpendicular offset (stays consistent via seed = i)
+      const seed = i / N;
+      const perpOffset = (seed - 0.5) * 0.35;
+      const t0 = progress[i];
+      const dx = curve(Math.min(t0 + 0.01, 1)).x - p.x;
+      const dy = curve(Math.min(t0 + 0.01, 1)).y - p.y;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      const perpX = -dy / len * perpOffset;
+      const perpY =  dx / len * perpOffset;
+      
+      posArr[i * 3]     = p.x + perpX;
+      posArr[i * 3 + 1] = p.y + perpY;
+      posArr[i * 3 + 2] = 0;
+    }
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+
+// ────────────── resize handler
+addEventListener('resize', () => {
+  const aspect = innerWidth / innerHeight;
+  const h = 10;
+  const w = h * aspect;
+  camera.left = -w;
+  camera.right = w;
+  camera.top = h;
+  camera.bottom = -h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+addEventListener('resize', () => {
+  const aspect = innerWidth / innerHeight;
+  const h = 10;
+  const w = h * aspect;
+  camera.left = -w;
+  camera.right = w;
+  camera.top = h;
+  camera.bottom = -h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+// trigger once to set initial aspect
+{
+  const aspect = innerWidth / innerHeight;
+  const h = 10;
+  const w = h * aspect;
+  camera.left = -w;
+  camera.right = w;
+  camera.top = h;
+  camera.bottom = -h;
+  camera.updateProjectionMatrix();
+}
+
+animate();
+</script>
+</body>
+</html>
