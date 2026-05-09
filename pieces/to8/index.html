@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>to8 · process — agents tracing vertical</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">to8</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0a);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 8, 24);
+camera.lookAt(0, 8, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── agent system — process 11 inspired
+// agents move along vertical channels, constrained by local rules
+// each agent leaves a trace of points that accumulate into the form
+// rule: agents prefer Y-axis motion but can drift laterally by reading neighbor density
+// rule: agents spawn child agents at branch points (deterministic Y thresholds)
+// rule: agents die when they reach Y=16 or move too far from origin
+
+const AGENT_COUNT = 280;
+const TRACE_CAPACITY = 70000;
+const CHANNELS = 14;   // vertical channels around origin (think: corrugated surface)
+
+class Agent {
+  constructor(x, y, z, vx, vy, vz, gen, channelIdx){
+    this.x = x; this.y = y; this.z = z;
+    this.vx = vx; this.vy = vy; this.vz = vz;
+    this.gen = gen;   // generation: 0 = trunk, 1+ = branches
+    this.age = 0;
+    this.dead = false;
+    this.channel = channelIdx;
+  }
+  step(agents, tracePos, traceIdx, seeds){
+    if (this.dead) return traceIdx;
+    this.age++;
+
+    // rule 1: primary motion is upward (Y+), magnitude decreases with generation
+    const upForce = 0.12 * Math.pow(0.75, this.gen);
+    this.vy += upForce;
+
+    // rule 2: lateral drift toward channel centerline (creates vertical ridges)
+    const channelAngle = (this.channel / CHANNELS) * Math.PI * 2;
+    const targetX = Math.cos(channelAngle) * 0.3;
+    const targetZ = Math.sin(channelAngle) * 0.3;
+    const dx = targetX - this.x;
+    const dz = targetZ - this.z;
+    this.vx += dx * 0.008;
+    this.vz += dz * 0.008;
+
+    // rule 3: slight repulsion from nearby agents (anti-collision)
+    for (const other of agents){
+      if (other === this || other.dead) continue;
+      const ox = other.x - this.x;
+      const oy = other.y - this.y;
+      const oz = other.z - this.z;
+      const d2 = ox*ox + oy*oy + oz*oz;
+      if (d2 < 0.25 && d2 > 0.001){
+        const f = 0.004 / d2;
+        this.vx -= ox * f;
+        this.vy -= oy * f * 0.1;   // weak Y repulsion — we want vertical flow
+        this.vz -= oz * f;
+      }
+    }
+
+    // damping
+    this.vx *= 0.94;
+    this.vy *= 0.97;
+    this.vz *= 0.94;
+
+    // integrate
+    this.x += this.vx;
+    this.y += this.vy;
+    this.z += this.vz;
+
+    // rule 4: record trace point every N steps
+    if (this.age % 2 === 0 && traceIdx < TRACE_CAPACITY){
+      tracePos[traceIdx*3]   = this.x;
+      tracePos[traceIdx*3+1] = this.y;
+      tracePos[traceIdx*3+2] = this.z;
+      seeds[traceIdx] = this.gen / 5;   // encode generation as seed for color
+      traceIdx++;
+    }
+
+    // rule 5: branch at deterministic Y thresholds
+    const branchYs = [3.0, 6.5, 10.0, 13.0];
+    if (this.gen < 3){
+      for (const by of branchYs){
+        if (this.y > by && this.y - this.vy < by){   // just crossed threshold
+          // spawn two child agents at slight lateral offsets
+          const newChannel1 = (this.channel + 1) % CHANNELS;
+          const newChannel2 = (this.channel - 1 + CHANNELS) % CHANNELS;
+          agents.push(new Agent(
+            this.x + (Math.random()-0.5)*0.15,
+            this.y,
+            this.z + (Math.random()-0.5)*0.15,
+            this.vx + (Math.random()-0.5)*0.02,
+            this.vy * 0.8,
+            this.vz + (Math.random()-0.5)*0.02,
+            this.gen + 1,
+            newChannel1
+          ));
+          agents.push(new Agent(
+            this.x + (Math.random()-0.5)*0.15,
+            this.y,
+            this.z + (Math.random()-0.5)*0.15,
+            this.vx + (Math.random()-0.5)*0.02,
+            this.vy * 0.8,
+            this.vz + (Math.random()-0.5)*0.02,
+            this.gen + 1,
+            newChannel2
+          ));
+        }
+      }
+    }
+
+    // rule 6: death conditions
+    if (this.y > 16.0 || this.x*this.x + this.z*this.z > 25){
+      this.dead = true;
+    }
+
+    return traceIdx;
+  }
+}
+
+// initialize agents at base (Y=0), distributed around channels
+const agents = [];
+for (let c = 0; c < CHANNELS; c++){
+  const angle = (c / CHANNELS) * Math.PI * 2;
+  const r = 0.05 + Math.random() * 0.1;
+  agents.push(new Agent(
+    Math.cos(angle) * r,
+    0.1,
+    Math.sin(angle) * r,
+    0, 0.04, 0,
+    0,
+    c
+  ));
+}
+
+const tracePos = new Float32Array(TRACE_CAPACITY * 3);
+const seeds = new Float32Array(TRACE_CAPACITY);
+let traceIdx = 0;
+
+// run agent system for 600 steps to generate form
+for (let step = 0; step < 600 && agents.some(a => !a.dead); step++){
+  for (const agent of agents){
+    traceIdx = agent.step(agents, tracePos, traceIdx, seeds);
+  }
+}
+
+// pad remaining trace slots with zero
+while (traceIdx < TRACE_CAPACITY){
+  tracePos[traceIdx*3] = 0;
+  tracePos[traceIdx*3+1] = 0;
+  tracePos[traceIdx*3+2] = 0;
+  seeds[traceIdx] = 0;
+  traceIdx++;
+}
+
+// ────────────── geometry
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(tracePos, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+
+// ────────────── shader — near-monochrome with one accent
+const uniforms = {
+  uTime: { value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    attribute float seed;
+    varying vec3 vCol;
+    void main(){
+      vec3 p = position;
+      
+      // primary monochrome — cool gray with 0.05 saturation
+      vec3 baseGray = vec3(0.52, 0.54, 0.56);
+      
+      // accent — rust orange (0.08 saturation) appears only at branch tips (gen 2+)
+      vec3 accent = vec3(0.68, 0.48, 0.40);
+      
+      float isAccent = step(0.4, seed);   // gen 2+ encoded as seed > 0.4
+      vCol = mix(baseGray, accent, isAccent * 0.22);   // subtle accent blend
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 1.4 * (60.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = 0.85 * (1.0 - r * 4.0);   // hard-edge disk, no glow
+      gl_FragColor = vec4(vCol, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── render loop — stillness
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  
+  // minimal camera drift — process compendium aesthetic (almost static)
+  camera.position.x = Math.sin(t * 0.02) * 1.2;
+  camera.lookAt(0, 8, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
