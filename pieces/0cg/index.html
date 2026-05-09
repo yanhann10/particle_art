@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0cg · cumulus drift · MORAKANA border atmospherics</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0f0e0d; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.6; font-size: 11px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">0cg</div>
+<div class="hint" id="hint">atmospheric border crossing · curl-noise advection · MORAKANA 2025</div>
+<div class="src">Tiri Kananuruk & Sebastián Morales · Lumen Prize Gold</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0f0e0d, 30, 120);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 28, 65);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0f0e0d, 1);
+document.body.appendChild(renderer.domElement);
+
+// Cloud particle count: 18,000 sprites forming volumetric cloud field
+const N = 18000;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const densities = new Float32Array(N);
+const ages = new Float32Array(N);
+
+// Border line: invisible wall at x=0 that tints particles red on crossing
+const BORDER_X = 0;
+const FIELD_WIDTH = 80;
+const FIELD_HEIGHT = 12;
+const FIELD_DEPTH = 50;
+
+// Initialize cloud particles in stratified layers
+for (let i = 0; i < N; i++){
+  // Start particles west of border (negative x)
+  positions[i*3]   = -FIELD_WIDTH * 0.5 + Math.random() * FIELD_WIDTH * 0.6 - 10;
+  positions[i*3+1] = Math.random() * FIELD_HEIGHT + 2;
+  positions[i*3+2] = (Math.random() - 0.5) * FIELD_DEPTH;
+  
+  // Eastward drift base velocity
+  velocities[i*3]   = 0.15 + Math.random() * 0.08;
+  velocities[i*3+1] = 0;
+  velocities[i*3+2] = 0;
+  
+  seeds[i] = Math.random();
+  densities[i] = 0.3 + Math.random() * 0.7;
+  ages[i] = Math.random() * 10;
+}
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBorderX: { value: BORDER_X }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uBorderX;
+    attribute float seed;
+    attribute float density;
+    attribute float age;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vDensity;
+    
+    void main(){
+      vec3 p = position;
+      float crossedBorder = step(uBorderX, p.x);
+      
+      // Palette: bone-white, dust gray, oxidized red when crossed
+      vec3 cloudWhite = vec3(0.92, 0.89, 0.84); // bone
+      vec3 cloudDust = vec3(0.68, 0.65, 0.61);  // dust
+      vec3 borderRed = vec3(0.72, 0.28, 0.22);  // oxidized red
+      
+      float phase = seed * 6.28 + uTime * 0.2 + age * 0.5;
+      float pulse = 0.5 + 0.5 * sin(phase);
+      
+      vec3 baseCol = mix(cloudDust, cloudWhite, pulse * 0.6);
+      
+      // Gradual red tint as particle crosses border
+      float distFromBorder = max(0.0, p.x - uBorderX);
+      float redBlend = smoothstep(0.0, 8.0, distFromBorder) * crossedBorder;
+      vCol = mix(baseCol, borderRed, redBlend * 0.7);
+      
+      vAlpha = density * (0.18 + 0.12 * pulse);
+      vDensity = density;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sizeFactor = 2.0 + density * 3.0 + pulse * 1.5;
+      gl_PointSize = sizeFactor * uPixel * (120.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vDensity;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      
+      // Soft volumetric falloff
+      float core = exp(-r * r * 4.0);
+      float halo = exp(-r * r * 1.2);
+      float alpha = mix(halo, core, vDensity * 0.6) * vAlpha;
+      
+      gl_FragColor = vec4(vCol, alpha);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('density', new THREE.BufferAttribute(densities, 1));
+geom.setAttribute('age', new THREE.BufferAttribute(ages, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Add ground plane to establish horizon line
+const groundGeom = new THREE.PlaneGeometry(200, 200);
+const groundMat = new THREE.MeshBasicMaterial({ 
+  color: 0x0a0908, 
+  side: THREE.DoubleSide,
+  transparent: true,
+  opacity: 0.4
+});
+const ground = new THREE.Mesh(groundGeom, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = 0;
+scene.add(ground);
+
+// Subtle ambient light
+const ambient = new THREE.AmbientLight(0x7a7268, 0.5);
+scene.add(ambient);
+
+// Directional light from east (simulating morning sun)
+const dirLight = new THREE.DirectionalLight(0xc4b8a8, 0.3);
+dirLight.position.set(50, 30, 0);
+scene.add(dirLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Curl noise function for wind advection
+function curlNoise(x, y, z, t) {
+  const eps = 0.1;
+  
+  function noise3D(px, py, pz) {
+    // Simplified Perlin-style noise
+    const X = Math.floor(px) & 255;
+    const Y = Math.floor(py) & 255;
+    const Z = Math.floor(pz) & 255;
+    const fx = px - Math.floor(px);
+    const fy = py - Math.floor(py);
+    const fz = pz - Math.floor(pz);
+    const u = fx * fx * (3 - 2 * fx);
+    const v = fy * fy * (3 - 2 * fy);
+    const w = fz * fz * (3 - 2 * fz);
+    const hash = (x, y, z) => {
+      let h = x * 374761393 + y * 668265263 + z * 1274126177;
+      h = (h ^ (h >> 13)) * 1274126177;
+      return (h ^ (h >> 16)) / 2147483648.0;
+    };
+    const lerp = (a, b, t) => a + t * (b - a);
+    const a = lerp(hash(X, Y, Z), hash(X+1, Y, Z), u);
+    const b = lerp(hash(X, Y+1, Z), hash(X+1, Y+1, Z), u);
+    const c = lerp(hash(X, Y, Z+1), hash(X+1, Y, Z+1), u);
+    const d = lerp(hash(X, Y+1, Z+1), hash(X+1, Y+1, Z+1), u);
+    const e = lerp(a, b, v);
+    const f = lerp(c, d, v);
+    return lerp(e, f, w);
+  }
+  
+  const scale = 0.08;
+  const sx = x * scale;
+  const sy = y * scale;
+  const sz = z * scale + t * 0.1;
+  
+  // Compute curl from potential field
+  const dFdy_z = (noise3D(sx, sy + eps, sz) - noise3D(sx, sy - eps, sz)) / (2 * eps);
+  const dFdz_y = (noise3D(sx, sy, sz + eps) - noise3D(sx, sy, sz - eps)) / (2 * eps);
+  const dFdz_x = (noise3D(sx, sy, sz + eps) - noise3D(sx, sy, sz - eps)) / (2 * eps);
+  const dFdx_z = (noise3D(sx + eps, sy, sz) - noise3D(sx - eps, sy, sz)) / (2 * eps);
+  const dFdx_y = (noise3D(sx + eps, sy, sz) - noise3D(sx - eps, sy, sz)) / (2 * eps);
+  const dFdy_x = (noise3D(sx, sy + eps, sz) - noise3D(sx, sy - eps, sz)) / (2 * eps);
+  
+  return {
+    x: dFdy_z - dFdz_y,
+    y: dFdz_x - dFdx_z,
+    z: dFdx_y - dFdy_x
+  };
+}
+
+function updateParticles(dt, t){
+  let crossedCount = 0;
+  
+  for (let i = 0; i < N; i++){
+    const px = positions[i*3];
+    const py = positions[i*3+1];
+    const pz = positions[i*3+2];
+    
+    // Apply curl-noise wind field
+    const curl = curlNoise(px, py, pz, t);
+    velocities[i*3] += curl.x * 0.012;
+    velocities[i*3+1] += curl.y * 0.006;
+    velocities[i*3+2] += curl.z * 0.008;
+    
+    // Maintain eastward drift bias
+    velocities[i*3] = Math.max(velocities[i*3], 0.1);
+    
+    // Update position
+    positions[i*3] += velocities[i*3] * dt;
+    positions[i*3+1] += velocities[i*3+1] * dt;
+    positions[i*3+2] += velocities[i*3+2] * dt;
+    
+    // Keep particles in vertical band
+    if (positions[i*3+1] < 1) {
+      positions[i*3+1] = 1;
+      velocities[i*3+1] = Math.abs(velocities[i*3+1]) * 0.5;
+    }
+    if (positions[i*3+1] > FIELD_HEIGHT + 3) {
+      positions[i*3+1] = FIELD_HEIGHT + 3;
+      velocities[i*3+1] = -Math.abs(velocities[i*3+1]) * 0.5;
+    }
+    
+    // Wrap depth
+    if (Math.abs(positions[i*3+2]) > FIELD_DEPTH * 0.6) {
+      positions[i*3+2] *= 0.8;
+    }
+    
+    // Recycle particles that drift too far east
+    if (positions[i*3] > FIELD_WIDTH * 0.5) {
+      positions[i*3] = -FIELD_WIDTH * 0.5 - 10 + Math.random() * 5;
+      positions[i*3+1] = Math.random() * FIELD_HEIGHT + 2;
+      positions[i*3+2] = (Math.random() - 0.5) * FIELD_DEPTH;
+      velocities[i*3] = 0.15 + Math.random() * 0.08;
+      velocities[i*3+1] = 0;
+      velocities[i*3+2] = 0;
+    }
+    
+    // Count particles that have crossed border
+    if (px > BORDER_X) crossedCount++;
+    
+    ages[i] += dt * 0.1;
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+  
+  // Update hint with crossing statistics
+  const crossPct = ((crossedCount / N) * 100).toFixed(1);
+  document.getElementById('hint').textContent = 
+    `${crossedCount.toLocaleString()} particles crossed · ${crossPct}% atmospheric occupation`;
+}
+
+// Camera tracks cloud centroid with slow lateral drift
+const centroid = new THREE.Vector3();
+function updateCamera(t){
+  centroid.set(0,0,0);
+  for (let i = 0; i < N; i++){
+    centroid.x += positions[i*3];
+    centroid.y += positions[i*3+1];
+    centroid.z += positions[i*3+2];
+  }
+  centroid.multiplyScalar(1 / N);
+  
+  // Camera drifts slowly east with the cloud mass
+  camera.position.x = centroid.x * 0.3 + Math.sin(t * 0.05) * 8;
+  camera.position.y = 28 + Math.sin(t * 0.08) * 4;
+  camera.position.z = 65 + Math.cos(t * 0.06) * 10;
+  
+  const lookTarget = new THREE.Vector3(
+    centroid.x * 0.5,
+    centroid.y * 0.7,
+    0
+  );
+  camera.lookAt(lookTarget);
+}
+
+let lastTime = performance.now();
+const start = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  const t = (now - start) / 1000;
+  
+  uniforms.uTime.value = t;
+  updateParticles(dt * 60, t);
+  updateCamera(t);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
