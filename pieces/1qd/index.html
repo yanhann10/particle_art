@@ -3,22 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>1qd · tender light strings</title>
+<title>1qd · L-system tree (atmospheric)</title>
+<!-- MOTION: sway, intensity: calm -->
 <style>
-  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
-               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  html, body { margin:0; padding:0; height:100%; background:#070908; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   canvas { display:block; }
-  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
-  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
-  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
-  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
 </style>
 </head>
 <body>
-<div class="id">1qd</div>
-<div class="hint">drag to orbit · click to pause/resume</div>
-<div class="src">Felix Gonzalez-Torres · light string drape · differential growth</div>
-<div class="stat" id="stat">N=0</div>
+<div class="id">1qd · L-system tree</div>
+<div class="hint">drag to orbit · scroll to zoom · click to regrow</div>
+<div class="src">procedural · L-system + 3D turtle · 80k particles · fog + light beam</div>
 
 <script type="importmap">
 { "imports": {
@@ -30,335 +29,305 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-/* Tender light strings — differential growth reimagined as
-   Felix Gonzalez-Torres draped incandescent bulb strands.
-   The self-avoiding curve still grows and folds, but gravity
-   pulls it into catenary drapes. Each vertex is a warm bulb;
-   particles cluster as soft haloed light.
-   
-   Palette: sodium-amber + ice-cyan duotone */
+const RULES = {
+  'F': [
+    { p: 0.45, s: 'FF[+F-F][-F+F][/F\\F]' },
+    { p: 0.30, s: 'F[+F][-F]F'           },
+    { p: 0.15, s: 'F[/F][\\F]F'          },
+    { p: 0.10, s: 'F[+F-F]F[\\F/F]'      },
+  ],
+};
+const ANGLE = THREE.MathUtils.degToRad(22.5);
+const STEP_BASE = 1.0;
 
-const BG = 0x0a0807;
+function expand(axiom, depth, rng){
+  let s = axiom;
+  for (let d = 0; d < depth; d++){
+    let out = '';
+    for (const ch of s){
+      if (ch in RULES) {
+        const r = rng();
+        let acc = 0;
+        for (const opt of RULES[ch]){
+          acc += opt.p;
+          if (r <= acc){ out += opt.s; break; }
+        }
+      } else out += ch;
+    }
+    s = out;
+  }
+  return s;
+}
+
+function turtle(str, depthFactor){
+  const H = new THREE.Vector3(0, 1, 0);
+  const L = new THREE.Vector3(-1, 0, 0);
+  const U = new THREE.Vector3(0, 0, 1);
+  const stack = [];
+  const segments = [];
+  let pos = new THREE.Vector3(0, -7, 0);
+  let h = H.clone(), l = L.clone(), u = U.clone();
+  let gen = 0;
+
+  const rotate = (axis, ang) => {
+    const q = new THREE.Quaternion().setFromAxisAngle(axis, ang);
+    h.applyQuaternion(q); l.applyQuaternion(q); u.applyQuaternion(q);
+  };
+
+  for (const ch of str){
+    switch(ch){
+      case 'F': {
+        const step = STEP_BASE * Math.pow(depthFactor, gen);
+        const nextPos = pos.clone().addScaledVector(h, step);
+        segments.push({ from: pos.clone(), to: nextPos.clone(), gen });
+        pos = nextPos;
+        break;
+      }
+      case '+': rotate(u, +ANGLE); break;
+      case '-': rotate(u, -ANGLE); break;
+      case '&': rotate(l, +ANGLE); break;
+      case '^': rotate(l, -ANGLE); break;
+      case '/': rotate(h, +ANGLE); break;
+      case '\\': rotate(h, -ANGLE); break;
+      case '[':
+        stack.push({ pos: pos.clone(), h: h.clone(), l: l.clone(), u: u.clone(), gen });
+        gen += 1;
+        break;
+      case ']': {
+        const f = stack.pop();
+        pos = f.pos; h = f.h; l = f.l; u = f.u; gen = f.gen;
+        break;
+      }
+    }
+  }
+  return segments;
+}
+
+function buildParticles(segments, totalN){
+  const lens = segments.map(s => s.from.distanceTo(s.to));
+  const total = lens.reduce((a,b)=>a+b, 0);
+  const positions = new Float32Array(totalN * 3);
+  const seeds     = new Float32Array(totalN);
+  const gens      = new Float32Array(totalN);
+  const lengths   = new Float32Array(totalN);
+  const v = new THREE.Vector3();
+  let written = 0;
+  for (let i = 0; i < segments.length; i++){
+    const share = i === segments.length - 1
+      ? totalN - written
+      : Math.max(1, Math.floor(totalN * lens[i] / total));
+    for (let k = 0; k < share && written < totalN; k++){
+      const t = Math.random();
+      v.lerpVectors(segments[i].from, segments[i].to, t);
+      const jitter = 0.04 * Math.pow(0.85, segments[i].gen);
+      v.x += (Math.random()-0.5) * jitter;
+      v.y += (Math.random()-0.5) * jitter;
+      v.z += (Math.random()-0.5) * jitter;
+      positions[written*3]   = v.x;
+      positions[written*3+1] = v.y;
+      positions[written*3+2] = v.z;
+      seeds[written]   = Math.random();
+      gens[written]    = segments[i].gen;
+      lengths[written] = t;
+      written++;
+    }
+  }
+  return { positions, seeds, gens, lengths };
+}
+
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
-camera.position.set(0, 2, 20);
+scene.fog = new THREE.FogExp2(0x070908, 0.032);
+
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 4, 22);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
-renderer.setClearColor(BG, 1);
+renderer.setClearColor(0x070908, 1);
 document.body.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-controls.target.set(0, -1, 0);
+controls.target.set(0, 2, 0);
 
-// --- curve parameters, tuned for draping ---
-const MAX_VERTS = 3200;
-const ATTRACT   = 0.05;
-const REPEL_R   = 0.48;
-const REPEL_STR = 0.10;
-const NOISE     = 0.002;
-const PRESSURE  = 0.002;
-const GRAVITY   = 0.008;
-const MAX_D     = 0.36;
-const ANCHOR_N  = 6;
+const N = 80000;
+let geom, points, mat;
 
-// initialize: horizontal line with gentle wave
-const verts = [];
-const NV0 = 40;
-for (let i = 0; i < NV0; i++) {
-  const t = (i / (NV0 - 1)) * 2 - 1;
-  const x = t * 6;
-  const y = -Math.abs(t) * 1.2 + Math.sin(t * Math.PI * 2) * 0.3;
-  verts.push({ x, z: 0, y, age: 0, pinY: i < ANCHOR_N || i >= NV0 - ANCHOR_N });
-}
-
-// spatial hash
-const CELL = REPEL_R;
-const grid = new Map();
-function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
-function rebuildGrid() {
-  grid.clear();
-  for (let i = 0; i < verts.length; i++) {
-    const v = verts[i], k = gridKey(v.x, v.z);
-    if (!grid.has(k)) grid.set(k, []);
-    grid.get(k).push(i);
-  }
-}
-function nearby(v) {
-  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
-  const out = [];
-  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
-    const arr = grid.get((cx + dx) + ',' + (cz + dz));
-    if (arr) for (const idx of arr) out.push(idx);
-  }
-  return out;
-}
-
-let paused = false;
-addEventListener('click', () => { paused = !paused; });
-
-function step() {
-  if (paused) return;
-  const n = verts.length;
-  if (n >= MAX_VERTS) return;
-  rebuildGrid();
-  const dx = new Float32Array(n);
-  const dz = new Float32Array(n);
-  const dy = new Float32Array(n);
-
-  // repulsion
-  for (let i = 0; i < n; i++) {
-    const v = verts[i];
-    for (const j of nearby(v)) {
-      if (j === i) continue;
-      const u = verts[j];
-      const ex = v.x - u.x, ez = v.z - u.z;
-      const d2 = ex * ex + ez * ez;
-      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
-      const d = Math.sqrt(d2);
-      const f = REPEL_STR * (1 - d / REPEL_R) / d;
-      dx[i] += ex * f;
-      dz[i] += ez * f;
-    }
-  }
-  // attraction
-  for (let i = 0; i < n; i++) {
-    const prev = i > 0 ? verts[i - 1] : null;
-    const next = i < n - 1 ? verts[i + 1] : null;
-    const v = verts[i];
-    if (prev) {
-      dx[i] += (prev.x - v.x) * ATTRACT;
-      dz[i] += (prev.z - v.z) * ATTRACT;
-      dy[i] += (prev.y - v.y) * ATTRACT;
-    }
-    if (next) {
-      dx[i] += (next.x - v.x) * ATTRACT;
-      dz[i] += (next.z - v.z) * ATTRACT;
-      dy[i] += (next.y - v.y) * ATTRACT;
-    }
-  }
-  // pressure
-  let cx = 0, cz = 0;
-  for (let i = 0; i < n; i++) { cx += verts[i].x; cz += verts[i].z; }
-  cx /= n; cz /= n;
-  for (let i = 0; i < n; i++) {
-    const ox = verts[i].x - cx, oz = verts[i].z - cz;
-    const d = Math.hypot(ox, oz) + 1e-6;
-    dx[i] += (ox / d) * PRESSURE;
-    dz[i] += (oz / d) * PRESSURE;
-  }
-
-  // apply + gravity + noise
-  for (let i = 0; i < n; i++) {
-    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
-    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
-    const grav = verts[i].pinY ? GRAVITY * 0.05 : GRAVITY;
-    verts[i].y += dy[i] - grav + (Math.random() - 0.5) * NOISE * 0.5;
-    verts[i].age += 0.0004;
-  }
-
-  // subdivide
-  const grown = [];
-  for (let i = 0; i < n - 1; i++) {
-    const a = verts[i], b = verts[i + 1];
-    grown.push(a);
-    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
-    if (ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
-      grown.push({
-        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.02,
-        z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.02,
-        y: (a.y + b.y) * 0.5,
-        age: Math.max(a.age, b.age) * 0.7,
-        pinY: false
-      });
-    }
-  }
-  grown.push(verts[n - 1]);
-  verts.length = 0;
-  for (const v of grown) verts.push(v);
-}
-
-// --- rendering: 40k particles as duotone bulbs ---
-const N_RENDER = 40000;
-const rPos   = new Float32Array(N_RENDER * 3);
-const rSeeds = new Float32Array(N_RENDER);
-const rAge   = new Float32Array(N_RENDER);
-for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
-
-const geom = new THREE.BufferGeometry();
-geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
-geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
-geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
-
+const beamPos = new THREE.Vector3(-3.5, 14, 2.5);
 const uniforms = {
-  uTime:  { value: 0 },
+  uTime: { value: 0 },
   uPixel: { value: renderer.getPixelRatio() },
-  uFogColor:   { value: new THREE.Color(BG) },
-  uFogDensity: { value: 0.035 }
+  uReady: { value: 0 },
+  uBeamPos: { value: beamPos },
+  uBeamRadius: { value: 1.8 },
 };
-
-const mat = new THREE.ShaderMaterial({
+mat = new THREE.ShaderMaterial({
   uniforms,
-  transparent: true,
-  depthWrite: false,
-  blending: THREE.AdditiveBlending,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
   vertexShader: `
     uniform float uTime;
     uniform float uPixel;
+    uniform float uReady;
+    uniform vec3 uBeamPos;
+    uniform float uBeamRadius;
     attribute float seed;
-    attribute float age;
+    attribute float gen;
+    attribute float lengthT;
     varying vec3 vCol;
-    varying float vAlpha;
-    varying float vFogFactor;
-    uniform float uFogDensity;
-
-    void main() {
+    varying float vGen;
+    varying float vEnergy;
+    varying float vBeamDist;
+    void main(){
       vec3 p = position;
+      float t = uTime * 0.5 + seed * 6.28;
+      float sway = 0.06 * gen * (0.5 + 0.5*sin(t * 0.7));
+      p.x += sway * sin(t + p.y * 0.3);
+      p.z += sway * cos(t * 0.9 + p.y * 0.3);
 
-      // gentle sway
-      float t = uTime * 0.3 + seed * 6.28;
-      float sway = sin(t) * 0.008 * (1.0 + seed);
-      p.x += sway;
-      p.z += cos(t * 0.7) * 0.005;
+      vec3 entry = vec3(seed*4.0 - 2.0, 25.0 + seed*8.0, seed*4.0 - 2.0);
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
 
-      // pulse per-bulb
-      float pulse = 0.85 + 0.15 * sin(uTime * 1.2 + seed * 40.0);
+      vGen = gen;
+      vEnergy = 0.5 + 0.5 * sin(t * 0.5);
 
-      // duotone palette: sodium-amber (low-pressure sodium vapor) ↔ ice-cyan
-      // sodium-amber: pure warm yellow-orange, saturated
-      vec3 sodium = vec3(1.0, 0.72, 0.12);
-      // ice-cyan: cold pale blue with slight desaturation
-      vec3 iceCyan = vec3(0.65, 0.88, 1.0);
-      
-      float k = clamp(age * 1.2, 0.0, 1.0);
-      // young bulbs are sodium, mature are ice-cyan
-      vCol = mix(sodium, iceCyan, k);
-      vCol *= pulse;
+      // distance from particle to beam axis (vertical cylinder)
+      vec2 toBeam = p.xz - uBeamPos.xz;
+      vBeamDist = length(toBeam);
 
-      vAlpha = 0.55 + 0.2 * pulse;
+      vec3 a = vec3(0.45, 0.30, 0.20);
+      vec3 b = vec3(0.42, 0.62, 0.35);
+      vec3 c = vec3(0.85, 0.95, 0.55);
+      float k = clamp(gen * 0.18, 0.0, 1.0);
+      vCol = mix(a, b, k);
+      vCol = mix(vCol, c, smoothstep(0.65, 1.0, k));
 
       vec4 mv = modelViewMatrix * vec4(p, 1.0);
       float dist = -mv.z;
-
-      gl_PointSize = 1.8 * uPixel * (45.0 / dist);
+      gl_PointSize = (1.0 + 0.7*vEnergy) * uPixel * (40.0/dist) * (0.4 + 0.6*uReady);
       gl_Position = projectionMatrix * mv;
-
-      // fog
-      float fogDepth = length(mv.xyz);
-      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
     }
   `,
   fragmentShader: `
+    uniform float uBeamRadius;
     varying vec3 vCol;
-    varying float vAlpha;
-    varying float vFogFactor;
-    uniform vec3 uFogColor;
-
-    void main() {
+    varying float vGen;
+    varying float vEnergy;
+    varying float vBeamDist;
+    void main(){
       vec2 d = gl_PointCoord - 0.5;
-      float r = dot(d, d);
+      float r = dot(d,d);
       if (r > 0.25) discard;
 
-      // soft glow falloff
-      float core = exp(-r * 24.0);
-      float halo = exp(-r * 8.0) * 0.35;
-      float a = (core + halo) * vAlpha;
+      // brighten particles inside beam
+      float inBeam = smoothstep(uBeamRadius + 0.3, uBeamRadius - 0.3, vBeamDist);
+      float brightBoost = 1.0 + 1.2 * inBeam;
 
-      vec3 col = vCol;
-      col = mix(col, uFogColor, vFogFactor);
-      a *= (1.0 - vFogFactor * 0.8);
-
-      gl_FragColor = vec4(col * a, a);
+      float a = exp(-r * 17.0) * (0.55 + 0.45*vEnergy);
+      gl_FragColor = vec4(vCol * a * brightBoost, a);
     }
   `
 });
 
-const points = new THREE.Points(geom, mat);
-scene.add(points);
-
-// wire
-const wireGeom = new THREE.BufferGeometry();
-const wirePositions = new Float32Array(MAX_VERTS * 3);
-wireGeom.setAttribute('position', new THREE.BufferAttribute(wirePositions, 3));
-const wireMat = new THREE.LineBasicMaterial({
-  color: 0x2a2420,
+// volumetric light beam: tall cone, translucent additive shader
+const coneGeom = new THREE.ConeGeometry(1.8, 28, 24, 1, true);
+const coneMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uBeamColor: { value: new THREE.Color(0.95, 0.92, 0.75) },
+  },
   transparent: true,
-  opacity: 0.3
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    varying float vY;
+    varying float vDist;
+    void main(){
+      vec3 p = position;
+      vY = (p.y + 14.0) / 28.0; // 0 at bottom, 1 at top
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDist = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uBeamColor;
+    varying float vY;
+    varying float vDist;
+    void main(){
+      // fade top-to-bottom: strong at top, weak at base
+      float falloff = smoothstep(0.0, 0.4, vY);
+      // depth fade
+      float depthFade = smoothstep(35.0, 10.0, vDist);
+      float a = 0.08 * falloff * depthFade;
+      gl_FragColor = vec4(uBeamColor * a, a);
+    }
+  `
 });
-const wireLine = new THREE.Line(wireGeom, wireMat);
-scene.add(wireLine);
+const cone = new THREE.Mesh(coneGeom, coneMat);
+cone.position.copy(beamPos);
+cone.rotation.x = Math.PI; // point downward
+scene.add(cone);
+
+let revealStart = 0;
+
+function regrow(seed){
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  const str = expand('F', 5, rng);
+  const segs = turtle(str, 0.78);
+  const bb = new THREE.Box3();
+  for (const s of segs) { bb.expandByPoint(s.from); bb.expandByPoint(s.to); }
+  const ctr = bb.getCenter(new THREE.Vector3());
+  const min = bb.min;
+  for (const s of segs){
+    s.from.x -= ctr.x; s.from.z -= ctr.z; s.from.y -= min.y - (-7);
+    s.to.x   -= ctr.x; s.to.z   -= ctr.z; s.to.y   -= min.y - (-7);
+  }
+
+  const { positions, seeds, gens, lengths } = buildParticles(segs, N);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('gen',      new THREE.BufferAttribute(gens, 1));
+    geom.setAttribute('lengthT',  new THREE.BufferAttribute(lengths, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions); geom.attributes.position.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);          geom.attributes.seed.needsUpdate = true;
+    geom.attributes.gen.array.set(gens);            geom.attributes.gen.needsUpdate = true;
+    geom.attributes.lengthT.array.set(lengths);     geom.attributes.lengthT.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+  revealStart = performance.now();
+}
+
+regrow(Math.floor(Math.random() * 1e9));
+addEventListener('click', () => regrow(Math.floor(Math.random() * 1e9)));
 
 addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
+  camera.aspect = innerWidth/innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
 
-// pre-grow
-for (let s = 0; s < 500; s++) step();
-
-const statEl = document.getElementById('stat');
 const start = performance.now();
-
-function loop() {
-  const t = (performance.now() - start) / 1000;
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
   uniforms.uTime.value = t;
-
-  for (let s = 0; s < 3; s++) step();
-
-  const n = verts.length;
-
-  // update wire
-  for (let i = 0; i < n; i++) {
-    wirePositions[i * 3]     = verts[i].x;
-    wirePositions[i * 3 + 1] = verts[i].y;
-    wirePositions[i * 3 + 2] = verts[i].z;
+  coneMat.uniforms.uTime.value = t;
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (now - revealStart) / 2200);
   }
-  wireGeom.setDrawRange(0, n);
-  wireGeom.attributes.position.needsUpdate = true;
-
-  // camera tracks centroid
-  let cx = 0, cy = 0, cz = 0;
-  for (let i = 0; i < n; i++) {
-    cx += verts[i].x; cy += verts[i].y; cz += verts[i].z;
-  }
-  cx /= n; cy /= n; cz /= n;
-  controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.02);
-
-  // distribute particles
-  const lengths = [];
-  let total = 0;
-  for (let i = 0; i < n - 1; i++) {
-    const a = verts[i], b = verts[i + 1];
-    const L = Math.sqrt(
-      (b.x - a.x) ** 2 + (b.z - a.z) ** 2 + (b.y - a.y) ** 2
-    );
-    lengths.push(L);
-    total += L;
-  }
-  if (total > 0) {
-    let written = 0;
-    for (let i = 0; i < n - 1; i++) {
-      const share = (i === n - 2)
-        ? N_RENDER - written
-        : Math.max(1, Math.floor(N_RENDER * lengths[i] / total));
-      const a = verts[i], b = verts[i + 1];
-      for (let k = 0; k < share && written < N_RENDER; k++) {
-        const u = Math.random();
-        const cu = u < 0.5 ? u * u * 2 : 1 - (1 - u) * (1 - u) * 2;
-        const spread = 0.015;
-        rPos[written * 3]     = a.x + (b.x - a.x) * cu + (Math.random() - 0.5) * spread;
-        rPos[written * 3 + 1] = a.y + (b.y - a.y) * cu + (Math.random() - 0.5) * spread * 0.5;
-        rPos[written * 3 + 2] = a.z + (b.z - a.z) * cu + (Math.random() - 0.5) * spread;
-        rAge[written] = Math.max(a.age, b.age);
-        written++;
-      }
-    }
-    geom.attributes.position.needsUpdate = true;
-    geom.attributes.age.needsUpdate = true;
-  }
-
-  statEl.textContent = `vertices=${n}${paused ? ' · paused' : ''}`;
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
