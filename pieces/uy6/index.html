@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uy6 · Halcyon Tide Web (Saraceno)</title>
+<!-- MOTION: drift, intensity: serene -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a1420; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">uy6 · Halcyon Tide Web</div>
+<div class="hint">drag to orbit · scroll to zoom</div>
+<div class="src">Tomás Saraceno · tidal web tomography · cyan-gold twilight threads</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Halcyon: calm, tranquil, idyllic — the kingfisher's nest floating on still winter seas.
+// Morph: spider web becomes horizontal tidal pool lattice, layered in shallow depth bands.
+// Cyan-gold palette (twilight refraction through water), slower breathing motion, visible camera drift.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0a1420, 10, 40);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 8, 12);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a1420, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, 0, 0);
+
+// Generate anchor nodes — horizontal tidal layers at y = -2, 0, +2
+const N = 320;
+const anchors = [];
+const velocities = [];
+const colors = []; // per-node color (depth-based gradient)
+
+// mulberry32
+let seed = 0xABC1234;
+function rng(){
+  seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+  let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// 4 tidal pool layers — shallow stacked planes
+const layerY = [-3, -1, 1, 3];
+const layerColors = [
+  new THREE.Color(0x1a4d5e), // deep cyan
+  new THREE.Color(0x2a6d7e),
+  new THREE.Color(0x4a8d9e),
+  new THREE.Color(0xd4a574), // surface gold
+];
+
+for (let i = 0; i < N; i++){
+  const lIdx = Math.floor(rng() * layerY.length);
+  const y = layerY[lIdx];
+  // scatter in horizontal XZ plane, radius 6–9
+  const r = 6.0 + rng() * 3.5;
+  const theta = rng() * Math.PI * 2;
+  const x = r * Math.cos(theta);
+  const z = r * Math.sin(theta);
+  // slight vertical jitter ±0.4
+  const yy = y + (rng() - 0.5) * 0.8;
+  anchors.push(new THREE.Vector3(x, yy, z));
+  velocities.push(new THREE.Vector3(0, 0, 0));
+  colors.push(layerColors[lIdx].clone());
+}
+
+// Build connectivity — intra-layer nearest 3–5 neighbors + inter-layer bridges
+const edges = [];
+const edgeColors = []; // per-edge color (average of endpoints)
+
+for (let i = 0; i < N; i++){
+  const dists = anchors.map((a, j) => ({ j, d: anchors[i].distanceTo(a), dyAbs: Math.abs(anchors[i].y - a.y) }));
+  dists.sort((a, b) => a.d - b.d);
+  
+  // intra-layer connections (dyAbs < 1.5)
+  const intraLayer = dists.filter(d => d.dyAbs < 1.5 && d.j !== i);
+  const kIntra = 3 + Math.floor(rng() * 3);
+  for (let m = 0; m < kIntra && m < intraLayer.length; m++){
+    const j = intraLayer[m].j;
+    if (j > i){
+      edges.push([i, j]);
+      edgeColors.push(colors[i].clone().lerp(colors[j], 0.5));
+    }
+  }
+  
+  // inter-layer bridges (dyAbs > 1.5)
+  if (rng() < 0.12){
+    const interLayer = dists.filter(d => d.dyAbs > 1.5 && d.j !== i);
+    if (interLayer.length > 0){
+      const idx = Math.floor(rng() * Math.min(5, interLayer.length));
+      const j = interLayer[idx].j;
+      if (j > i){
+        edges.push([i, j]);
+        edgeColors.push(colors[i].clone().lerp(colors[j], 0.5));
+      }
+    }
+  }
+}
+
+// Line geometry for threads — custom ShaderMaterial with per-edge color
+const linePositions = new Float32Array(edges.length * 6);
+const lineColors = new Float32Array(edges.length * 6);
+
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+lineGeom.setAttribute('color', new THREE.BufferAttribute(lineColors, 3));
+
+const lineMat = new THREE.ShaderMaterial({
+  vertexShader: `
+    attribute vec3 color;
+    varying vec3 vColor;
+    void main(){
+      vColor = color;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    void main(){
+      gl_FragColor = vec4(vColor, 0.75);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+});
+
+const lineMesh = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lineMesh);
+
+function updateLineGeometry(){
+  for (let i = 0; i < edges.length; i++){
+    const [a, b] = edges[i];
+    const pa = anchors[a];
+    const pb = anchors[b];
+    linePositions[i*6]   = pa.x;
+    linePositions[i*6+1] = pa.y;
+    linePositions[i*6+2] = pa.z;
+    linePositions[i*6+3] = pb.x;
+    linePositions[i*6+4] = pb.y;
+    linePositions[i*6+5] = pb.z;
+    
+    const c = edgeColors[i];
+    lineColors[i*6]   = c.r;
+    lineColors[i*6+1] = c.g;
+    lineColors[i*6+2] = c.b;
+    lineColors[i*6+3] = c.r;
+    lineColors[i*6+4] = c.g;
+    lineColors[i*6+5] = c.b;
+  }
+  lineGeom.attributes.position.needsUpdate = true;
+  lineGeom.attributes.color.needsUpdate = true;
+}
+updateLineGeometry();
+
+// Nodes as instanced spheres — color per instance
+const nodeSphereGeom = new THREE.SphereGeometry(0.06, 8, 8);
+const nodeInstances = new THREE.InstancedMesh(
+  nodeSphereGeom,
+  new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.85,
+    depthWrite: false,
+  }),
+  N
+);
+scene.add(nodeInstances);
+
+const mat = new THREE.Matrix4();
+const colorAttr = new Float32Array(N * 3);
+for (let i = 0; i < N; i++){
+  mat.setPosition(anchors[i]);
+  nodeInstances.setMatrixAt(i, mat);
+  colorAttr[i*3]   = colors[i].r;
+  colorAttr[i*3+1] = colors[i].g;
+  colorAttr[i*3+2] = colors[i].b;
+}
+nodeInstances.instanceMatrix.needsUpdate = true;
+nodeInstances.geometry.setAttribute('color', new THREE.InstancedBufferAttribute(colorAttr, 3));
+
+// Soft spring + tidal sway (horizontal wave motion, slower than wind)
+const restPositions = anchors.map(a => a.clone());
+const SPRING_K = 0.004; // gentler
+const DAMPING = 0.95;   // higher (calmer)
+const TIDE_SCALE = 0.005;
+
+function updatePhysics(t){
+  for (let i = 0; i < N; i++){
+    const rest = restPositions[i];
+    const curr = anchors[i];
+    const dx = rest.x - curr.x;
+    const dy = rest.y - curr.y;
+    const dz = rest.z - curr.z;
+    velocities[i].x += dx * SPRING_K;
+    velocities[i].y += dy * SPRING_K;
+    velocities[i].z += dz * SPRING_K;
+    
+    // tidal sway: horizontal sine waves (XZ plane), phase from Y layer
+    const tx = Math.sin(t * 0.12 + curr.y * 0.4 + curr.z * 0.15) * TIDE_SCALE;
+    const tz = Math.cos(t * 0.1 + curr.y * 0.35 + curr.x * 0.2) * TIDE_SCALE;
+    const ty = Math.sin(t * 0.08 + curr.x * 0.25) * TIDE_SCALE * 0.3; // subtle vertical bob
+    velocities[i].x += tx;
+    velocities[i].y += ty;
+    velocities[i].z += tz;
+    
+    velocities[i].multiplyScalar(DAMPING);
+    curr.add(velocities[i]);
+  }
+  
+  for (let i = 0; i < N; i++){
+    mat.setPosition(anchors[i]);
+    nodeInstances.setMatrixAt(i, mat);
+  }
+  nodeInstances.instanceMatrix.needsUpdate = true;
+  updateLineGeometry();
+}
+
+// Camera drift — tighter orbit, faster rotation to catch light on threads
+const CAM_RADIUS = 12;
+const CAM_SPEED = 0.1; // 4× faster than parent (0.025→0.1)
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let lastInteraction = start;
+controls.addEventListener('change', () => { lastInteraction = performance.now(); });
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  updatePhysics(t);
+  
+  // auto-drift if no interaction for 2s
+  if (performance.now() - lastInteraction > 2000){
+    const angle = t * CAM_SPEED;
+    camera.position.x = CAM_RADIUS * Math.cos(angle);
+    camera.position.z = CAM_RADIUS * Math.sin(angle);
+    camera.position.y = 8 + Math.sin(t * 0.06) * 2;
+    camera.lookAt(0, 0, 0);
+  }
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
