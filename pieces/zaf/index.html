@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zaf · border clouds (Morakana)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1512; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">zaf</div>
+<div class="hint">drag to orbit</div>
+<div class="src">Morakana · Cumulus · volumetric border clouds over terrain</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Morakana's Cumulus reimagined — volumetric clouds drifting over
+   the Mexico-US border terrain. Live NOAA satellite spirit: soft
+   white clouds, warm earth ground, a single thin red contour line
+   marking the invisible political division. Slow, atmospheric,
+   geopolitically melancholic. */
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0b09);
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 38, 65);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+controls.minPolarAngle = 0.2;
+controls.maxPolarAngle = Math.PI * 0.48;
+
+// --- terrain: warm earth tones, procedural height variation ---
+const TERRAIN_W = 120;
+const TERRAIN_D = 80;
+const TERRAIN_RES = 90;
+const terrainGeom = new THREE.PlaneGeometry(TERRAIN_W, TERRAIN_D, TERRAIN_RES, TERRAIN_RES);
+terrainGeom.rotateX(-Math.PI / 2);
+const posArr = terrainGeom.attributes.position.array;
+
+// gentle rolling hills via summed sine waves
+for (let i = 0; i < posArr.length; i += 3) {
+  const x = posArr[i], z = posArr[i + 2];
+  let h = 0;
+  h += Math.sin(x * 0.04 + z * 0.02) * 1.2;
+  h += Math.sin(x * 0.08 - z * 0.05) * 0.6;
+  h += Math.sin(x * 0.15 + z * 0.12) * 0.3;
+  h += (Math.random() - 0.5) * 0.15; // texture roughness
+  posArr[i + 1] = h - 2.5; // lower the ground slightly
+}
+terrainGeom.computeVertexNormals();
+
+const terrainMat = new THREE.MeshStandardMaterial({
+  color: 0x4a3d2f, // warm earth brown
+  roughness: 0.95,
+  metalness: 0.05,
+  flatShading: false
+});
+const terrain = new THREE.Mesh(terrainGeom, terrainMat);
+scene.add(terrain);
+
+// --- border line: single thin red contour at z=0 ---
+const borderGeom = new THREE.BufferGeometry();
+const borderPts = [];
+const borderSamples = 200;
+for (let i = 0; i < borderSamples; i++) {
+  const x = (i / (borderSamples - 1)) * TERRAIN_W - TERRAIN_W / 2;
+  const z = 0;
+  // sample terrain height at this x
+  let h = 0;
+  h += Math.sin(x * 0.04) * 1.2;
+  h += Math.sin(x * 0.08) * 0.6;
+  h += Math.sin(x * 0.15) * 0.3;
+  borderPts.push(x, h - 2.5 + 0.08, z); // slightly above terrain
+}
+borderGeom.setAttribute('position', new THREE.Float32BufferAttribute(borderPts, 3));
+const borderMat = new THREE.LineBasicMaterial({ color: 0xcc3333, opacity: 0.75, transparent: true });
+const borderLine = new THREE.Line(borderGeom, borderMat);
+scene.add(borderLine);
+
+// --- volumetric clouds: 40k particles raymarched through 3D worley/perlin ---
+const N_PARTICLES = 40000;
+const cloudPos = new Float32Array(N_PARTICLES * 3);
+const cloudSeeds = new Float32Array(N_PARTICLES);
+
+// distribute particles in a thick slab above terrain
+const CLOUD_Y_MIN = 8;
+const CLOUD_Y_MAX = 22;
+const CLOUD_SPREAD_XZ = 50;
+for (let i = 0; i < N_PARTICLES; i++) {
+  cloudPos[i * 3]     = (Math.random() - 0.5) * CLOUD_SPREAD_XZ;
+  cloudPos[i * 3 + 1] = CLOUD_Y_MIN + Math.random() * (CLOUD_Y_MAX - CLOUD_Y_MIN);
+  cloudPos[i * 3 + 2] = (Math.random() - 0.5) * CLOUD_SPREAD_XZ * 0.6;
+  cloudSeeds[i] = Math.random();
+}
+
+const cloudGeom = new THREE.BufferGeometry();
+cloudGeom.setAttribute('position', new THREE.BufferAttribute(cloudPos, 3));
+cloudGeom.setAttribute('seed', new THREE.BufferAttribute(cloudSeeds, 1));
+
+const cloudUniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const cloudMat = new THREE.ShaderMaterial({
+  uniforms: cloudUniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vDensity;
+    varying float vDepth;
+
+    // 3D worley-like noise (simplified)
+    vec3 hash3(vec3 p) {
+      p = fract(p * vec3(443.897, 441.423, 437.195));
+      p += dot(p, p.yzx + 19.19);
+      return fract((p.xxy + p.yxx) * p.zyx);
+    }
+    float worley(vec3 p) {
+      vec3 i = floor(p);
+      vec3 f = fract(p);
+      float minDist = 1.0;
+      for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+          for (int z = -1; z <= 1; z++) {
+            vec3 cell = i + vec3(float(x), float(y), float(z));
+            vec3 cellPos = hash3(cell);
+            vec3 diff = cellPos - f + vec3(float(x), float(y), float(z));
+            minDist = min(minDist, dot(diff, diff));
+          }
+        }
+      }
+      return sqrt(minDist);
+    }
+
+    void main() {
+      vec3 p = position;
+      // wind drift: clouds move slowly eastward
+      float drift = uTime * 0.5;
+      vec3 samplePos = vec3(p.x + drift, p.y, p.z) * 0.08;
+
+      // worley noise for cloud density
+      float w1 = worley(samplePos);
+      float w2 = worley(samplePos * 2.0 + vec3(10.0));
+      float density = 1.0 - w1 * 0.7 - w2 * 0.3;
+      density = smoothstep(0.35, 0.65, density); // thresholded fluffy clouds
+
+      // vertical gradient: clouds denser at mid-layer
+      float yFactor = 1.0 - abs((p.y - 15.0) / 7.0);
+      density *= clamp(yFactor, 0.0, 1.0);
+
+      vDensity = density;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      gl_PointSize = 2.2 * uPixel * (50.0 / vDepth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDensity;
+    varying float vDepth;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // soft cloud particle — white with subtle warmth
+      vec3 cloudCol = vec3(0.98, 0.96, 0.94);
+      float falloff = exp(-r * 12.0);
+      float alpha = vDensity * falloff * 0.65;
+
+      // depth fade: distant clouds softer
+      alpha *= clamp(1.0 - (vDepth - 40.0) / 80.0, 0.3, 1.0);
+
+      gl_FragColor = vec4(cloudCol, alpha);
+    }
+  `
+});
+
+const cloudPoints = new THREE.Points(cloudGeom, cloudMat);
+scene.add(cloudPoints);
+
+// --- lighting: soft ambient + warm directional (late afternoon sun) ---
+const ambientLight = new THREE.AmbientLight(0x3d3a38, 0.6);
+scene.add(ambientLight);
+const dirLight = new THREE.DirectionalLight(0xffd9a8, 0.8);
+dirLight.position.set(15, 25, 20);
+scene.add(dirLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  cloudUniforms.uTime.value = t;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
