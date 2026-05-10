@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7w6 · thread field (lorenz)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">7w6 · thread field</div>
+<div class="hint">chiharu shiota · 12k threads connect lorenz orbits</div>
+<div class="src">crimson on void · line network</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Thread installation: 12,000 line segments, each connecting two random particles
+// in the Lorenz attractor field. Sparse random-graph topology reads as memory web.
+// Shiota aesthetic: crimson threads in architectural void, gauzy additive overlay.
+
+const W = 128, H = 128;
+const N = W * H;
+const THREAD_COUNT = 12000;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0a, 1);
+document.body.appendChild(renderer.domElement);
+
+// ---- ping-pong state RTs ----
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// init: scatter particles in attractor basin
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 8.0;
+  init[i*4+1] = (Math.random()*2-1) * 8.0;
+  init[i*4+2] = (Math.random()*2-1) * 8.0 + 25.0;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// ---- simulation pass: integrate Lorenz ----
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt:    { value: 0.005 },
+  uSigma: { value: 10.0 },
+  uRho:   { value: 28.0 },
+  uBeta:  { value: 8.0/3.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uSigma;
+    uniform float uRho;
+    uniform float uBeta;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      vec3 dp = vec3(
+        uSigma * (p.y - p.x),
+        p.x * (uRho - p.z) - p.y,
+        p.x * p.y - uBeta * p.z
+      );
+      p += dp * uDt;
+      age = mod(age + uDt * 0.05, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// ---- thread network: line segments connecting random particle pairs ----
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 32, 90);
+camera.lookAt(0, -10, 0);
+
+// generate random particle-pair indices
+const threadPairs = new Uint16Array(THREAD_COUNT * 2);
+for (let i = 0; i < THREAD_COUNT; i++){
+  threadPairs[i*2]   = Math.floor(Math.random() * N);
+  threadPairs[i*2+1] = Math.floor(Math.random() * N);
+}
+// convert particle index to UV coord
+function indexToUV(idx){
+  const x = idx % W;
+  const y = Math.floor(idx / W);
+  return [(x + 0.5) / W, (y + 0.5) / H];
+}
+
+const threadsGeom = new THREE.BufferGeometry();
+const uvA = new Float32Array(THREAD_COUNT * 2 * 2); // 2 verts per segment, 2 floats per UV
+const uvB = new Float32Array(THREAD_COUNT * 2 * 2);
+const variance = new Float32Array(THREAD_COUNT * 2); // per-vertex random offset
+
+for (let i = 0; i < THREAD_COUNT; i++){
+  const uvStart = indexToUV(threadPairs[i*2]);
+  const uvEnd   = indexToUV(threadPairs[i*2+1]);
+  uvA[i*4]     = uvStart[0]; uvA[i*4+1] = uvStart[1];
+  uvA[i*4+2]   = uvEnd[0];   uvA[i*4+3] = uvEnd[1];
+  uvB[i*4]     = uvStart[0]; uvB[i*4+1] = uvStart[1];
+  uvB[i*4+2]   = uvEnd[0];   uvB[i*4+3] = uvEnd[1];
+  // slight per-thread opacity variance for hand-placed feel
+  variance[i*2]   = 0.5 + Math.random() * 0.5;
+  variance[i*2+1] = 0.5 + Math.random() * 0.5;
+}
+
+threadsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(THREAD_COUNT * 2 * 3), 3));
+threadsGeom.setAttribute('uvA', new THREE.BufferAttribute(uvA, 2));
+threadsGeom.setAttribute('uvB', new THREE.BufferAttribute(uvB, 2));
+threadsGeom.setAttribute('variance', new THREE.BufferAttribute(variance, 1));
+
+const threadMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state: { value: rtB.texture },
+    uTime: { value: 0 },
+    uPointer: { value: new THREE.Vector2(0, 0) }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uTime;
+    uniform vec2 uPointer;
+    attribute vec2 uvA;
+    attribute vec2 uvB;
+    attribute float variance;
+    varying float vOpacity;
+    void main(){
+      // read positions of both endpoints
+      vec4 sA = texture2D(state, uvA);
+      vec4 sB = texture2D(state, uvB);
+      vec3 pA = sA.xyz;
+      vec3 pB = sB.xyz;
+      // shift attractor down
+      pA.z -= 25.0;
+      pB.z -= 25.0;
+      // interpolate along segment
+      float t = float(gl_VertexID % 2);
+      vec3 p = mix(pA, pB, t);
+      // subtle drift from pointer (emotional tension)
+      vec2 influence = uPointer * 0.8;
+      p.x += influence.x * (1.0 - t*0.5);
+      p.y += influence.y * (1.0 - t*0.5);
+      // slight time-sway (wabi-sabi breath)
+      p.x += sin(uTime * 0.3 + float(gl_VertexID) * 0.01) * 0.5 * variance;
+      p.y += cos(uTime * 0.25 + float(gl_VertexID) * 0.013) * 0.4 * variance;
+      
+      vOpacity = variance;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vOpacity;
+    void main(){
+      // Shiota crimson
+      vec3 crimson = vec3(0.612, 0.122, 0.122);
+      float alpha = 0.08 * vOpacity;
+      gl_FragColor = vec4(crimson * alpha, alpha);
+    }
+  `
+});
+
+const threads = new THREE.LineSegments(threadsGeom, threadMat);
+scene.add(threads);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pointer influence (subtle tension field)
+const pointer = { x: 0, y: 0 };
+addEventListener('pointermove', (e) => {
+  pointer.x = (e.clientX / innerWidth)  * 2 - 1;
+  pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+});
+
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - lastTime) / 1000; lastTime = now;
+
+  // step sim (2 substeps)
+  for (let i = 0; i < 2; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  threadMat.uniforms.state.value = rtA.texture;
+  threadMat.uniforms.uTime.value = now / 1000;
+  threadMat.uniforms.uPointer.value.set(pointer.x * 2.5, pointer.y * 2.5);
+
+  // slow orbit (architectural framing)
+  const ang = now * 0.00008;
+  camera.position.x = Math.sin(ang) * 90;
+  camera.position.z = Math.cos(ang) * 90;
+  camera.lookAt(0, -10, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
