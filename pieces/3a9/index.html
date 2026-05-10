@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>particle landscape · infrastructure erosion to starfield</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020308; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">3a9 · infrastructure to sky</div>
+<div class="hint">dual layer: built grid → celestial commons · 120s cycle</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Dual particle system: BUILT layer (8k orthogonal grid — sodium-orange, low altitude)
+// + SKY layer (20k deep field — cobalt to white, high altitude). BUILT progressively
+// erases over 120s cycle, leaving only SKY. Camera tracks the dissolve frontier.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020308, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 400);
+camera.position.set(0, 35, 100);
+camera.lookAt(0, 20, 0);
+
+// ─────────────────────────── BUILT layer: 8k grid ───────────────────────────
+const BUILT_W = 90, BUILT_H = 90;
+const BUILT_N = BUILT_W * BUILT_H;
+const builtGeom = new THREE.BufferGeometry();
+const builtPos = new Float32Array(BUILT_N * 3);
+const builtAge = new Float32Array(BUILT_N);
+const builtRnd = new Float32Array(BUILT_N);
+
+let bi = 0;
+for (let x = 0; x < BUILT_W; x++){
+  for (let z = 0; z < BUILT_H; z++){
+    builtPos[bi*3]   = (x - BUILT_W/2) * 2.5 + (Math.random()-0.5)*0.8;
+    builtPos[bi*3+1] = 2.0 + Math.random() * 4.0;
+    builtPos[bi*3+2] = (z - BUILT_H/2) * 2.5 + (Math.random()-0.5)*0.8;
+    builtAge[bi] = Math.random();
+    builtRnd[bi] = Math.random();
+    bi++;
+  }
+}
+builtGeom.setAttribute('position', new THREE.BufferAttribute(builtPos, 3));
+builtGeom.setAttribute('age', new THREE.BufferAttribute(builtAge, 1));
+builtGeom.setAttribute('rnd', new THREE.BufferAttribute(builtRnd, 1));
+
+const builtMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uCycle: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uCycle;
+    uniform float uPixel;
+    attribute float age;
+    attribute float rnd;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogDepth;
+    void main(){
+      vec3 p = position;
+      
+      // erosion: particles with age < uCycle fade + drift up
+      float erode = smoothstep(age - 0.03, age + 0.03, uCycle);
+      float visible = 1.0 - erode;
+      p.y += erode * 60.0 * (0.8 + rnd * 0.4);
+      
+      // pulse per particle
+      float pulse = 0.85 + 0.15 * sin(uTime * (2.0 + rnd*3.0) + rnd * 62.83);
+      
+      // sodium-orange (light pollution)
+      vCol = vec3(1.0, 0.62, 0.18) * pulse;
+      vAlpha = visible * (0.5 + rnd * 0.3);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vFogDepth = -mv.z;
+      gl_PointSize = (1.8 + rnd*1.2) * uPixel * (4.0 / max(1.0, vFogDepth * 0.08));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      
+      // fog toward deep navy
+      float fogF = 1.0 - exp(-vFogDepth * vFogDepth * 0.000008);
+      vec3 col = mix(vCol, vec3(0.02, 0.04, 0.10), fogF);
+      
+      gl_FragColor = vec4(col * a * vAlpha, a * vAlpha);
+    }
+  `
+});
+const builtPoints = new THREE.Points(builtGeom, builtMat);
+scene.add(builtPoints);
+
+// ─────────────────────────── SKY layer: 20k deep field ───────────────────────────
+const SKY_N = 20000;
+const skyGeom = new THREE.BufferGeometry();
+const skyPos = new Float32Array(SKY_N * 3);
+const skyVel = new Float32Array(SKY_N * 3);
+const skyDepth = new Float32Array(SKY_N);
+
+for (let i = 0; i < SKY_N; i++){
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const r = 80 + Math.random() * 200;
+  skyPos[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+  skyPos[i*3+1] = 50 + r * Math.cos(phi) * 0.6;
+  skyPos[i*3+2] = r * Math.sin(phi) * Math.sin(theta);
+  
+  // slow celestial drift
+  skyVel[i*3]   = (Math.random()-0.5) * 0.02;
+  skyVel[i*3+1] = (Math.random()-0.5) * 0.01;
+  skyVel[i*3+2] = (Math.random()-0.5) * 0.02;
+  
+  skyDepth[i] = Math.random();
+}
+skyGeom.setAttribute('position', new THREE.BufferAttribute(skyPos, 3));
+skyGeom.setAttribute('velocity', new THREE.BufferAttribute(skyVel, 3));
+skyGeom.setAttribute('depth', new THREE.BufferAttribute(skyDepth, 1));
+
+const skyMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uCycle: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uCycle;
+    uniform float uPixel;
+    attribute vec3 velocity;
+    attribute float depth;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogDepth;
+    void main(){
+      vec3 p = position + velocity * uTime * 2.0;
+      
+      // sky layer becomes fully visible as BUILT layer erodes
+      float reveal = smoothstep(0.0, 0.3, uCycle);
+      
+      // cobalt → white gradient by depth
+      vec3 cobalt = vec3(0.12, 0.28, 0.58);
+      vec3 white = vec3(0.92, 0.95, 0.98);
+      float k = pow(depth, 1.8);
+      vCol = mix(cobalt, white, k);
+      
+      vAlpha = reveal * (0.6 + depth * 0.4);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vFogDepth = -mv.z;
+      gl_PointSize = (0.8 + depth * 2.0) * uPixel * (5.0 / max(1.0, vFogDepth * 0.05));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0);
+      
+      // deep navy fog
+      float fogF = 1.0 - exp(-vFogDepth * vFogDepth * 0.000006);
+      vec3 col = mix(vCol, vec3(0.02, 0.04, 0.10), fogF);
+      
+      gl_FragColor = vec4(col * a * vAlpha, a * vAlpha);
+    }
+  `
+});
+const skyPoints = new THREE.Points(skyGeom, skyMat);
+scene.add(skyPoints);
+
+// ─────────────────────────── horizon line (eroding infrastructure silhouette) ───────────────────────────
+const lineGeom = new THREE.BufferGeometry();
+const lineSegs = 200;
+const linePos = new Float32Array(lineSegs * 2 * 3);
+for (let i = 0; i < lineSegs; i++){
+  const x = (i / lineSegs - 0.5) * 240;
+  const y = 0.5 + Math.sin(i * 0.4) * 2.0;
+  linePos[i*6]   = x;
+  linePos[i*6+1] = y;
+  linePos[i*6+2] = -50;
+  linePos[i*6+3] = x;
+  linePos[i*6+4] = y + 15.0;
+  linePos[i*6+5] = -50;
+}
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
+const lineMat = new THREE.LineBasicMaterial({ color: 0x3d2815, opacity: 0.0, transparent: true });
+const lines = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lines);
+
+// ─────────────────────────── camera tracking ───────────────────────────
+function updateCamera(cycle){
+  const camT = cycle * 120;
+  camera.position.x = Math.sin(camT * 0.004) * 90;
+  camera.position.z = 100 + Math.cos(camT * 0.003) * 40;
+  camera.position.y = 35 + cycle * 25;
+  camera.lookAt(0, 20 + cycle * 15, 0);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const CYCLE_S = 120;
+let startT = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - startT) / 1000;
+  const cycle = Math.min(1.0, elapsed / CYCLE_S);
+  
+  builtMat.uniforms.uTime.value = elapsed;
+  builtMat.uniforms.uCycle.value = cycle;
+  
+  skyMat.uniforms.uTime.value = elapsed;
+  skyMat.uniforms.uCycle.value = cycle;
+  
+  // horizon line fades as infrastructure erodes
+  lineMat.opacity = Math.max(0, 0.25 * (1.0 - cycle * 2.0));
+  
+  updateCamera(cycle);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
