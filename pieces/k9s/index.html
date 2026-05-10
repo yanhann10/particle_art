@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>k9s · Process Compendium (spherical)</title>
+<!-- MOTION: tracing, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#fafaf8; overflow:hidden;
+               color:#1a1a1a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">k9s</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xfafaf8, 1);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+// Agent system: Elements trace circular paths on a sphere surface
+const N = 320;
+const agents = [];
+const R = 5.2; // sphere radius
+
+class Element {
+  constructor() {
+    // random position on sphere
+    this.theta = Math.random() * Math.PI * 2;
+    this.phi = Math.acos(2 * Math.random() - 1);
+    
+    // circular motion parameters
+    this.speed = 0.004 + Math.random() * 0.006;
+    this.clockwise = Math.random() > 0.5;
+    this.axis = new THREE.Vector3(
+      Math.random() - 0.5,
+      Math.random() - 0.5,
+      Math.random() - 0.5
+    ).normalize();
+    
+    this.phase = Math.random() * Math.PI * 2;
+  }
+  
+  getPosition(t) {
+    const angle = this.phase + t * this.speed * (this.clockwise ? 1 : -1);
+    const x = R * Math.sin(this.phi) * Math.cos(this.theta + angle * 0.3);
+    const y = R * Math.sin(this.phi) * Math.sin(this.theta + angle * 0.3);
+    const z = R * Math.cos(this.phi);
+    
+    // apply small orbital perturbation around axis
+    const p = new THREE.Vector3(x, y, z);
+    const rotAngle = angle * 0.7;
+    const q = new THREE.Quaternion().setFromAxisAngle(this.axis, rotAngle);
+    p.applyQuaternion(q);
+    return p;
+  }
+}
+
+for (let i = 0; i < N; i++) {
+  agents.push(new Element());
+}
+
+// Connection geometry: when two agents are within threshold, draw quad
+const MAX_CONNECTIONS = 800;
+const connectionGeom = new THREE.BufferGeometry();
+const positions = new Float32Array(MAX_CONNECTIONS * 4 * 3); // 4 vertices per quad
+const indices = [];
+for (let i = 0; i < MAX_CONNECTIONS; i++) {
+  const base = i * 4;
+  indices.push(base, base+1, base+2);
+  indices.push(base, base+2, base+3);
+}
+connectionGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+connectionGeom.setIndex(indices);
+connectionGeom.setDrawRange(0, 0);
+
+const connectionMat = new THREE.MeshBasicMaterial({
+  color: 0x1a1a1a,
+  transparent: true,
+  opacity: 0.018,
+  side: THREE.DoubleSide,
+  blending: THREE.NormalBlending,
+  depthWrite: false
+});
+const connectionMesh = new THREE.Mesh(connectionGeom, connectionMat);
+scene.add(connectionMesh);
+
+// Agent markers (small dots)
+const markerGeom = new THREE.BufferGeometry();
+const markerPos = new Float32Array(N * 3);
+markerGeom.setAttribute('position', new THREE.BufferAttribute(markerPos, 3));
+const markerMat = new THREE.PointsMaterial({
+  color: 0x2a2a2a,
+  size: 0.08,
+  transparent: true,
+  opacity: 0.6,
+  sizeAttenuation: true
+});
+const markerPoints = new THREE.Points(markerGeom, markerMat);
+scene.add(markerPoints);
+
+// Contact history: track which pairs have touched
+const contactMap = new Map();
+const THRESHOLD = 0.85;
+const CONTACT_FADE = 0.993;
+
+function hashPair(i, j) {
+  return i < j ? `${i}_${j}` : `${j}_${i}`;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+let connectionCount = 0;
+const connectionBuffer = [];
+const MAX_BUFFER = 12000;
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  
+  // Update agent positions
+  const currentPos = [];
+  for (let i = 0; i < N; i++) {
+    const p = agents[i].getPosition(t);
+    currentPos.push(p);
+    markerPos[i*3] = p.x;
+    markerPos[i*3+1] = p.y;
+    markerPos[i*3+2] = p.z;
+  }
+  markerGeom.attributes.position.needsUpdate = true;
+  
+  // Check distances and create connections
+  for (let i = 0; i < N; i++) {
+    for (let j = i+1; j < N; j++) {
+      const dist = currentPos[i].distanceTo(currentPos[j]);
+      const key = hashPair(i, j);
+      
+      if (dist < THRESHOLD) {
+        if (!contactMap.has(key)) {
+          contactMap.set(key, { count: 0, lastT: t });
+        }
+        const contact = contactMap.get(key);
+        
+        // Create quad connecting the two agents
+        if (contact.count < 3 && Math.random() > 0.85) {
+          const p1 = currentPos[i];
+          const p2 = currentPos[j];
+          
+          // Create perpendicular vectors for quad width
+          const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+          const dir = new THREE.Vector3().subVectors(p2, p1);
+          const perp = new THREE.Vector3().crossVectors(dir, mid).normalize().multiplyScalar(0.12);
+          
+          connectionBuffer.push({
+            v0: p1.clone().add(perp),
+            v1: p1.clone().sub(perp),
+            v2: p2.clone().sub(perp),
+            v3: p2.clone().add(perp)
+          });
+          
+          contact.count++;
+          contact.lastT = t;
+        }
+      }
+    }
+  }
+  
+  // Prune old connections from map
+  for (const [key, contact] of contactMap.entries()) {
+    if (t - contact.lastT > 8) {
+      contactMap.delete(key);
+    }
+  }
+  
+  // Maintain buffer size
+  if (connectionBuffer.length > MAX_BUFFER) {
+    connectionBuffer.splice(0, connectionBuffer.length - MAX_BUFFER);
+  }
+  
+  // Update connection geometry
+  connectionCount = Math.min(connectionBuffer.length, MAX_CONNECTIONS);
+  for (let i = 0; i < connectionCount; i++) {
+    const conn = connectionBuffer[connectionBuffer.length - connectionCount + i];
+    positions[i*12]   = conn.v0.x;
+    positions[i*12+1] = conn.v0.y;
+    positions[i*12+2] = conn.v0.z;
+    positions[i*12+3] = conn.v1.x;
+    positions[i*12+4] = conn.v1.y;
+    positions[i*12+5] = conn.v1.z;
+    positions[i*12+6] = conn.v2.x;
+    positions[i*12+7] = conn.v2.y;
+    positions[i*12+8] = conn.v2.z;
+    positions[i*12+9] = conn.v3.x;
+    positions[i*12+10] = conn.v3.y;
+    positions[i*12+11] = conn.v3.z;
+  }
+  connectionGeom.attributes.position.needsUpdate = true;
+  connectionGeom.setDrawRange(0, connectionCount * 6);
+  
+  // Slow orbital camera
+  camera.position.x = Math.sin(t * 0.08) * 18;
+  camera.position.z = Math.cos(t * 0.08) * 18;
+  camera.position.y = Math.sin(t * 0.05) * 3;
+  camera.lookAt(0, 0, 0);
+  
+  // Accumulative render with slow fade
+  renderer.setClearColor(0xfafaf8, 0.008);
+  renderer.clear();
+  renderer.render(scene, camera);
+  
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
