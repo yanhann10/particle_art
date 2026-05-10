@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vkh · Process 18 sphere / contact quads</title>
+<!-- MOTION: trace, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background:
+      radial-gradient(ellipse at 32% 38%, #faf8f4 0%, #e8dfd0 38%, #d0c4b0 78%, #8a7a64 100%),
+      #8a7a64;
+    background-blend-mode: normal;
+    color: #1a1612; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.88' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.15  0 0 0 0 0.12  0 0 0 0 0.08  0 0 0 0.28 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.52'/></svg>");
+    mix-blend-mode: multiply; opacity: 0.48;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background: radial-gradient(ellipse 85% 75% at 18% 22%, rgba(255,245,230,0.28), rgba(255,245,230,0) 50%);
+    mix-blend-mode: screen;
+  }
+  canvas { display:block; position: relative; z-index: 0; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; z-index:5; color: #cdd2dc; font-family: ui-monospace; }
+</style>
+</head>
+<body>
+<div class="id">vkh</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Casey Reas Process 18 — agents move on a sphere surface; when two agents come
+// within ε, a quad forms connecting their endpoints; quads accumulate additively
+// over time, building a dense interlocking field. The piece is a record of contact.
+// Motion: slow circular arcs on sphere. Visual: black quads on warm parchment.
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 9);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+renderer.autoClear = false; // ACCUMULATE — the drawing stays
+document.body.appendChild(renderer.domElement);
+
+// ────────────── AGENT SYSTEM
+const N = 380;
+const R = 3.2; // sphere radius
+const agents = [];
+
+class Element {
+  constructor(seed){
+    this.seed = seed;
+    // position on sphere: phi, theta
+    this.phi   = Math.random() * Math.PI * 2;
+    this.theta = Math.acos(Math.random() * 2 - 1);
+    // circular motion: we orbit around a pole at fixed angular speed
+    this.poleTheta = Math.random() * Math.PI;
+    this.polePhi   = Math.random() * Math.PI * 2;
+    this.angSpeed  = (0.08 + Math.random() * 0.12) * (Math.random() > 0.5 ? 1 : -1);
+    this.orbitRadius = 0.3 + Math.random() * 0.5;
+    this.t = Math.random() * 100;
+    // history for quad drawing: store last 3 positions
+    this.history = [];
+  }
+  update(dt){
+    this.t += dt;
+    const angle = this.t * this.angSpeed;
+    // orbit on sphere: we pick a local tangent circle around the pole
+    const px = Math.sin(this.poleTheta) * Math.cos(this.polePhi);
+    const py = Math.cos(this.poleTheta);
+    const pz = Math.sin(this.poleTheta) * Math.sin(this.polePhi);
+    // build a local frame
+    const up = new THREE.Vector3(px, py, pz).normalize();
+    const right = new THREE.Vector3(-pz, 0, px).normalize();
+    if (right.lengthSq() < 0.01) right.set(1, 0, 0);
+    const forward = new THREE.Vector3().crossVectors(up, right).normalize();
+    // circular motion in the tangent plane
+    const offset = new THREE.Vector3()
+      .addScaledVector(right, Math.cos(angle) * this.orbitRadius)
+      .addScaledVector(forward, Math.sin(angle) * this.orbitRadius);
+    const pos = new THREE.Vector3().addVectors(up, offset).normalize().multiplyScalar(R);
+    this.history.push(pos.clone());
+    if (this.history.length > 3) this.history.shift();
+  }
+  getPos(){
+    return this.history.length > 0 ? this.history[this.history.length - 1] : new THREE.Vector3();
+  }
+}
+
+for (let i = 0; i < N; i++){
+  agents.push(new Element(Math.random()));
+}
+
+// ────────────── QUAD DRAWING
+// We'll use InstancedMesh for accumulated quads; each contact event spawns a quad
+// that persists. We pre-allocate a large pool and cycle through.
+const MAX_QUADS = 12000;
+let quadIndex = 0;
+const quadGeom = new THREE.PlaneGeometry(1, 1);
+const quadMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  uniforms: {
+    uTime: { value: 0 },
+    uOpacity: { value: 1.0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uOpacity;
+    varying vec2 vUv;
+    void main(){
+      // soft gradient quad — darker at edges, lighter at center
+      vec2 d = vUv - 0.5;
+      float r = dot(d, d);
+      float a = exp(-r * 4.0);
+      // sumi ink black with slight warmth
+      vec3 col = vec3(0.08, 0.06, 0.04);
+      gl_FragColor = vec4(col, a * 0.12 * uOpacity);
+    }
+  `
+});
+const quads = new THREE.InstancedMesh(quadGeom, quadMat, MAX_QUADS);
+quads.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(quads);
+
+// hide all quads initially
+const dummy = new THREE.Object3D();
+dummy.scale.set(0, 0, 0);
+for (let i = 0; i < MAX_QUADS; i++){
+  quads.setMatrixAt(i, dummy.matrix);
+}
+quads.instanceMatrix.needsUpdate = true;
+
+function spawnQuad(a, b){
+  // a and b are Elements; we draw a quad connecting their current and previous positions
+  if (a.history.length < 2 || b.history.length < 2) return;
+  const a0 = a.history[a.history.length - 2];
+  const a1 = a.history[a.history.length - 1];
+  const b0 = b.history[b.history.length - 2];
+  const b1 = b.history[b.history.length - 1];
+  // quad corners: a0, a1, b1, b0 — we'll position a plane between them
+  const center = new THREE.Vector3()
+    .add(a0).add(a1).add(b0).add(b1).multiplyScalar(0.25);
+  // scale to fit the quad
+  const diag1 = new THREE.Vector3().subVectors(a1, b0);
+  const diag2 = new THREE.Vector3().subVectors(b1, a0);
+  const scale = Math.max(diag1.length(), diag2.length()) * 0.5;
+  // orient the quad to face camera (billboard) — simple LookAt
+  dummy.position.copy(center);
+  dummy.scale.set(scale, scale, 1);
+  dummy.lookAt(camera.position);
+  dummy.updateMatrix();
+  quads.setMatrixAt(quadIndex, dummy.matrix);
+  quadIndex = (quadIndex + 1) % MAX_QUADS;
+  quads.instanceMatrix.needsUpdate = true;
+}
+
+// ────────────── AGENT MARKERS (optional small dots to show agents)
+const markerGeom = new THREE.BufferGeometry();
+const markerPos = new Float32Array(N * 3);
+markerGeom.setAttribute('position', new THREE.BufferAttribute(markerPos, 3));
+const markerMat = new THREE.PointsMaterial({
+  size: 2.5, color: 0x1a0f08, transparent: true, opacity: 0.35, sizeAttenuation: false
+});
+const markers = new THREE.Points(markerGeom, markerMat);
+scene.add(markers);
+
+// ────────────── INTERACTION & LOOP
+const THRESHOLD = 0.45; // contact distance
+let lastT = performance.now();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastT) / 1000, 0.1);
+  lastT = now;
+  const t = now / 1000;
+
+  // update agents
+  for (let i = 0; i < N; i++){
+    agents[i].update(dt);
+    const p = agents[i].getPos();
+    markerPos[i*3]     = p.x;
+    markerPos[i*3 + 1] = p.y;
+    markerPos[i*3 + 2] = p.z;
+  }
+  markerGeom.attributes.position.needsUpdate = true;
+
+  // check contacts — when distance < THRESHOLD, spawn quad
+  for (let i = 0; i < N; i++){
+    for (let j = i + 1; j < N; j++){
+      const dist = agents[i].getPos().distanceTo(agents[j].getPos());
+      if (dist < THRESHOLD && Math.random() < 0.08){ // stochastic spawn to avoid flood
+        spawnQuad(agents[i], agents[j]);
+      }
+    }
+  }
+
+  // slow camera orbit — viewer circles the sphere
+  camera.position.x = Math.sin(t * 0.04) * 9;
+  camera.position.z = Math.cos(t * 0.04) * 9;
+  camera.position.y = 0.5 + Math.sin(t * 0.03) * 0.8;
+  camera.lookAt(0, 0, 0);
+
+  quadMat.uniforms.uTime.value = t;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
