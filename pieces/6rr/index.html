@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6rr · quayola scan-error tree</title>
+<!-- MOTION: orbit, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0b0d; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">6rr · quayola scan-error tree</div>
+<div class="hint">lidar occlusion · missing leaves where laser blocked</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0b0d, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 8, 28);
+camera.lookAt(0, 10, 0);
+
+// L-system fractal tree skeleton
+// axiom: F   rule: F → F[+F][-F]F
+// We generate this as cylinder segments, then densely sample points on each segment
+class Branch {
+  constructor(start, dir, len, gen) {
+    this.start = start.clone();
+    this.dir = dir.clone().normalize();
+    this.len = len;
+    this.gen = gen;
+    this.end = start.clone().add(this.dir.clone().multiplyScalar(len));
+  }
+}
+
+function generateTree(pos, maxGen) {
+  const branches = [];
+  const stack = [];
+  const axiom = [{ pos: pos.clone(), dir: new THREE.Vector3(0, 1, 0), gen: 0, len: 4.2 }];
+  
+  while (axiom.length > 0) {
+    const { pos, dir, gen, len } = axiom.shift();
+    if (gen > maxGen) continue;
+    
+    const branch = new Branch(pos, dir, len, gen);
+    branches.push(branch);
+    
+    // grow forward
+    const nextPos = branch.end.clone();
+    const nextLen = len * 0.72;
+    const nextGen = gen + 1;
+    
+    // right child [+F]
+    const rightDir = dir.clone();
+    const angleRight = 0.48 + Math.random() * 0.15;
+    rightDir.applyAxisAngle(new THREE.Vector3(Math.random()-0.5, 0, Math.random()-0.5).normalize(), angleRight);
+    axiom.push({ pos: nextPos.clone(), dir: rightDir, gen: nextGen, len: nextLen });
+    
+    // left child [-F]
+    const leftDir = dir.clone();
+    const angleLeft = 0.48 + Math.random() * 0.15;
+    leftDir.applyAxisAngle(new THREE.Vector3(Math.random()-0.5, 0, Math.random()-0.5).normalize(), -angleLeft);
+    axiom.push({ pos: nextPos.clone(), dir: leftDir, gen: nextGen, len: nextLen });
+    
+    // straight continuation F
+    axiom.push({ pos: nextPos.clone(), dir: dir.clone(), gen: nextGen, len: nextLen });
+  }
+  
+  return branches;
+}
+
+const treeRoot = new THREE.Vector3(0, 0, 0);
+const branches = generateTree(treeRoot, 5);
+
+// Convert branches to point cloud with scan errors
+const pointsData = [];
+
+branches.forEach((branch, branchIdx) => {
+  const radius = 0.15 * Math.pow(0.8, branch.gen);
+  const samplesPerUnit = 180; // dense sampling
+  const numSamples = Math.floor(branch.len * samplesPerUnit);
+  
+  // Occlusion mask: random blocks where laser was blocked
+  const occlusionChance = 0.18 + branch.gen * 0.06; // deeper branches more occluded
+  const isOccluded = Math.random() < occlusionChance;
+  
+  if (isOccluded) {
+    // Skip 60-90% of this branch's points
+    const keepRatio = 0.1 + Math.random() * 0.3;
+    for (let i = 0; i < numSamples; i++) {
+      if (Math.random() > keepRatio) continue;
+      const t = i / numSamples;
+      const p = branch.start.clone().lerp(branch.end, t);
+      
+      // Radial scatter around cylinder axis
+      const theta = Math.random() * Math.PI * 2;
+      const rOffset = (Math.random() - 0.5) * radius * 2;
+      const perp1 = new THREE.Vector3(-branch.dir.z, 0, branch.dir.x).normalize();
+      const perp2 = new THREE.Vector3().crossVectors(branch.dir, perp1).normalize();
+      p.add(perp1.multiplyScalar(Math.cos(theta) * rOffset));
+      p.add(perp2.multiplyScalar(Math.sin(theta) * rOffset));
+      
+      pointsData.push(p.x, p.y, p.z);
+    }
+  } else {
+    // Full density, but with gaussian noise that grows with camera distance
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / numSamples;
+      const p = branch.start.clone().lerp(branch.end, t);
+      
+      const theta = Math.random() * Math.PI * 2;
+      const rOffset = (Math.random() - 0.5) * radius * 2;
+      const perp1 = new THREE.Vector3(-branch.dir.z, 0, branch.dir.x).normalize();
+      const perp2 = new THREE.Vector3().crossVectors(branch.dir, perp1).normalize();
+      p.add(perp1.multiplyScalar(Math.cos(theta) * rOffset));
+      p.add(perp2.multiplyScalar(Math.sin(theta) * rOffset));
+      
+      pointsData.push(p.x, p.y, p.z);
+    }
+  }
+});
+
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointsData, 3));
+
+// Near-monochrome shader: pale gray with slight depth falloff
+const material = new THREE.ShaderMaterial({
+  uniforms: {
+    uCamPos: { value: camera.position },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform vec3 uCamPos;
+    uniform float uPixel;
+    varying float vDist;
+    varying float vDepth;
+    
+    // Box-Muller gaussian noise
+    float gaussianNoise(vec2 seed) {
+      float u1 = fract(sin(dot(seed, vec2(12.9898, 78.233))) * 43758.5453);
+      float u2 = fract(sin(dot(seed + 0.1, vec2(63.7264, 10.873))) * 43758.5453);
+      float r = sqrt(-2.0 * log(u1 + 0.001));
+      return r * cos(6.28318 * u2);
+    }
+    
+    void main() {
+      vec3 pos = position;
+      
+      // Camera distance
+      float dist = length(pos - uCamPos);
+      vDist = dist;
+      
+      // LiDAR noise: grows quadratically with distance (inverse square law)
+      float noiseScale = 0.008 + dist * dist * 0.00012;
+      vec2 seed = pos.xy + pos.z * 100.0;
+      vec3 noise = vec3(
+        gaussianNoise(seed),
+        gaussianNoise(seed + 7.7),
+        gaussianNoise(seed + 13.3)
+      ) * noiseScale;
+      
+      pos += noise;
+      
+      vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
+      vDepth = -mvPos.z;
+      gl_PointSize = (0.9 + dist * 0.018) * uPixel * (40.0 / vDepth);
+      gl_Position = projectionMatrix * mvPos;
+    }
+  `,
+  fragmentShader: `
+    varying float vDist;
+    varying float vDepth;
+    
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      
+      float alpha = exp(-r * 12.0);
+      
+      // Pale gray, slightly cooler at distance (atmospheric)
+      float depthFade = smoothstep(5.0, 35.0, vDepth);
+      vec3 col = mix(vec3(0.76, 0.77, 0.78), vec3(0.68, 0.70, 0.74), depthFade);
+      
+      // Distance falloff (lidar gets noisier/dimmer at range)
+      alpha *= smoothstep(60.0, 10.0, vDist);
+      
+      gl_FragColor = vec4(col, alpha * 0.45);
+    }
+  `
+});
+
+const pointCloud = new THREE.Points(geometry, material);
+scene.add(pointCloud);
+
+// Faint ground reference (horizontal scan plane)
+const groundGeom = new THREE.PlaneGeometry(60, 60, 1, 1);
+groundGeom.rotateX(-Math.PI / 2);
+const groundMat = new THREE.MeshBasicMaterial({ 
+  color: 0x15161a, 
+  transparent: true, 
+  opacity: 0.08,
+  side: THREE.DoubleSide
+});
+const ground = new THREE.Mesh(groundGeom, groundMat);
+scene.add(ground);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(t) {
+  // Slow orbital reveal (120s full rotation)
+  const angle = t * 0.00008;
+  const radius = 28;
+  camera.position.x = Math.sin(angle) * radius;
+  camera.position.z = Math.cos(angle) * radius;
+  camera.position.y = 8 + Math.sin(angle * 0.7) * 2;
+  camera.lookAt(0, 10, 0);
+  
+  material.uniforms.uCamPos.value.copy(camera.position);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop(0);
+</script>
+</body>
+</html>
