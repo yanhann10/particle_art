@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>z6t · cosmic web (IllustrisTNG filament structure)</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#667; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#667; }
+</style>
+</head>
+<body>
+<div class="id">z6t</div>
+<div class="hint">orbit drag · 800 Mly³ · gravitational infall</div>
+<div class="src">MillenniumTNG · Voronoi foam · 50k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000000, 0.006);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 1, 2000);
+camera.position.set(120, 80, 180);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+// Voronoi seed points (cluster nodes)
+const nNodes = 200;
+const nodePositions = [];
+const nodeVelocities = [];
+const cubeSize = 200;
+
+function rng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+const rand = rng(Date.now());
+
+for (let i = 0; i < nNodes; i++) {
+  nodePositions.push(new THREE.Vector3(
+    (rand() - 0.5) * cubeSize,
+    (rand() - 0.5) * cubeSize,
+    (rand() - 0.5) * cubeSize
+  ));
+  nodeVelocities.push(new THREE.Vector3(
+    (rand() - 0.5) * 0.02,
+    (rand() - 0.5) * 0.02,
+    (rand() - 0.5) * 0.02
+  ));
+}
+
+// Build Voronoi edges by connecting each node to its K nearest neighbors
+function buildVoronoiEdges(nodes, K = 5) {
+  const edges = [];
+  for (let i = 0; i < nodes.length; i++) {
+    const distances = nodes.map((n, j) => ({
+      idx: j,
+      dist: i === j ? Infinity : nodes[i].distanceTo(n)
+    }));
+    distances.sort((a, b) => a.dist - b.dist);
+    for (let k = 0; k < K && k < distances.length; k++) {
+      const j = distances[k].idx;
+      if (j > i) { // avoid duplicates
+        edges.push({ a: i, b: j, mid: new THREE.Vector3().addVectors(nodes[i], nodes[j]).multiplyScalar(0.5) });
+      }
+    }
+  }
+  return edges;
+}
+
+const edges = buildVoronoiEdges(nodePositions, 6);
+
+// Particle generation along filaments
+const N = 50000;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const targetNodes = new Float32Array(N); // index of nearest node
+const edgeDistances = new Float32Array(N); // distance along edge [0,1]
+
+let idx = 0;
+for (const edge of edges) {
+  const pA = nodePositions[edge.a];
+  const pB = nodePositions[edge.b];
+  const edgeLength = pA.distanceTo(pB);
+  const nParticles = Math.floor(edgeLength * 8); // density per unit length
+
+  for (let i = 0; i < nParticles && idx < N; i++) {
+    const t = rand();
+    const pos = new THREE.Vector3().lerpVectors(pA, pB, t);
+    
+    // Perpendicular scatter (thin filament)
+    const perp = new THREE.Vector3(
+      (rand() - 0.5),
+      (rand() - 0.5),
+      (rand() - 0.5)
+    ).normalize().multiplyScalar(rand() * 1.5 * Math.exp(-t * t * 2)); // Gaussian falloff
+    
+    pos.add(perp);
+    
+    positions[idx * 3] = pos.x;
+    positions[idx * 3 + 1] = pos.y;
+    positions[idx * 3 + 2] = pos.z;
+    
+    // Velocity toward nearest node (gravitational infall)
+    const nearestNode = t < 0.5 ? edge.a : edge.b;
+    targetNodes[idx] = nearestNode;
+    edgeDistances[idx] = Math.min(t, 1 - t) * 2; // 0 at nodes, 1 at mid-filament
+    
+    const dir = new THREE.Vector3().subVectors(nodePositions[nearestNode], pos).normalize();
+    velocities[idx * 3] = dir.x * 0.08;
+    velocities[idx * 3 + 1] = dir.y * 0.08;
+    velocities[idx * 3 + 2] = dir.z * 0.08;
+    
+    idx++;
+  }
+}
+
+// Fill remaining with node-cluster particles
+while (idx < N) {
+  const nodeIdx = Math.floor(rand() * nNodes);
+  const node = nodePositions[nodeIdx];
+  const offset = new THREE.Vector3(
+    (rand() - 0.5),
+    (rand() - 0.5),
+    (rand() - 0.5)
+  ).normalize().multiplyScalar(rand() * 3.0);
+  
+  const pos = new THREE.Vector3().addVectors(node, offset);
+  
+  positions[idx * 3] = pos.x;
+  positions[idx * 3 + 1] = pos.y;
+  positions[idx * 3 + 2] = pos.z;
+  
+  targetNodes[idx] = nodeIdx;
+  edgeDistances[idx] = 0; // at node
+  
+  velocities[idx * 3] = (rand() - 0.5) * 0.02;
+  velocities[idx * 3 + 1] = (rand() - 0.5) * 0.02;
+  velocities[idx * 3 + 2] = (rand() - 0.5) * 0.02;
+  
+  idx++;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('edgeDist', new THREE.BufferAttribute(edgeDistances, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float edgeDist;
+    varying float vDist;
+    varying float vDepth;
+
+    void main() {
+      vDist = edgeDist;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vDepth = -mv.z;
+      float size = uPixel * (8.0 + 12.0 * (1.0 - edgeDist));
+      gl_PointSize = size / (1.0 + vDepth * 0.002);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDist;
+    varying float vDepth;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      
+      float alpha = 1.0 - smoothstep(0.35, 0.5, r);
+      
+      // Colormap: hot magenta at nodes (vDist=0), cool blue mid-filament (vDist=1)
+      vec3 clusterColor = vec3(1.0, 0.2, 0.6); // magenta
+      vec3 filamentColor = vec3(0.4, 0.6, 1.0); // pale blue
+      vec3 col = mix(clusterColor, filamentColor, vDist);
+      
+      // Depth fog attenuation
+      float fog = exp(-vDepth * 0.004);
+      
+      gl_FragColor = vec4(col * fog, alpha * fog * 0.7);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Orbit controls
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 1.0;
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  isDragging = true;
+  prevX = e.clientX;
+  prevY = e.clientY;
+  e.preventDefault();
+});
+
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.004;
+  orbitPhi = Math.max(0.2, Math.min(2.8, orbitPhi - (e.clientY - prevY) * 0.004));
+  prevX = e.clientX;
+  prevY = e.clientY;
+});
+
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  mat.uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  mat.uniforms.uTime.value = t;
+
+  // Particle infall
+  for (let i = 0; i < N; i++) {
+    const target = targetNodes[i];
+    const node = nodePositions[target];
+    
+    const px = positions[i * 3];
+    const py = positions[i * 3 + 1];
+    const pz = positions[i * 3 + 2];
+    
+    const dx = node.x - px;
+    const dy = node.y - py;
+    const dz = node.z - pz;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    
+    if (dist > 2.0) {
+      positions[i * 3] += velocities[i * 3];
+      positions[i * 3 + 1] += velocities[i * 3 + 1];
+      positions[i * 3 + 2] += velocities[i * 3 + 2];
+      
+      // Update edgeDist toward 0 (converging to node)
+      edgeDistances[i] *= 0.998;
+    }
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.edgeDist.needsUpdate = true;
+
+  // Camera orbit
+  const autoTheta = t * 0.03;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 220;
+
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
