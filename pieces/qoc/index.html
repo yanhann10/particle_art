@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qoc · disrupted aizawa lattice</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0c0e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">qoc</div>
+<div class="hint">pointer to shift void zones</div>
+<div class="src">vera molnár · disrupted-grid attractor</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Aizawa attractor particles placed on a coarse hexagonal lattice,
+// then four deliberate disruption zones carved out:
+// 1) empty circular void at offset center
+// 2) density spike quadrant (upper-right)
+// 3) vertical gap/tear (left third)
+// 4) broken edge (bottom)
+// Pointer moves the void zones laterally.
+
+const W = 256, H = 256;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0c0e, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// Hexagonal lattice init with four disruption zones
+const init = new Float32Array(N * 4);
+const hexSpacing = 0.15;
+const voidCenter = { x: -0.3, y: 0.1 };
+const voidRadius = 0.6;
+
+for (let i = 0; i < N; i++){
+  const row = Math.floor(i / W);
+  const col = i % W;
+  const rowNorm = (row / H) - 0.5;
+  const colNorm = (col / W) - 0.5;
+  
+  // hexagonal offset
+  const offsetX = (row % 2) * hexSpacing * 0.5;
+  const gridX = colNorm * 2.2 + offsetX;
+  const gridY = rowNorm * 2.2;
+  
+  // disruption zone 1: circular void at offset center
+  const dx = gridX - voidCenter.x;
+  const dy = gridY - voidCenter.y;
+  const distToVoid = Math.sqrt(dx*dx + dy*dy);
+  
+  // disruption zone 2: density spike in upper-right quadrant
+  const inSpikeZone = gridX > 0.4 && gridY > 0.3;
+  
+  // disruption zone 3: vertical tear (left third, narrow band)
+  const inTearZone = gridX > -0.9 && gridX < -0.7 && Math.abs(gridY) < 0.8;
+  
+  // disruption zone 4: broken bottom edge
+  const inBrokenEdge = gridY < -0.7 && Math.abs(gridX) < 0.5;
+  
+  let px, py, pz;
+  if (distToVoid < voidRadius) {
+    // void: push particles far out of frame
+    px = gridX * 20;
+    py = gridY * 20;
+    pz = -15;
+  } else if (inSpikeZone) {
+    // density spike: cluster tightly
+    px = 0.6 + (Math.random() - 0.5) * 0.2;
+    py = 0.5 + (Math.random() - 0.5) * 0.2;
+    pz = (Math.random() - 0.5) * 0.3;
+  } else if (inTearZone) {
+    // tear: particles absent (push out)
+    px = gridX * 18;
+    py = gridY * 18;
+    pz = -12;
+  } else if (inBrokenEdge) {
+    // broken edge: sparse scatter
+    if (Math.random() > 0.65) {
+      px = gridX + (Math.random() - 0.5) * 0.4;
+      py = gridY + (Math.random() - 0.5) * 0.4;
+      pz = (Math.random() - 0.5) * 0.5;
+    } else {
+      px = gridX * 15;
+      py = gridY * 15;
+      pz = -10;
+    }
+  } else {
+    // normal lattice position with small jitter
+    px = gridX + (Math.random() - 0.5) * hexSpacing * 0.3;
+    py = gridY + (Math.random() - 0.5) * hexSpacing * 0.3;
+    pz = (Math.random() - 0.5) * 0.4;
+  }
+  
+  init[i*4]   = px;
+  init[i*4+1] = py;
+  init[i*4+2] = pz;
+  init[i*4+3] = Math.random();
+}
+
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt: { value: 0.008 },
+  uA:  { value: 0.95 },
+  uB:  { value: 0.70 },
+  uC:  { value: 0.60 },
+  uD:  { value: 3.50 },
+  uE:  { value: 0.25 },
+  uF:  { value: 0.10 },
+  uVoidX: { value: voidCenter.x },
+  uVoidY: { value: voidCenter.y },
+  uVoidR: { value: voidRadius }
+};
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF;
+    uniform float uVoidX, uVoidY, uVoidR;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      
+      // check if in void zone (frozen)
+      float dx = p.x - uVoidX;
+      float dy = p.y - uVoidY;
+      float distToVoid = sqrt(dx*dx + dy*dy);
+      
+      if (distToVoid > uVoidR && abs(p.z) < 8.0) {
+        vec3 dp = vec3(
+          (p.z - uB) * p.x - uD * p.y,
+          uD * p.x + (p.z - uB) * p.y,
+          uC + uA * p.z - (p.z * p.z * p.z) / 3.0
+                - (p.x * p.x + p.y * p.y) * (1.0 + uE * p.z)
+                + uF * p.z * p.x * p.x * p.x
+        );
+        p += dp * uDt;
+      }
+      
+      age = mod(age + uDt * 0.05, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.05, 50);
+camera.position.set(0, 0, 5);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vDepth;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      float size = 1.2 * uPixel * (10.0 / vDepth);
+      gl_PointSize = size;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vDepth;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      
+      // charcoal → warm amber → cold steel
+      vec3 col1 = vec3(0.15, 0.16, 0.18);
+      vec3 col2 = vec3(0.72, 0.48, 0.26);
+      vec3 col3 = vec3(0.68, 0.72, 0.76);
+      
+      float k = mod(vAge * 2.0, 1.0);
+      vec3 col = mix(col1, col2, smoothstep(0.0, 0.4, k));
+      col = mix(col, col3, smoothstep(0.4, 1.0, k));
+      
+      float depthFade = clamp(1.0 - vDepth * 0.08, 0.3, 1.0);
+      gl_FragColor = vec4(col * a * depthFade, a * 0.7);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const target = { vx: voidCenter.x, vy: voidCenter.y };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth) - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.vx = nx * 1.2;
+  target.vy = -ny * 1.2;
+});
+
+let t0 = performance.now();
+function loop(){
+  const now = performance.now();
+  
+  simUniforms.uVoidX.value += (target.vx - simUniforms.uVoidX.value) * 0.03;
+  simUniforms.uVoidY.value += (target.vy - simUniforms.uVoidY.value) * 0.03;
+
+  for (let i = 0; i < 3; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  
+  const elapsed = (now - t0) * 0.0001;
+  camera.position.x = Math.sin(elapsed) * 5;
+  camera.position.z = Math.cos(elapsed) * 5;
+  camera.position.y = Math.sin(elapsed * 0.6) * 0.8;
+  camera.lookAt(0, 0, 0.5);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
