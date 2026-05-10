@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3zs · courier heatmap / fictive seoul overhead</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1d28; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  /* Ayoung Kim's slate-fog base — topological misty void, not empty canvas */
+  body {
+    background:
+      radial-gradient(ellipse at 50% 30%, #252a3a 0%, #1a1d28 55%, #0f1118 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.50; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.38; font-size: 10px; letter-spacing: 0.04em; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.65; font-size: 10px; letter-spacing: 0.06em;
+          color: #7fff5a; }
+</style>
+</head>
+<body>
+<div class="id">3zs · courier heatmap / fictive seoul overhead</div>
+<div class="hint">no input — watch couriers draw the city by moving through it</div>
+<div class="src">ayoung kim · delivery dancer's sphere · speculative cartography</div>
+<div class="arc" id="arc">routes drawn: 0</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Ayoung Kim — Delivery Dancer's Sphere / speculative AI cartography
+// Venice 2024, Artnet '25 of 2025' — fictive cities seen from above as topological
+// wireframes + AI-hallucinated overlays. Seoul that folds into itself, motorbike-courier
+// paths drawn as glowing trails, neon road graph on misty 3D terrain.
+//
+// FORM: Voronoi-footprint city (nodes=buildings, edges=streets). Couriers traverse
+// graph from random source→sink at constant speed; their trail accumulates as line
+// geometry with fading alpha, drawing a heatmap of routes over time. Buildings =
+// wireframe extrusions. Camera high-angle, slow rotation. Chartreuse + magenta on slate.
+//
+// NARRATIVE ARC: The city is invisible until couriers move — the map is made by
+// navigation, not preordained. After 120 seconds the oldest trails start to fade,
+// so the heatmap is a living memory, not a static record.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x1a1d28, 0.012);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 48, 32);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── city graph generation (Voronoi-based nodes + Delaunay edges)
+const SITES = 80;
+const AREA_R = 38;
+const sites = [];
+for (let i = 0; i < SITES; i++){
+  const r = Math.random() * AREA_R;
+  const th = Math.random() * Math.PI * 2;
+  sites.push({ x: Math.cos(th) * r, z: Math.sin(th) * r, y: 0, id: i, neighbors: [] });
+}
+
+// Delaunay triangulation surrogate: nearest-neighbor graph up to 6 neighbors
+for (let i = 0; i < SITES; i++){
+  const dists = [];
+  for (let j = 0; j < SITES; j++){
+    if (i === j) continue;
+    const dx = sites[j].x - sites[i].x;
+    const dz = sites[j].z - sites[i].z;
+    const d = Math.sqrt(dx*dx + dz*dz);
+    dists.push({ j, d });
+  }
+  dists.sort((a,b) => a.d - b.d);
+  for (let k = 0; k < Math.min(6, dists.length); k++){
+    const j = dists[k].j;
+    if (!sites[i].neighbors.includes(j)) sites[i].neighbors.push(j);
+    if (!sites[j].neighbors.includes(i)) sites[j].neighbors.push(i);
+  }
+}
+
+// building wireframe extrusions (chartreuse wire on slate)
+const buildingGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
+const buildingMat = new THREE.LineBasicMaterial({ color: 0x7fff5a, transparent: true, opacity: 0.22, fog: true });
+const buildings = new THREE.InstancedMesh(buildingGeo, buildingMat, SITES);
+for (let i = 0; i < SITES; i++){
+  const h = 1.2 + Math.random() * 4.5;
+  const w = 0.8 + Math.random() * 1.6;
+  const mat4 = new THREE.Matrix4();
+  mat4.makeScale(w, h, w);
+  mat4.setPosition(sites[i].x, h * 0.5, sites[i].z);
+  buildings.setMatrixAt(i, mat4);
+}
+scene.add(buildings);
+
+// street network (chartreuse lines, thinner than courier trails)
+const streetGeo = new THREE.BufferGeometry();
+const streetPos = [];
+for (let i = 0; i < SITES; i++){
+  for (const j of sites[i].neighbors){
+    if (j > i){   // avoid duplicate edges
+      streetPos.push(sites[i].x, 0.05, sites[i].z);
+      streetPos.push(sites[j].x, 0.05, sites[j].z);
+    }
+  }
+}
+streetGeo.setAttribute('position', new THREE.Float32BufferAttribute(streetPos, 3));
+const streetMat = new THREE.LineBasicMaterial({ color: 0x7fff5a, transparent: true, opacity: 0.18, fog: true });
+const streets = new THREE.LineSegments(streetGeo, streetMat);
+scene.add(streets);
+
+// ground plane (subtle mist texture — paper-grain + faint gradient)
+const groundGeo = new THREE.PlaneGeometry(120, 120, 1, 1);
+groundGeo.rotateX(-Math.PI * 0.5);
+const groundMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, fog: true,
+  uniforms: {
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    // paper-grain noise
+    float hash21(vec2 p){
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    void main(){
+      float grain = hash21(vUv * 800.0 + vec2(uTime * 0.001, 0.0)) * 0.06 - 0.03;
+      float radial = 1.0 - length(vUv - 0.5) * 0.8;
+      float a = (0.08 + grain) * radial;
+      gl_FragColor = vec4(0.15, 0.17, 0.22, a);
+    }
+  `
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.position.y = -0.02;
+scene.add(ground);
+
+// ────────────── couriers (particles traversing graph, drawing trails)
+const NUM_COURIERS = 28;
+const couriers = [];
+const trailLines = [];      // array of { geo, mat, mesh, alpha, birthTime }
+let routesDrawn = 0;
+const arcEl = document.getElementById('arc');
+
+for (let c = 0; c < NUM_COURIERS; c++){
+  const src = Math.floor(Math.random() * SITES);
+  const dst = Math.floor(Math.random() * SITES);
+  const path = findPath(src, dst);
+  couriers.push({
+    path,
+    seg: 0,
+    t: 0,
+    speed: 0.55 + Math.random() * 0.35,
+    x: sites[src].x,
+    z: sites[src].z,
+    color: Math.random() < 0.5 ? 0xff00ff : 0x7fff5a,   // magenta or chartreuse
+    trailPos: []
+  });
+}
+
+// BFS pathfinding
+function findPath(src, dst){
+  if (src === dst) return [src];
+  const q = [[src]];
+  const visited = new Set([src]);
+  while (q.length){
+    const p = q.shift();
+    const last = p[p.length - 1];
+    if (last === dst) return p;
+    for (const nb of sites[last].neighbors){
+      if (!visited.has(nb)){
+        visited.add(nb);
+        q.push([...p, nb]);
+      }
+    }
+  }
+  return [src, dst];   // fallback straight line
+}
+
+function updateCouriers(dt){
+  for (const c of couriers){
+    if (c.seg >= c.path.length - 1){
+      // arrived at destination — spawn new route
+      const src = Math.floor(Math.random() * SITES);
+      const dst = Math.floor(Math.random() * SITES);
+      c.path = findPath(src, dst);
+      c.seg = 0;
+      c.t = 0;
+      c.x = sites[src].x;
+      c.z = sites[src].z;
+      c.trailPos = [];
+      routesDrawn++;
+      arcEl.textContent = `routes drawn: ${routesDrawn}`;
+      continue;
+    }
+    const n0 = sites[c.path[c.seg]];
+    const n1 = sites[c.path[c.seg + 1]];
+    const dx = n1.x - n0.x;
+    const dz = n1.z - n0.z;
+    const segLen = Math.sqrt(dx*dx + dz*dz);
+    const step = (c.speed * dt) / segLen;
+    c.t += step;
+    if (c.t >= 1.0){
+      c.t = 0;
+      c.seg++;
+    } else {
+      c.x = n0.x + dx * c.t;
+      c.z = n0.z + dz * c.t;
+      // record trail position
+      c.trailPos.push(c.x, 0.08, c.z);
+      // every 6 positions, spawn a trail line segment
+      if (c.trailPos.length >= 18){
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(c.trailPos.slice(), 3));
+        const mat = new THREE.LineBasicMaterial({ color: c.color, transparent: true, opacity: 0.7, fog: true });
+        const mesh = new THREE.Line(geo, mat);
+        scene.add(mesh);
+        trailLines.push({ geo, mat, mesh, alpha: 0.7, birthTime: performance.now() });
+        c.trailPos = [];
+      }
+    }
+  }
+
+  // fade old trails after 120 seconds
+  const now = performance.now();
+  const FADE_START = 120000;
+  const FADE_DUR = 30000;
+  for (let i = trailLines.length - 1; i >= 0; i--){
+    const tr = trailLines[i];
+    const age = now - tr.birthTime;
+    if (age > FADE_START){
+      const fade = Math.max(0, 1.0 - (age - FADE_START) / FADE_DUR);
+      tr.mat.opacity = tr.alpha * fade;
+      if (fade <= 0){
+        scene.remove(tr.mesh);
+        tr.geo.dispose();
+        tr.mat.dispose();
+        trailLines.splice(i, 1);
+      }
+    }
+  }
+}
+
+// ────────────── lighting (Ayoung Kim: low ambient + one key from above-side, chartreuse tint)
+const ambLight = new THREE.AmbientLight(0x3a4052, 0.4);
+scene.add(ambLight);
+const keyLight = new THREE.DirectionalLight(0x7fff5a, 0.8);
+keyLight.position.set(20, 35, 15);
+scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0xff00ff, 0.3);
+fillLight.position.set(-15, 10, -20);
+scene.add(fillLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  groundMat.uniforms.uTime.value = now / 1000;
+
+  updateCouriers(dt);
+
+  // slow camera rotation (Ayoung Kim: overhead drift, not orbit — camera slides laterally while looking down)
+  const ang = now * 0.00008;
+  const r = 32;
+  camera.position.x = Math.sin(ang) * r;
+  camera.position.z = Math.cos(ang) * r;
+  camera.position.y = 48 + Math.sin(ang * 0.7) * 4;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
