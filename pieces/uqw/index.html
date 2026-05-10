@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uqw · n-dimensional hypercube projection</title>
+<!-- MOTION: rotation, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">uqw</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 32);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// n-dimensional hypercube: n=7
+const N = 7;
+const numVerts = Math.pow(2, N);
+const vertices = [];
+for (let i = 0; i < numVerts; i++){
+  const v = [];
+  for (let d = 0; d < N; d++){
+    v.push((i & (1 << d)) ? 1 : -1);
+  }
+  vertices.push(v);
+}
+
+// edges: connect vertices differing in exactly one coordinate
+const edges = [];
+for (let i = 0; i < numVerts; i++){
+  for (let d = 0; d < N; d++){
+    const j = i ^ (1 << d);
+    if (j > i) edges.push([i, j]);
+  }
+}
+
+// projection matrix R^7 → R^3 via orthonormalized random basis
+function randomProjection(){
+  const M = [];
+  for (let r = 0; r < 3; r++){
+    const row = [];
+    for (let c = 0; c < N; c++) row.push(Math.random()*2 - 1);
+    M.push(row);
+  }
+  // Gram-Schmidt orthonormalization
+  for (let i = 0; i < 3; i++){
+    for (let j = 0; j < i; j++){
+      let dot = 0;
+      for (let k = 0; k < N; k++) dot += M[i][k] * M[j][k];
+      for (let k = 0; k < N; k++) M[i][k] -= dot * M[j][k];
+    }
+    let len = 0;
+    for (let k = 0; k < N; k++) len += M[i][k] * M[i][k];
+    len = Math.sqrt(len);
+    if (len > 1e-6) for (let k = 0; k < N; k++) M[i][k] /= len;
+  }
+  return M;
+}
+const projMat = randomProjection();
+
+function project(v){
+  const out = [0, 0, 0];
+  for (let r = 0; r < 3; r++){
+    for (let c = 0; c < N; c++){
+      out[r] += projMat[r][c] * v[c];
+    }
+  }
+  return out;
+}
+
+// Givens rotation in a random 2-plane of R^N
+const plane1 = Math.floor(Math.random() * N);
+let plane2 = Math.floor(Math.random() * N);
+while (plane2 === plane1) plane2 = Math.floor(Math.random() * N);
+function rotateND(v, angle){
+  const v2 = v.slice();
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const a = v[plane1], b = v[plane2];
+  v2[plane1] = c * a - s * b;
+  v2[plane2] = s * a + c * b;
+  return v2;
+}
+
+// Mohr palette: primaries + white
+const palette = [
+  new THREE.Color(0xff0000), // red
+  new THREE.Color(0x0000ff), // blue
+  new THREE.Color(0xffff00), // yellow
+  new THREE.Color(0xffffff)  // white
+];
+
+// edge selection rule: keep edge if sum of vertex indices mod 3 === 0
+const selectedEdges = edges.filter(([i,j]) => (i+j) % 3 === 0);
+
+// create line segments
+const lineMat = new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 1 });
+const lineGeom = new THREE.BufferGeometry();
+const positions = [];
+const colors = [];
+for (let idx = 0; idx < selectedEdges.length; idx++){
+  const [i, j] = selectedEdges[idx];
+  const p1 = project(vertices[i]);
+  const p2 = project(vertices[j]);
+  positions.push(...p1, ...p2);
+  const col = palette[idx % palette.length];
+  colors.push(col.r, col.g, col.b, col.r, col.g, col.b);
+}
+lineGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+lineGeom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+const lineSegments = new THREE.LineSegments(lineGeom, lineMat);
+lineSegments.scale.setScalar(6.0);
+scene.add(lineSegments);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  const angle = t * 0.15; // slow rotation in the n-dimensional plane
+  const positions = lineGeom.attributes.position.array;
+  let writeIdx = 0;
+  for (let idx = 0; idx < selectedEdges.length; idx++){
+    const [i, j] = selectedEdges[idx];
+    const v1 = rotateND(vertices[i], angle);
+    const v2 = rotateND(vertices[j], angle);
+    const p1 = project(v1);
+    const p2 = project(v2);
+    positions[writeIdx++] = p1[0];
+    positions[writeIdx++] = p1[1];
+    positions[writeIdx++] = p1[2];
+    positions[writeIdx++] = p2[0];
+    positions[writeIdx++] = p2[1];
+    positions[writeIdx++] = p2[2];
+  }
+  lineGeom.attributes.position.needsUpdate = true;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
