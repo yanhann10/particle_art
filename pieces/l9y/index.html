@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>l9y · saraceno web scan</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">l9y</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000000, 0.018);
+const camera = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, 0.1, 120);
+camera.position.set(0, 0, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+// generate sparse 3D graph — ~300 anchors in bounded volume
+const N = 300;
+const anchors = [];
+const bounds = { x: 12, y: 10, z: 14 };
+for (let i = 0; i < N; i++) {
+  anchors.push(new THREE.Vector3(
+    (Math.random()-0.5) * bounds.x,
+    (Math.random()-0.5) * bounds.y,
+    (Math.random()-0.5) * bounds.z
+  ));
+}
+
+// connect each anchor to 2–4 nearest neighbors (probability decay with distance)
+const edges = [];
+const maxConnections = 4;
+const connectionProb = (d) => Math.exp(-d / 3.5);
+for (let i = 0; i < N; i++) {
+  const dists = anchors.map((p, j) => ({ j, d: i===j ? Infinity : anchors[i].distanceTo(p) }));
+  dists.sort((a, b) => a.d - b.d);
+  let count = 0;
+  for (let k = 0; k < dists.length && count < maxConnections; k++) {
+    const { j, d } = dists[k];
+    if (Math.random() < connectionProb(d)) {
+      if (!edges.some(e => (e[0]===i && e[1]===j) || (e[0]===j && e[1]===i))) {
+        edges.push([i, j]);
+        count++;
+      }
+    }
+  }
+}
+
+// add ~12 long-range guy-lines for structural heterogeneity
+for (let i = 0; i < 12; i++) {
+  const a = Math.floor(Math.random() * N);
+  const b = Math.floor(Math.random() * N);
+  if (a !== b && !edges.some(e => (e[0]===a && e[1]===b) || (e[0]===b && e[1]===a))) {
+    edges.push([a, b]);
+  }
+}
+
+// render edges as thin lines — metallic pearl on black
+const edgeGeom = new THREE.BufferGeometry();
+const edgePositions = new Float32Array(edges.length * 6);
+edges.forEach((e, idx) => {
+  const [i, j] = e;
+  edgePositions[idx*6]   = anchors[i].x;
+  edgePositions[idx*6+1] = anchors[i].y;
+  edgePositions[idx*6+2] = anchors[i].z;
+  edgePositions[idx*6+3] = anchors[j].x;
+  edgePositions[idx*6+4] = anchors[j].y;
+  edgePositions[idx*6+5] = anchors[j].z;
+});
+edgeGeom.setAttribute('position', new THREE.BufferAttribute(edgePositions, 3));
+const edgeMat = new THREE.LineBasicMaterial({ color: 0xb8c5d0, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending });
+const edgeMesh = new THREE.LineSegments(edgeGeom, edgeMat);
+scene.add(edgeMesh);
+
+// render anchor nodes as tiny sprites
+const nodeGeom = new THREE.BufferGeometry();
+const nodePositions = new Float32Array(N * 3);
+const nodeSizes = new Float32Array(N);
+anchors.forEach((p, i) => {
+  nodePositions[i*3]   = p.x;
+  nodePositions[i*3+1] = p.y;
+  nodePositions[i*3+2] = p.z;
+  nodeSizes[i] = 0.08 + Math.random() * 0.06;
+});
+nodeGeom.setAttribute('position', new THREE.BufferAttribute(nodePositions, 3));
+nodeGeom.setAttribute('size', new THREE.BufferAttribute(nodeSizes, 1));
+
+const nodeMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float size;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      // soft spring wind field — low amplitude breathing
+      float wx = sin(uTime * 0.4 + position.x * 0.3) * 0.08;
+      float wy = cos(uTime * 0.5 + position.y * 0.25) * 0.06;
+      float wz = sin(uTime * 0.35 + position.z * 0.28) * 0.07;
+      p += vec3(wx, wy, wz);
+      vAlpha = 0.45 + 0.25 * sin(uTime * 0.6 + position.x * 0.8);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = size * uPixel * (120.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float glow = exp(-r * 16.0);
+      float a = glow * vAlpha;
+      vec3 col = vec3(0.82, 0.88, 0.92); // faint pearl
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const nodeMesh = new THREE.Points(nodeGeom, nodeMat);
+scene.add(nodeMesh);
+
+// update edges to match anchor breathing
+function updateEdges(t) {
+  edges.forEach((e, idx) => {
+    const [i, j] = e;
+    const ai = anchors[i];
+    const aj = anchors[j];
+    const wx_i = Math.sin(t * 0.4 + ai.x * 0.3) * 0.08;
+    const wy_i = Math.cos(t * 0.5 + ai.y * 0.25) * 0.06;
+    const wz_i = Math.sin(t * 0.35 + ai.z * 0.28) * 0.07;
+    const wx_j = Math.sin(t * 0.4 + aj.x * 0.3) * 0.08;
+    const wy_j = Math.cos(t * 0.5 + aj.y * 0.25) * 0.06;
+    const wz_j = Math.sin(t * 0.35 + aj.z * 0.28) * 0.07;
+    edgePositions[idx*6]   = ai.x + wx_i;
+    edgePositions[idx*6+1] = ai.y + wy_i;
+    edgePositions[idx*6+2] = ai.z + wz_i;
+    edgePositions[idx*6+3] = aj.x + wx_j;
+    edgePositions[idx*6+4] = aj.y + wy_j;
+    edgePositions[idx*6+5] = aj.z + wz_j;
+  });
+  edgeGeom.attributes.position.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// stereoscopic dolly — slow drift through the web
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  nodeMat.uniforms.uTime.value = t;
+  updateEdges(t);
+  // camera path — elliptical orbit + z-depth drift
+  const orbitSpeed = 0.08;
+  const rx = 6;
+  const rz = 8;
+  camera.position.x = Math.sin(t * orbitSpeed) * rx;
+  camera.position.z = 18 + Math.cos(t * orbitSpeed) * rz;
+  camera.position.y = Math.sin(t * 0.06) * 2.5;
+  camera.lookAt(0, 0, 0);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
