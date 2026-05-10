@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>p9l · atmospheric border · MORAKANA</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">p9l</div>
+<div class="hint" id="hint">cloud particles crossing the 31°N parallel · curl-noise advection</div>
+<div class="src">MORAKANA · Cumulus 2025 · Lumen Prize Gold</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 600);
+camera.position.set(0, 85, 120);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+
+// Atmospheric fog
+scene.fog = new THREE.Fog(0x0a0908, 80, 280);
+
+const N = 18000;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const densities = new Float32Array(N); // per-particle cloud density
+const ages = new Float32Array(N); // lifecycle phase
+
+// The border: 31°N parallel mapped to y=0 plane in our coordinate system
+const BORDER_Y = 0;
+const WORLD_WIDTH = 160;
+const WORLD_DEPTH = 100;
+const WIND_SPEED = 0.15; // slow eastward drift
+const ALTITUDE_MIN = -8;
+const ALTITUDE_MAX = 22;
+
+// Initialize particles in scattered cloud formations
+for (let i = 0; i < N; i++){
+  // Cluster into 6-8 cloud masses
+  const clusterCount = 7;
+  const clusterId = Math.floor(Math.random() * clusterCount);
+  const clusterX = (clusterId / clusterCount) * WORLD_WIDTH - WORLD_WIDTH * 0.5;
+  const clusterZ = (Math.random() - 0.5) * WORLD_DEPTH;
+  const clusterY = ALTITUDE_MIN + Math.random() * (ALTITUDE_MAX - ALTITUDE_MIN);
+  
+  // Scatter within cluster
+  const spreadX = (Math.random() - 0.5) * 18;
+  const spreadY = (Math.random() - 0.5) * 8;
+  const spreadZ = (Math.random() - 0.5) * 14;
+  
+  positions[i*3]   = clusterX + spreadX;
+  positions[i*3+1] = clusterY + spreadY;
+  positions[i*3+2] = clusterZ + spreadZ;
+  
+  velocities[i*3]   = WIND_SPEED + (Math.random() - 0.5) * 0.05;
+  velocities[i*3+1] = (Math.random() - 0.5) * 0.02; // slight vertical drift
+  velocities[i*3+2] = (Math.random() - 0.5) * 0.03;
+  
+  seeds[i] = Math.random();
+  densities[i] = 0.3 + Math.random() * 0.7;
+  ages[i] = Math.random(); // phase offset for lifecycle
+}
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBorderY: { value: BORDER_Y }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uBorderY;
+    attribute float seed;
+    attribute float density;
+    attribute float age;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vSoftness;
+    
+    void main(){
+      vec3 p = position;
+      
+      // Lifecycle pulsing
+      float phase = age * 6.28 + uTime * 0.15;
+      float pulse = 0.5 + 0.5 * sin(phase);
+      
+      // Distance from border plane
+      float distFromBorder = abs(p.y - uBorderY);
+      float borderProximity = smoothstep(8.0, 0.0, distFromBorder);
+      
+      // Color logic: bone-white base, shift to oxidized red near/past border
+      vec3 cloudWhite = vec3(0.92, 0.91, 0.88); // bone
+      vec3 dustGray = vec3(0.68, 0.65, 0.62);   // dust
+      vec3 borderRed = vec3(0.72, 0.28, 0.24);  // oxidized red
+      
+      // Determine if particle has crossed border
+      float crossed = step(uBorderY, p.y); // 1.0 if y >= border
+      
+      vec3 baseCol = mix(cloudWhite, dustGray, seed);
+      vCol = mix(baseCol, borderRed, crossed * borderProximity * 0.85);
+      
+      vAlpha = density * (0.35 + 0.25 * pulse) * smoothstep(200.0, 80.0, -p.z);
+      vSoftness = density;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (3.5 + density * 4.0 + pulse * 1.5) * uPixel * (100.0/dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vSoftness;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      
+      // Soft cloud falloff
+      float soft = 1.0 - smoothstep(0.0, 0.5, r);
+      soft = pow(soft, 1.5 + vSoftness * 0.8);
+      
+      float a = soft * vAlpha;
+      gl_FragColor = vec4(vCol, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('density', new THREE.BufferAttribute(densities, 1));
+geom.setAttribute('age', new THREE.BufferAttribute(ages, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Add subtle border line geometry — visible only when close
+const borderLineGeom = new THREE.BufferGeometry();
+const linePoints = [];
+for (let i = 0; i <= 200; i++){
+  const x = (i / 200) * WORLD_WIDTH - WORLD_WIDTH * 0.5;
+  linePoints.push(x, BORDER_Y, -WORLD_DEPTH * 0.5);
+  linePoints.push(x, BORDER_Y, WORLD_DEPTH * 0.5);
+}
+borderLineGeom.setAttribute('position', new THREE.Float32BufferAttribute(linePoints, 3));
+const borderLineMat = new THREE.LineBasicMaterial({ 
+  color: 0x3a1a18, 
+  opacity: 0.12, 
+  transparent: true 
+});
+const borderLines = new THREE.LineSegments(borderLineGeom, borderLineMat);
+scene.add(borderLines);
+
+// Curl noise function for organic advection
+function curlNoise(x, y, z, t){
+  const eps = 0.1;
+  const n1 = noise3D(x, y + eps, z, t);
+  const n2 = noise3D(x, y - eps, z, t);
+  const n3 = noise3D(x, y, z + eps, t);
+  const n4 = noise3D(x, y, z - eps, t);
+  const n5 = noise3D(x + eps, y, z, t);
+  const n6 = noise3D(x - eps, y, z, t);
+  
+  return {
+    x: (n3 - n4) / (2 * eps),
+    y: (n5 - n6) / (2 * eps),
+    z: (n1 - n2) / (2 * eps)
+  };
+}
+
+function noise3D(x, y, z, t){
+  const X = Math.floor(x) & 255;
+  const Y = Math.floor(y) & 255;
+  const Z = Math.floor(z) & 255;
+  const T = Math.floor(t * 10) & 255;
+  x -= Math.floor(x);
+  y -= Math.floor(y);
+  z -= Math.floor(z);
+  const u = fade(x);
+  const v = fade(y);
+  const w = fade(z);
+  const A = p[X] + Y;
+  const AA = p[A] + Z;
+  const AB = p[A + 1] + Z;
+  const B = p[X + 1] + Y;
+  const BA = p[B] + Z;
+  const BB = p[B + 1] + Z;
+  return lerp(w,
+    lerp(v, lerp(u, grad(p[AA], x, y, z), grad(p[BA], x - 1, y, z)),
+            lerp(u, grad(p[AB], x, y - 1, z), grad(p[BB], x - 1, y - 1, z))),
+    lerp(v, lerp(u, grad(p[AA + 1], x, y, z - 1), grad(p[BA + 1], x - 1, y, z - 1)),
+            lerp(u, grad(p[AB + 1], x, y - 1, z - 1), grad(p[BB + 1], x - 1, y - 1, z - 1)))
+  ) + T * 0.001;
+}
+
+function fade(t){ return t * t * t * (t * (t * 6 - 15) + 10); }
+function lerp(t, a, b){ return a + t * (b - a); }
+function grad(hash, x, y, z){
+  const h = hash & 15;
+  const u = h < 8 ? x : y;
+  const v = h < 4 ? y : h === 12 || h === 14 ? x : z;
+  return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+}
+
+const p = new Uint8Array(512);
+for (let i = 0; i < 256; i++) p[i] = p[i + 256] = (i * 137) & 255;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function updateParticles(t, dt){
+  for (let i = 0; i < N; i++){
+    const px = positions[i*3];
+    const py = positions[i*3+1];
+    const pz = positions[i*3+2];
+    
+    // Curl noise advection
+    const noiseScale = 0.015;
+    const curl = curlNoise(
+      px * noiseScale, 
+      py * noiseScale, 
+      pz * noiseScale, 
+      t * 0.05
+    );
+    
+    velocities[i*3]   += curl.x * 0.012;
+    velocities[i*3+1] += curl.y * 0.008;
+    velocities[i*3+2] += curl.z * 0.01;
+    
+    // Damping
+    velocities[i*3]   *= 0.98;
+    velocities[i*3+1] *= 0.99;
+    velocities[i*3+2] *= 0.99;
+    
+    // Enforce slow eastward drift
+    velocities[i*3] += (WIND_SPEED - velocities[i*3]) * 0.02;
+    
+    // Update position
+    positions[i*3]   += velocities[i*3];
+    positions[i*3+1] += velocities[i*3+1];
+    positions[i*3+2] += velocities[i*3+2];
+    
+    // Wraparound at world edges
+    if (positions[i*3] > WORLD_WIDTH * 0.5){
+      positions[i*3] = -WORLD_WIDTH * 0.5;
+    }
+    if (positions[i*3+2] > WORLD_DEPTH * 0.5){
+      positions[i*3+2] = -WORLD_DEPTH * 0.5;
+    }
+    if (positions[i*3+2] < -WORLD_DEPTH * 0.5){
+      positions[i*3+2] = WORLD_DEPTH * 0.5;
+    }
+    
+    // Soft vertical bounds
+    if (positions[i*3+1] > ALTITUDE_MAX){
+      velocities[i*3+1] -= 0.015;
+    }
+    if (positions[i*3+1] < ALTITUDE_MIN){
+      velocities[i*3+1] += 0.015;
+    }
+    
+    // Update age
+    ages[i] += dt * 0.2;
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+}
+
+// Camera slow drift following cloud centroid
+const centroid = new THREE.Vector3();
+function updateCamera(t){
+  centroid.set(0, 0, 0);
+  let count = 0;
+  for (let i = 0; i < N; i++){
+    if (Math.abs(positions[i*3]) < WORLD_WIDTH * 0.3){
+      centroid.x += positions[i*3];
+      centroid.y += positions[i*3+1];
+      centroid.z += positions[i*3+2];
+      count++;
+    }
+  }
+  if (count > 0) centroid.multiplyScalar(1 / count);
+  
+  const targetX = centroid.x * 0.4;
+  const targetY = 85 + centroid.y * 0.2;
+  const targetZ = 120 + Math.sin(t * 0.00008) * 15;
+  
+  camera.position.x += (targetX - camera.position.x) * 0.01;
+  camera.position.y += (targetY - camera.position.y) * 0.01;
+  camera.position.z += (targetZ - camera.position.z) * 0.01;
+  
+  camera.lookAt(centroid.x * 0.5, centroid.y * 0.5, centroid.z * 0.5);
+}
+
+let lastTime = performance.now();
+const hintEl = document.getElementById('hint');
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  const t = now / 1000;
+  
+  uniforms.uTime.value = t;
+  updateParticles(t, dt);
+  updateCamera(now);
+  
+  // Update hint with crossing count
+  if (Math.floor(t) % 3 === 0 && Math.floor(t * 10) % 10 === 0){
+    let crossedCount = 0;
+    for (let i = 0; i < N; i++){
+      if (positions[i*3+1] >= BORDER_Y) crossedCount++;
+    }
+    const pct = ((crossedCount / N) * 100).toFixed(1);
+    hintEl.textContent = `${crossedCount} particles crossed · ${pct}% north of 31°N`;
+  }
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
