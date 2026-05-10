@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>b6r · Barcarolle — gondola traces on lagoon</title>
+<!-- MOTION: glide, intensity: serene -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background:
+      radial-gradient(ellipse at 32% 38%, #1a2838 0%, #0f1a28 38%, #060d18 78%, #020508 100%),
+      #020508;
+    background-blend-mode: normal;
+    color: #e8f0f8; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.88' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.08  0 0 0 0 0.12  0 0 0 0 0.15  0 0 0 0.18 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.42'/></svg>");
+    mix-blend-mode: overlay; opacity: 0.38;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background: radial-gradient(ellipse 85% 75% at 50% 35%, rgba(100,150,180,0.15), rgba(0,0,0,0) 60%);
+    mix-blend-mode: screen;
+  }
+  canvas { display:block; position: relative; z-index: 0; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; z-index:5; color: #cdd2dc; font-family: ui-monospace; }
+</style>
+</head>
+<body>
+<div class="id">b6r</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// BARCAROLLE MORPH: the sphere becomes a flat lagoon (xz plane); agents become
+// gondolas tracing sinuous paths; quads become luminous wake ribbons that fade
+// over time like moonlight on water. The contact-spawning logic morphs into
+// wake-trail emission. Motion: slow gliding figure-8 paths. Palette: deep night
+// blues with silver-cyan wakes.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x060d18, 8, 25);
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 12, 18);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x060d18, 1);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── GONDOLA SYSTEM
+const N = 220;
+const LAGOON_SIZE = 14;
+const agents = [];
+
+class Gondola {
+  constructor(seed){
+    this.seed = seed;
+    // figure-8 path parameters
+    this.centerX = (Math.random() - 0.5) * LAGOON_SIZE * 0.6;
+    this.centerZ = (Math.random() - 0.5) * LAGOON_SIZE * 0.6;
+    this.radiusA = 1.8 + Math.random() * 2.2;
+    this.radiusB = 1.2 + Math.random() * 1.8;
+    this.speed = 0.06 + Math.random() * 0.08;
+    this.phaseOffset = Math.random() * Math.PI * 2;
+    this.t = Math.random() * 100;
+    // trail history for wake ribbons
+    this.trail = [];
+    this.maxTrail = 28;
+  }
+  update(dt){
+    this.t += dt;
+    const phase = this.t * this.speed + this.phaseOffset;
+    // figure-8: lemniscate curve
+    const x = this.centerX + this.radiusA * Math.sin(phase);
+    const z = this.centerZ + this.radiusB * Math.sin(phase * 2);
+    const pos = new THREE.Vector3(x, 0, z);
+    this.trail.push({ pos: pos.clone(), time: this.t });
+    if (this.trail.length > this.maxTrail) this.trail.shift();
+  }
+  getPos(){
+    return this.trail.length > 0 ? this.trail[this.trail.length - 1].pos : new THREE.Vector3();
+  }
+}
+
+for (let i = 0; i < N; i++){
+  agents.push(new Gondola(Math.random()));
+}
+
+// ────────────── WAKE RIBBON SYSTEM
+// Instead of contact-quads, we emit wake ribbons behind each gondola
+const MAX_RIBBONS = 18000;
+let ribbonIndex = 0;
+const ribbonGeom = new THREE.PlaneGeometry(1, 1);
+const ribbonMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  uniforms: {
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    varying vec3 vPos;
+    void main(){
+      vUv = uv;
+      vPos = (modelMatrix * vec4(position, 1.0)).xyz;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    varying vec3 vPos;
+    void main(){
+      // luminous cyan-silver wake with soft falloff
+      vec2 d = vUv - 0.5;
+      float r = length(d);
+      float edge = smoothstep(0.5, 0.2, r);
+      // shimmer effect
+      float shimmer = sin(vPos.x * 2.0 + uTime * 1.2) * 0.5 + 0.5;
+      shimmer = mix(0.6, 1.0, shimmer);
+      vec3 col = vec3(0.4, 0.7, 0.85) * shimmer;
+      float alpha = edge * 0.18;
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+const ribbons = new THREE.InstancedMesh(ribbonGeom, ribbonMat, MAX_RIBBONS);
+ribbons.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(ribbons);
+
+const dummy = new THREE.Object3D();
+dummy.scale.set(0, 0, 0);
+for (let i = 0; i < MAX_RIBBONS; i++){
+  ribbons.setMatrixAt(i, dummy.matrix);
+}
+ribbons.instanceMatrix.needsUpdate = true;
+
+function emitWake(gondola){
+  if (gondola.trail.length < 2) return;
+  const len = gondola.trail.length;
+  const p0 = gondola.trail[len - 2].pos;
+  const p1 = gondola.trail[len - 1].pos;
+  // ribbon between p0 and p1
+  const center = new THREE.Vector3().addVectors(p0, p1).multiplyScalar(0.5);
+  center.y = 0.02; // just above water
+  const dir = new THREE.Vector3().subVectors(p1, p0);
+  const length = dir.length();
+  if (length < 0.01) return;
+  const width = 0.25 + Math.random() * 0.15;
+  dummy.position.copy(center);
+  dummy.scale.set(width, length, 1);
+  dummy.lookAt(center.x, center.y + 1, center.z);
+  dummy.rotateX(Math.PI / 2);
+  dummy.updateMatrix();
+  ribbons.setMatrixAt(ribbonIndex, dummy.matrix);
+  ribbonIndex = (ribbonIndex + 1) % MAX_RIBBONS;
+  ribbons.instanceMatrix.needsUpdate = true;
+}
+
+// ────────────── GONDOLA MARKERS (lanterns)
+const markerGeom = new THREE.BufferGeometry();
+const markerPos = new Float32Array(N * 3);
+markerGeom.setAttribute('position', new THREE.BufferAttribute(markerPos, 3));
+const markerMat = new THREE.PointsMaterial({
+  size: 3.8, color: 0xfff4d0, transparent: true, opacity: 0.75, sizeAttenuation: true
+});
+const markers = new THREE.Points(markerGeom, markerMat);
+scene.add(markers);
+
+// ────────────── LAGOON PLANE (subtle reflection)
+const lagoonGeom = new THREE.PlaneGeometry(LAGOON_SIZE * 2, LAGOON_SIZE * 2, 1, 1);
+const lagoonMat = new THREE.ShaderMaterial({
+  transparent: true,
+  side: THREE.DoubleSide,
+  uniforms: {
+    uTime: { value: 0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    void main(){
+      // dark water with subtle ripple reflection
+      vec2 p = vUv * 8.0;
+      float ripple = sin(p.x * 2.0 + uTime * 0.3) * sin(p.y * 2.0 + uTime * 0.4) * 0.5 + 0.5;
+      vec3 col = vec3(0.05, 0.08, 0.12) + vec3(0.02, 0.04, 0.06) * ripple;
+      gl_FragColor = vec4(col, 0.95);
+    }
+  `
+});
+const lagoon = new THREE.Mesh(lagoonGeom, lagoonMat);
+lagoon.rotation.x = -Math.PI / 2;
+lagoon.position.y = -0.05;
+scene.add(lagoon);
+
+// ────────────── LOOP
+let lastT = performance.now();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min((now - lastT) / 1000, 0.1);
+  lastT = now;
+  const t = now / 1000;
+
+  // update gondolas
+  for (let i = 0; i < N; i++){
+    agents[i].update(dt);
+    const p = agents[i].getPos();
+    markerPos[i*3]     = p.x;
+    markerPos[i*3 + 1] = p.y + 0.15; // lantern height
+    markerPos[i*3 + 2] = p.z;
+    // emit wake ribbon every few frames
+    if (Math.random() < 0.25) emitWake(agents[i]);
+  }
+  markerGeom.attributes.position.needsUpdate = true;
+
+  // gentle camera drift — overhead view with slight arc
+  camera.position.x = Math.sin(t * 0.035) * 4;
+  camera.position.z = 18 + Math.cos(t * 0.035) * 3;
+  camera.position.y = 12 + Math.sin(t * 0.02) * 1.5;
+  camera.lookAt(0, 0, 0);
+
+  ribbonMat.uniforms.uTime.value = t;
+  lagoonMat.uniforms.uTime.value = t;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
