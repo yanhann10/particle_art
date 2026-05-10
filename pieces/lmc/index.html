@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lmc · cyber-nest · metaball orbit with data-trail</title>
+<!-- MOTION: orbit, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">lmc · cyber-nest · metaball orbit with data-trail</div>
+<div class="hint">move pointer to attract nest</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Wang & Söderström cyber-nest homage: soft metaballs orbit an attractor (mouse
+// raycasted to world plane), leaving behind a trail of shed 'data exhaust' spheres
+// when moving fast. The core nest accretes slowly, the trail fades and shrinks.
+// Pearl, lavender, mercury palette on near-black ground. Glossy MeshPhysicalMaterial
+// for the biomorphic organism feel.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a0e, 0.024);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 150);
+camera.position.set(0, 12, 22);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0e, 1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+// lights: soft ambient + subtle pearl point-light
+const ambient = new THREE.AmbientLight(0xb8b4c8, 0.6);
+scene.add(ambient);
+const point = new THREE.PointLight(0xe8e4f0, 1.4, 50);
+point.position.set(6, 10, 8);
+scene.add(point);
+
+// attractor position — raycasted from pointer
+const attractor = new THREE.Vector3(0, 0, 0);
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2(0, 0);
+const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+
+addEventListener('pointermove', (e) => {
+  pointer.x = (e.clientX / innerWidth) * 2 - 1;
+  pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+});
+
+function updateAttractor(){
+  raycaster.setFromCamera(pointer, camera);
+  const p = new THREE.Vector3();
+  raycaster.ray.intersectPlane(plane, p);
+  if (p){
+    attractor.x += (p.x - attractor.x) * 0.08;
+    attractor.z += (p.z - attractor.z) * 0.08;
+  }
+}
+
+// ─────────── metaball nest: instanced spheres orbiting attractor
+const NEST_COUNT = 42;
+const nestData = [];
+for (let i = 0; i < NEST_COUNT; i++){
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.acos(2 * Math.random() - 1);
+  const r = 2.5 + Math.random() * 1.5;
+  nestData.push({
+    pos: new THREE.Vector3(
+      Math.sin(ph) * Math.cos(th) * r,
+      Math.sin(ph) * Math.sin(th) * r,
+      Math.cos(ph) * r
+    ),
+    vel: new THREE.Vector3(0, 0, 0),
+    baseScale: 0.5 + Math.random() * 0.6,
+    scale: 0.5 + Math.random() * 0.6,
+    hue: i % 3,  // pearl / lavender / mercury
+    prevPos: new THREE.Vector3(0, 0, 0)
+  });
+}
+
+// palette
+const PEARL = 0xe8e4f0;
+const LAVENDER = 0xb5a8d0;
+const MERCURY = 0xc8c8d0;
+const palette = [PEARL, LAVENDER, MERCURY];
+
+const sphereGeo = new THREE.IcosahedronGeometry(1.0, 3);
+const nestInstanced = new THREE.InstancedMesh(
+  sphereGeo,
+  new THREE.MeshPhysicalMaterial({
+    color: 0xffffff,
+    metalness: 0.15,
+    roughness: 0.25,
+    clearcoat: 0.6,
+    clearcoatRoughness: 0.2,
+    transparent: true,
+    opacity: 0.88
+  }),
+  NEST_COUNT
+);
+scene.add(nestInstanced);
+
+// data-trail spheres: fixed-pool for fade-out
+const TRAIL_MAX = 200;
+const trailData = [];
+const trailInstanced = new THREE.InstancedMesh(
+  sphereGeo,
+  new THREE.MeshPhysicalMaterial({
+    color: 0xffffff,
+    metalness: 0.1,
+    roughness: 0.4,
+    transparent: true,
+    opacity: 0.0
+  }),
+  TRAIL_MAX
+);
+scene.add(trailInstanced);
+
+const dummy = new THREE.Object3D();
+const color = new THREE.Color();
+
+// step nest: orbit attractor + shed trail on fast motion
+function stepNest(){
+  for (let i = 0; i < NEST_COUNT; i++){
+    const d = nestData[i];
+    d.prevPos.copy(d.pos);
+
+    // orbit forces: attract + tangential swirl
+    const toAtt = new THREE.Vector3().subVectors(attractor, d.pos);
+    const dist = toAtt.length();
+    const attractF = toAtt.normalize().multiplyScalar(0.014 * dist);
+
+    const tangent = new THREE.Vector3(-toAtt.z, 0, toAtt.x).normalize().multiplyScalar(0.008);
+    d.vel.add(attractF).add(tangent);
+
+    // inter-blob soft repulsion (cheap SDF-like behavior)
+    for (let j = 0; j < NEST_COUNT; j++){
+      if (j === i) continue;
+      const other = nestData[j];
+      const diff = new THREE.Vector3().subVectors(d.pos, other.pos);
+      const d2 = diff.lengthSq();
+      const threshold = (d.baseScale + other.baseScale) * 1.2;
+      if (d2 < threshold * threshold && d2 > 0.001){
+        const repel = diff.normalize().multiplyScalar(0.006 * (1 - Math.sqrt(d2) / threshold));
+        d.vel.add(repel);
+      }
+    }
+
+    d.vel.multiplyScalar(0.92); // damping
+    d.pos.add(d.vel);
+
+    // scale pulses with speed
+    const speed = d.vel.length();
+    const targetScale = d.baseScale * (1.0 + 0.3 * Math.min(speed * 8, 1.0));
+    d.scale += (targetScale - d.scale) * 0.1;
+
+    // shed trail if moving fast
+    if (speed > 0.08 && Math.random() < 0.12){
+      const oldest = trailData.shift() || { life: 0 };
+      trailData.push({
+        pos: d.pos.clone(),
+        scale: d.scale * 0.5,
+        hue: d.hue,
+        life: 1.0
+      });
+    }
+
+    dummy.position.copy(d.pos);
+    dummy.scale.setScalar(d.scale);
+    dummy.updateMatrix();
+    nestInstanced.setMatrixAt(i, dummy.matrix);
+    color.set(palette[d.hue]);
+    nestInstanced.setColorAt(i, color);
+  }
+  nestInstanced.instanceMatrix.needsUpdate = true;
+  if (nestInstanced.instanceColor) nestInstanced.instanceColor.needsUpdate = true;
+}
+
+function stepTrail(){
+  for (let i = 0; i < TRAIL_MAX; i++){
+    if (i < trailData.length){
+      const t = trailData[i];
+      t.life -= 0.008;
+      if (t.life <= 0){
+        trailData.splice(i, 1);
+        i--;
+        continue;
+      }
+      dummy.position.copy(t.pos);
+      dummy.scale.setScalar(t.scale * t.life * 0.8);
+      dummy.updateMatrix();
+      trailInstanced.setMatrixAt(i, dummy.matrix);
+      color.set(palette[t.hue]);
+      trailInstanced.setColorAt(i, color);
+    } else {
+      dummy.position.set(0, -100, 0);
+      dummy.scale.setScalar(0.001);
+      dummy.updateMatrix();
+      trailInstanced.setMatrixAt(i, dummy.matrix);
+    }
+  }
+  trailInstanced.instanceMatrix.needsUpdate = true;
+  if (trailInstanced.instanceColor) trailInstanced.instanceColor.needsUpdate = true;
+}
+
+// camera orbit
+let camTheta = 0;
+function orbitCamera(){
+  camTheta += 0.002;
+  const r = 22;
+  camera.position.x = Math.sin(camTheta) * r;
+  camera.position.z = Math.cos(camTheta) * r;
+  camera.position.y = 12 + Math.sin(camTheta * 0.5) * 2;
+  camera.lookAt(0, 0, 0);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(){
+  updateAttractor();
+  stepNest();
+  stepTrail();
+  orbitCamera();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
