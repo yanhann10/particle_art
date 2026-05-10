@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jfu · voronoi shatter · hand point cloud</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0c10; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">jfu · voronoi shatter</div>
+<div class="hint">move pointer to shatter · rest pose when centered</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Hand point cloud (8192 particles) shatters along voronoi cell boundaries on mouse input.
+// Rest state: recognizable hand. Dispersed state: cells tear apart proportional to mouse distance from center.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0c10, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0c10, 0.04);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 50);
+camera.position.set(0, 0, 3.5);
+camera.lookAt(0, 0, 0);
+
+// Generate hand shape: palm + 5 fingers as cylindrical segments
+const N = 8192;
+const positions = new Float32Array(N * 3);
+const colors = new Float32Array(N * 3);
+
+function addCylinder(startIdx, count, p0, p1, radius, col) {
+  for (let i = 0; i < count; i++) {
+    const t = Math.random();
+    const theta = Math.random() * Math.PI * 2;
+    const r = Math.sqrt(Math.random()) * radius;
+    const x = THREE.MathUtils.lerp(p0.x, p1.x, t) + Math.cos(theta) * r;
+    const y = THREE.MathUtils.lerp(p0.y, p1.y, t) + Math.sin(theta) * r;
+    const z = THREE.MathUtils.lerp(p0.z, p1.z, t) + (Math.random() - 0.5) * 0.08;
+    const idx = startIdx + i;
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = z;
+    colors[idx * 3] = col.r;
+    colors[idx * 3 + 1] = col.g;
+    colors[idx * 3 + 2] = col.b;
+  }
+}
+
+// Palm (square region)
+const palmCount = 2400;
+const palmCol = new THREE.Color(0.85, 0.72, 0.65);
+for (let i = 0; i < palmCount; i++) {
+  const x = (Math.random() - 0.5) * 0.55;
+  const y = (Math.random() - 0.5) * 0.65 - 0.2;
+  const z = (Math.random() - 0.5) * 0.12;
+  positions[i * 3] = x;
+  positions[i * 3 + 1] = y;
+  positions[i * 3 + 2] = z;
+  colors[i * 3] = palmCol.r;
+  colors[i * 3 + 1] = palmCol.g;
+  colors[i * 3 + 2] = palmCol.b;
+}
+
+let idx = palmCount;
+
+// Thumb (shorter, angled outward)
+const thumbCol = new THREE.Color(0.82, 0.68, 0.60);
+addCylinder(idx, 1100, { x: -0.25, y: -0.45, z: 0 }, { x: -0.45, y: -0.20, z: 0 }, 0.08, thumbCol);
+idx += 1100;
+
+// Index finger
+const indexCol = new THREE.Color(0.88, 0.75, 0.68);
+addCylinder(idx, 1200, { x: -0.20, y: 0.10, z: 0 }, { x: -0.22, y: 0.60, z: 0 }, 0.07, indexCol);
+idx += 1200;
+
+// Middle finger (longest)
+const middleCol = new THREE.Color(0.90, 0.77, 0.70);
+addCylinder(idx, 1300, { x: 0.0, y: 0.15, z: 0 }, { x: 0.0, y: 0.75, z: 0 }, 0.07, middleCol);
+idx += 1300;
+
+// Ring finger
+const ringCol = new THREE.Color(0.86, 0.73, 0.66);
+addCylinder(idx, 1200, { x: 0.20, y: 0.10, z: 0 }, { x: 0.22, y: 0.65, z: 0 }, 0.07, ringCol);
+idx += 1200;
+
+// Pinky (shortest)
+const pinkyCol = new THREE.Color(0.84, 0.70, 0.62);
+addCylinder(idx, 992, { x: 0.28, y: -0.05, z: 0 }, { x: 0.32, y: 0.40, z: 0 }, 0.06, pinkyCol);
+
+// Generate voronoi sites (48 sites for clear cell structure)
+const siteCount = 48;
+const sites = [];
+for (let i = 0; i < siteCount; i++) {
+  sites.push(new THREE.Vector3(
+    (Math.random() - 0.5) * 1.2,
+    (Math.random() - 0.5) * 1.4,
+    (Math.random() - 0.5) * 0.3
+  ));
+}
+
+// Assign each particle to nearest voronoi site
+const cellAssignments = new Uint8Array(N);
+for (let i = 0; i < N; i++) {
+  const px = positions[i * 3];
+  const py = positions[i * 3 + 1];
+  const pz = positions[i * 3 + 2];
+  let minDist = Infinity;
+  let minIdx = 0;
+  for (let s = 0; s < siteCount; s++) {
+    const dx = px - sites[s].x;
+    const dy = py - sites[s].y;
+    const dz = pz - sites[s].z;
+    const d = dx * dx + dy * dy + dz * dz;
+    if (d < minDist) {
+      minDist = d;
+      minIdx = s;
+    }
+  }
+  cellAssignments[i] = minIdx;
+}
+
+// Geometry
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+geom.setAttribute('cellId', new THREE.BufferAttribute(new Float32Array(cellAssignments), 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uPixel: { value: renderer.getPixelRatio() },
+    uMouseDist: { value: 0.0 },
+    uTime: { value: 0.0 }
+  },
+  vertexColors: true,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uPixel;
+    uniform float uMouseDist;
+    uniform float uTime;
+    attribute float cellId;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogDepth;
+    
+    // Cellular noise for per-cell displacement direction
+    vec3 hash3(float n) {
+      return fract(sin(vec3(n, n + 1.7, n + 3.3)) * vec3(43758.5453, 22578.1459, 19642.3737));
+    }
+    
+    void main() {
+      vCol = color;
+      
+      // Per-cell displacement vector (consistent per cell, varies between cells)
+      vec3 cellDir = normalize(hash3(cellId) - 0.5);
+      
+      // Shatter intensity grows with mouse distance from center
+      float shatterForce = smoothstep(0.0, 0.8, uMouseDist);
+      
+      // Add cellular rotation wobble
+      float wobble = sin(uTime * 0.8 + cellId * 0.6) * 0.15 * shatterForce;
+      
+      // Displace position along cell-specific direction
+      vec3 pos = position + cellDir * shatterForce * 1.8 + vec3(wobble, wobble * 0.5, 0.0);
+      
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      vFogDepth = -mv.z;
+      
+      gl_PointSize = 2.2 * uPixel * (3.0 / vFogDepth);
+      gl_Position = projectionMatrix * mv;
+      
+      vAlpha = 1.0 - shatterForce * 0.3;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogDepth;
+    
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0);
+      
+      float fogF = 1.0 - exp(-0.004 * vFogDepth * vFogDepth);
+      vec3 col = mix(vCol, vec3(0.04, 0.05, 0.06), fogF);
+      
+      gl_FragColor = vec4(col * a * vAlpha, a * vAlpha * 0.85);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Mouse tracking
+let mouseX = 0, mouseY = 0;
+let targetMouseDist = 0.0;
+let currentMouseDist = 0.0;
+
+addEventListener('mousemove', (e) => {
+  mouseX = (e.clientX / innerWidth) * 2 - 1;
+  mouseY = -(e.clientY / innerHeight) * 2 + 1;
+  targetMouseDist = Math.sqrt(mouseX * mouseX + mouseY * mouseY);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  
+  mat.uniforms.uTime.value = now / 1000;
+  
+  // Smooth mouse distance damping
+  currentMouseDist += (targetMouseDist - currentMouseDist) * dt * 4.0;
+  mat.uniforms.uMouseDist.value = currentMouseDist;
+  
+  // Gentle camera sway
+  const t = now / 1000;
+  camera.position.x = Math.sin(t * 0.15) * 0.3;
+  camera.position.y = Math.sin(t * 0.11) * 0.2;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
