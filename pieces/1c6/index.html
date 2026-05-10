@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1c6 · border drift</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#d4cfc8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">1c6</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x1a1612, 0.012);
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 28, 85);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+// cloud field: 12000 particles advected by curl-noise eastward drift
+const N = 12000;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const birthTime = new Float32Array(N);
+
+for (let i = 0; i < N; i++) {
+  positions[i*3]   = (Math.random() - 0.5) * 120;
+  positions[i*3+1] = (Math.random() - 0.3) * 18 + 8;
+  positions[i*3+2] = (Math.random() - 0.5) * 60;
+  velocities[i*3] = 0;
+  velocities[i*3+1] = 0;
+  velocities[i*3+2] = 0;
+  seeds[i] = Math.random();
+  birthTime[i] = Math.random() * 10;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('birthTime', new THREE.BufferAttribute(birthTime, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uBorderZ: { value: 2.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uBorderZ;
+    attribute float seed;
+    attribute float birthTime;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main(){
+      float age = uTime - birthTime;
+      if (age < 0.0) {
+        gl_Position = vec4(0.0);
+        gl_PointSize = 0.0;
+        vAlpha = 0.0;
+        return;
+      }
+
+      vec3 p = position;
+      
+      // particle crossed the border line at z=uBorderZ?
+      float crossDist = p.z - uBorderZ;
+      float crossed = smoothstep(-1.5, 0.5, crossDist);
+
+      // palette: bone-white → dust → oxidized red
+      vec3 boneWhite = vec3(0.92, 0.89, 0.84);
+      vec3 dust = vec3(0.68, 0.62, 0.56);
+      vec3 oxidizedRed = vec3(0.72, 0.28, 0.22);
+      
+      float dustiness = seed * 0.4 + 0.3;
+      vec3 baseCol = mix(boneWhite, dust, dustiness);
+      vCol = mix(baseCol, oxidizedRed, crossed * 0.75);
+
+      // soft fade-in
+      float fadeIn = smoothstep(0.0, 2.0, age);
+      vAlpha = fadeIn * (0.22 + seed * 0.12) * (1.0 - crossed * 0.25);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sizeBase = 18.0 + seed * 26.0;
+      gl_PointSize = sizeBase * uPixel * (80.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      float a = exp(-r * 3.5) * vAlpha;
+      gl_FragColor = vec4(vCol, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// invisible border line marker (for visual reference only — not rendered)
+const borderGeom = new THREE.BufferGeometry();
+const borderPositions = new Float32Array([-60, 0, 2,  60, 0, 2]);
+borderGeom.setAttribute('position', new THREE.BufferAttribute(borderPositions, 3));
+const borderMat = new THREE.LineBasicMaterial({ color: 0x8a3a2a, transparent: true, opacity: 0.08 });
+const borderLine = new THREE.Line(borderGeom, borderMat);
+scene.add(borderLine);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// curl-noise helpers
+function noise3(x, y, z) {
+  const X = Math.floor(x) & 255;
+  const Y = Math.floor(y) & 255;
+  const Z = Math.floor(z) & 255;
+  x -= Math.floor(x);
+  y -= Math.floor(y);
+  z -= Math.floor(z);
+  const u = x * x * (3 - 2 * x);
+  const v = y * y * (3 - 2 * y);
+  const w = z * z * (3 - 2 * z);
+  const A = (X + Y * 57 + Z * 113) & 255;
+  const B = (X + 1 + Y * 57 + Z * 113) & 255;
+  const C = (X + (Y+1) * 57 + Z * 113) & 255;
+  const D = (X + 1 + (Y+1) * 57 + Z * 113) & 255;
+  const E = (X + Y * 57 + (Z+1) * 113) & 255;
+  const F = (X + 1 + Y * 57 + (Z+1) * 113) & 255;
+  const G = (X + (Y+1) * 57 + (Z+1) * 113) & 255;
+  const H = (X + 1 + (Y+1) * 57 + (Z+1) * 113) & 255;
+  const hash = (n) => {
+    let h = n * 2654435761 | 0;
+    h = (h ^ (h >>> 16)) * 0x85ebca6b | 0;
+    h = (h ^ (h >>> 13)) * 0xc2b2ae35 | 0;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  };
+  const l1 = hash(A) * (1-u) + hash(B) * u;
+  const l2 = hash(C) * (1-u) + hash(D) * u;
+  const l3 = hash(E) * (1-u) + hash(F) * u;
+  const l4 = hash(G) * (1-u) + hash(H) * u;
+  const m1 = l1 * (1-v) + l2 * v;
+  const m2 = l3 * (1-v) + l4 * v;
+  return m1 * (1-w) + m2 * w;
+}
+
+function curl(x, y, z, t) {
+  const eps = 0.2;
+  const scale = 0.08;
+  const xs = x * scale + t * 0.05;
+  const ys = y * scale;
+  const zs = z * scale;
+  
+  const n000 = noise3(xs, ys, zs);
+  const n100 = noise3(xs + eps, ys, zs);
+  const n010 = noise3(xs, ys + eps, zs);
+  const n001 = noise3(xs, ys, zs + eps);
+  
+  const dx = (n100 - n000) / eps;
+  const dy = (n010 - n000) / eps;
+  const dz = (n001 - n000) / eps;
+  
+  return {
+    x: dz - dy,
+    y: dx - dz,
+    z: dy - dx
+  };
+}
+
+const start = performance.now();
+const dt = 1/60;
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // advect particles with curl-noise + eastward wind
+  for (let i = 0; i < N; i++) {
+    const px = positions[i*3];
+    const py = positions[i*3+1];
+    const pz = positions[i*3+2];
+    
+    const c = curl(px, py, pz, t);
+    
+    // eastward wind (positive x direction)
+    const windX = 1.8;
+    
+    velocities[i*3]   += (c.x * 0.4 + windX) * dt;
+    velocities[i*3+1] += c.y * 0.3 * dt;
+    velocities[i*3+2] += c.z * 0.35 * dt;
+    
+    // damping
+    velocities[i*3]   *= 0.96;
+    velocities[i*3+1] *= 0.97;
+    velocities[i*3+2] *= 0.97;
+    
+    positions[i*3]   += velocities[i*3] * dt;
+    positions[i*3+1] += velocities[i*3+1] * dt;
+    positions[i*3+2] += velocities[i*3+2] * dt;
+    
+    // wrap around
+    if (positions[i*3] > 70) {
+      positions[i*3] = -70;
+      birthTime[i] = t;
+    }
+    if (positions[i*3] < -70) positions[i*3] = 70;
+    if (positions[i*3+1] > 30) positions[i*3+1] = -5;
+    if (positions[i*3+1] < -5) positions[i*3+1] = 30;
+    if (positions[i*3+2] > 35) positions[i*3+2] = -35;
+    if (positions[i*3+2] < -35) positions[i*3+2] = 35;
+  }
+  
+  geom.attributes.position.needsUpdate = true;
+
+  // gentle camera drift
+  camera.position.x = Math.sin(t * 0.08) * 8;
+  camera.position.y = 28 + Math.sin(t * 0.05) * 4;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
