@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ank · 3-centroid attractor</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020408; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">ank</div>
+<div class="hint">3-centroid attractor · Lissajous orbits · 40k particles</div>
+<div class="src">gravitational affinity · nebula drift</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── RENDERER ──────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020408, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 600);
+camera.position.set(0, 18, 72);
+camera.lookAt(0, 0, 0);
+
+// ── CENTROID DEFINITIONS ──────────────────────────────────────────────────
+// Three attractors, each on an independent Lissajous / epicycloid orbit.
+// A: dominant — strong, steady pull (deep-blue family)
+// B: secondary — medium pull, oscillates slowly (void-purple family)
+// C: escapee — oscillating strength (can repel), fast Lissajous (stellar-gold family)
+
+const CENTROIDS = [
+  {
+    // A: dominant — Lissajous (ωx=1, ωy=2, ωz=3, phase offsets)
+    a_x: 22, a_y: 14, a_z: 10,
+    freq_x: 1.0, freq_y: 2.0, freq_z: 3.0,
+    phi_x: 0.0, phi_y: 0.7, phi_z: 1.4,
+    baseStrength: 0.18,     // strongest pull
+    oscillate: false,
+    color: new THREE.Color(0.04, 0.18, 0.72),   // deep blue
+    glowColor: 0x0a2ab8
+  },
+  {
+    // B: secondary — epicycloid-like (3 freq components)
+    a_x: 16, a_y: 10, a_z: 14,
+    freq_x: 1.7, freq_y: 1.0, freq_z: 2.3,
+    phi_x: 2.1, phi_y: 0.4, phi_z: 0.9,
+    baseStrength: 0.11,     // medium pull
+    oscillate: false,
+    color: new THREE.Color(0.32, 0.06, 0.55),   // void purple
+    glowColor: 0x520a8c
+  },
+  {
+    // C: escapee — fast Lissajous, oscillating sign (repel ↔ attract)
+    a_x: 18, a_y: 18, a_z: 12,
+    freq_x: 2.5, freq_y: 3.7, freq_z: 1.9,
+    phi_x: 1.0, phi_y: 2.5, phi_z: 0.2,
+    baseStrength: 0.09,
+    oscillate: true,        // strength oscillates negative → positive
+    oscillateFreq: 0.12,
+    color: new THREE.Color(0.78, 0.62, 0.22),   // stellar gold
+    glowColor: 0xc8a038
+  }
+];
+
+// ── PARTICLE STATE ────────────────────────────────────────────────────────
+const N = 40000;
+const MAX_SPEED = 0.09;   // very slow — nebula drift
+
+// Position
+const px = new Float32Array(N);
+const py = new Float32Array(N);
+const pz = new Float32Array(N);
+// Velocity
+const vx = new Float32Array(N);
+const vy = new Float32Array(N);
+const vz = new Float32Array(N);
+// Affinity (which centroid dominates — 0/1/2 as continuous blend)
+const affA = new Float32Array(N);
+const affB = new Float32Array(N);
+const affC = new Float32Array(N);
+
+// ── INITIALISE ────────────────────────────────────────────────────────────
+// Scatter particles in a large ellipsoid centred on origin.
+// Give them tiny random velocities so motion begins immediately.
+for (let i = 0; i < N; i++) {
+  const r = 28 + Math.random() * 14;
+  const theta = Math.acos(2 * Math.random() - 1);
+  const phi   = Math.random() * Math.PI * 2;
+  px[i] = r * Math.sin(theta) * Math.cos(phi) + (Math.random() - 0.5) * 6;
+  py[i] = r * Math.sin(theta) * Math.sin(phi) * 0.6 + (Math.random() - 0.5) * 4;
+  pz[i] = r * Math.cos(theta) * 0.8 + (Math.random() - 0.5) * 6;
+  vx[i] = (Math.random() - 0.5) * 0.012;
+  vy[i] = (Math.random() - 0.5) * 0.012;
+  vz[i] = (Math.random() - 0.5) * 0.012;
+  affA[i] = Math.random(); // will be updated each frame
+  affB[i] = 0;
+  affC[i] = 0;
+}
+
+// ── THREE.JS GEOMETRY ─────────────────────────────────────────────────────
+const posArr = new Float32Array(N * 3);
+const colArr = new Float32Array(N * 3);
+const sizArr = new Float32Array(N);
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+geom.setAttribute('color',    new THREE.BufferAttribute(colArr, 3));
+geom.setAttribute('aSize',    new THREE.BufferAttribute(sizArr, 1));
+
+// Additive-blending sprite shader
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uPixelRatio: { value: renderer.getPixelRatio() }
+  },
+  vertexShader: `
+    attribute float aSize;
+    attribute vec3 color;
+    varying vec3 vColor;
+    uniform float uPixelRatio;
+    void main(){
+      vColor = color;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = aSize * uPixelRatio * (80.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d) * 4.0;  // 0 at centre, 1 at edge
+      if (r > 1.0) discard;
+      float a = (1.0 - r) * (1.0 - r);
+      gl_FragColor = vec4(vColor * a, a);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexColors: false  // we use attribute manually
+});
+
+// Actually use THREE.Points with custom shader driven by 'color' attribute.
+// (VertexColors=false but we read color in the vert shader ourselves.)
+const mat2 = new THREE.ShaderMaterial({
+  uniforms: { uPixelRatio: { value: renderer.getPixelRatio() } },
+  vertexShader: `
+    attribute vec3 color;
+    attribute float aSize;
+    varying vec3 vColor;
+    uniform float uPixelRatio;
+    void main(){
+      vColor = color;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = max(-mv.z, 1.0);
+      gl_PointSize = aSize * uPixelRatio * (90.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d) * 4.0;
+      if (r > 1.0) discard;
+      float a = pow(1.0 - r, 2.2);
+      gl_FragColor = vec4(vColor * a, a);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const points = new THREE.Points(geom, mat2);
+scene.add(points);
+
+// ── CENTROID GLOW ORBS ────────────────────────────────────────────────────
+// Subtle luminous sphere at each centroid position
+const orbGeoms = [], orbMeshes = [];
+for (let k = 0; k < 3; k++) {
+  const og = new THREE.SphereGeometry(0.55, 12, 8);
+  const om = new THREE.MeshBasicMaterial({
+    color: CENTROIDS[k].glowColor,
+    transparent: true,
+    opacity: 0.45,
+    depthWrite: false
+  });
+  const mesh = new THREE.Mesh(og, om);
+  scene.add(mesh);
+  orbMeshes.push(mesh);
+
+  // Halo sprite around each orb
+  const haloMat = new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: new THREE.Color(CENTROIDS[k].glowColor) } },
+    vertexShader: `
+      varying vec2 vUv;
+      void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      varying vec2 vUv;
+      void main(){
+        float r = length(vUv - 0.5) * 2.0;
+        float a = pow(max(0.0, 1.0 - r), 2.5) * 0.5;
+        gl_FragColor = vec4(uColor, a);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide
+  });
+  const haloGeom = new THREE.PlaneGeometry(4.5, 4.5);
+  const halo = new THREE.Mesh(haloGeom, haloMat);
+  scene.add(halo);
+  orbGeoms.push({ halo, haloMat });
+}
+
+// ── CENTROID POSITION FUNCTION ────────────────────────────────────────────
+// Returns [cx, cy, cz] for centroid k at time t (seconds)
+function centroidPos(k, t) {
+  const C = CENTROIDS[k];
+  const cx = C.a_x * Math.sin(C.freq_x * t * 0.08 + C.phi_x);
+  const cy = C.a_y * Math.sin(C.freq_y * t * 0.08 + C.phi_y) * 0.5;
+  const cz = C.a_z * Math.sin(C.freq_z * t * 0.08 + C.phi_z);
+  return [cx, cy, cz];
+}
+
+// ── SIMULATION STEP ───────────────────────────────────────────────────────
+// Compute per-frame centroid attractors and update particle velocities
+const centPos = [[0,0,0],[0,0,0],[0,0,0]];
+const centStrength = [0, 0, 0];
+
+function simulate(t, dt) {
+  // Update centroid positions + strengths
+  for (let k = 0; k < 3; k++) {
+    const [cx, cy, cz] = centroidPos(k, t);
+    centPos[k][0] = cx; centPos[k][1] = cy; centPos[k][2] = cz;
+    const C = CENTROIDS[k];
+    if (C.oscillate) {
+      // C oscillates: positive half = attract, negative half = repel
+      centStrength[k] = C.baseStrength * Math.sin(C.oscillateFreq * t);
+    } else {
+      centStrength[k] = C.baseStrength;
+    }
+  }
+
+  const invN = 1 / N;
+
+  for (let i = 0; i < N; i++) {
+    const xi = px[i], yi = py[i], zi = pz[i];
+
+    let fx = 0, fy = 0, fz = 0;
+    let wA = 0, wB = 0, wC = 0;
+
+    for (let k = 0; k < 3; k++) {
+      const dx = centPos[k][0] - xi;
+      const dy = centPos[k][1] - yi;
+      const dz = centPos[k][2] - zi;
+      const dist2 = dx*dx + dy*dy + dz*dz + 0.5; // softening
+      const dist  = Math.sqrt(dist2);
+
+      // Gravitational-style: force ∝ strength / dist^1.5  (softer than 1/r²)
+      const invDist = 1.0 / (dist * Math.sqrt(dist));
+      const f = centStrength[k] * invDist;
+
+      fx += f * dx;
+      fy += f * dy;
+      fz += f * dz;
+
+      // Affinity weight: inverse distance squared (closer → stronger affinity)
+      const w = 1.0 / (dist2 + 0.1);
+      if (k === 0) wA = w;
+      else if (k === 1) wB = w;
+      else wC = w;
+    }
+
+    // Normalise affinity weights
+    const wSum = wA + wB + wC + 1e-8;
+    affA[i] = wA / wSum;
+    affB[i] = wB / wSum;
+    affC[i] = wC / wSum;
+
+    // Apply forces
+    vx[i] += fx * dt;
+    vy[i] += fy * dt;
+    vz[i] += fz * dt;
+
+    // Damping — high damping keeps motion glacially slow
+    const damp = 0.982;
+    vx[i] *= damp;
+    vy[i] *= damp;
+    vz[i] *= damp;
+
+    // Speed cap — nebula drift
+    const spd = Math.sqrt(vx[i]*vx[i] + vy[i]*vy[i] + vz[i]*vz[i]);
+    if (spd > MAX_SPEED) {
+      const inv = MAX_SPEED / spd;
+      vx[i] *= inv; vy[i] *= inv; vz[i] *= inv;
+    }
+
+    // Integrate position
+    px[i] += vx[i];
+    py[i] += vy[i];
+    pz[i] += vz[i];
+
+    // Soft spherical boundary — gentle restoring force if too far
+    const r2 = xi*xi + yi*yi + zi*zi;
+    if (r2 > 50*50) {
+      const r = Math.sqrt(r2);
+      const excess = (r - 50) * 0.001;
+      vx[i] -= (xi/r) * excess;
+      vy[i] -= (yi/r) * excess;
+      vz[i] -= (zi/r) * excess;
+    }
+  }
+}
+
+// ── COLOR PALETTE ─────────────────────────────────────────────────────────
+// centroid A: deep blue #0a1628
+// centroid B: void purple #1a0a28
+// centroid C: stellar gold #c8a060
+// Mix by affinity
+const colA = new THREE.Color(0.04, 0.09, 0.16);   // deep blue
+const colB = new THREE.Color(0.10, 0.04, 0.16);   // void purple
+const colC = new THREE.Color(0.78, 0.63, 0.22);   // stellar gold
+
+// Brightness by distance from nearest centroid (closer → brighter)
+function updateGeometry(t) {
+  for (let i = 0; i < N; i++) {
+    posArr[i*3]   = px[i];
+    posArr[i*3+1] = py[i];
+    posArr[i*3+2] = pz[i];
+
+    const xi = px[i], yi = py[i], zi = pz[i];
+
+    // Blend colour by affinity
+    const r = colA.r * affA[i] + colB.r * affB[i] + colC.r * affC[i];
+    const g = colA.g * affA[i] + colB.g * affB[i] + colC.g * affC[i];
+    const b = colA.b * affA[i] + colB.b * affB[i] + colC.b * affC[i];
+
+    // Find closest centroid distance for brightness
+    let minDist = 1e9;
+    for (let k = 0; k < 3; k++) {
+      const ddx = xi - centPos[k][0];
+      const ddy = yi - centPos[k][1];
+      const ddz = zi - centPos[k][2];
+      const d = Math.sqrt(ddx*ddx + ddy*ddy + ddz*ddz);
+      if (d < minDist) minDist = d;
+    }
+    // Brightness: peaks near attractors, fades at distance
+    const bright = 0.12 + 0.88 * Math.exp(-minDist * 0.045);
+
+    colArr[i*3]   = r * bright;
+    colArr[i*3+1] = g * bright;
+    colArr[i*3+2] = b * bright;
+
+    // Dominant affinity for size
+    const domAff = Math.max(affA[i], affB[i], affC[i]);
+    sizArr[i] = 1.5 + domAff * 2.5;
+  }
+
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.color.needsUpdate    = true;
+  geom.attributes.aSize.needsUpdate    = true;
+
+  // Update centroid orb positions + halo billboards
+  for (let k = 0; k < 3; k++) {
+    const [cx, cy, cz] = centPos[k];
+    orbMeshes[k].position.set(cx, cy, cz);
+    const halo = orbGeoms[k].halo;
+    halo.position.set(cx, cy, cz);
+    // Billboard: face camera
+    halo.quaternion.copy(camera.quaternion);
+  }
+}
+
+// ── CAMERA ────────────────────────────────────────────────────────────────
+// Slow, elegant orbital drift around origin
+let camTheta = 0.0;
+const CAM_RADIUS = 72;
+const CAM_SPEED  = 0.018; // degrees/sec (very slow)
+
+function updateCamera(dt) {
+  camTheta += CAM_SPEED * dt;
+  const cx = Math.cos(camTheta) * CAM_RADIUS;
+  const cz = Math.sin(camTheta) * CAM_RADIUS;
+  const cy = 16 + Math.sin(camTheta * 0.3) * 8;
+  camera.position.set(cx, cy, cz);
+  camera.lookAt(0, 0, 0);
+}
+
+// ── RESIZE ────────────────────────────────────────────────────────────────
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── LOOP ──────────────────────────────────────────────────────────────────
+let lastT = performance.now() / 1000;
+
+function loop() {
+  const now = performance.now() / 1000;
+  const dt  = Math.min(now - lastT, 0.05);
+  lastT = now;
+
+  simulate(now, dt);
+  updateGeometry(now);
+  updateCamera(dt);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
