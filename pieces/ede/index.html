@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ede — fluid slit</title>
+  <style>*{margin:0;padding:0}body{background:#0c0a09;overflow:hidden}canvas{display:block}
+  .id{position:fixed;left:14px;bottom:12px;opacity:0.45;font:11px/1 'SF Mono',monospace;color:#c8a87a;letter-spacing:.06em}
+  .hint{position:fixed;left:14px;top:14px;opacity:0.35;font:10px/1 'SF Mono',monospace;color:#c8a87a;letter-spacing:.04em}
+  </style>
+</head>
+<body>
+<div class="id">ede</div>
+<div class="hint">drag to orbit · click to lift</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.164.1/build/three.module.js","three/addons/":"https://unpkg.com/three@0.164.1/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+
+// ── Scene ─────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0c0a09);
+
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.01, 50);
+camera.position.set(0.4, -0.8, 4.2);
+camera.lookAt(0, 0.2, 0);
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+const ctrl = new OrbitControls(camera, renderer.domElement);
+ctrl.enableDamping = true; ctrl.dampingFactor = 0.06;
+ctrl.target.set(0, 0.15, 0);
+
+// ── Lighting — raking side light to feel paper depth ─────────────────────
+scene.add(new THREE.AmbientLight(0xfff0e0, 0.12));
+
+const key = new THREE.DirectionalLight(0xffe8c0, 3.2);
+key.position.set(4, 2.5, 2);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, {left:-2.5,right:2.5,top:2.5,bottom:-2.5,near:0.1,far:20});
+scene.add(key);
+
+const fill = new THREE.DirectionalLight(0xa0b8d0, 0.4);
+fill.position.set(-3, 1, 1.5);
+scene.add(fill);
+
+const rim = new THREE.DirectionalLight(0xffe0a0, 0.3);
+rim.position.set(0.5, -3, -1.5);
+scene.add(rim);
+
+// ── Seeded RNG (mulberry32) ───────────────────────────────────────────────
+function mkRng(seed) {
+  let s = seed >>> 0;
+  return () => { s += 0x6D2B79F5; let t=s; t=Math.imul(t^(t>>>15),t|1); t^=t+Math.imul(t^(t>>>7),t|61); return((t^(t>>>14))>>>0)/4294967296; };
+}
+const rng = mkRng(0xEDE12345);
+const rand = (a,b) => a + rng()*(b-a);
+
+// ── Materials ─────────────────────────────────────────────────────────────
+// Kraft paper — warm brown with visible roughness
+const KRAFT = new THREE.Color(0xc8a87a);
+const KRAFT_DARK = new THREE.Color(0xa88a5a);
+
+function paperMat(col) {
+  return new THREE.MeshPhongMaterial({
+    color: col ?? KRAFT.clone(),
+    specular: new THREE.Color(0x0a0806),
+    shininess: 3,
+    side: THREE.DoubleSide
+  });
+}
+
+// ── Hand-cut slit layout ──────────────────────────────────────────────────
+// 6 slits of varying length, angle, position — scattered with controlled
+// randomness, not radially symmetric. Each slit has a pivot edge (hinge)
+// and a free tip that curls up.
+//
+// Format: { cx, cy, len, angle, width, bendMax, phase, rate }
+// cx/cy: center of slit in base-plate local coords (0=center)
+// len: slit length (radius swept by flap)
+// angle: orientation of slit (rad) — local +Y of flap = along this
+// width: flap width
+// bendMax: maximum curl angle at rest (radians)
+// phase/rate: breathing parameters
+
+const slitDefs = [
+  // Slit 0: upper-left, long diagonal, tight curl
+  { cx:-0.55, cy: 0.50, len:0.58, angle:2.1,   width:0.10, bendMax:2.1, phase:0.00, rate:0.52 },
+  // Slit 1: upper-right, shorter, gentle bend, wide
+  { cx: 0.60, cy: 0.55, len:0.42, angle:1.05,  width:0.13, bendMax:1.3, phase:1.80, rate:0.44 },
+  // Slit 2: center-left, medium, medium bend
+  { cx:-0.30, cy: 0.05, len:0.50, angle:2.85,  width:0.09, bendMax:1.7, phase:0.95, rate:0.58 },
+  // Slit 3: center-right, long, very tight spiral curl
+  { cx: 0.42, cy:-0.10, len:0.62, angle:0.35,  width:0.08, bendMax:2.4, phase:2.50, rate:0.49 },
+  // Slit 4: lower-left, short, wide, lazy bend
+  { cx:-0.62, cy:-0.45, len:0.36, angle:1.75,  width:0.14, bendMax:0.9, phase:1.20, rate:0.38 },
+  // Slit 5: lower-center, medium, medium-tight, narrow
+  { cx: 0.10, cy:-0.52, len:0.46, angle:2.45,  width:0.07, bendMax:1.85, phase:3.30, rate:0.55 },
+];
+
+// ── Base plate with irregular slit holes cut out ──────────────────────────
+// Each slit hole is a thin rectangle aligned along the slit's local +Y axis.
+const HALF_BASE = 1.05;
+
+function buildBasePlate(defs) {
+  const shape = new THREE.Shape();
+  shape.moveTo(-HALF_BASE,-HALF_BASE);
+  shape.lineTo( HALF_BASE,-HALF_BASE);
+  shape.lineTo( HALF_BASE, HALF_BASE);
+  shape.lineTo(-HALF_BASE, HALF_BASE);
+  shape.closePath();
+
+  for (const d of defs) {
+    const ca = Math.cos(d.angle), sa = Math.sin(d.angle);
+    // Hinge is at the proximal end of the slit; tip at d.len distal
+    const HX = d.cx, HY = d.cy; // hinge position (center of hinge edge)
+    const hw = d.width * 0.5;
+    const hl = d.len;
+    // Four corners of the slit hole (in base coords)
+    // local frame: +Y = along angle, +X = perpendicular
+    // Corner order: CW so Three.js treats it as a hole
+    const corners = [
+      { u:-hw, v:0.01 },
+      { u: hw, v:0.01 },
+      { u: hw, v:hl   },
+      { u:-hw, v:hl   },
+    ];
+    const h = new THREE.Path();
+    for (let i=0; i<4; i++) {
+      const cx2 = HX + corners[i].u * ca - corners[i].v * sa;
+      const cy2 = HY + corners[i].u * sa + corners[i].v * ca;
+      if (i===0) h.moveTo(cx2, cy2); else h.lineTo(cx2, cy2);
+    }
+    h.closePath();
+    shape.holes.push(h);
+  }
+  return shape;
+}
+
+const baseShape = buildBasePlate(slitDefs);
+
+// Flat base
+const baseMesh = new THREE.Mesh(
+  new THREE.ShapeGeometry(baseShape, 64),
+  paperMat(KRAFT.clone())
+);
+baseMesh.receiveShadow = true;
+scene.add(baseMesh);
+
+// Thin extruded edge for physicality (paper thickness ~1mm)
+const edgeMat = paperMat(KRAFT_DARK.clone());
+const edgeMesh = new THREE.Mesh(
+  new THREE.ExtrudeGeometry(baseShape, {depth:0.006, bevelEnabled:false}),
+  edgeMat
+);
+edgeMesh.position.z = -0.006;
+scene.add(edgeMesh);
+
+// ── Flap geometry — arc-bent strip ───────────────────────────────────────
+// Flap bends around the hinge edge. Local frame:
+//   +Y = outward from hinge (along slit direction)
+//   +Z = rises above the base plate as we curl
+// The bend is non-uniform: tighter at tip, looser at hinge (like real paper).
+function bentFlap(width, len, bendAng, segs=48) {
+  const pos=[], nor=[], uv=[], idx=[];
+  for (let j=0; j<=segs; j++) {
+    const t = j/segs;
+    // Non-uniform bend: t^1.4 makes hinge region flatter, tip tighter
+    const ta = Math.pow(t, 1.4) * bendAng;
+    const R = len / Math.max(bendAng, 0.05);
+    const y = R * Math.sin(ta);
+    const z = R * (1 - Math.cos(ta));
+    const ny = Math.cos(ta), nz = -Math.sin(ta);
+    for (let s=0; s<2; s++) {
+      pos.push((s-0.5)*width, y, z);
+      nor.push(0, ny, nz);
+      uv.push(s, t);
+    }
+    if (j<segs) {
+      const o=j*2;
+      idx.push(o,o+2,o+1, o+1,o+2,o+3);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+  g.setAttribute('normal',   new THREE.Float32BufferAttribute(nor,3));
+  g.setAttribute('uv',       new THREE.Float32BufferAttribute(uv,2));
+  g.setIndex(idx);
+  return g;
+}
+
+// ── Build flaps ───────────────────────────────────────────────────────────
+const flaps = [];
+for (const d of slitDefs) {
+  // Vary material: alternate between kraft and slightly cooler/warmer tones
+  const baseCol = KRAFT.clone().lerp(KRAFT_DARK, rand(0.0, 0.35));
+  // Inner face slightly darker (like paper cross-section)
+  const mat = paperMat(baseCol);
+
+  const mesh = new THREE.Mesh(bentFlap(d.width, d.len, d.bendMax), mat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+
+  // Pivot group: positioned at hinge point, rotated so local +Y faces along slit direction
+  const pivot = new THREE.Group();
+  pivot.position.set(d.cx, d.cy, 0);
+  pivot.rotation.z = d.angle - Math.PI * 0.5; // rotate so local +Y aligns with slit direction
+
+  pivot.add(mesh);
+  scene.add(pivot);
+
+  flaps.push({ mesh, def:d, restBend:d.bendMax });
+}
+
+// ── Tip oscillation particles (subtle — a few dust motes near each tip) ──
+const MOTE_COUNT = 80;
+const motePositions = new Float32Array(MOTE_COUNT * 3);
+const moteSpeeds   = new Float32Array(MOTE_COUNT * 3);
+const motePhases   = new Float32Array(MOTE_COUNT);
+for (let i=0; i<MOTE_COUNT; i++) {
+  // Attach near a random flap tip
+  const fi = Math.floor(rand(0, slitDefs.length));
+  const d = slitDefs[fi];
+  const tipX = d.cx + Math.cos(d.angle) * d.len * rand(0.6,1.0);
+  const tipY = d.cy + Math.sin(d.angle) * d.len * rand(0.6,1.0);
+  const tipZ = rand(0.05, 0.25);
+  motePositions[i*3]   = tipX + rand(-0.08,0.08);
+  motePositions[i*3+1] = tipY + rand(-0.08,0.08);
+  motePositions[i*3+2] = tipZ;
+  moteSpeeds[i*3]   = rand(-0.002, 0.002);
+  moteSpeeds[i*3+1] = rand(-0.002, 0.002);
+  moteSpeeds[i*3+2] = rand(0.0005, 0.002);
+  motePhases[i] = rand(0, Math.PI*2);
+}
+const moteGeo = new THREE.BufferGeometry();
+moteGeo.setAttribute('position', new THREE.BufferAttribute(motePositions, 3));
+const moteMat = new THREE.PointsMaterial({color:0xe0c090, size:0.006, transparent:true, opacity:0.55, sizeAttenuation:true});
+const motes = new THREE.Points(moteGeo, moteMat);
+scene.add(motes);
+
+// ── Click-to-lift interaction ─────────────────────────────────────────────
+let lifted = false, liftTarget = 0, liftCurrent = 0;
+renderer.domElement.addEventListener('click', () => {
+  lifted = !lifted;
+  liftTarget = lifted ? 1 : 0;
+});
+
+// ── Rebuild flap geometry with new bend (only when delta > threshold) ─────
+function rebuildFlap(flap, bend) {
+  flap.mesh.geometry.dispose();
+  flap.mesh.geometry = bentFlap(flap.def.width, flap.def.len, Math.max(bend, 0.03));
+}
+
+const SEGS = 48;
+let lastLift = -1;
+
+// ── Animate ───────────────────────────────────────────────────────────────
+function animate(ms) {
+  requestAnimationFrame(animate);
+  const t = ms * 0.001;
+
+  // Smooth lift / lower
+  liftCurrent += (liftTarget - liftCurrent) * 0.022;
+
+  // Per-flap: breathing at independent rates and phases
+  flaps.forEach((fl, i) => {
+    const d = fl.def;
+    // Breathing: small oscillation around rest bend, each flap independent
+    const breathAmp = 0.04 + (i % 3) * 0.025;
+    const breathe = 1 + breathAmp * Math.sin(t * d.rate + d.phase);
+    // When lifted, flatten significantly (papers unfurl when lifted)
+    const liftFlatten = liftCurrent * 0.82;
+    const bend = d.bendMax * (1 - liftFlatten) * breathe;
+
+    // Only rebuild if changed enough (avoids unnecessary GPU upload)
+    if (Math.abs(bend - (fl._lastBend ?? -99)) > 0.005) {
+      rebuildFlap(fl, bend);
+      fl._lastBend = bend;
+    }
+
+    // Tiny tip oscillation — mesh scale.z breathes independently
+    fl.mesh.scale.z = 1 + 0.012 * Math.sin(t * d.rate * 1.7 + d.phase * 0.8);
+  });
+
+  // Animate dust motes
+  const pos = moteGeo.attributes.position.array;
+  for (let i=0; i<MOTE_COUNT; i++) {
+    pos[i*3]   += moteSpeeds[i*3]   * Math.sin(t * 0.4 + motePhases[i]);
+    pos[i*3+1] += moteSpeeds[i*3+1] * Math.cos(t * 0.3 + motePhases[i] * 1.3);
+    pos[i*3+2] += moteSpeeds[i*3+2] * 0.05 * Math.sin(t * 0.7 + motePhases[i] * 0.6);
+    // Keep motes near their origin (gentle spring)
+    if (Math.abs(pos[i*3+2]) > 0.4) pos[i*3+2] *= 0.98;
+  }
+  moteGeo.attributes.position.needsUpdate = true;
+
+  // Very slow scene drift — feels like air currents
+  scene.rotation.z = Math.sin(t * 0.05) * 0.035;
+  scene.rotation.x = Math.sin(t * 0.032 + 1.2) * 0.012;
+
+  ctrl.update();
+  renderer.render(scene, camera);
+}
+animate(0);
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
