@@ -21,6 +21,7 @@ mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/cron-$(date -u +%Y%m).log"
 LOCK="$REPO/.parallel_tick.lock"
 THRUM="$HOME/.local/bin/thrum"
+TELEGRAM_ENV="$HOME/.particle_telegram.env"
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
@@ -39,8 +40,7 @@ fi
 VENV="$REPO/.venv"
 [ -x "$VENV/bin/python3" ] || { log "FATAL: venv missing at $VENV"; exit 2; }
 
-# --- thrum: process pending steering messages (keep/drop/mutate directives) ---
-# Graceful: if daemon is down, skip silently — never block a tick.
+# --- thrum: process pending steering messages from coordinator ---
 if [ -x "$THRUM" ] && "$THRUM" daemon status --quiet 2>/dev/null; then
   INBOX=$("$THRUM" inbox --unread --json 2>/dev/null || echo '[]')
   MSG_COUNT=$(echo "$INBOX" | "$VENV/bin/python3" -c "import json,sys; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else len(d.get('messages',[])))" 2>/dev/null || echo 0)
@@ -50,12 +50,14 @@ if [ -x "$THRUM" ] && "$THRUM" daemon status --quiet 2>/dev/null; then
   fi
 fi
 
+# Snapshot piece list before workers run (to detect new pieces after)
+PIECES_BEFORE=$(find "$REPO/pieces" -name 'meta.json' -printf '%h\n' 2>/dev/null | xargs -I{} basename {} | sort)
+
 PIDS=()
 for i in $(seq 1 "$N"); do
   ( "$VENV/bin/python3" "$REPO/scripts/mutate.py" 2>&1 \
       | sed "s/^/  [w$i] /" >> "$LOG" ) &
   PIDS+=("$!")
-  # tiny stagger so two workers don't race on lineage.json read at the exact same ms
   sleep 1
 done
 
@@ -63,15 +65,28 @@ for pid in "${PIDS[@]}"; do
   wait "$pid" || true
 done
 
-# final backlog drain — if any worker's push got rejected after retry, this catches it
+# final backlog drain
 git push 2>>"$LOG" || git pull --rebase -X theirs --autostash --quiet 2>>"$LOG" && git push 2>>"$LOG" || true
 
 log "── parallel_tick end ──"
 
+# --- Detect new pieces and notify via Telegram ---
+PIECES_AFTER=$(find "$REPO/pieces" -name 'meta.json' -printf '%h\n' 2>/dev/null | xargs -I{} basename {} | sort)
+NEW_PIECES=$(comm -13 <(echo "$PIECES_BEFORE") <(echo "$PIECES_AFTER") | tr '\n' ' ')
+log "new pieces: ${NEW_PIECES:-none}"
+
+if [ -f "$TELEGRAM_ENV" ]; then
+  # shellcheck disable=SC1090
+  set -a; source "$TELEGRAM_ENV"; set +a
+  "$VENV/bin/python3" "$REPO/scripts/notify_telegram.py" $NEW_PIECES 2>>"$LOG" \
+    && log "telegram: notified" \
+    || log "WARN: telegram notify failed"
+fi
+
 # --- thrum: report tick completion ---
 if [ -x "$THRUM" ] && "$THRUM" daemon status --quiet 2>/dev/null; then
-  NEW_COUNT=$(git log --oneline ORIG_HEAD..HEAD -- 'pieces/' 2>/dev/null | wc -l | tr -d ' ' || echo '?')
-  "$THRUM" send "tick done — ~${NEW_COUNT} new piece(s). check gallery." --to @human 2>/dev/null || true
+  NEW_COUNT=$(echo "$NEW_PIECES" | wc -w | tr -d ' ')
+  "$THRUM" send "tick done — ${NEW_COUNT} new piece(s): ${NEW_PIECES:-none}" 2>/dev/null || true
 fi
 
 exit 0

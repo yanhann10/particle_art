@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Process thrum inbox messages and apply steering directives.
 Called by parallel_tick.sh before each mutation tick.
-Reads stdin as JSON array from `thrum inbox --unread --json`.
+Reads stdin as JSON from `thrum inbox --unread --json`.
+Handles comma-separated directives in a single message.
 """
 import json, sys, subprocess, os, re
 
@@ -17,47 +18,48 @@ def load_prefs():
 def save_prefs(prefs):
     with open(PREFS, 'w') as f:
         json.dump(prefs, f, indent=2)
-    print(f'[thrum] preferences.json updated')
+    print('[thrum] preferences.json updated')
 
-data = json.load(sys.stdin)
-messages = data if isinstance(data, list) else data.get('messages', [])
-
-for msg in messages:
-    body = msg.get('body', '').strip()
-    body_low = body.lower()
-    sender = msg.get('from', '?')
-    print(f'[thrum] message from {sender}: {body[:80]}')
-
+def apply_directive(part):
+    part = part.strip()
     # keep <code>
-    m = re.match(r'keep\s+([a-z0-9]{3})\b', body_low)
+    m = re.match(r'keep\s+([a-z0-9]{3})\b', part)
     if m:
         code = m.group(1)
         prefs = load_prefs()
         prefs.setdefault('marks', {}).setdefault(code, {})['favorite'] = True
         prefs['marks'][code].pop('drop', None)
         save_prefs(prefs)
-        continue
-
+        return
     # drop <code>
-    m = re.match(r'drop\s+([a-z0-9]{3})\b', body_low)
+    m = re.match(r'drop\s+([a-z0-9]{3})\b', part)
     if m:
         code = m.group(1)
         prefs = load_prefs()
         prefs.setdefault('marks', {}).setdefault(code, {})['drop'] = True
         prefs['marks'][code].pop('favorite', None)
         save_prefs(prefs)
-        continue
-
-    # mutate <code> → <directive>  (also accepts ->)
-    m = re.match(r'mutate\s+([a-z0-9]{3})\s*[→\-]>?\s*(.+)', body_low)
+        return
+    # mutate <code> → <directive>
+    m = re.match(r'mutate\s+([a-z0-9]{3})\s*[→\-]>?\s*(.+)', part)
     if m:
-        parent = m.group(1)
-        directive = m.group(2).strip()
+        parent, directive = m.group(1), m.group(2).strip()
         print(f'[thrum] immediate mutate: {parent} → {directive}')
-        subprocess.run(
-            [VENV_PYTHON, MUTATE_PY, '--parent', parent, '--directive', directive],
-            cwd=REPO, check=False
-        )
-        continue
+        subprocess.run([VENV_PYTHON, MUTATE_PY, '--parent', parent, '--directive', directive],
+                       cwd=REPO, check=False)
+        return
+    if part:
+        print(f'[thrum] no handler for: {part[:50]}')
 
-    print(f'[thrum] no handler for message (ignored)')
+data = json.load(sys.stdin)
+messages = data if isinstance(data, list) else data.get('messages', [])
+
+for msg in messages:
+    body_raw = msg.get('body', '')
+    body = (body_raw.get('content', '') if isinstance(body_raw, dict) else str(body_raw)).strip()
+    sender = msg.get('agent_id', msg.get('from', '?'))
+    print(f'[thrum] from @{sender}: {body[:100]}')
+    # strip leading "steering:" prefix if present, then split by comma
+    body_clean = re.sub(r'^steering:\s*', '', body, flags=re.IGNORECASE)
+    for part in re.split(r',\s*', body_clean.lower()):
+        apply_directive(part)
