@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8gu · pearlescent shells · MORAKANA</title>
+<!-- MOTION: orbit, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.3; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">8gu</div>
+<div class="hint">five concentric atmospheres · each turning at its own tempo</div>
+<div class="src">MORAKANA · nacre formation · Lumen Prize Gold</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 12, 65);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080e, 1);
+document.body.appendChild(renderer.domElement);
+
+scene.fog = new THREE.FogExp2(0x06080e, 0.012);
+
+/* ── Shell definitions ──
+   Each shell: { radius, count, speed, axisTilt, opacity, color inner/outer }
+   Inspired by nacre (mother-of-pearl) layering — each aragonite platelet
+   layer refracts light differently. Reference: Andy Lomas' morphogenetic
+   growth + Olafur Eliasson's monofrequency rooms.
+*/
+const SHELLS = [
+  { radius: 5.5,  count: 2500, speed: 0.09,  axisTilt: [0.1, 0.0, 0.05],  opacity: 0.7,
+    colorA: [0.039, 0.102, 0.227], colorB: [0.055, 0.14, 0.30],  // deep sapphire core
+    pointSize: 2.2, jitter: 0.4, breathAmp: 0.3 },
+  { radius: 10.0, count: 3500, speed: -0.055, axisTilt: [0.0, 0.15, -0.08], opacity: 0.5,
+    colorA: [0.06, 0.13, 0.28],  colorB: [0.10, 0.18, 0.32],   // mid sapphire
+    pointSize: 2.8, jitter: 0.6, breathAmp: 0.5 },
+  { radius: 15.5, count: 4000, speed: 0.035,  axisTilt: [-0.12, 0.05, 0.1], opacity: 0.38,
+    colorA: [0.125, 0.22, 0.125], colorB: [0.16, 0.28, 0.18],  // aurora green
+    pointSize: 3.2, jitter: 0.8, breathAmp: 0.7 },
+  { radius: 21.0, count: 4500, speed: -0.022, axisTilt: [0.08, -0.1, 0.06], opacity: 0.28,
+    colorA: [0.30, 0.34, 0.38],  colorB: [0.50, 0.54, 0.56],   // pewter transition
+    pointSize: 3.5, jitter: 1.0, breathAmp: 0.9 },
+  { radius: 27.0, count: 5500, speed: 0.014,  axisTilt: [-0.05, 0.08, -0.12], opacity: 0.18,
+    colorA: [0.62, 0.68, 0.72],  colorB: [0.816, 0.847, 0.878], // pale silver
+    pointSize: 3.8, jitter: 1.3, breathAmp: 1.1 }
+];
+
+const totalN = SHELLS.reduce((s, sh) => s + sh.count, 0); // 20000
+
+const vertShader = `
+  uniform float uTime;
+  uniform float uPixel;
+  uniform float uShellRadius;
+  uniform float uShellSpeed;
+  uniform float uShellOpacity;
+  uniform float uPointSize;
+  uniform float uBreathAmp;
+  uniform vec3 uAxisTilt;
+  uniform vec3 uColorA;
+  uniform vec3 uColorB;
+  attribute float seed;
+  attribute float phi;
+  attribute float theta;
+  attribute float radOffset;
+  varying vec3 vCol;
+  varying float vAlpha;
+
+  mat3 rotAxisAngle(vec3 axis, float angle){
+    float c = cos(angle), s = sin(angle);
+    float t = 1.0 - c;
+    vec3 a = normalize(axis);
+    return mat3(
+      t*a.x*a.x+c,     t*a.x*a.y-s*a.z, t*a.x*a.z+s*a.y,
+      t*a.x*a.y+s*a.z, t*a.y*a.y+c,     t*a.y*a.z-s*a.x,
+      t*a.x*a.z-s*a.y, t*a.y*a.z+s*a.x, t*a.z*a.z+c
+    );
+  }
+
+  void main(){
+    float t = uTime;
+
+    // Breathing radius
+    float breath = sin(t * 0.4 + seed * 6.28) * uBreathAmp;
+    float r = uShellRadius + radOffset + breath;
+
+    // Spherical coords with slow rotation
+    float p = phi + t * uShellSpeed * (0.8 + seed * 0.4);
+    float th = theta + sin(t * 0.15 + seed * 3.14) * 0.04;
+
+    vec3 pos;
+    pos.x = r * sin(th) * cos(p);
+    pos.y = r * cos(th);
+    pos.z = r * sin(th) * sin(p);
+
+    // Tilt the shell axis
+    vec3 tiltAxis = normalize(vec3(1.0, 0.3, 0.0) + uAxisTilt);
+    float tiltAngle = length(uAxisTilt) * 1.5;
+    pos = rotAxisAngle(tiltAxis, tiltAngle) * pos;
+
+    // Iridescence: angle-dependent color shift (nacre effect)
+    vec3 viewDir = normalize(cameraPosition - pos);
+    vec3 normal = normalize(pos); // shell normal = radial
+    float fresnel = 1.0 - abs(dot(viewDir, normal));
+    fresnel = pow(fresnel, 2.2);
+
+    // Base color from shell definition, shifted by fresnel
+    vec3 baseCol = mix(uColorA, uColorB, seed);
+    // Iridescent highlight: shift toward complement at glancing angles
+    vec3 iridescentShift = vec3(
+      sin(fresnel * 4.0 + 0.0) * 0.08,
+      sin(fresnel * 4.0 + 2.09) * 0.06,
+      sin(fresnel * 4.0 + 4.19) * 0.1
+    );
+    vCol = baseCol + iridescentShift * fresnel + vec3(fresnel * 0.12);
+
+    // Opacity: shell base × depth fade × slight flicker
+    float flicker = 0.85 + 0.15 * sin(t * 0.7 + seed * 12.0);
+    vAlpha = uShellOpacity * flicker * smoothstep(300.0, 40.0, length(cameraPosition - pos));
+
+    vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+    float dist = -mv.z;
+    gl_PointSize = uPointSize * uPixel * (90.0 / max(dist, 1.0));
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+
+const fragShader = `
+  varying vec3 vCol;
+  varying float vAlpha;
+
+  void main(){
+    vec2 d = gl_PointCoord - 0.5;
+    float r = length(d);
+    if (r > 0.5) discard;
+
+    float soft = 1.0 - smoothstep(0.0, 0.5, r);
+    soft = pow(soft, 1.8);
+
+    // Subtle bright core
+    float core = exp(-r * r * 18.0) * 0.3;
+
+    gl_FragColor = vec4(vCol + core, soft * vAlpha);
+  }
+`;
+
+const shellMeshes = [];
+
+for (const sh of SHELLS) {
+  const positions = new Float32Array(sh.count * 3); // dummy, computed in shader
+  const seedArr = new Float32Array(sh.count);
+  const phiArr = new Float32Array(sh.count);
+  const thetaArr = new Float32Array(sh.count);
+  const radOffsetArr = new Float32Array(sh.count);
+
+  for (let i = 0; i < sh.count; i++) {
+    // Fibonacci sphere distribution for even coverage
+    const golden = (1 + Math.sqrt(5)) / 2;
+    const t = (i + 0.5) / sh.count;
+    const th = Math.acos(1 - 2 * t);
+    const p = 2 * Math.PI * i / golden;
+
+    phiArr[i] = p;
+    thetaArr[i] = th;
+    seedArr[i] = Math.random();
+    radOffsetArr[i] = (Math.random() - 0.5) * sh.jitter * 2;
+
+    // Initial positions (will be overridden by shader, but needed for bounding)
+    positions[i*3]   = sh.radius * Math.sin(th) * Math.cos(p);
+    positions[i*3+1] = sh.radius * Math.cos(th);
+    positions[i*3+2] = sh.radius * Math.sin(th) * Math.sin(p);
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+  geom.setAttribute('phi', new THREE.BufferAttribute(phiArr, 1));
+  geom.setAttribute('theta', new THREE.BufferAttribute(thetaArr, 1));
+  geom.setAttribute('radOffset', new THREE.BufferAttribute(radOffsetArr, 1));
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uPixel: { value: renderer.getPixelRatio() },
+      uShellRadius: { value: sh.radius },
+      uShellSpeed: { value: sh.speed },
+      uShellOpacity: { value: sh.opacity },
+      uPointSize: { value: sh.pointSize },
+      uBreathAmp: { value: sh.breathAmp },
+      uAxisTilt: { value: new THREE.Vector3(...sh.axisTilt) },
+      uColorA: { value: new THREE.Vector3(...sh.colorA) },
+      uColorB: { value: new THREE.Vector3(...sh.colorB) }
+    },
+    vertexShader: vertShader,
+    fragmentShader: fragShader,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
+  });
+
+  const pts = new THREE.Points(geom, mat);
+  scene.add(pts);
+  shellMeshes.push(pts);
+}
+
+// Faint inner glow at center — a warm ember
+const glowGeom = new THREE.SphereGeometry(2.5, 16, 16);
+const glowMat = new THREE.MeshBasicMaterial({
+  color: 0x1a2a4a,
+  transparent: true,
+  opacity: 0.15,
+  blending: THREE.AdditiveBlending
+});
+const glowMesh = new THREE.Mesh(glowGeom, glowMat);
+scene.add(glowMesh);
+
+// Dust motes — sparse environmental texture
+const dustN = 800;
+const dustPos = new Float32Array(dustN * 3);
+const dustSeed = new Float32Array(dustN);
+for (let i = 0; i < dustN; i++) {
+  dustPos[i*3]   = (Math.random() - 0.5) * 120;
+  dustPos[i*3+1] = (Math.random() - 0.5) * 80;
+  dustPos[i*3+2] = (Math.random() - 0.5) * 120;
+  dustSeed[i] = Math.random();
+}
+const dustGeom = new THREE.BufferGeometry();
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({
+  color: 0x445566,
+  size: 1.2,
+  transparent: true,
+  opacity: 0.08,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  sizeAttenuation: true
+});
+const dustPts = new THREE.Points(dustGeom, dustMat);
+scene.add(dustPts);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Camera: slow orbit, gentle breathing distance
+function updateCamera(t) {
+  const orbitSpeed = 0.00004;
+  const angle = t * orbitSpeed;
+  const breathDist = 65 + Math.sin(t * 0.0001) * 8;
+  const camY = 12 + Math.sin(t * 0.00007) * 5;
+
+  camera.position.x += (Math.cos(angle) * breathDist - camera.position.x) * 0.008;
+  camera.position.y += (camY - camera.position.y) * 0.008;
+  camera.position.z += (Math.sin(angle) * breathDist - camera.position.z) * 0.008;
+  camera.lookAt(0, 0, 0);
+}
+
+// Dust drift
+function updateDust(t) {
+  const pos = dustGeom.attributes.position.array;
+  for (let i = 0; i < dustN; i++) {
+    pos[i*3]   += Math.sin(t * 0.0003 + dustSeed[i] * 10) * 0.005;
+    pos[i*3+1] += Math.cos(t * 0.0002 + dustSeed[i] * 7) * 0.003;
+    pos[i*3+2] += Math.sin(t * 0.00025 + dustSeed[i] * 5) * 0.004;
+  }
+  dustGeom.attributes.position.needsUpdate = true;
+}
+
+function loop() {
+  const now = performance.now();
+  const t = now / 1000;
+
+  for (const pts of shellMeshes) {
+    pts.material.uniforms.uTime.value = t;
+  }
+
+  // Inner glow pulse
+  glowMat.opacity = 0.12 + 0.05 * Math.sin(t * 0.3);
+  glowMesh.scale.setScalar(1.0 + 0.08 * Math.sin(t * 0.25));
+
+  updateCamera(now);
+  updateDust(now);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
