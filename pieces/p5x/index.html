@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>p5x · physarum slime-mold growth · emergent trails</title>
+<!-- MOTION: bloom, intensity: vigorous -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0e12; overflow:hidden;
+               color:#cfe1d4; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .stat  { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size: 11px; letter-spacing: 0.08em; }
+  .src   { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">p5x · physarum growth</div>
+<div class="hint">slime-mold chemical diffusion & trail-deposition · auto-reset every 20s</div>
+<div class="stat" id="stat">agents: 16k · trails: accumulating</div>
+<div class="src">GPGPU physarum · diffusion + stigmergy</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Physarum polycephalum v2: 16k agents deposit + sense chemical trail
+// Trail field diffuses on GPU; agents follow sensed gradients, depositing pheromone
+// Asymmetric sensing creates organic, self-avoiding paths that spiral and interweave
+// Four attractant sources replenish at fixed points; agents seek them, leaving perfumed trails
+// Over time: high-entropy swirl → low-entropy branched networks → collapse/restart
+
+const AGENTS = 16384;
+const TRAIL_W = 512;
+const TRAIL_H = 512;
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0e12, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { 
+  type: THREE.FloatType, 
+  format: THREE.RGBAFormat,
+  minFilter: THREE.LinearFilter, 
+  magFilter: THREE.LinearFilter,
+  wrapS: THREE.RepeatWrapping, 
+  wrapT: THREE.RepeatWrapping,
+  depthBuffer: false 
+};
+
+// Trail field (pheromone concentration)
+let rtTrailA = new THREE.WebGLRenderTarget(TRAIL_W, TRAIL_H, rtParams);
+let rtTrailB = new THREE.WebGLRenderTarget(TRAIL_W, TRAIL_H, rtParams);
+
+// Agent state texture: (x, y, angle, speed)
+const agentW = 64, agentH = 256; // 16k agents
+const agentN = agentW * agentH;
+function makeAgentInitTexture(){
+  const t = new Float32Array(agentN * 4);
+  for (let i = 0; i < agentN; i++){
+    // spawn in small cluster near center
+    const r = Math.random() * 0.15;
+    const th = Math.random() * Math.PI * 2;
+    t[i*4]   = 0.5 + r * Math.cos(th);     // x in [0,1]
+    t[i*4+1] = 0.5 + r * Math.sin(th);     // y in [0,1]
+    t[i*4+2] = Math.random() * Math.PI * 2; // angle
+    t[i*4+3] = 0.08 + Math.random() * 0.04; // speed
+  }
+  const tex = new THREE.DataTexture(t, agentW, agentH, THREE.RGBAFormat, THREE.FloatType);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+let agentState = makeAgentInitTexture();
+
+// ──────────────────── trail diffusion + decay ──────────────────
+const diffuseMat = new THREE.ShaderMaterial({
+  uniforms: {
+    trailTex: { value: rtTrailA.texture },
+    uTime: { value: 0 }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D trailTex;
+    uniform float uTime;
+    varying vec2 vUv;
+    void main(){
+      vec2 pix = 1.0 / vec2(${TRAIL_W.toFixed(1)}, ${TRAIL_H.toFixed(1)});
+      
+      vec4 center = texture2D(trailTex, vUv);
+      vec4 n = texture2D(trailTex, vUv + vec2(0.0, pix.y));
+      vec4 s = texture2D(trailTex, vUv - vec2(0.0, pix.y));
+      vec4 e = texture2D(trailTex, vUv + vec2(pix.x, 0.0));
+      vec4 w = texture2D(trailTex, vUv - vec2(pix.x, 0.0));
+      
+      vec4 avg = (n + s + e + w) * 0.25;
+      vec4 diffused = mix(center, avg, 0.15);
+      
+      // decay
+      diffused *= 0.94;
+      
+      gl_FragColor = max(diffused, vec4(0.0));
+    }
+  `
+});
+
+const camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const diffuseScene = new THREE.Scene();
+diffuseScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), diffuseMat));
+
+// ──────────────────── agent logic: sense + deposit ──────────────────
+const agentMat = new THREE.ShaderMaterial({
+  uniforms: {
+    agentTex: { value: agentState },
+    trailTex: { value: rtTrailA.texture },
+    uTime: { value: 0 },
+    uMouseX: { value: 0.5 },
+    uMouseY: { value: 0.5 },
+    uAttractor0: { value: new THREE.Vector2(0.2, 0.3) },
+    uAttractor1: { value: new THREE.Vector2(0.8, 0.3) },
+    uAttractor2: { value: new THREE.Vector2(0.2, 0.8) },
+    uAttractor3: { value: new THREE.Vector2(0.8, 0.8) }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D agentTex;
+    uniform sampler2D trailTex;
+    uniform float uTime;
+    uniform float uMouseX, uMouseY;
+    uniform vec2 uAttractor0, uAttractor1, uAttractor2, uAttractor3;
+    varying vec2 vUv;
+    
+    const float SENSOR_DIST = 0.04;
+    const float SENSOR_WIDTH = 0.015;
+    
+    float senseAt(vec2 pos, sampler2D tex){
+      return max(texture2D(tex, pos).r, 0.0);
+    }
+    
+    void main(){
+      vec4 agent = texture2D(agentTex, vUv);
+      vec2 pos = agent.xy;
+      float angle = agent.z;
+      float speed = agent.w;
+      
+      // sense forward, left-35°, right+35° for asymmetric steering
+      float sF = senseAt(pos + vec2(cos(angle), sin(angle)) * SENSOR_DIST, trailTex);
+      float sL = senseAt(pos + vec2(cos(angle - 0.6), sin(angle - 0.6)) * SENSOR_DIST, trailTex);
+      float sR = senseAt(pos + vec2(cos(angle + 0.6), sin(angle + 0.6)) * SENSOR_DIST, trailTex);
+      
+      // also sense attractant gradients
+      vec2 toA0 = normalize(uAttractor0 - pos); float gradA0 = 1.0 / (1.0 + length(uAttractor0 - pos) * 8.0);
+      vec2 toA1 = normalize(uAttractor1 - pos); float gradA1 = 1.0 / (1.0 + length(uAttractor1 - pos) * 8.0);
+      vec2 toA2 = normalize(uAttractor2 - pos); float gradA2 = 1.0 / (1.0 + length(uAttractor2 - pos) * 8.0);
+      vec2 toA3 = normalize(uAttractor3 - pos); float gradA3 = 1.0 / (1.0 + length(uAttractor3 - pos) * 8.0);
+      vec2 toAttractor = normalize(toA0*gradA0 + toA1*gradA1 + toA2*gradA2 + toA3*gradA3);
+      float attractorAngle = atan(toAttractor.y, toAttractor.x);
+      
+      // steer: if left sense > right, turn left; else turn right; also pull toward attractant
+      float steer = 0.0;
+      if (sL > sR + 0.01) steer = -0.08;
+      else if (sR > sL + 0.01) steer = 0.08;
+      else steer = (attractorAngle - angle) * 0.15;
+      
+      angle += steer;
+      
+      // move
+      vec2 newPos = pos + vec2(cos(angle), sin(angle)) * speed;
+      
+      // wrap around screen (torus topology)
+      newPos = fract(newPos);
+      
+      // deposit pheromone at current location
+      gl_FragColor = vec4(newPos, angle, speed);
+    }
+  `
+});
+
+const agentScene = new THREE.Scene();
+agentScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), agentMat));
+
+// ──────────────────── trail deposition ──────────────────
+const depositMat = new THREE.ShaderMaterial({
+  uniforms: {
+    agentTex: { value: agentState }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D agentTex;
+    varying vec2 vUv;
+    
+    void main(){
+      // Initialize to black
+      gl_FragColor = vec4(0.0);
+      
+      // For each agent, if their position lands near this pixel, deposit
+      // (approximation: we accumulate contributions from nearby agents)
+      for(int i = 0; i < 16; i++){
+        for(int j = 0; j < 16; j++){
+          float u = float(i) / 16.0;
+          float v = float(j) / 16.0;
+          vec4 agent = texture2D(agentTex, vec2(u, v));
+          vec2 apos = agent.xy;
+          
+          float dist = length(apos - vUv);
+          if(dist < 0.01){
+            float deposit = exp(-dist * dist * 1000.0) * 0.8;
+            gl_FragColor.r += deposit;
+          }
+        }
+      }
+      gl_FragColor = clamp(gl_FragColor, 0.0, 1.0);
+    }
+  `
+});
+
+const depositScene = new THREE.Scene();
+depositScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), depositMat));
+
+// ──────────────────── render scene ──────────────────
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0e12, 0.8);
+
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0, 8);
+camera.lookAt(0, 0, 0);
+
+// trail visualization as a quad
+const trailQuadMat = new THREE.ShaderMaterial({
+  uniforms: {
+    trailTex: { value: rtTrailA.texture },
+    uTime: { value: 0 }
+  },
+  fog: false,
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D trailTex;
+    uniform float uTime;
+    varying vec2 vUv;
+    void main(){
+      float trail = texture2D(trailTex, vUv).r;
+      
+      // color: cyan to amber based on trail concentration
+      vec3 col = mix(vec3(0.1, 0.3, 0.8), vec3(1.0, 0.7, 0.1), trail * 2.0);
+      col = mix(col, vec3(1.0, 1.0, 1.0), max(0.0, trail - 0.5) * 2.0);
+      
+      gl_FragColor = vec4(col, trail * 0.9);
+    }
+  `
+});
+
+// Map to unit square in 3D
+const trailQuad = new THREE.Mesh(new THREE.PlaneGeometry(10, 10), trailQuadMat);
+trailQuad.position.z = 0;
+scene.add(trailQuad);
+
+// ──────────────────── attractant indicator lights ──────────────────
+const light0 = new THREE.PointLight(0x00ffff, 0.8, 15);
+light0.position.set(-5, -5, 2);
+scene.add(light0);
+
+const light1 = new THREE.PointLight(0xffaa00, 0.8, 15);
+light1.position.set(5, -5, 2);
+scene.add(light1);
+
+const light2 = new THREE.PointLight(0xff00aa, 0.8, 15);
+light2.position.set(-5, 5, 2);
+scene.add(light2);
+
+const light3 = new THREE.PointLight(0x00aaff, 0.8, 15);
+light3.position.set(5, 5, 2);
+scene.add(light3);
+
+// ──────────────────── mouse tracking ──────────────────
+let mouseX = 0.5, mouseY = 0.5;
+addEventListener('mousemove', (e) => {
+  mouseX = e.clientX / innerWidth;
+  mouseY = 1.0 - e.clientY / innerHeight;
+});
+
+// ──────────────────── reset ──────────────────
+let resetTimer = 0;
+const RESET_INTERVAL = 20000;
+
+function reset(){
+  agentState = makeAgentInitTexture();
+  agentMat.uniforms.agentTex.value = agentState;
+  
+  // clear trail
+  const blankTrail = new THREE.ShaderMaterial({
+    fragmentShader: `void main(){ gl_FragColor=vec4(0.0); }`
+  });
+  renderer.setRenderTarget(rtTrailA);
+  renderer.render(new THREE.Scene().add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blankTrail)), camOrtho);
+  renderer.setRenderTarget(rtTrailB);
+  renderer.render(new THREE.Scene().add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blankTrail)), camOrtho);
+  renderer.setRenderTarget(null);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+let frameCount = 0;
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  frameCount++;
+  
+  resetTimer += dt * 1000;
+  if (resetTimer > RESET_INTERVAL) {
+    reset();
+    resetTimer = 0;
+  }
+  
+  // Update uniforms
+  diffuseMat.uniforms.uTime.value = now / 1000;
+  agentMat.uniforms.uTime.value = now / 1000;
+  agentMat.uniforms.uMouseX.value = mouseX;
+  agentMat.uniforms.uMouseY.value = mouseY;
+  trailQuadMat.uniforms.uTime.value = now / 1000;
+  
+  // Diffuse trail
+  diffuseMat.uniforms.trailTex.value = rtTrailA.texture;
+  renderer.setRenderTarget(rtTrailB);
+  renderer.render(diffuseScene, camOrtho);
+  [rtTrailA, rtTrailB] = [rtTrailB, rtTrailA];
+  
+  // Update agent positions
+  agentMat.uniforms.agentTex.value = agentState;
+  agentMat.uniforms.trailTex.value = rtTrailA.texture;
+  const tempAgent = new THREE.WebGLRenderTarget(agentW, agentH, rtParams);
+  renderer.setRenderTarget(tempAgent);
+  renderer.render(agentScene, camOrtho);
+  agentState = tempAgent.texture;
+  
+  // Deposit pheromone
+  depositMat.uniforms.agentTex.value = agentState;
+  renderer.setRenderTarget(rtTrailA);
+  renderer.render(depositScene, camOrtho);
+  renderer.setRenderTarget(null);
+  
+  // Display
+  trailQuadMat.uniforms.trailTex.value = rtTrailA.texture;
+  renderer.render(scene, camera);
+  
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
