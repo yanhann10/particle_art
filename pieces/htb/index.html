@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>htb · tender light strings · naïve marks</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0b0908; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">htb</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Cy Twombly · scrawled light strings · naïve marks</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Cy Twombly scrawl aesthetic over Felix Gonzalez-Torres light strings.
+   Anti-polish: visible mark-making, deliberate jitter, asymmetric layout,
+   some particles bloomed large like chalk smears on blackboard.
+   Three strands placed ASYMMETRICALLY — not evenly spaced.
+   Hand-feel: wobble, drips, stray marks, uneven density. */
+
+const BG = 0x0b0908;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0.7, 1.3, 19);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0.3, -0.7, 0);
+
+const MAX_VERTS = 3200;
+const ATTRACT   = 0.05;
+const REPEL_R   = 0.48;
+const REPEL_STR = 0.10;
+const NOISE     = 0.003;
+const PRESSURE  = 0.002;
+const GRAVITY   = 0.008;
+const MAX_D     = 0.36;
+const ANCHOR_N  = 4;
+
+// ASYMMETRIC strand placement — deliberately uneven
+const strands = [
+  { verts: [], color: 0, xOffset: -5.8, yOffset: 0.3, severAt: 0.4 },
+  { verts: [], color: 1, xOffset: -0.6, yOffset: -0.15, clusterAt: 0.6 },
+  { verts: [], color: 2, xOffset: 4.2, yOffset: 0.1, gapFrom: 0.35, gapTo: 0.55 }
+];
+
+function initStrand(strand, NV0, xOff, yOff) {
+  for (let i = 0; i < NV0; i++) {
+    const t = (i / (NV0 - 1)) * 2 - 1;
+    const x = t * 4 + xOff;
+    // Asymmetric catenary — one side droops more
+    const asym = t > 0 ? 1.15 : 0.88;
+    const y = -Math.abs(t) * asym + Math.sin(t * Math.PI * 2) * 0.25 + yOff;
+    // Slight z-wobble per strand — not flat
+    const z = Math.sin(t * 3.1 + xOff * 0.7) * 0.15;
+    strand.verts.push({
+      x, z, y,
+      age: 0,
+      pinY: i < ANCHOR_N || i >= NV0 - ANCHOR_N,
+      original_i: i,
+      original_n: NV0
+    });
+  }
+}
+
+initStrand(strands[0], 40, strands[0].xOffset, strands[0].yOffset);
+initStrand(strands[1], 40, strands[1].xOffset, strands[1].yOffset);
+initStrand(strands[2], 40, strands[2].xOffset, strands[2].yOffset);
+
+const CELL = REPEL_R;
+function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+
+function stepStrand(strand) {
+  const verts = strand.verts;
+  const n = verts.length;
+  if (n >= MAX_VERTS / 3) return;
+
+  const grid = new Map();
+  for (let i = 0; i < n; i++) {
+    const v = verts[i], k = gridKey(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+
+  function nearby(v) {
+    const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+    const out = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const arr = grid.get((cx + dx) + ',' + (cz + dz));
+      if (arr) for (const idx of arr) out.push(idx);
+    }
+    return out;
+  }
+
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? verts[i - 1] : null;
+    const next = i < n - 1 ? verts[i + 1] : null;
+    const v = verts[i];
+    if (prev) {
+      dx[i] += (prev.x - v.x) * ATTRACT;
+      dz[i] += (prev.z - v.z) * ATTRACT;
+      dy[i] += (prev.y - v.y) * ATTRACT;
+    }
+    if (next) {
+      dx[i] += (next.x - v.x) * ATTRACT;
+      dz[i] += (next.z - v.z) * ATTRACT;
+      dy[i] += (next.y - v.y) * ATTRACT;
+    }
+  }
+
+  let cx_ = 0, cz_ = 0;
+  for (let i = 0; i < n; i++) { cx_ += verts[i].x; cz_ += verts[i].z; }
+  cx_ /= n; cz_ /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - cx_, oz = verts[i].z - cz_;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dz[i] += (oz / d) * PRESSURE;
+  }
+
+  for (let i = 0; i < n; i++) {
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+    const grav = verts[i].pinY ? GRAVITY * 0.05 : GRAVITY;
+    verts[i].y += dy[i] - grav + (Math.random() - 0.5) * NOISE * 0.5;
+    verts[i].age += 0.0004;
+  }
+
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    grown.push(a);
+    const pos = a.original_i / a.original_n;
+    let shouldSubdivide = true;
+    if (strand === strands[0] && pos > strand.severAt) {
+      shouldSubdivide = Math.random() > 0.7;
+    }
+    if (strand === strands[1]) {
+      if (pos > strand.clusterAt && pos < strand.clusterAt + 0.15) {
+        shouldSubdivide = true;
+      } else if (pos > strand.clusterAt + 0.15) {
+        shouldSubdivide = Math.random() > 0.65;
+      }
+    }
+    if (strand === strands[2]) {
+      if (pos > strand.gapFrom && pos < strand.gapTo) {
+        shouldSubdivide = false;
+      }
+    }
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    if (shouldSubdivide && ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS / 3) {
+      const mid = {
+        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.04,
+        z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.04,
+        y: (a.y + b.y) * 0.5,
+        age: Math.max(a.age, b.age) * 0.7,
+        pinY: false,
+        original_i: a.original_i,
+        original_n: a.original_n
+      };
+      grown.push(mid);
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+const N_RENDER = 40000;
+const rPos    = new Float32Array(N_RENDER * 3);
+const rSeeds  = new Float32Array(N_RENDER);
+const rAge    = new Float32Array(N_RENDER);
+const rStrand = new Float32Array(N_RENDER);
+const rMark   = new Float32Array(N_RENDER); // brushstroke intensity
+
+for (let i = 0; i < N_RENDER; i++) {
+  rSeeds[i] = Math.random();
+  // ~6% of particles are "marks" — big chalky smears
+  // Another ~4% are "drips" — stray particles that fall below
+  const r = Math.random();
+  if (r < 0.06) rMark[i] = 2.0 + Math.random() * 3.0; // large mark
+  else if (r < 0.10) rMark[i] = -1.0; // drip flag
+  else rMark[i] = 0.7 + Math.random() * 0.6; // normal with variation
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('strandId', new THREE.BufferAttribute(rStrand, 1));
+geom.setAttribute('mark',     new THREE.BufferAttribute(rMark, 1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.032 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float age;
+    attribute float strandId;
+    attribute float mark;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    varying float vMark;
+    uniform float uFogDensity;
+
+    // Cheap hash for per-particle wobble
+    float hash(float n) { return fract(sin(n * 127.1) * 43758.5453); }
+
+    void main() {
+      vec3 p = position;
+
+      // Per-particle jitter: 8-12% of local scale (~0.12 units)
+      float jx = (hash(seed * 13.7) - 0.5) * 0.22;
+      float jy = (hash(seed * 29.3) - 0.5) * 0.14;
+      float jz = (hash(seed * 41.1) - 0.5) * 0.18;
+      p += vec3(jx, jy, jz);
+
+      // Uneven sway — not sinusoidal, more hand-tremor
+      float t = uTime * 0.25 + seed * 6.28;
+      float sway = sin(t) * 0.012 * (1.0 + seed)
+                 + sin(t * 2.7 + 1.3) * 0.004; // second harmonic = shakier
+      p.x += sway;
+      p.z += cos(t * 0.6 + seed * 3.0) * 0.006;
+
+      // Drip particles fall slowly
+      float isDrip = mark < 0.0 ? 1.0 : 0.0;
+      p.y -= isDrip * (0.3 + hash(seed * 77.7) * 0.5);
+      // Drips also scatter sideways slightly
+      p.x += isDrip * (hash(seed * 53.1) - 0.5) * 0.3;
+
+      float pulse = 0.80 + 0.20 * sin(uTime * 0.9 + seed * 40.0);
+      // Some marks pulse harder — chalk pressure variation
+      float markAbs = abs(mark);
+      pulse *= (markAbs > 1.5) ? 1.15 : 1.0;
+
+      // Palette: warm but with deliberate temperature shifts per strand
+      // Not perfectly graduated — hand-mixed
+      vec3 amber   = vec3(1.0, 0.70, 0.28);
+      vec3 rawSien = vec3(0.92, 0.58, 0.32); // raw sienna — earthier
+      vec3 warm    = vec3(1.0, 0.86, 0.68);
+      vec3 chalk   = vec3(0.98, 0.94, 0.88);
+      vec3 blush   = vec3(1.0, 0.78, 0.72); // pink-ish off note
+
+      vec3 base;
+      if (strandId < 0.5) {
+        base = mix(amber, rawSien, age * 1.3 + hash(seed * 7.0) * 0.15);
+      } else if (strandId < 1.5) {
+        // Center strand gets the blush off-note on some particles
+        float offNote = step(0.85, hash(seed * 19.0));
+        base = mix(warm, mix(chalk, blush, offNote), age * 1.1);
+      } else {
+        base = mix(chalk, warm, age * 0.8 + hash(seed * 11.0) * 0.2);
+      }
+
+      // Drips are dimmer, cooler
+      base = mix(base, vec3(0.6, 0.55, 0.52), isDrip * 0.5);
+
+      vCol = base * pulse;
+      vMark = markAbs;
+
+      // Opacity variation: marks are bolder, normal particles vary
+      float baseAlpha = 0.45 + 0.25 * pulse;
+      baseAlpha *= (markAbs > 1.5) ? 1.3 : (0.8 + hash(seed * 31.0) * 0.4);
+      baseAlpha *= (1.0 - isDrip * 0.4);
+      vAlpha = baseAlpha;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // Size: marks are 3-5x larger (chalk smears), normal vary 0.7-1.3x
+      float sizeMul = markAbs > 1.5 ? markAbs : (0.7 + hash(seed * 23.0) * 0.6);
+      gl_PointSize = sizeMul * 1.8 * uPixel * (45.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    varying float vMark;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // Marks get softer falloff (chalky, not sharp dots)
+      float sharpness = vMark > 1.5 ? 10.0 : 24.0;
+      float haloStr   = vMark > 1.5 ? 0.55 : 0.35;
+      float core = exp(-r * sharpness);
+      float halo = exp(-r * 6.0) * haloStr;
+      float a = (core + halo) * vAlpha;
+
+      vec3 col = vCol;
+      col = mix(col, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.8);
+
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Wire lines — wobblier, not perfectly connecting vertices
+const wireLines = [];
+for (let s = 0; s < 3; s++) {
+  const wireGeom = new THREE.BufferGeometry();
+  const wirePositions = new Float32Array(MAX_VERTS * 3);
+  wireGeom.setAttribute('position', new THREE.BufferAttribute(wirePositions, 3));
+  // Each wire slightly different opacity — hand-drawn feel
+  const wireMat = new THREE.LineBasicMaterial({
+    color: 0x2a2420,
+    transparent: true,
+    opacity: [0.25, 0.32, 0.22][s]
+  });
+  const wireLine = new THREE.Line(wireGeom, wireMat);
+  scene.add(wireLine);
+  wireLines.push({ geom: wireGeom, positions: wirePositions });
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+for (let pre = 0; pre < 500; pre++) {
+  for (const strand of strands) stepStrand(strand);
+}
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (!paused) {
+    for (let s = 0; s < 3; s++) {
+      for (const strand of strands) stepStrand(strand);
+    }
+  }
+
+  let totalVerts = 0;
+  for (const strand of strands) totalVerts += strand.verts.length;
+
+  // Update wires with hand-wobble
+  for (let s = 0; s < 3; s++) {
+    const strand = strands[s];
+    const n = strand.verts.length;
+    const wire = wireLines[s];
+    for (let i = 0; i < n; i++) {
+      // Small wobble on wire — hand-drawn line, not CAD
+      const wobble = Math.sin(i * 1.7 + t * 0.4 + s * 2.1) * 0.015;
+      wire.positions[i * 3]     = strand.verts[i].x + wobble;
+      wire.positions[i * 3 + 1] = strand.verts[i].y + Math.sin(i * 2.3 + s) * 0.008;
+      wire.positions[i * 3 + 2] = strand.verts[i].z + wobble * 0.7;
+    }
+    wire.geom.setDrawRange(0, n);
+    wire.geom.attributes.position.needsUpdate = true;
+  }
+
+  // Track centroid — slight offset so framing isn't perfectly centered
+  let cx = 0, cy = 0, cz = 0, count = 0;
+  for (const strand of strands) {
+    for (const v of strand.verts) {
+      cx += v.x; cy += v.y; cz += v.z;
+      count++;
+    }
+  }
+  if (count > 0) {
+    cx /= count; cy /= count; cz /= count;
+    // Offset target slightly left and down — asymmetric framing
+    controls.target.lerp(new THREE.Vector3(cx - 0.3, cy - 0.1, cz), 0.02);
+  }
+
+  // Distribute particles across strands
+  let written = 0;
+  const particlesPerStrand = Math.floor(N_RENDER / 3);
+
+  for (let s = 0; s < 3; s++) {
+    const strand = strands[s];
+    const verts = strand.verts;
+    const n = verts.length;
+
+    const lengths = [];
+    let total = 0;
+    for (let i = 0; i < n - 1; i++) {
+      const a = verts[i], b = verts[i + 1];
+      const L = Math.sqrt(
+        (b.x - a.x) ** 2 + (b.z - a.z) ** 2 + (b.y - a.y) ** 2
+      );
+      lengths.push(L);
+      total += L;
+    }
+
+    if (total > 0) {
+      const budget = (s === 2) ? N_RENDER - written : particlesPerStrand;
+      let strandWritten = 0;
+
+      for (let i = 0; i < n - 1 && written < N_RENDER; i++) {
+        const share = (i === n - 2)
+          ? budget - strandWritten
+          : Math.max(1, Math.floor(budget * lengths[i] / total));
+        const a = verts[i], b = verts[i + 1];
+
+        for (let k = 0; k < share && written < N_RENDER; k++) {
+          const u = Math.random();
+          // Less smooth interpolation — clumpier distribution
+          const cu = u < 0.3 ? u * u * 3.3 : u > 0.7 ? 1 - (1 - u) * (1 - u) * 3.3 : u;
+          // Wider spread — less precise, more hand-scattered
+          const spread = 0.025 + Math.random() * 0.015;
+          rPos[written * 3]     = a.x + (b.x - a.x) * cu + (Math.random() - 0.5) * spread;
+          rPos[written * 3 + 1] = a.y + (b.y - a.y) * cu + (Math.random() - 0.5) * spread * 0.6;
+          rPos[written * 3 + 2] = a.z + (b.z - a.z) * cu + (Math.random() - 0.5) * spread;
+          rAge[written] = Math.max(a.age, b.age);
+          rStrand[written] = s;
+          written++;
+          strandWritten++;
+        }
+      }
+    }
+  }
+
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+  geom.attributes.strandId.needsUpdate = true;
+
+  statEl.textContent = `vertices=${totalVerts}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
