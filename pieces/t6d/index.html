@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: trace, intensity: gentle -->
+<title>t6d · Shiota · thread memory</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#040202; overflow:hidden;
+               color:#5a1a1a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.45; font-size: 11px;
+          letter-spacing: 0.06em; color:#8B2020; }
+</style>
+</head>
+<body>
+<div class="id">t6d</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Chiharu Shiota · thread memory
+// Vast networks of red thread fill the space: nodes connected by crimson filaments,
+// weaving outward like a 3D nervous system or a room of suspended memory.
+// Differential-growth algorithm adapted from 2iy; topology is a tree (not a loop),
+// so each node knows its parent. New child nodes spawn from the longest edges,
+// doubling the thread count over time. The result: a mycelial spiderweb.
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x040202);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 28);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.3;
+controls.target.set(0, 0, 0);
+
+// ─────────── node pool
+// Each node: {pos: Vector3, vel: Vector3, parentIdx: int}
+// parentIdx === -1 for seed nodes (they still connect in a seed ring)
+const REPEL_R   = 2.5;
+const REPEL_STR = 0.22;
+const SPRING_K  = 0.07;
+const REST_LEN  = 1.8;
+const DAMPING   = 0.85;
+const SPLIT_THR = 2.2;  // edge longer than this spawns a midpoint
+const MAX_NODES = 500;
+
+const nodes = [];  // {pos, vel, parentIdx}
+const edges = [];  // [parentIdx, childIdx] — tree edges for rendering
+
+// Seed: 8 nodes in an ellipse, connected in a ring
+const SEED_COUNT = 8;
+for (let i = 0; i < SEED_COUNT; i++) {
+  const theta = (i / SEED_COUNT) * Math.PI * 2;
+  nodes.push({
+    pos: new THREE.Vector3(Math.cos(theta) * 3.0, Math.sin(theta) * 2.0, 0),
+    vel: new THREE.Vector3(),
+    parentIdx: i === 0 ? -1 : i - 1,  // chain; -1 for first seed
+  });
+  if (i > 0) edges.push([i - 1, i]);
+}
+// close the seed ring
+edges.push([SEED_COUNT - 1, 0]);
+
+// Candidate edges to split: any parent-child edge in the tree
+// (We track them separately so we can also check the ring closure)
+// Actually we'll re-derive edges each split pass from parentIdx.
+
+// ─────────── grid for spatial repulsion
+const CELL = REPEL_R;
+const grid = new Map();
+
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < nodes.length; i++) {
+    const p = nodes[i].pos;
+    const k = `${Math.floor(p.x/CELL)},${Math.floor(p.y/CELL)},${Math.floor(p.z/CELL)}`;
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+
+function getNeighbors(p) {
+  const cx = Math.floor(p.x/CELL), cy = Math.floor(p.y/CELL), cz = Math.floor(p.z/CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++)
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dz = -1; dz <= 1; dz++) {
+        const arr = grid.get(`${cx+dx},${cy+dy},${cz+dz}`);
+        if (arr) for (const idx of arr) out.push(idx);
+      }
+  return out;
+}
+
+// ─────────── physics step
+let paused = false;
+
+function physicsStep() {
+  if (paused) return;
+  const n = nodes.length;
+  rebuildGrid();
+
+  // 1. Repulsion
+  for (let i = 0; i < n; i++) {
+    const ni = nodes[i];
+    for (const j of getNeighbors(ni.pos)) {
+      if (j === i) continue;
+      const nj = nodes[j];
+      const dx = ni.pos.x - nj.pos.x;
+      const dy = ni.pos.y - nj.pos.y;
+      const dz = ni.pos.z - nj.pos.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 < 1e-8 || d2 > REPEL_R * REPEL_R) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      ni.vel.x += dx * f;
+      ni.vel.y += dy * f;
+      ni.vel.z += dz * f;
+    }
+  }
+
+  // 2. Spring attraction along edges
+  for (const [ai, bi] of edges) {
+    if (ai < 0 || bi < 0 || ai >= n || bi >= n) continue;
+    const a = nodes[ai], b = nodes[bi];
+    const dx = b.pos.x - a.pos.x;
+    const dy = b.pos.y - a.pos.y;
+    const dz = b.pos.z - a.pos.z;
+    const d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 1e-8;
+    const stretch = (d - REST_LEN) * SPRING_K;
+    const fx = (dx/d) * stretch;
+    const fy = (dy/d) * stretch;
+    const fz = (dz/d) * stretch;
+    a.vel.x += fx;  a.vel.y += fy;  a.vel.z += fz;
+    b.vel.x -= fx;  b.vel.y -= fy;  b.vel.z -= fz;
+  }
+
+  // 3. Dampen + integrate
+  for (let i = 0; i < n; i++) {
+    const nd = nodes[i];
+    nd.vel.multiplyScalar(DAMPING);
+    // tiny noise for organic wander
+    nd.vel.x += (Math.random() - 0.5) * 0.003;
+    nd.vel.y += (Math.random() - 0.5) * 0.003;
+    nd.vel.z += (Math.random() - 0.5) * 0.003;
+    nd.pos.add(nd.vel);
+  }
+}
+
+// ─────────── edge splitting (growth)
+let lastSplitTime = 0;
+
+function growStep() {
+  if (paused || nodes.length >= MAX_NODES) return;
+
+  // Find longest edges
+  const candidates = [];
+  for (const [ai, bi] of edges) {
+    if (ai < 0 || bi < 0 || ai >= nodes.length || bi >= nodes.length) continue;
+    const d2 = nodes[ai].pos.distanceToSquared(nodes[bi].pos);
+    if (d2 > SPLIT_THR * SPLIT_THR) {
+      candidates.push({ ai, bi, d2 });
+    }
+  }
+  // Sort longest first, insert up to 6 per grow tick
+  candidates.sort((a, b) => b.d2 - a.d2);
+  const MAX_INSERTS = 6;
+  let inserted = 0;
+  for (const { ai, bi } of candidates) {
+    if (nodes.length >= MAX_NODES || inserted >= MAX_INSERTS) break;
+    const a = nodes[ai], b = nodes[bi];
+    const midPos = new THREE.Vector3()
+      .addVectors(a.pos, b.pos)
+      .multiplyScalar(0.5)
+      .add(new THREE.Vector3(
+        (Math.random() - 0.5) * 0.3,
+        (Math.random() - 0.5) * 0.3,
+        (Math.random() - 0.5) * 0.3
+      ));
+    const newIdx = nodes.length;
+    nodes.push({
+      pos: midPos,
+      vel: new THREE.Vector3(
+        (Math.random() - 0.5) * 0.08,
+        (Math.random() - 0.5) * 0.08,
+        (Math.random() - 0.5) * 0.08
+      ),
+      parentIdx: ai,
+    });
+
+    // Remove old edge, add two new ones
+    const edgeIdx = edges.findIndex(e => e[0] === ai && e[1] === bi);
+    if (edgeIdx !== -1) edges.splice(edgeIdx, 1);
+    edges.push([ai, newIdx]);
+    edges.push([newIdx, bi]);
+    inserted++;
+  }
+}
+
+// ─────────── warm up: pre-simulate 200 steps so web starts populated
+for (let s = 0; s < 200; s++) {
+  physicsStep();
+  if (s % 25 === 0) growStep();
+}
+
+// ─────────── thread geometry (LineSegments, rebuilt every 30 frames)
+// Per-edge color: randomize slightly per edge for depth shadow effect
+const MAX_EDGES = 3000;
+const posArray = new Float32Array(MAX_EDGES * 6);   // 2 verts × 3 floats
+const colArray = new Float32Array(MAX_EDGES * 6);   // 2 verts × 3 floats
+
+const lineGeo = new THREE.BufferGeometry();
+const posAttr = new THREE.BufferAttribute(posArray, 3);
+const colAttr = new THREE.BufferAttribute(colArray, 3);
+posAttr.setUsage(THREE.DynamicDrawUsage);
+colAttr.setUsage(THREE.DynamicDrawUsage);
+lineGeo.setAttribute('position', posAttr);
+lineGeo.setAttribute('color', colAttr);
+lineGeo.setDrawRange(0, 0);
+
+const lineMat = new THREE.LineBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.88,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+});
+
+const lineSegs = new THREE.LineSegments(lineGeo, lineMat);
+scene.add(lineSegs);
+
+// Edge color lookup: fixed random per edge, so we don't recompute per frame
+// Colors range from near-black #2a0505 to deep crimson #CC1111
+const edgeColors = new Map();  // key = `${ai}-${bi}` → [r,g,b]
+
+function getEdgeColor(ai, bi) {
+  const key = `${ai}-${bi}`;
+  if (!edgeColors.has(key)) {
+    const t = Math.random();
+    // t=0 → near-black shadow (#2a0505 = 0.165, 0.02, 0.02)
+    // t=1 → bright crimson   (#CC1111 = 0.80, 0.067, 0.067)
+    const r = 0.165 + t * (0.80 - 0.165);
+    const g = 0.02  + t * (0.067 - 0.02);
+    const b = 0.02  + t * (0.067 - 0.02);
+    edgeColors.set(key, [r, g, b]);
+  }
+  return edgeColors.get(key);
+}
+
+function rebuildLines() {
+  const n = nodes.length;
+  let count = 0;
+  for (const [ai, bi] of edges) {
+    if (count >= MAX_EDGES) break;
+    if (ai < 0 || bi < 0 || ai >= n || bi >= n) continue;
+    const a = nodes[ai].pos;
+    const b = nodes[bi].pos;
+    const base = count * 6;
+    posArray[base + 0] = a.x;  posArray[base + 1] = a.y;  posArray[base + 2] = a.z;
+    posArray[base + 3] = b.x;  posArray[base + 4] = b.y;  posArray[base + 5] = b.z;
+    const [r, g, bl] = getEdgeColor(ai, bi);
+    colArray[base + 0] = r;  colArray[base + 1] = g;  colArray[base + 2] = bl;
+    colArray[base + 3] = r;  colArray[base + 4] = g;  colArray[base + 5] = bl;
+    count++;
+  }
+  posAttr.needsUpdate = true;
+  colAttr.needsUpdate = true;
+  lineGeo.setDrawRange(0, count * 2);
+}
+
+// ─────────── input
+addEventListener('click', () => { paused = !paused; });
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─────────── render loop
+let frameCount = 0;
+let lastGrow = 0;
+const GROW_INTERVAL = 0.8;  // seconds between growth pulses
+
+function loop(now) {
+  const t = now * 0.001;
+  frameCount++;
+
+  // Physics: 2 sub-steps per frame
+  physicsStep();
+  physicsStep();
+
+  // Growth pulse every GROW_INTERVAL seconds
+  if (t - lastGrow > GROW_INTERVAL) {
+    growStep();
+    lastGrow = t;
+  }
+
+  // Geometry rebuild every 30 frames
+  if (frameCount % 30 === 0) {
+    rebuildLines();
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+// Initial geometry build
+rebuildLines();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

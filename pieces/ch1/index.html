@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>ch1 · Chihuly · chandelier study</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06060e; overflow:hidden;
+               color:#c8d8f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+          letter-spacing:0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px;
+          letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px;
+          letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">ch1 · chihuly chandelier</div>
+<div class="hint">drag to orbit</div>
+<div class="src">strange-attractor-gpgpu · 100k particles · parent 467</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─── GPGPU constants ─────────────────────────────────────────────────────────
+const W = 320, H = 320;
+const N = W * H;   // 102 400 particles
+
+const NUM_TENDRILS = 7;
+
+// ─── Renderer ────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06060e, 1);
+document.body.appendChild(renderer.domElement);
+
+// ─── Render targets (ping-pong) ───────────────────────────────────────────────
+const rtParams = {
+  type: THREE.HalfFloatType,
+  format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter,
+  magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping,
+  wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false
+};
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// ─── Initial particle state ───────────────────────────────────────────────────
+// Each particle is born near the chandelier crown (y ≈ 2) with slight scatter.
+// .w encodes the tendril zone index (0–6) baked in as a float (zone / 6).
+const init = new Float32Array(N * 4);
+for (let y = 0; y < H; y++) {
+  // tendril zone: determined by row band (each zone gets H/7 rows)
+  const zone = Math.floor(y / (H / NUM_TENDRILS));
+  const zoneF = zone / (NUM_TENDRILS - 1);  // 0..1
+
+  for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 4;
+    // start near origin with small random scatter
+    init[i]   = (Math.random() * 2 - 1) * 0.4;
+    init[i+1] = (Math.random() * 2 - 1) * 0.4 + 1.5; // near crown
+    init[i+2] = (Math.random() * 2 - 1) * 0.4;
+    init[i+3] = zoneF;  // tendril zone baked as .w
+  }
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+// ─── Blit initial state into rtA ─────────────────────────────────────────────
+const camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const blitScene = new THREE.Scene();
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader:   `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), blitMat));
+renderer.setRenderTarget(rtA);
+renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// ─── Simulation shader ────────────────────────────────────────────────────────
+// Each tendril i has angle thetaI = i*2PI/7.
+// Attractor spine at age t: (cos(thetaI)*R(t),  -t*droop,  sin(thetaI)*R(t))
+// where R grows 0→8, droop=1.5.
+// Particle is pulled toward nearest point on that helix spine (simplified: use
+// a single "current" attractor bead that advances with uTime).
+//
+// .w channel stores the baked zone index (0..1 mapped to 0..6) — READ ONLY,
+// never overwritten so zone assignment is permanent.
+
+const simUniforms = {
+  prev:   { value: rtA.texture },
+  uTime:  { value: 0.0 },
+  uDt:    { value: 0.016 }
+};
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: /* glsl */`
+    uniform sampler2D prev;
+    uniform float uTime;
+    uniform float uDt;
+    varying vec2 vUv;
+
+    #define NUM_TENDRILS 7
+    #define TWO_PI 6.28318530718
+
+    // Helix bead position for tendril i at time t
+    vec3 tendrilBead(int i, float t) {
+      float theta = float(i) * TWO_PI / float(NUM_TENDRILS);
+      // R grows from 0 to 8 over ~60s then cycles
+      float phase = mod(t * 0.4, TWO_PI * 2.0);
+      float R = 4.0 + 4.0 * sin(phase * 0.5);      // 0 to 8, slowly pulsing
+      float droop = -1.5 * (R / 8.0);               // hang down proportional to R
+      // add slow helix twist around the arm angle
+      float twist = t * 0.25 + float(i) * 0.9;
+      float helixR = 0.35;
+      return vec3(
+        cos(theta) * R + cos(twist) * helixR,
+        droop,
+        sin(theta) * R + sin(twist) * helixR
+      );
+    }
+
+    void main() {
+      vec4 s    = texture2D(prev, vUv);
+      vec3 pos  = s.xyz;
+      float zoneF = s.w;                           // permanent zone [0,1]
+
+      // Decode zone index 0..6
+      int zone = int(floor(zoneF * float(NUM_TENDRILS - 1) + 0.5));
+
+      // Compute attractor bead for this tendril
+      vec3 target = tendrilBead(zone, uTime);
+
+      // Spring toward target
+      vec3 vel = (target - pos) * 0.055;
+
+      // Slow swirl: small angular velocity around Y axis
+      float angVel = 0.012;
+      float cosA = cos(angVel), sinA = sin(angVel);
+      float nx = pos.x * cosA - pos.z * sinA;
+      float nz = pos.x * sinA + pos.z * cosA;
+      pos.x = nx;
+      pos.z = nz;
+
+      // Apply velocity
+      pos += vel * uDt * 60.0;
+
+      // Soft containment: repel if radius > 12
+      float r = length(pos.xz);
+      if (r > 12.0) {
+        pos.xz *= (12.0 / r) * 0.98;
+      }
+      // Vertical containment: keep from going too high or sinking too far
+      pos.y = clamp(pos.y, -5.0, 4.0);
+
+      // .w is read-only zone - preserve it
+      gl_FragColor = vec4(pos, zoneF);
+    }
+  `
+});
+
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), simMat));
+
+// ─── Particle render ──────────────────────────────────────────────────────────
+const mainScene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 4, 22);
+camera.lookAt(0, -2, 0);
+
+// OrbitControls for mouse drag
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, -2, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.23;  // ~0.04 rad/s at 60fps
+
+// UV index buffer — each particle reads its own texel
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) {
+  for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    idxArr[i * 2]     = (x + 0.5) / W;
+    idxArr[i * 2 + 1] = (y + 0.5) / H;
+  }
+}
+
+const pointsGeom = new THREE.BufferGeometry();
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+// 7 Chihuly jewel colors (zone 0..6)
+// Passed as a flat array of 21 floats (7 × vec3)
+const ZONE_COLORS = new Float32Array([
+  0.05, 0.25, 0.85,   // 0: cobalt blue
+  0.95, 0.55, 0.05,   // 1: amber gold
+  0.85, 0.08, 0.15,   // 2: ruby red
+  0.02, 0.70, 0.45,   // 3: viridian
+  0.55, 0.10, 0.90,   // 4: violet
+  0.20, 0.85, 0.95,   // 5: ice-cyan
+  0.95, 0.40, 0.25,   // 6: warm coral
+]);
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:      { value: rtA.texture },
+    uPixelR:    { value: renderer.getPixelRatio() },
+    uColors:    { value: ZONE_COLORS }
+  },
+  transparent: true,
+  depthWrite:  false,
+  blending:    THREE.NormalBlending,
+
+  vertexShader: /* glsl */`
+    uniform sampler2D state;
+    uniform float     uPixelR;
+    uniform float     uColors[21];   // 7 * vec3
+
+    attribute vec2 uvIdx;
+    varying   vec3 vCol;
+
+    #define NUM_TENDRILS 7
+
+    void main() {
+      vec4  s     = texture2D(state, uvIdx);
+      vec3  pos   = s.xyz;
+      float zoneF = s.w;
+
+      // Decode zone (same rounding as sim shader)
+      int zone = int(floor(zoneF * float(NUM_TENDRILS - 1) + 0.5));
+      int base = zone * 3;
+      vCol = vec3(uColors[base], uColors[base + 1], uColors[base + 2]);
+
+      vec4 mv   = modelViewMatrix * vec4(pos, 1.0);
+      float dist = max(-mv.z, 1.0);
+
+      // Base size 4.2px, scales with depth
+      gl_PointSize = uPixelR * (4.2 * 60.0 / dist);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+
+  fragmentShader: /* glsl */`
+    varying vec3 vCol;
+
+    void main() {
+      vec2  d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+
+      // Hard-edged circle
+      if (r > 0.25) discard;
+
+      // Inner specular highlight - glass catches light at center
+      float spec = pow(max(0.0, 1.0 - r * 4.0), 3.0) * 0.40;
+      vec3  col  = mix(vCol, vec3(1.0), spec);
+
+      gl_FragColor = vec4(col, 0.88);
+    }
+  `
+});
+
+const points = new THREE.Points(pointsGeom, pointsMat);
+mainScene.add(points);
+
+// ─── Resize ───────────────────────────────────────────────────────────────────
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─── Render loop ─────────────────────────────────────────────────────────────
+let t0 = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;  // seconds
+
+  simUniforms.uTime.value = elapsed;
+  simUniforms.uDt.value   = Math.min(0.033, 0.016);  // clamped dt
+
+  // Run 3 sim steps per frame for snappier response
+  for (let i = 0; i < 3; i++) {
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+
+  controls.update();
+
+  renderer.render(mainScene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
