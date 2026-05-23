@@ -73,6 +73,45 @@ def call_bedrock(system: str, user: str, max_tokens: int = 8000) -> str:
         raise ProviderError(f"bedrock invoke failed: {e}")
 
 
+def call_bedrock_vision(system: str, user_text: str, image_b64: str,
+                        media_type: str = "image/jpeg",
+                        model_id: str = "us.amazon.nova-pro-v1:0",
+                        max_tokens: int = 1024) -> str:
+    """Multimodal Bedrock call with one image. Uses Nova Pro (cheap + capable).
+    image_b64: base64-encoded image bytes. Raises ProviderError on failure."""
+    try:
+        import boto3  # type: ignore
+    except ImportError:
+        raise ProviderError("boto3 not installed")
+    client = boto3.client("bedrock-runtime", region_name=BEDROCK_REGION)
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": media_type, "data": image_b64,
+                }},
+                {"type": "text", "text": user_text},
+            ],
+        }],
+    }
+    try:
+        resp = client.invoke_model(
+            modelId=model_id, body=json.dumps(body),
+            contentType="application/json", accept="application/json",
+        )
+        payload = json.loads(resp["body"].read())
+        for block in payload.get("content", []):
+            if block.get("type") == "text":
+                return block["text"]
+        raise ProviderError(f"no text block: {payload}")
+    except Exception as e:
+        raise ProviderError(f"bedrock vision failed: {e}")
+
+
 def call(system: str, user: str) -> tuple[str, str]:
     """Try subscription → Bedrock. Returns (response_text, provider_used)."""
     out = call_subscription(system, user)
