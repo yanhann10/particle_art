@@ -139,17 +139,29 @@ async function load(){
     .id(d=>d.id)
     .parentId(d=>d.parent_id)(stratData);
 
-  /* ── layout ── */
-  const NODE_W=50, NODE_H=90;
-  d3.tree().nodeSize([NODE_W,NODE_H])(root);
+  /* ── left-to-right layout ──
+   * nodeSize([sibling-gap, depth-gap])
+   *   node.x = sibling order → maps to SVG y
+   *   node.y = generation depth → maps to SVG x
+   */
+  const SIBLING_GAP = 140;   /* vertical px between siblings */
+  const DEPTH_GAP   = 130;   /* horizontal px per generation */
+  const THUMB       = 90;    /* thumbnail side length */
+  const HALF        = THUMB / 2;
+
+  d3.tree().nodeSize([SIBLING_GAP, DEPTH_GAP])(root);
 
   /* position lookup by id */
-  const pos={};
-  root.descendants().forEach(n=>{pos[n.id]={x:n.x,y:n.y,data:n.data}});
+  const pos = {};
+  root.descendants().forEach(n=>{ pos[n.id] = {x:n.x, y:n.y, data:n.data}; });
 
-  /* shift so __root__ is well above viewport (hide it) */
-  const synthY = pos[SYNTH].y;
-  const OFFSET_Y = -synthY - 200;   /* true roots land ~200px from svg top after zoom */
+  /* shift synthetic root off-screen left; true roots start ~80px from left edge */
+  const synthDepth = pos[SYNTH].y;
+  const OFFSET_X = -synthDepth + 80;
+
+  /* helpers: SVG coordinate from tree node position */
+  const svgX = id => pos[id].y + OFFSET_X;
+  const svgY = id => pos[id].x;
 
   /* ── SVG setup ── */
   const stage = document.getElementById('stage');
@@ -159,41 +171,45 @@ async function load(){
 
   /* clip-path for rounded thumbnails */
   svg.append('defs').append('clipPath').attr('id','clip-round')
-    .append('rect').attr('x',-15).attr('y',-15).attr('width',30).attr('height',30).attr('rx',3);
+    .append('rect').attr('x',-HALF).attr('y',-HALF)
+    .attr('width',THUMB).attr('height',THUMB).attr('rx',6);
 
   /* zoom */
-  const zoom = d3.zoom().scaleExtent([0.15,3]).on('zoom',e=>g.attr('transform',e.transform));
+  const zoom = d3.zoom().scaleExtent([0.08,3]).on('zoom',e=>g.attr('transform',e.transform));
   svg.call(zoom);
 
-  /* initial transform: center the tree horizontally, show from top */
-  const xs = cleanPieces.filter(p=>!p.parent_id).map(p=>pos[p.id].x);
-  const midX = (Math.min(...xs)+Math.max(...xs))/2;
-  const initTx = W/2 - midX;
-  const initTy = 80 - (pos[cleanPieces.find(p=>!p.parent_id)?.id||cleanPieces[0].id]?.y||0) - OFFSET_Y;
-  svg.call(zoom.transform, d3.zoomIdentity.translate(initTx, initTy).scale(0.9));
+  /* initial transform: center vertically on the root cluster, roots at left */
+  const rootPieces = cleanPieces.filter(p=>!p.parent_id);
+  const ys = rootPieces.map(p=>svgY(p.id));
+  const midY = (Math.min(...ys)+Math.max(...ys))/2;
+  svg.call(zoom.transform, d3.zoomIdentity.translate(40, H/2-midY).scale(0.85));
 
   /* ── edge layer ── */
   const edgeG = g.append('g').attr('fill','none');
 
-  /* primary tree edges */
+  /* primary tree edges — horizontal bezier from right edge of parent to left edge of child */
   root.links().forEach(link=>{
-    if(link.source.id===SYNTH) return;   /* skip synthetic root edges */
-    const px=link.source.x, py=link.source.y+OFFSET_Y+15;
-    const cx=link.target.x, cy=link.target.y+OFFSET_Y-15;
-    const midY=(py+cy)/2;
+    if(link.source.id===SYNTH) return;
+    const px = svgX(link.source.id) + HALF;
+    const py = svgY(link.source.id);
+    const cx = svgX(link.target.id) - HALF;
+    const cy = svgY(link.target.id);
+    const midX = (px+cx)/2;
     edgeG.append('path')
-      .attr('d',`M${px},${py} C${px},${midY} ${cx},${midY} ${cx},${cy}`)
+      .attr('d',`M${px},${py} C${midX},${py} ${midX},${cy} ${cx},${cy}`)
       .attr('stroke','#2a3a5a').attr('stroke-width',1.2).attr('opacity',0.8);
   });
 
   /* cross / hybrid edges */
   crossEdges.forEach(e=>{
     if(!pos[e.from]||!pos[e.to]) return;
-    const px=pos[e.from].x, py=pos[e.from].y+OFFSET_Y+15;
-    const cx=pos[e.to].x,   cy=pos[e.to].y+OFFSET_Y-15;
-    const midY=(py+cy)/2;
+    const px = svgX(e.from) + HALF;
+    const py = svgY(e.from);
+    const cx = svgX(e.to) - HALF;
+    const cy = svgY(e.to);
+    const midX = (px+cx)/2;
     edgeG.append('path')
-      .attr('d',`M${px},${py} C${px},${midY} ${cx},${midY} ${cx},${cy}`)
+      .attr('d',`M${px},${py} C${midX},${py} ${midX},${cy} ${cx},${cy}`)
       .attr('stroke','#c9a86a').attr('stroke-dasharray','4,3')
       .attr('stroke-width',1).attr('opacity',0.5);
   });
@@ -210,29 +226,29 @@ async function load(){
     const enter = nodes.enter().append('g')
       .attr('class','node')
       .attr('data-id', d=>d.id)
-      .attr('transform', d=>`translate(${pos[d.id].x},${pos[d.id].y+OFFSET_Y})`)
+      .attr('transform', d=>`translate(${svgX(d.id)},${svgY(d.id)})`)
       .style('cursor','pointer');
 
-    /* fallback rect (shows behind image; visible if thumb 404) */
+    /* fallback rect */
     enter.append('rect')
-      .attr('x',-15).attr('y',-15).attr('width',30).attr('height',30)
-      .attr('rx',3).attr('fill','#1f1f26');
+      .attr('x',-HALF).attr('y',-HALF).attr('width',THUMB).attr('height',THUMB)
+      .attr('rx',6).attr('fill','#1f1f26');
 
     /* thumbnail */
     enter.append('image')
       .attr('href', d=>`thumbs/${d.id}.png`)
-      .attr('x',-15).attr('y',-15).attr('width',30).attr('height',30)
+      .attr('x',-HALF).attr('y',-HALF).attr('width',THUMB).attr('height',THUMB)
       .attr('clip-path','url(#clip-round)')
       .attr('preserveAspectRatio','xMidYMid slice');
 
     /* dropped overlay */
     enter.append('rect').attr('class','drop-overlay')
-      .attr('x',-15).attr('y',-15).attr('width',30).attr('height',30)
-      .attr('rx',3).attr('fill','#0a0a0d');
+      .attr('x',-HALF).attr('y',-HALF).attr('width',THUMB).attr('height',THUMB)
+      .attr('rx',6).attr('fill','#0a0a0d');
 
     /* label */
     enter.append('text')
-      .attr('y',22).attr('text-anchor','middle')
+      .attr('y', HALF+12).attr('text-anchor','middle')
       .attr('font-size','9px').attr('font-family','ui-monospace,monospace')
       .style('pointer-events','none')
       .text(d=>d.id);
