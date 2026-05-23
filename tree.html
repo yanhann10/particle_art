@@ -153,50 +153,62 @@ function render(){
       const par=lineage.pieces.find(x=>x.id===cur);cur=par?par.parent_id:null}
   });
 
-  /* ── which pieces to include in layout ── */
+  /* ── annotate all pieces ── */
   const allPieces = lineage.pieces.map(p=>({
     ...p,
     dropped: dismissed.has(p.id)||!!(marks[p.id]||{}).drop,
     favored: favs.has(p.id),
     mark: marks[p.id]||{},
   }));
-  const byId = Object.fromEntries(allPieces.map(p=>[p.id,p]));
+  const allById = Object.fromEntries(allPieces.map(p=>[p.id,p]));
+  const byId    = allById;
 
-  /* filter: hide dropped pieces (and their orphaned children) unless showDropped */
-  let layoutPieces = showDropped
-    ? allPieces
-    : (() => {
-        let s = allPieces.filter(p=>!p.dropped);
-        let prevSize = -1;
-        while(s.length!==prevSize){
-          prevSize=s.length;
-          const ids=new Set(s.map(p=>p.id));
-          s=s.filter(p=>!p.parent_id||ids.has(p.parent_id));
-        }
-        return s;
-      })();
+  /* ── compute effective parent: skip over dropped ancestors ──
+   * When a node is individually dropped, its children are promoted
+   * to connect directly to the nearest non-dropped ancestor. */
+  const activeIds = new Set(allPieces.filter(p=>!p.dropped).map(p=>p.id));
+  function effectiveParent(piece){
+    let cur=piece.parent_id;
+    while(cur && !activeIds.has(cur)){
+      cur=allById[cur]?.parent_id||null;
+    }
+    return cur||null;
+  }
 
-  /* ── transitive orphan filter on the final set ── */
-  let cleanPieces = layoutPieces;
-  {
+  /* ── which pieces appear in layout ── */
+  let cleanPieces;
+  if(showDropped){
+    /* show everything; apply orphan filter for data integrity only */
+    cleanPieces=allPieces;
     let prevSize=-1;
     while(cleanPieces.length!==prevSize){
       prevSize=cleanPieces.length;
       const ids=new Set(cleanPieces.map(p=>p.id));
       cleanPieces=cleanPieces.filter(p=>!p.parent_id||ids.has(p.parent_id));
     }
+  } else {
+    /* show only active pieces; dropped ones silently removed,
+     * their children re-attached via effectiveParent */
+    cleanPieces=allPieces.filter(p=>!p.dropped);
   }
-  const knownIds = new Set(cleanPieces.map(p=>p.id));
+  const knownIds=new Set(cleanPieces.map(p=>p.id));
 
-  /* ── cross edges ── */
-  const pidMap={};
-  cleanPieces.forEach(p=>{pidMap[p.id]=p.parent_id||null});
-  const crossEdges=(lineage.edges||[]).filter(e=>knownIds.has(e.from)&&knownIds.has(e.to)&&pidMap[e.to]!==e.from);
+  /* ── cross edges (hybrid connections) ── */
+  const primaryParent={};
+  cleanPieces.forEach(p=>{
+    primaryParent[p.id]=showDropped?(p.parent_id||null):effectiveParent(p);
+  });
+  const crossEdges=(lineage.edges||[]).filter(e=>
+    knownIds.has(e.from)&&knownIds.has(e.to)&&primaryParent[e.to]!==e.from
+  );
 
   /* ── D3 stratify + left-to-right tree ── */
   const SYNTH='__root__';
   const stratData=[{id:SYNTH,parent_id:null},...cleanPieces.map(p=>({
-    ...p, parent_id:p.parent_id||SYNTH
+    ...p,
+    parent_id: showDropped
+      ? (p.parent_id && knownIds.has(p.parent_id) ? p.parent_id : SYNTH)
+      : (effectiveParent(p)||SYNTH)
   }))];
   const root=d3.stratify().id(d=>d.id).parentId(d=>d.parent_id)(stratData);
 
