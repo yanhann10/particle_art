@@ -70,6 +70,30 @@
   }
   .legend .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
   .legend .swatch { width: 10px; height: 10px; border-radius: 50%; }
+  #ctx-menu {
+    position: fixed; z-index: 20;
+    background: rgba(17,17,22,0.97);
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 0.25rem 0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.8rem;
+    display: none; min-width: 180px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.55);
+  }
+  #ctx-menu .ctx-title {
+    padding: 0.35rem 0.9rem 0.3rem;
+    color: var(--accent); font-weight: 600; font-size: 0.85rem;
+    border-bottom: 1px solid var(--line);
+  }
+  #ctx-menu button {
+    display: block; width: 100%;
+    background: none; border: none; color: var(--ink);
+    padding: 0.4rem 0.9rem; text-align: left;
+    cursor: pointer; font-family: inherit; font-size: 0.8rem;
+  }
+  #ctx-menu button:hover { background: rgba(201,168,106,0.12); color: var(--accent); }
+  #ctx-menu button.danger:hover { background: rgba(215,107,90,0.12); color: var(--hot); }
+  #ctx-menu .sep { border-top: 1px solid var(--line); margin: 0.2rem 0; }
 </style>
 </head>
 <body>
@@ -82,6 +106,13 @@
 </header>
 <svg id="stage"></svg>
 <div id="tooltip"></div>
+<div id="ctx-menu">
+  <div class="ctx-title" id="ctx-label">—</div>
+  <button id="ctx-drop-node">Drop this node</button>
+  <button id="ctx-drop-tree" class="danger">Drop entire subtree</button>
+  <div class="sep"></div>
+  <button id="ctx-restore">Restore subtree</button>
+</div>
 <div class="legend">
   <div class="row"><span class="swatch" style="background:#c9a86a"></span> seed (no parent)</div>
   <div class="row"><span class="swatch" style="background:#5b6e8f"></span> mutation</div>
@@ -91,6 +122,58 @@
 
 <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 <script>
+/* ── subtree drop helpers ────────────────────────────────────────── */
+const DISMISSED_KEY = 'particle_art_dismissed';
+
+function getDismissed() {
+  try { return new Set(JSON.parse(localStorage.getItem(DISMISSED_KEY) || '[]')); }
+  catch { return new Set(); }
+}
+function saveDismissed(set) {
+  localStorage.setItem(DISMISSED_KEY, JSON.stringify([...set]));
+}
+
+/** Return all descendant IDs of rootId (not including rootId itself). */
+function getDescendants(rootId, allNodes) {
+  const children = {};
+  allNodes.forEach(n => {
+    if (n.parent_id) {
+      if (!children[n.parent_id]) children[n.parent_id] = [];
+      children[n.parent_id].push(n.id);
+    }
+  });
+  const result = [];
+  const queue = [rootId];
+  while (queue.length) {
+    const cur = queue.shift();
+    (children[cur] || []).forEach(child => { result.push(child); queue.push(child); });
+  }
+  return result;
+}
+
+/** Drop rootId and all its descendants into localStorage dismissed set. */
+function dropSubtree(rootId, allNodes) {
+  const dismissed = getDismissed();
+  dismissed.add(rootId);
+  getDescendants(rootId, allNodes).forEach(id => dismissed.add(id));
+  saveDismissed(dismissed);
+}
+
+/** Drop only this single node (not descendants). */
+function dropNode(id) {
+  const dismissed = getDismissed();
+  dismissed.add(id);
+  saveDismissed(dismissed);
+}
+
+/** Restore rootId and all its descendants from the dismissed set. */
+function restoreSubtree(rootId, allNodes) {
+  const dismissed = getDismissed();
+  dismissed.delete(rootId);
+  getDescendants(rootId, allNodes).forEach(id => dismissed.delete(id));
+  saveDismissed(dismissed);
+}
+
 async function load(){
   const [lineage, prefs] = await Promise.all([
     fetch('lineage.json',          { cache: 'no-cache' }).then(r => r.json()),
@@ -117,10 +200,12 @@ async function load(){
   svg.call(d3.zoom().scaleExtent([0.4, 4]).on('zoom', e => g.attr('transform', e.transform)));
 
   // build node + link arrays
+  const dismissed = getDismissed();
   const nodes = lineage.pieces.map(p => ({
     ...p,
     enrich: enrichments[p.id] || {},
-    mark: marks[p.id] || {}
+    mark: marks[p.id] || {},
+    dropped: dismissed.has(p.id) || !!(marks[p.id] || {}).drop
   }));
   const links = (lineage.edges || []).map(e => ({
     source: e.from, target: e.to, directive: e.directive
@@ -141,17 +226,29 @@ async function load(){
   });
 
   function nodeColor(n){
-    if (n.mark.drop) return '#666';
+    if (n.dropped) return '#555';
     if ((n.enrich.mutation_directive_id || '').startsWith('user-')) return '#48b09e';
     if (!n.parent_id) return '#c9a86a';   // seed
     return '#5b6e8f';                       // mutation
   }
   function nodeRadius(n){
-    if (n.mark.drop) return 7;
+    if (n.dropped) return 7;
     return 9 + Math.min(18, Math.sqrt(descCount[n.id] || 0) * 5);
   }
   function nodeOpacity(n){
-    return n.mark.drop ? 0.35 : 1.0;
+    return n.dropped ? 0.28 : 1.0;
+  }
+
+  function refreshNode(d) {
+    const dismissed = getDismissed();
+    d.dropped = dismissed.has(d.id) || !!d.mark.drop;
+    d3.select(`[data-id="${d.id}"] circle`)
+      .attr('fill', nodeColor(d))
+      .attr('opacity', nodeOpacity(d))
+      .attr('r', nodeRadius(d));
+    d3.select(`[data-id="${d.id}"] text`)
+      .attr('fill', d.dropped ? '#555' : '#0a0a0d')
+      .style('text-decoration', d.dropped ? 'line-through' : 'none');
   }
 
   // force-directed layout
@@ -184,6 +281,7 @@ async function load(){
     .text(d => d.directive || '');
 
   const nodeSel = g.append('g').selectAll('g').data(nodes).enter().append('g')
+    .attr('data-id', d => d.id)
     .style('cursor', 'pointer')
     .call(d3.drag()
       .on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
@@ -241,18 +339,70 @@ async function load(){
   }
   function hideTip(){ tip.style.display = 'none'; }
 
+  /* ── context menu wiring ── */
+  const ctxMenu = document.getElementById('ctx-menu');
+  const ctxLabel = document.getElementById('ctx-label');
+  let ctxTarget = null;
+
+  function closeCtx() { ctxMenu.style.display = 'none'; ctxTarget = null; }
+  document.addEventListener('click', closeCtx);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCtx(); });
+
+  document.getElementById('ctx-drop-node').addEventListener('click', () => {
+    if (!ctxTarget) return;
+    dropNode(ctxTarget.id);
+    ctxTarget.dropped = true;
+    refreshNode(ctxTarget);
+    updateCount();
+    closeCtx();
+  });
+
+  document.getElementById('ctx-drop-tree').addEventListener('click', () => {
+    if (!ctxTarget) return;
+    dropSubtree(ctxTarget.id, nodes);
+    const toDrop = [ctxTarget.id, ...getDescendants(ctxTarget.id, nodes)];
+    const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+    toDrop.forEach(id => { if (byId[id]) { byId[id].dropped = true; refreshNode(byId[id]); } });
+    updateCount();
+    closeCtx();
+  });
+
+  document.getElementById('ctx-restore').addEventListener('click', () => {
+    if (!ctxTarget) return;
+    restoreSubtree(ctxTarget.id, nodes);
+    const toRestore = [ctxTarget.id, ...getDescendants(ctxTarget.id, nodes)];
+    const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+    toRestore.forEach(id => { if (byId[id]) { byId[id].dropped = false; refreshNode(byId[id]); } });
+    updateCount();
+    closeCtx();
+  });
+
+  function updateCount() {
+    const active = nodes.filter(n => !n.dropped).length;
+    document.getElementById('counts').textContent =
+      `${nodes.length} pieces · ${links.length} edges · ${active} active`;
+  }
+
   nodeSel
     .on('mouseover', showTip)
     .on('mousemove', showTip)
     .on('mouseout', hideTip)
+    .on('contextmenu', (e, d) => {
+      e.preventDefault();
+      e.stopPropagation();
+      hideTip();
+      ctxTarget = d;
+      ctxLabel.textContent = d.id + ' · ' + (d.direction || d.title || '');
+      ctxMenu.style.display = 'block';
+      ctxMenu.style.left = Math.min(window.innerWidth - 200, e.clientX) + 'px';
+      ctxMenu.style.top  = Math.min(window.innerHeight - 140, e.clientY) + 'px';
+    })
     .on('click', (e, d) => {
-      // open the piece in a new tab
+      closeCtx();
       window.open(`pieces/${d.id}/`, '_blank');
     });
 
-  document.getElementById('counts').textContent =
-    `${nodes.length} pieces · ${links.length} edges · ` +
-    `${nodes.filter(n => !n.mark.drop).length} active`;
+  updateCount();
 
   sim.on('tick', () => {
     linkSel
