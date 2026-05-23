@@ -505,6 +505,7 @@ def main():
     run_git("add",
             f"pieces/{new_id}",
             "lineage.json",
+            "taste.json",
             "scripts/improv_log.jsonl")
     # Reject artifacts intentionally NOT pushed (kept local for inspection).
     msg = f"improv·{mode} {parent['id']} → {new_id} · {word}"

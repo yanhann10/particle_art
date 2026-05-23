@@ -564,6 +564,7 @@ def main():
     run_git("add",
             f"pieces/{new_id}",
             "lineage.json",
+            "taste.json",
             "scripts/mutation_log.jsonl")
     msg = f"mutate {parent['id']} → {new_id} · {directive_id}"
     run_git("commit", "-m", msg)
