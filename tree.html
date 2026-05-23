@@ -10,24 +10,34 @@
     --line:#1f1f26; --accent:#c9a86a; --hot:#d76b5a;
   }
   * { box-sizing:border-box; }
-  html,body { margin:0; height:100%; }
-  body { background:var(--bg); color:var(--ink);
+  html { background:var(--bg); }
+  body { margin:0; background:var(--bg); color:var(--ink);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif;
-    overflow:hidden; }
+    overflow-y:scroll; overflow-x:auto; }
   header {
-    position:fixed; top:0; left:0; right:0;
-    padding:1rem 1.6rem 0.7rem;
-    background:linear-gradient(180deg,rgba(10,10,13,0.95),rgba(10,10,13,0));
-    z-index:5; display:flex; justify-content:space-between; align-items:baseline;
+    position:sticky; top:0;
+    padding:0.9rem 1.6rem 0.7rem;
+    background:rgba(10,10,13,0.97);
+    border-bottom:1px solid var(--line);
+    z-index:10; display:flex; justify-content:space-between; align-items:baseline;
+    backdrop-filter:blur(6px);
   }
   h1 { margin:0; font-size:1.0rem; font-weight:600; letter-spacing:0.04em; }
   header .meta { color:var(--muted); font-size:0.82rem;
     font-family:ui-monospace,"SF Mono",Menlo,monospace; }
   header a { color:var(--accent); text-decoration:none; border-bottom:1px dotted var(--accent); }
   header a:hover { color:var(--hot); border-color:var(--hot); }
-  #stage { width:100%; height:100vh; display:block; }
+  #legend {
+    padding:0.35rem 1.6rem;
+    background:rgba(10,10,13,0.95);
+    border-bottom:1px solid var(--line);
+    font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:0.75rem;
+    color:var(--muted); display:flex; gap:1.4rem; align-items:center; flex-wrap:wrap;
+  }
+  #legend .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; vertical-align:middle; }
+  #stage { display:block; }
   #tooltip {
-    position:fixed; pointer-events:none; z-index:10;
+    position:fixed; pointer-events:none; z-index:20;
     background:rgba(20,20,26,0.96); border:1px solid var(--line);
     border-radius:4px; padding:0.7rem 0.9rem; max-width:360px;
     font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:0.8rem;
@@ -41,11 +51,8 @@
   #tooltip .tag   { background:rgba(201,168,106,0.15); color:var(--accent);
     border:1px solid rgba(201,168,106,0.35); padding:1px 6px;
     border-radius:2px; font-size:0.7rem; }
-  #tooltip .influence { margin-top:8px; padding-top:6px;
-    border-top:1px dotted var(--line); color:#c9d2dc;
-    font-style:italic; font-size:0.78rem; }
   #ctx-menu {
-    position:fixed; z-index:20; background:rgba(17,17,22,0.97);
+    position:fixed; z-index:30; background:rgba(17,17,22,0.97);
     border:1px solid var(--line); border-radius:4px; padding:0.25rem 0;
     font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:0.8rem;
     display:none; min-width:180px; box-shadow:0 6px 20px rgba(0,0,0,.55);
@@ -64,10 +71,15 @@
 <header>
   <div>
     <h1>particle_art · lineage tree</h1>
-    <div class="meta"><span id="counts">…</span> · hover for tooltip · right-click to drop</div>
+    <div class="meta"><span id="counts">…</span> · hover for tooltip · right-click to drop/restore</div>
   </div>
   <div class="meta"><a href="index.html">← gallery</a></div>
 </header>
+<div id="legend">
+  <span><span class="dot" style="background:#c9a86a"></span><span style="color:#c9a86a">encouraged</span> — system favors these branches</span>
+  <span><span class="dot" style="background:#555"></span> dropped — dimmed, excluded from curated view</span>
+  <span style="color:rgba(201,168,106,0.4)">── dashed gold</span><span> = cross-lineage (hybrid) connection</span>
+</div>
 <svg id="stage"></svg>
 <div id="tooltip"></div>
 <div id="ctx-menu">
@@ -82,8 +94,10 @@
 <script>
 /* ── helpers ─────────────────────────────────────────────────────── */
 const DISMISSED_KEY = 'particle_art_dismissed';
+const FAVORITES_KEY  = 'particle_art_favorites';
 function getDismissed(){try{return new Set(JSON.parse(localStorage.getItem(DISMISSED_KEY)||'[]'))}catch{return new Set()}}
 function saveDismissed(s){localStorage.setItem(DISMISSED_KEY,JSON.stringify([...s]))}
+function getFavorites(){try{return new Set(JSON.parse(localStorage.getItem(FAVORITES_KEY)||'[]'))}catch{return new Set()}}
 function getDescendants(rootId,allNodes){
   const ch={};
   allNodes.forEach(n=>{if(n.parent_id){(ch[n.parent_id]=ch[n.parent_id]||[]).push(n.id)}});
@@ -104,6 +118,7 @@ async function load(){
 
   const marks = prefs.marks || {};
   const dismissed = getDismissed();
+  const favs = getFavorites();
 
   /* ── descendant counts ── */
   const descCount = {};
@@ -114,121 +129,85 @@ async function load(){
       const par=lineage.pieces.find(x=>x.id===cur);cur=par?par.parent_id:null}
   });
 
-  /* ── filter orphaned nodes — iterate to transitive closure ── */
+  /* ── filter orphaned nodes — iterative transitive closure ── */
   let cleanPieces = lineage.pieces;
   let prevSize = -1;
-  while (cleanPieces.length !== prevSize) {
+  while(cleanPieces.length !== prevSize){
     prevSize = cleanPieces.length;
     const validIds = new Set(cleanPieces.map(p=>p.id));
     cleanPieces = cleanPieces.filter(p=>!p.parent_id||validIds.has(p.parent_id));
   }
   const knownIds = new Set(cleanPieces.map(p=>p.id));
 
-  /* ── identify cross edges (target's parent_id ≠ edge.from) ── */
+  /* ── identify cross edges ── */
   const pidMap = {};
   cleanPieces.forEach(p=>{pidMap[p.id]=p.parent_id||null});
   const crossEdges = (lineage.edges||[]).filter(e=>knownIds.has(e.from)&&knownIds.has(e.to)&&pidMap[e.to]!==e.from);
 
-  /* ── add synthetic root for stratify ── */
+  /* ── stratify + left-to-right tree layout ── */
   const SYNTH = '__root__';
-  const stratData = [{id:SYNTH, parent_id:null}, ...cleanPieces.map(p=>({
-    ...p, parent_id: p.parent_id||SYNTH
+  const stratData = [{id:SYNTH,parent_id:null}, ...cleanPieces.map(p=>({
+    ...p, parent_id:p.parent_id||SYNTH
   }))];
+  const root = d3.stratify().id(d=>d.id).parentId(d=>d.parent_id)(stratData);
 
-  const root = d3.stratify()
-    .id(d=>d.id)
-    .parentId(d=>d.parent_id)(stratData);
-
-  /* ── left-to-right layout ──
-   * nodeSize([sibling-gap, depth-gap])
-   *   node.x = sibling order → maps to SVG y
-   *   node.y = generation depth → maps to SVG x
-   */
-  const SIBLING_GAP = 140;   /* vertical px between siblings */
-  const DEPTH_GAP   = 130;   /* horizontal px per generation */
-  const THUMB       = 90;    /* thumbnail side length */
-  const HALF        = THUMB / 2;
+  const SIBLING_GAP = 110;  /* px between sibling centers (vertical) */
+  const DEPTH_GAP   = 120;  /* px between generation columns (horizontal) */
+  const THUMB       = 66;   /* thumbnail side length */
+  const HALF        = 33;
+  const PAD_TOP     = 20;   /* extra top padding in SVG */
 
   d3.tree().nodeSize([SIBLING_GAP, DEPTH_GAP])(root);
 
-  /* position lookup by id */
   const pos = {};
-  root.descendants().forEach(n=>{ pos[n.id] = {x:n.x, y:n.y, data:n.data}; });
+  root.descendants().forEach(n=>{ pos[n.id]={x:n.x, y:n.y}; });
 
-  /* shift synthetic root off-screen left; true roots start ~80px from left edge */
+  /* left-to-right: node.y → SVG x, node.x → SVG y */
   const synthDepth = pos[SYNTH].y;
-  const OFFSET_X = -synthDepth + 80;
+  const OFFSET_X = -synthDepth + 20;  /* true roots start near left */
 
-  /* helpers: SVG coordinate from tree node position */
   const svgX = id => pos[id].y + OFFSET_X;
   const svgY = id => pos[id].x;
 
-  /* ── SVG setup ── */
+  /* compute SVG size to fit all nodes */
+  const allX = cleanPieces.map(p=>svgX(p.id));
+  const allY = cleanPieces.map(p=>svgY(p.id));
+  const minX = Math.min(...allX);
+  const svgWidth  = Math.max(...allX) + HALF + 24;
+  const svgHeight = Math.max(...allY) + HALF + 16 + PAD_TOP;
+  /* vertically center: shift y so min is at top with padding */
+  const minYVal = Math.min(...allY);
+  const SHIFT_Y = -minYVal + PAD_TOP;
+
   const stage = document.getElementById('stage');
-  const W = stage.clientWidth, H = stage.clientHeight;
+  stage.setAttribute('width',  svgWidth);
+  stage.setAttribute('height', svgHeight - minYVal + PAD_TOP + HALF + 16);
   const svg = d3.select(stage);
-  const g   = svg.append('g');
+  const g   = svg.append('g').attr('transform',`translate(0,${SHIFT_Y})`);
 
   /* clip-path for rounded thumbnails */
   svg.append('defs').append('clipPath').attr('id','clip-round')
     .append('rect').attr('x',-HALF).attr('y',-HALF)
-    .attr('width',THUMB).attr('height',THUMB).attr('rx',6);
-
-  /* zoom — wheel/trackpad scroll pans; ctrl/pinch zooms */
-  const zoom = d3.zoom()
-    .scaleExtent([0.08,3])
-    .filter(event=>{
-      if(event.type==='wheel') return event.ctrlKey||event.metaKey||event.shiftKey;
-      return !event.button;
-    })
-    .on('zoom',e=>g.attr('transform',e.transform));
-  svg.call(zoom);
-  /* plain wheel → pan (Figma-style) */
-  stage.addEventListener('wheel', function(ev){
-    if(!ev.ctrlKey&&!ev.metaKey&&!ev.shiftKey){
-      ev.preventDefault();
-      const t = d3.zoomTransform(stage);
-      svg.call(zoom.transform, t.translate(-ev.deltaX,-ev.deltaY));
-    }
-  },{passive:false});
-
-  /* fit-to-view on load: scale to show full tree, floor at 0.22 so thumbs stay readable */
-  const allX = cleanPieces.map(p=>svgX(p.id));
-  const allY = cleanPieces.map(p=>svgY(p.id));
-  const minX=Math.min(...allX)-HALF, maxX=Math.max(...allX)+HALF;
-  const minY=Math.min(...allY)-HALF, maxY=Math.max(...allY)+HALF+14;
-  const treeW=maxX-minX, treeH=maxY-minY;
-  const PAD=60;
-  const fitScale=Math.min((W-PAD*2)/treeW,(H-PAD*2)/treeH);
-  const initScale=Math.max(fitScale,0.22);
-  const tx=(W-treeW*initScale)/2-minX*initScale;
-  const ty=(H-treeH*initScale)/2-minY*initScale;
-  svg.call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(initScale));
+    .attr('width',THUMB).attr('height',THUMB).attr('rx',5);
 
   /* ── edge layer ── */
   const edgeG = g.append('g').attr('fill','none');
 
-  /* primary tree edges — horizontal bezier from right edge of parent to left edge of child */
   root.links().forEach(link=>{
     if(link.source.id===SYNTH) return;
-    const px = svgX(link.source.id) + HALF;
-    const py = svgY(link.source.id);
-    const cx = svgX(link.target.id) - HALF;
-    const cy = svgY(link.target.id);
-    const midX = (px+cx)/2;
+    const px=svgX(link.source.id)+HALF, py=svgY(link.source.id);
+    const cx=svgX(link.target.id)-HALF, cy=svgY(link.target.id);
+    const midX=(px+cx)/2;
     edgeG.append('path')
       .attr('d',`M${px},${py} C${midX},${py} ${midX},${cy} ${cx},${cy}`)
       .attr('stroke','#2a3a5a').attr('stroke-width',1.2).attr('opacity',0.8);
   });
 
-  /* cross / hybrid edges */
   crossEdges.forEach(e=>{
     if(!pos[e.from]||!pos[e.to]) return;
-    const px = svgX(e.from) + HALF;
-    const py = svgY(e.from);
-    const cx = svgX(e.to) - HALF;
-    const cy = svgY(e.to);
-    const midX = (px+cx)/2;
+    const px=svgX(e.from)+HALF, py=svgY(e.from);
+    const cx=svgX(e.to)-HALF,   cy=svgY(e.to);
+    const midX=(px+cx)/2;
     edgeG.append('path')
       .attr('d',`M${px},${py} C${midX},${py} ${midX},${cy} ${cx},${cy}`)
       .attr('stroke','#c9a86a').attr('stroke-dasharray','4,3')
@@ -236,62 +215,71 @@ async function load(){
   });
 
   /* ── node layer ── */
-  const pieces = cleanPieces.map(p=>({...p, mark:marks[p.id]||{}, dropped:dismissed.has(p.id)||!!(marks[p.id]||{}).drop}));
-  const byId   = Object.fromEntries(pieces.map(p=>[p.id,p]));
+  const pieces = cleanPieces.map(p=>({
+    ...p,
+    mark:    marks[p.id]||{},
+    dropped: dismissed.has(p.id)||!!(marks[p.id]||{}).drop,
+    favored: favs.has(p.id),
+  }));
+  const byId = Object.fromEntries(pieces.map(p=>[p.id,p]));
 
   const nodeG = g.append('g');
 
   function renderNodes(){
     const nodes = nodeG.selectAll('g.node').data(pieces, d=>d.id);
-
     const enter = nodes.enter().append('g')
       .attr('class','node')
-      .attr('data-id', d=>d.id)
-      .attr('transform', d=>`translate(${svgX(d.id)},${svgY(d.id)})`)
+      .attr('data-id',d=>d.id)
+      .attr('transform',d=>`translate(${svgX(d.id)},${svgY(d.id)})`)
       .style('cursor','pointer');
 
     /* fallback rect */
     enter.append('rect')
       .attr('x',-HALF).attr('y',-HALF).attr('width',THUMB).attr('height',THUMB)
-      .attr('rx',6).attr('fill','#1f1f26');
+      .attr('rx',5).attr('fill','#1f1f26');
 
     /* thumbnail */
     enter.append('image')
-      .attr('href', d=>`thumbs/${d.id}.png`)
+      .attr('href',d=>`thumbs/${d.id}.png`)
       .attr('x',-HALF).attr('y',-HALF).attr('width',THUMB).attr('height',THUMB)
       .attr('clip-path','url(#clip-round)')
       .attr('preserveAspectRatio','xMidYMid slice');
 
-    /* dropped overlay */
+    /* drop overlay */
     enter.append('rect').attr('class','drop-overlay')
       .attr('x',-HALF).attr('y',-HALF).attr('width',THUMB).attr('height',THUMB)
-      .attr('rx',6).attr('fill','#0a0a0d');
+      .attr('rx',5).attr('fill','#0a0a0d');
+
+    /* favored ring — golden border */
+    enter.append('rect').attr('class','fav-ring')
+      .attr('x',-HALF-2).attr('y',-HALF-2).attr('width',THUMB+4).attr('height',THUMB+4)
+      .attr('rx',6).attr('fill','none').attr('stroke','#c9a86a').attr('stroke-width',2);
 
     /* label */
     enter.append('text')
-      .attr('y', HALF+12).attr('text-anchor','middle')
+      .attr('y',HALF+11).attr('text-anchor','middle')
       .attr('font-size','9px').attr('font-family','ui-monospace,monospace')
       .style('pointer-events','none')
       .text(d=>d.id);
 
-    /* merge + style */
     const merged = enter.merge(nodes);
-    merged.select('image').attr('opacity', d=>d.dropped?0.2:1);
-    merged.select('.drop-overlay').attr('opacity', d=>d.dropped?0.65:0);
-    merged.select('text').attr('fill', d=>d.dropped?'#555':'#c9a86a');
+    styleNodes(merged);
 
-    /* events */
     merged
-      .on('mouseover', showTip).on('mousemove', showTip).on('mouseout', hideTip)
-      .on('contextmenu', onCtx)
-      .on('click', (e,d)=>{ closeCtx(); window.open(`pieces/${d.id}/`,'_blank'); });
+      .on('mouseover',showTip).on('mousemove',showTip).on('mouseout',hideTip)
+      .on('contextmenu',onCtx)
+      .on('click',(e,d)=>{ closeCtx(); window.open(`pieces/${d.id}/`,'_blank'); });
+  }
+
+  function styleNodes(sel){
+    sel.select('image')     .attr('opacity',d=>d.dropped?0.18:1);
+    sel.select('.drop-overlay').attr('opacity',d=>d.dropped?0.62:0);
+    sel.select('.fav-ring') .attr('opacity',d=>d.favored?1:0);
+    sel.select('text')      .attr('fill',d=>d.dropped?'#44444e':d.favored?'#c9a86a':'#8a8a93');
   }
 
   function refreshNode(d){
-    const sel = nodeG.select(`[data-id="${d.id}"]`);
-    sel.select('image').attr('opacity', d.dropped?0.2:1);
-    sel.select('.drop-overlay').attr('opacity', d.dropped?0.65:0);
-    sel.select('text').attr('fill', d.dropped?'#555':'#c9a86a');
+    styleNodes(nodeG.select(`[data-id="${d.id}"]`));
   }
 
   renderNodes();
@@ -308,12 +296,13 @@ async function load(){
     else if(conceptTag) influence='engages '+conceptTag.replace('concept_','').replace(/_/g,' ');
     else if(d.mark.note) influence=d.mark.note;
     tip.innerHTML=`
-      <div class="code">${d.id}</div>
+      <div class="code">${d.id}${d.favored?' ♥':''}</div>
       <div class="title">${d.title||''}</div>
       <div class="row"><b>direction</b> · ${d.direction||'—'}</div>
       <div class="row"><b>generation</b> · ${d.generation??0} · <b>desc</b> · ${descCount[d.id]||0}</div>
       ${tags.length?`<div class="tags">${tags.map(t=>`<span class="tag">${t}</span>`).join('')}</div>`:''}
       ${influence?`<div class="influence">${influence}</div>`:''}
+      ${d.dropped?'<div class="row" style="color:#a06060">dropped (right-click to restore)</div>':''}
     `;
     tip.style.display='block';
     tip.style.left=Math.min(window.innerWidth-380,e.clientX+12)+'px';
@@ -361,9 +350,10 @@ async function load(){
   });
 
   function updateCount(){
-    const active=pieces.filter(n=>!n.dropped).length;
+    const active  = pieces.filter(n=>!n.dropped).length;
+    const favored = pieces.filter(n=>n.favored).length;
     document.getElementById('counts').textContent=
-      `${pieces.length} pieces · ${(lineage.edges||[]).length} edges · ${active} active`;
+      `${pieces.length} pieces · ${(lineage.edges||[]).length} edges · ${active} active · ${favored} encouraged`;
   }
 }
 load();
