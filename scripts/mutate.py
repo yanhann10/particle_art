@@ -506,107 +506,85 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "index.html").write_text(html)
 
-    # ── VISUAL GATE ────────────────────────────────────────────────────────────
-    # Pipeline: render screenshot → pixel checks → VLM assessment → up to 3
-    # total attempts. On "iterate" the VLM's specific constraints are injected
-    # back into the remake prompt. Thumbnails are deleted after each verdict.
-    # On "pass" the loop breaks and we proceed to commit. On "fail" or 3 strikes
-    # the piece is rejected and removed.
-    MAX_VLM_ATTEMPTS = 3
-    _vlm_attempt = 0
-    _cur_id   = new_id
-    _cur_html = html
-    _cur_dir  = out_dir
-    _vlm_passed = False
-
+    # render-content gate — blank pieces (shader compile fail, design that waits
+    # for interaction/network input that never comes, misframed camera, etc.)
+    # must NEVER ship to Vercel. Validate via Playwright before proceeding.
+    # Blur failures trigger a remake (up to MAX_BLUR_REMAKES attempts) with an
+    # explicit sharpness constraint injected into the prompt.
+    MAX_BLUR_REMAKES = 2
+    _blur_attempt = 0
     try:
         import shutil
         from validate_render import validate as render_validate
-        import visual_gate
-
-        while _vlm_attempt < MAX_VLM_ATTEMPTS:
-            (_cur_dir / "index.html").write_text(_cur_html)
-
-            # ── pixel pre-check (empty/black frames fail immediately) ──────
-            rc, failures = render_validate([_cur_id], record_clip=False, return_details=True)
-            thumb_path = REPO / "thumbs" / f"{_cur_id}.png"
-
-            if rc != 0:
-                fail_reason = failures[0][1] if failures else "render failed"
-                is_empty = "empty render" in fail_reason
-                if is_empty:
-                    # Black frame — VLM can't help; hard fail
-                    shutil.rmtree(_cur_dir, ignore_errors=True)
-                    if thumb_path.exists(): thumb_path.unlink()
-                    rej = REPO / "scripts" / f"reject_{_cur_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
-                    rej.write_text(_cur_html)
-                    print(f"render gate: REJECTED {_cur_id} — {fail_reason}")
-                    return 7
-                # Non-empty failure (blur/contrast) — let VLM judge from thumb
-
-            # ── VLM visual assessment ──────────────────────────────────────
-            verdict, reason, constraints = visual_gate.check(
-                _cur_id, thumb_path, parent, directive, _vlm_attempt
-            )
-
-            # Always remove the thumbnail after verdict
+        while True:
+            rc, failures = render_validate([new_id], record_clip=False, return_details=True)
+            if rc == 0:
+                break
+            is_blur = any("blurry" in reason for _, reason in failures)
+            rej = REPO / "scripts" / f"reject_{new_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
+            rej.write_text(html)
+            shutil.rmtree(out_dir, ignore_errors=True)
+            thumb_path = REPO / "thumbs" / f"{new_id}.png"
             if thumb_path.exists():
                 thumb_path.unlink()
-
-            if verdict == "pass":
-                _vlm_passed = True
-                new_id  = _cur_id
-                html    = _cur_html
-                out_dir = _cur_dir
-                break
-
-            # Not pass — remove this attempt's piece dir
-            rej = REPO / "scripts" / f"vlm_reject_{_cur_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
-            rej.write_text(_cur_html)
-            shutil.rmtree(_cur_dir, ignore_errors=True)
-
-            if _vlm_attempt >= MAX_VLM_ATTEMPTS - 1:
-                print(f"visual gate: NO HOPE after {MAX_VLM_ATTEMPTS} attempts — {reason}")
-                return 7
-
-            # ── remake with VLM feedback ───────────────────────────────────
-            _vlm_attempt += 1
-            feedback = (
-                f"\n\nVISUAL GATE FEEDBACK (attempt {_vlm_attempt}/{MAX_VLM_ATTEMPTS}): "
-                f"Previous render scored '{verdict}'. {reason}. "
-                + (f"Required fix: {constraints}" if constraints else
-                   "Redesign significantly to improve visual quality.")
-            )
-            try:
-                remake_id = codes.generate(LINEAGE, n=1)[0]
-                sys_p, usr_p = build_prompt(parent, parent_html,
-                                            directive + feedback,
+            if is_blur and _blur_attempt < MAX_BLUR_REMAKES:
+                _blur_attempt += 1
+                print(f"render gate: BLUR FAIL — remake attempt {_blur_attempt}/{MAX_BLUR_REMAKES}")
+                sharp_constraint = (
+                    "\n\nCRITICAL REMAKE CONSTRAINT (previous render was blurry and rejected): "
+                    "Every particle/point MUST be visually sharp. "
+                    "Use PointsMaterial with sizeAttenuation=false or explicit pixel sizes ≥2px. "
+                    "Set opacity=1.0 or near-1.0 — no soft halos, no Gaussian-blur sprites, "
+                    "no feathered additive fog that washes out detail. "
+                    "If using MeshStandardMaterial, ensure strong key lighting so edges read crisply."
+                )
+                system, user = build_prompt(parent, parent_html,
+                                            directive + sharp_constraint,
                                             seed_block=seed_block_text)
-                remake_text, provider = lib_claude.call(sys_p, usr_p)
-                remake_html = extract_html(remake_text)
-                validate(remake_html)
-                _cur_id   = remake_id
-                _cur_html = remake_html.replace("<NEW_ID>", remake_id).replace(
-                                               "&lt;NEW_ID&gt;", remake_id)
-                _cur_dir  = PIECES / remake_id
-                _cur_dir.mkdir(parents=True, exist_ok=True)
-                print(f"  remake {_vlm_attempt}/{MAX_VLM_ATTEMPTS}: new candidate {remake_id}")
-            except Exception as e:
-                print(f"  remake attempt {_vlm_attempt} failed: {e}")
+                try:
+                    text, provider = lib_claude.call(system, user)
+                    html = extract_html(text)
+                    validate(html)
+                except Exception as e:
+                    print(f"  remake failed: {e}")
+                    return 7
+                new_id = codes.generate(LINEAGE, n=1)[0]
+                html = html.replace("<NEW_ID>", new_id).replace("&lt;NEW_ID&gt;", new_id)
+                out_dir = PIECES / new_id
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "index.html").write_text(html)
+            else:
+                reason = failures[0][1] if failures else "unknown"
+                print(f"render gate: REJECTED {new_id} — {reason} (saved to {rej.name})")
                 return 7
-
-        if not _vlm_passed:
-            return 7
-
     except ImportError as e:
-        print(f"visual gate: SKIPPED ({e}) — pip install playwright pillow numpy boto3 && playwright install chromium")
-        # Write piece to disk if it hasn't been written yet
-        if not (out_dir / "index.html").exists():
-            (out_dir / "index.html").write_text(html)
+        print(f"render gate: SKIPPED ({e}) — pip install playwright pillow numpy && playwright install chromium")
     except Exception as e:
-        print(f"visual gate: SKIPPED on exception ({e})")
-        if not (out_dir / "index.html").exists():
-            (out_dir / "index.html").write_text(html)
+        print(f"render gate: SKIPPED on exception ({e})")
+
+    # aesthetic gate — reads bug.md (user's catalogue of anti-patterns) +
+    # the new piece's HTML, asks Claude whether the piece exhibits any
+    # documented failure mode (jcl dots-on-intestine, h97 sieve, 610 blurry,
+    # LeePerrySmith head, ac2 noise nebula, tiny-subject-vast-canvas, etc.).
+    # Failing pieces are REJECTED but their reusable IDEAS are extracted to
+    # scripts/idea_extracts.jsonl so genius bits survive the cull.
+    try:
+        import shutil
+        from aesthetic_gate import check as aesthetic_check
+        ok, hits, ideas = aesthetic_check(html, new_id, parent, directive)
+        if not ok:
+            rej = REPO / "scripts" / f"aesthetic_reject_{new_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
+            rej.write_text(html)
+            print(f"aesthetic gate: REJECTED {new_id} (saved to {rej.name})")
+            shutil.rmtree(out_dir, ignore_errors=True)
+            thumb = REPO / "thumbs" / f"{new_id}.png"
+            if thumb.exists():
+                thumb.unlink()
+            return 8
+    except ImportError as e:
+        print(f"aesthetic gate: SKIPPED ({e})")
+    except Exception as e:
+        print(f"aesthetic gate: SKIPPED on exception ({e})")
 
     pieces_now = lineage["pieces"]
     parent_chain = _lineage_chain(parent["id"], pieces_now)            # parent → … → root
