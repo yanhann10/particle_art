@@ -32,6 +32,7 @@ import codes
 import element_counts
 import lib_claude
 from evaluator import read_top_eval_note
+from lineage_lock import lineage_write_lock
 
 LINEAGE = REPO / "lineage.json"
 PIECES = REPO / "pieces"
@@ -633,22 +634,24 @@ def main():
         new_meta["seed"] = seed_slug
     (out_dir / "meta.json").write_text(json.dumps(new_meta, indent=2))
 
-    # update lineage.json
-    lineage["pieces"].append({
-        "id": new_id,
-        "title": new_meta["title"],
-        "direction": new_meta["direction"],
-        "input": new_meta["input"],
-        "particle_count": new_meta["particle_count"],
-        "parent_id": parent["id"],
-        "generation": new_meta["generation"],
-        "created_at": new_meta["created_at"],
-    })
-    lineage.setdefault("edges", []).append({
-        "from": parent["id"], "to": new_id, "directive": directive_id,
-    })
-    lineage["updated_at"] = datetime.now(timezone.utc).isoformat()
-    LINEAGE.write_text(json.dumps(lineage, indent=2))
+    # update lineage.json — re-read under lock so concurrent workers don't clobber each other
+    with lineage_write_lock():
+        lineage = load_json(LINEAGE)
+        lineage["pieces"].append({
+            "id": new_id,
+            "title": new_meta["title"],
+            "direction": new_meta["direction"],
+            "input": new_meta["input"],
+            "particle_count": new_meta["particle_count"],
+            "parent_id": parent["id"],
+            "generation": new_meta["generation"],
+            "created_at": new_meta["created_at"],
+        })
+        lineage.setdefault("edges", []).append({
+            "from": parent["id"], "to": new_id, "directive": directive_id,
+        })
+        lineage["updated_at"] = datetime.now(timezone.utc).isoformat()
+        LINEAGE.write_text(json.dumps(lineage, indent=2))
 
     # record spend (subscription = $0)
     cost = 0.0 if provider == "subscription" else lib_claude.BEDROCK_COST_ESTIMATE_USD
@@ -674,11 +677,22 @@ def main():
         taste_path.write_text(json.dumps(taste_data, indent=2))
         print(f"iterate_when_chosen: removed {parent['id']} (iterated → {new_id})")
 
-    run_git("add",
-            f"pieces/{new_id}",
-            "lineage.json",
-            "taste.json",
-            "scripts/mutation_log.jsonl")
+    # SWARM DEBATE — run before commit so verdicts are bundled in the mutation commit.
+    # Failure is non-fatal; piece ships regardless.
+    try:
+        from swarm_debate import debate
+        swarm_entry = debate(new_id)
+        if swarm_entry:
+            n_verdicts = len((swarm_entry.get("verdicts") or {}))
+            print(f"swarm debate: {n_verdicts} verdicts logged for {new_id}")
+    except Exception as e:
+        print(f"swarm debate skipped: {e}")
+
+    _advice_path = REPO / "scripts" / "swarm_advice.jsonl"
+    git_add = [f"pieces/{new_id}", "lineage.json", "taste.json", "scripts/mutation_log.jsonl"]
+    if _advice_path.exists():
+        git_add.append("scripts/swarm_advice.jsonl")
+    run_git("add", *git_add)
     msg = f"mutate {parent['id']} → {new_id} · {directive_id}"
     run_git("commit", "-m", msg)
     if not args.no_push:
@@ -686,18 +700,6 @@ def main():
             print("push failed after retries")
             return 6
     print(f"committed: {msg}")
-
-    # POST-MUTATION SWARM DEBATE — three distilled-artist personas critique the
-    # new piece in one Claude call. Verdicts feed forward into the next tick's
-    # prompt guardrails. Failure here is non-fatal (mutation is already shipped).
-    try:
-        from swarm_debate import debate
-        v = debate(new_id)
-        if v:
-            n = len((v.get("verdicts") or {}))
-            print(f"swarm debate: {n} verdicts logged for {new_id}")
-    except Exception as e:
-        print(f"swarm debate skipped: {e}")
     return 0
 
 

@@ -41,6 +41,7 @@ import codes
 import element_counts
 import lib_claude
 from evaluator import read_top_eval_note
+from lineage_lock import lineage_write_lock
 
 LINEAGE = REPO / "lineage.json"
 PIECES  = REPO / "pieces"
@@ -515,21 +516,24 @@ def main():
     }
     (out_dir / "meta.json").write_text(json.dumps(new_meta, indent=2, ensure_ascii=False))
 
-    lineage["pieces"].append({
-        "id": new_id,
-        "title": new_meta["title"],
-        "direction": new_meta["direction"],
-        "input": new_meta["input"],
-        "particle_count": new_meta["particle_count"],
-        "parent_id": parent["id"],
-        "generation": new_meta["generation"],
-        "created_at": new_meta["created_at"],
-    })
-    lineage.setdefault("edges", []).append({
-        "from": parent["id"], "to": new_id, "directive": directive_id,
-    })
-    lineage["updated_at"] = datetime.now(timezone.utc).isoformat()
-    LINEAGE.write_text(json.dumps(lineage, indent=2, ensure_ascii=False))
+    # re-read under lock so concurrent workers don't clobber each other
+    with lineage_write_lock():
+        lineage = load_json(LINEAGE)
+        lineage["pieces"].append({
+            "id": new_id,
+            "title": new_meta["title"],
+            "direction": new_meta["direction"],
+            "input": new_meta["input"],
+            "particle_count": new_meta["particle_count"],
+            "parent_id": parent["id"],
+            "generation": new_meta["generation"],
+            "created_at": new_meta["created_at"],
+        })
+        lineage.setdefault("edges", []).append({
+            "from": parent["id"], "to": new_id, "directive": directive_id,
+        })
+        lineage["updated_at"] = datetime.now(timezone.utc).isoformat()
+        LINEAGE.write_text(json.dumps(lineage, indent=2, ensure_ascii=False))
 
     # Cost: gen v1 + critic v1 + gen v2 + critic v2 = 4 calls. Subscription = $0.
     n_calls = 4 if not args.no_critic else 1

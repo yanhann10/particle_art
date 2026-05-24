@@ -11,7 +11,7 @@ Personas (in priority order, fall through to inline if a SKILL.md is missing):
 
 Cost: ~$0.07/call. Run only after the mutation succeeds.
 """
-import json, sys, pathlib, datetime, re
+import json, random, sys, pathlib, datetime, re
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 import lib_claude  # noqa
@@ -112,6 +112,33 @@ PERSONAS = PERSONAS_POOL
 PANEL_SIZE = 5
 
 
+def _sample_panel(n: int = PANEL_SIZE) -> list[tuple[str, str]]:
+    """Sample n personas weighted by inverse-recency so every voice gets airtime."""
+    if n >= len(PERSONAS_POOL):
+        return list(PERSONAS_POOL)
+    recent = recent_advice(20)
+    # recency[label] = how many entries ago this persona last spoke (0 = never)
+    recency: dict[str, int] = {}
+    for rank, entry in enumerate(reversed(recent)):  # 0 = most recent
+        for persona in (entry.get("verdicts") or {}):
+            if persona not in recency:
+                recency[persona] = rank + 1
+    weights = [1.0 / (1.0 + recency.get(label, 0)) for label, _ in PERSONAS_POOL]
+    selected: list[tuple[str, str]] = []
+    remaining = list(zip(PERSONAS_POOL, weights))
+    for _ in range(min(n, len(remaining))):
+        total = sum(w for _, w in remaining)
+        r = random.random() * total
+        cum = 0.0
+        for i, (persona_tuple, w) in enumerate(remaining):
+            cum += w
+            if r <= cum or i == len(remaining) - 1:
+                selected.append(persona_tuple)
+                remaining.pop(i)
+                break
+    return selected
+
+
 def _read_skill(name: str) -> str:
     p = pathlib.Path.home() / ".claude/skills" / name / "SKILL.md"
     if p.exists():
@@ -135,28 +162,30 @@ def debate(piece_id: str) -> dict | None:
     # truncate HTML aggressively — the distilled artists react to the *form*, not the code
     html_excerpt = html[:6000] + ("\n... [truncated] ..." if len(html) > 6000 else "")
 
+    panel = _sample_panel(PANEL_SIZE)
+
     # inline the persona briefs + first chunk of each SKILL.md if available
     brief_parts = []
-    for label, desc in PERSONAS:
+    for label, desc in panel:
         skill_name = label.replace("_", "-") + "-skill"
         skill_text = (_read_skill(skill_name) or "")[:1500]
         brief_parts.append(f"### {label}\n{desc}\n\n{skill_text}")
     persona_briefs = "\n\n".join(brief_parts)
 
     system = (
-        "You are facilitating a three-voice swarm debate. Read the piece description and code excerpt. "
+        f"You are facilitating a {len(panel)}-voice swarm debate. Read the piece description and code excerpt. "
         "Each artist persona below speaks ONCE — reading the piece in their own register, naming what works, "
         "what concerns them, and ONE concrete improvement directive (≤25 words) the worker could apply on the "
         "next iteration. Be specific to THIS piece; never generic.\n\n"
         + persona_briefs
         + "\n\nReturn STRICT JSON only — one top-level object whose keys are the "
-          f"{len(PERSONAS_POOL)} persona ids listed above, in this exact order:\n"
+          f"{len(panel)} persona ids listed above, in this exact order:\n"
         + "{\n"
         + "".join(f'  "{label}": {{"praise":"...", "concern":"...", "directive":"..."}}'
-                 + (",\n" if i < len(PERSONAS_POOL) - 1 else "\n")
-                 for i, (label, _) in enumerate(PERSONAS_POOL))
+                 + (",\n" if i < len(panel) - 1 else "\n")
+                 for i, (label, _) in enumerate(panel))
         + "}\n"
-        + f"All {len(PERSONAS_POOL)} personas must speak — one verdict each, ≤25 words for the directive. "
+        + f"All {len(panel)} personas must speak — one verdict each, ≤25 words for the directive. "
           "Be specific to THIS piece; never generic. The directive must be concrete enough to apply on the next mutation."
     )
     user = (
@@ -198,30 +227,12 @@ def debate(piece_id: str) -> dict | None:
     with ADVICE.open("a") as f:
         f.write(json.dumps(entry) + "\n")
 
-    # also stash into the piece's meta.json for permanence
+    # stash into the piece's meta.json for permanence
     meta.setdefault("swarm_debate", []).append(entry)
     meta_path.write_text(json.dumps(meta, indent=2))
 
-    # commit + push so the experts page can read it (and so it survives across machines).
-    # tolerated to fail — the mutation already shipped, this is a follow-up.
-    import subprocess
-    try:
-        subprocess.run(["git", "add", str(ADVICE.relative_to(REPO)),
-                        str(meta_path.relative_to(REPO))],
-                       cwd=REPO, check=False, capture_output=True)
-        r = subprocess.run(["git", "diff", "--cached", "--quiet"],
-                           cwd=REPO, capture_output=True)
-        if r.returncode != 0:  # something staged
-            subprocess.run(["git", "commit", "-m", f"swarm advice for {piece_id}"],
-                           cwd=REPO, check=False, capture_output=True)
-            for _ in range(3):
-                p = subprocess.run(["git", "push"], cwd=REPO, capture_output=True)
-                if p.returncode == 0:
-                    break
-                subprocess.run(["git", "pull", "--rebase", "-X", "theirs", "--autostash"],
-                               cwd=REPO, check=False, capture_output=True)
-    except Exception:
-        pass
+    # caller (mutate.py) is responsible for committing swarm_advice.jsonl + meta.json
+    # as part of the mutation commit — no standalone commit here.
     return entry
 
 
@@ -240,12 +251,19 @@ def advice_block() -> str:
     recent = recent_advice(4)
     if not recent: return ""
     lines = ["RECENT SWARM-PANEL DIRECTIVES (treat as soft guidance — pick what fits):"]
+    seen = 0
+    max_lines = PANEL_SIZE * 4  # cap prompt injection — each panel has PANEL_SIZE voices × 4 entries
     for r in recent:
         v = r.get("verdicts", {})
         for persona, verdict in v.items():
             d = (verdict or {}).get("directive", "").strip()
             if d:
                 lines.append(f"  - [{persona} on {r.get('piece')}] {d}")
+                seen += 1
+                if seen >= max_lines:
+                    break
+        if seen >= max_lines:
+            break
     return "\n".join(lines)
 
 
