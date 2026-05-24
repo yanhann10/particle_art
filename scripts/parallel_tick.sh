@@ -40,6 +40,14 @@ fi
 VENV="$REPO/.venv"
 [ -x "$VENV/bin/python3" ] || { log "FATAL: venv missing at $VENV"; exit 2; }
 
+# --- absorber: poll Telegram for direction: / new: messages ---
+if [ -f "$TELEGRAM_ENV" ]; then
+  set -a; source "$TELEGRAM_ENV"; set +a
+  "$VENV/bin/python3" "$REPO/scripts/absorber.py" 2>>"$LOG" \
+    && log "absorber: poll complete" \
+    || log "WARN: absorber poll error (continuing)"
+fi
+
 # --- thrum: process pending steering messages from coordinator ---
 if [ -x "$THRUM" ] && "$THRUM" daemon status --quiet 2>/dev/null; then
   INBOX=$("$THRUM" inbox --unread --json 2>/dev/null || echo '[]')
