@@ -222,9 +222,9 @@ def cmd_check(args: argparse.Namespace) -> int:
         print("status: installed_not_running")
         print(
             "hint: open TouchDesigner and enable the web server DAT on "
-            f"port {TD_PORT}, or run td_tool.py render to auto-launch."
+            f"port {TD_PORT} to enable rendering."
         )
-        return 0  # installed but not running is not an error for 'check'
+        return 1  # not ready for rendering; callers use exit code to skip TD
 
 
 def cmd_list_templates(args: argparse.Namespace) -> int:
@@ -356,9 +356,13 @@ except Exception as e:
                 print(f"[td_tool] Injection render error: {output}", file=sys.stderr)
                 return 1
             else:
-                print("[td_tool] Injection completed (result opaque).", file=sys.stderr)
-                print(f"output: {out_path}")
-                return 0
+                # --externaltox doesn't exec Python scripts; can't verify render happened
+                print(
+                    "[td_tool] Script injection launched TD but render outcome is unknown.\n"
+                    "  TD must be running with a web server DAT on port 9980 for reliable render.",
+                    file=sys.stderr,
+                )
+                return 1
         except Exception as e:
             print(f"[td_tool] Script injection failed: {e}", file=sys.stderr)
 
