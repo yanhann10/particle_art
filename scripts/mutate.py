@@ -45,12 +45,12 @@ def load_json(p: Path) -> dict:
     return json.loads(p.read_text())
 
 
-def _pop_pending_directive() -> tuple[str, str] | None:
+def _pop_pending_directive() -> tuple[str, str, str | None] | None:
     """Pop the first valid directive from pending_directives.jsonl.
 
     Handles both 'directive' (pinterest_agent) and 'priority_directive'
-    (pinterest_critic_agent) field names. Returns (directive_text, source)
-    or None if the queue is empty.
+    (pinterest_critic_agent) field names.
+    Returns (directive_text, source, parent_id_or_None) or None if empty.
     """
     if not PENDING_QUEUE.exists():
         return None
@@ -65,7 +65,8 @@ def _pop_pending_directive() -> tuple[str, str] | None:
             continue
         remaining = [l for j, l in enumerate(lines) if j != i]
         PENDING_QUEUE.write_text(("\n".join(remaining) + "\n") if remaining else "")
-        return directive, entry.get("source", "pending")
+        parent_id = entry.get("parent_id") or entry.get("pin_id")
+        return directive, entry.get("source", "pending"), parent_id
     return None
 
 
@@ -464,6 +465,11 @@ def main():
         if pending:
             directive, directive_id = pending[0], f"pending:{pending[1]}"
             print(f"using pending directive (source={pending[1]}): {directive[:80]}")
+            if pending[2]:
+                forced = next((p for p in lineage["pieces"] if p["id"] == pending[2] and not p.get("dropped")), None)
+                if forced:
+                    parent = forced
+                    print(f"  forced parent from queue: {parent['id']}")
         else:
             directive_id, directive = sample_directive(DIRECTIVES, parent["id"], recent)
 
