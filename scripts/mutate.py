@@ -130,6 +130,13 @@ def pick_parent(lineage: dict, prefs: dict, recent: list[dict]) -> dict:
     if not pool:
         pool = pieces
 
+    # iterate_when_chosen pieces are highest priority — narrow pool to just those when any exist
+    iwc_ids = set((_read_taste().get("iterate_when_chosen") or {}).keys())
+    if iwc_ids:
+        iwc_in_pool = [p for p in pool if p["id"] in iwc_ids]
+        if iwc_in_pool:
+            pool = iwc_in_pool
+
     # count descendants for each piece (count of pieces with this id anywhere in their lineage chain)
     parent_of = {p["id"]: p.get("parent_id") for p in pieces}
     desc_count: dict[str, int] = {p["id"]: 0 for p in pieces}
@@ -628,6 +635,16 @@ def main():
     if args.dry_run:
         print("[dry-run] not committing")
         return 0
+
+    # if this parent was in iterate_when_chosen, remove it now that one iteration is done
+    taste_path = REPO / "taste.json"
+    taste_data = _read_taste()
+    iwc = taste_data.get("iterate_when_chosen") or {}
+    if parent["id"] in iwc:
+        del iwc[parent["id"]]
+        taste_data["iterate_when_chosen"] = iwc
+        taste_path.write_text(json.dumps(taste_data, indent=2))
+        print(f"iterate_when_chosen: removed {parent['id']} (iterated → {new_id})")
 
     run_git("add",
             f"pieces/{new_id}",
