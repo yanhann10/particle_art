@@ -43,6 +43,13 @@ MIN_NONBACKGROUND_FRACTION = 0.01
 # is too narrow (no real foreground/background separation).
 MIN_GRAYSCALE_STDDEV   = 12.0   # 0..255 scale
 MIN_LUMA_DYNAMIC_RANGE = 35.0   # p95 - p5 of luminance, 0..255 scale
+# BLUR GATE — Laplacian variance measures edge sharpness. Blurry renders (feathered
+# sprites, Gaussian-smeared particles, soft halos drowning the form) score near zero;
+# sharp renders score 50+. Pieces like si0/7wq/610 that the user flagged as "blurry"
+# would fail this gate. Tunable via env PARTICLE_ART_MIN_SHARPNESS.
+MIN_SHARPNESS_VARIANCE = float(
+    __import__("os").environ.get("PARTICLE_ART_MIN_SHARPNESS", "30.0")
+)
 
 W, H = 800, 500
 
@@ -62,7 +69,8 @@ def _warmup_for(piece_id: str) -> int:
     return 2500
 
 
-def validate(piece_ids: list[str], record_clip: bool = False) -> int:
+def validate(piece_ids: list[str], record_clip: bool = False,
+             return_details: bool = False) -> "int | tuple[int, list]":
     """If record_clip is True, capture a 3-second webm motion clip per piece in addition to the still PNG."""
     try:
         from playwright.sync_api import sync_playwright
@@ -70,11 +78,11 @@ def validate(piece_ids: list[str], record_clip: bool = False) -> int:
         import numpy as np
     except ImportError as e:
         print(f"missing dependency: {e}\nrun: pip install playwright pillow numpy && playwright install chromium", file=sys.stderr)
-        return 2
+        return (2, []) if return_details else 2
 
     if not piece_ids:
         print("usage: validate_render.py <piece_id> [piece_id ...]", file=sys.stderr)
-        return 2
+        return (2, []) if return_details else 2
 
     failed = []
     clips_dir = REPO / "clips"
@@ -131,6 +139,11 @@ def validate(piece_ids: list[str], record_clip: bool = False) -> int:
                 p5, p95 = np.percentile(gray, [5, 95])
                 drange = float(p95 - p5)
 
+                # blur gate — Laplacian variance: low = blurry/soft, high = sharp
+                lap = (gray[2:, 1:-1] - 2 * gray[1:-1, 1:-1] + gray[:-2, 1:-1]
+                       + gray[1:-1, 2:] - 2 * gray[1:-1, 1:-1] + gray[1:-1, :-2])
+                sharpness = float(lap.var())
+
                 fail_reason = None
                 if non_bg < MIN_NONBACKGROUND_FRACTION:
                     fail_reason = f"empty render ({non_bg*100:.2f}% non-bg)"
@@ -138,10 +151,12 @@ def validate(piece_ids: list[str], record_clip: bool = False) -> int:
                     fail_reason = f"low-contrast (stddev={gstd:.1f}<{MIN_GRAYSCALE_STDDEV:.0f})"
                 elif drange < MIN_LUMA_DYNAMIC_RANGE:
                     fail_reason = f"narrow dynamic range (p95-p5={drange:.1f}<{MIN_LUMA_DYNAMIC_RANGE:.0f})"
+                elif sharpness < MIN_SHARPNESS_VARIANCE:
+                    fail_reason = f"blurry (sharpness={sharpness:.1f}<{MIN_SHARPNESS_VARIANCE:.0f})"
 
                 ok = fail_reason is None
                 marker = "✓" if ok else "✗"
-                print(f"  {marker} {pid}: non-bg={non_bg*100:.2f}% stddev={gstd:.1f} range={drange:.1f}" +
+                print(f"  {marker} {pid}: non-bg={non_bg*100:.2f}% stddev={gstd:.1f} range={drange:.1f} sharpness={sharpness:.1f}" +
                       (f"  errors: {errors[:2]}" if errors else ""))
                 if not ok:
                     failed.append((pid, fail_reason + (f"; pageerror: {errors[0]}" if errors else "")))
@@ -168,10 +183,12 @@ def validate(piece_ids: list[str], record_clip: bool = False) -> int:
         print(f"  {len(failed)} piece(s) failed validation:")
         for pid, reason in failed:
             print(f"    - {pid}: {reason}")
-        return 1
-    print()
-    print(f"  all {len(piece_ids)} piece(s) passed")
-    return 0
+        rc = 1
+    else:
+        print()
+        print(f"  all {len(piece_ids)} piece(s) passed")
+        rc = 0
+    return (rc, failed) if return_details else rc
 
 
 def validate_html_path(html_path: Path, label: str, warmup_ms: int = 2500,

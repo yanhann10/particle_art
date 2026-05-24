@@ -495,19 +495,54 @@ def main():
     # render-content gate — blank pieces (shader compile fail, design that waits
     # for interaction/network input that never comes, misframed camera, etc.)
     # must NEVER ship to Vercel. Validate via Playwright before proceeding.
+    # Blur failures trigger a remake (up to MAX_BLUR_REMAKES attempts) with an
+    # explicit sharpness constraint injected into the prompt.
+    MAX_BLUR_REMAKES = 2
+    _blur_attempt = 0
     try:
         import shutil
         from validate_render import validate as render_validate
-        rc = render_validate([new_id], record_clip=False)
-        if rc != 0:
+        while True:
+            rc, failures = render_validate([new_id], record_clip=False, return_details=True)
+            if rc == 0:
+                break
+            is_blur = any("blurry" in reason for _, reason in failures)
             rej = REPO / "scripts" / f"reject_{new_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
             rej.write_text(html)
-            print(f"render gate: REJECTED {new_id} (saved to {rej.name})")
             shutil.rmtree(out_dir, ignore_errors=True)
-            thumb = REPO / "thumbs" / f"{new_id}.png"
-            if thumb.exists():
-                thumb.unlink()
-            return 7
+            thumb_path = REPO / "thumbs" / f"{new_id}.png"
+            if thumb_path.exists():
+                thumb_path.unlink()
+            if is_blur and _blur_attempt < MAX_BLUR_REMAKES:
+                _blur_attempt += 1
+                print(f"render gate: BLUR FAIL — remake attempt {_blur_attempt}/{MAX_BLUR_REMAKES}")
+                sharp_constraint = (
+                    "\n\nCRITICAL REMAKE CONSTRAINT (previous render was blurry and rejected): "
+                    "Every particle/point MUST be visually sharp. "
+                    "Use PointsMaterial with sizeAttenuation=false or explicit pixel sizes ≥2px. "
+                    "Set opacity=1.0 or near-1.0 — no soft halos, no Gaussian-blur sprites, "
+                    "no feathered additive fog that washes out detail. "
+                    "If using MeshStandardMaterial, ensure strong key lighting so edges read crisply."
+                )
+                system, user = build_prompt(parent, parent_html,
+                                            directive + sharp_constraint,
+                                            seed_block=seed_block_text)
+                try:
+                    text, provider = lib_claude.call(system, user)
+                    html = extract_html(text)
+                    validate(html)
+                except Exception as e:
+                    print(f"  remake failed: {e}")
+                    return 7
+                new_id = codes.generate(LINEAGE, n=1)[0]
+                html = html.replace("<NEW_ID>", new_id).replace("&lt;NEW_ID&gt;", new_id)
+                out_dir = PIECES / new_id
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "index.html").write_text(html)
+            else:
+                reason = failures[0][1] if failures else "unknown"
+                print(f"render gate: REJECTED {new_id} — {reason} (saved to {rej.name})")
+                return 7
     except ImportError as e:
         print(f"render gate: SKIPPED ({e}) — pip install playwright pillow numpy && playwright install chromium")
     except Exception as e:

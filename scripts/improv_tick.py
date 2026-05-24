@@ -441,15 +441,36 @@ def main():
     try:
         import shutil as _shutil
         from validate_render import validate as render_validate
-        rc = render_validate([new_id], record_clip=False)
+        rc, failures = render_validate([new_id], record_clip=False, return_details=True)
         if rc != 0:
             rej = REPO / "scripts" / f"reject_{new_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
             rej.write_text(final_html)
-            print(f"render gate: REJECTED {new_id} (saved to {rej.name})")
+            is_blur = any("blurry" in reason for _, reason in failures)
+            reason_str = failures[0][1] if failures else "unknown"
+            print(f"render gate: REJECTED {new_id} — {reason_str} (saved to {rej.name})")
             _shutil.rmtree(out_dir, ignore_errors=True)
             thumb = REPO / "thumbs" / f"{new_id}.png"
             if thumb.exists():
                 thumb.unlink()
+            if is_blur:
+                # queue sharpness constraint for next tick to consume via evaluator
+                import json as _json
+                eval_q = REPO / "scripts" / "eval_queue.jsonl"
+                entry = {
+                    "piece_id": new_id,
+                    "score": 0,
+                    "axes": {"form_clarity": 0, "technique_match": 0, "novelty": 0},
+                    "weakest_axis": "render_quality",
+                    "suggested_directive": (
+                        "SHARPNESS REQUIRED: previous piece was blurry — "
+                        "use PointsMaterial sizeAttenuation=false, opacity≥0.8, "
+                        "no soft halos or Gaussian-blur sprites"
+                    ),
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+                with eval_q.open("a") as f:
+                    f.write(_json.dumps(entry) + "\n")
+                print(f"  blur failure queued to eval_queue.jsonl — next tick will apply sharpness constraint")
             return 7
         print(f"render gate: PASS {new_id}")
     except ImportError as e:
