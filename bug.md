@@ -30,3 +30,23 @@
 ## Hard bans
 
 * **LeePerrySmith.glb** — never load this model. Reject any piece containing the string `LeePerrySmith`.
+
+## Code-detectable visual failures — REJECT if present
+
+These are specific patterns in the GLSL / Three.js code that reliably produce bad visuals.
+**Check the shader code and material config, not just the HTML structure.**
+
+### Blurry / indistinct particles
+* Fragment shader uses `exp(-r * N)` (gaussian falloff) where N ≤ 15 on the main form — produces soft blobs, not marks. Reject unless the piece is intentionally a fog/smoke piece. Sharp marks require N ≥ 20 (or `alphaTest ≥ 0.5` with a hard-edge texture).
+* `halo` term added on top of `core` using `exp(-r * 6.0)` or similar low exponent — doubles blur radius, makes every particle look smeared. Reject if halo exponent < 8.
+* `sizeAttenuation: true` combined with particles far from camera — makes distant particles microscopic and unreadable.
+
+### Faint / invisible form
+* Base alpha < 0.55 on the main particle material — form reads as translucent fog, not solid mark. `AdditiveBlending` amplifies the problem: low-alpha additive particles vanish against a dark background.
+* Fog density ≥ 0.025 with `AdditiveBlending` — the combination kills midground and background particles, leaving only a small near-camera zone visible. Result: the form "fades into nothing."
+* Wire / line opacity ≤ 0.25 — invisible structure, no readable form.
+
+### Moves too fast / jittery / illegible motion
+* Per-particle position jitter > 0.15 world units (e.g. `hash(...) * 0.22`) — at standard camera distance this blurs the silhouette into noise.
+* Camera `autoRotate` with speed > 0.8, or `lerp` toward target with α > 0.05 per frame — produces nausea-inducing chase camera.
+* Growth/simulation tick calling `requestAnimationFrame` AND a `setInterval` in the same piece — double-stepping causes motion at 2× intended speed.

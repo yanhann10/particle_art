@@ -86,8 +86,17 @@ def check(html: str, piece_id: str, parent: dict, directive: str) -> tuple[bool,
     if not bugs:
         return True, [], []
 
-    # truncate HTML aggressively — the critic reads structure, not every line
-    html_excerpt = html[:6000] + ("\n... [truncated] ..." if len(html) > 6000 else "")
+    # Include head + tail so shaders and material configs are always visible.
+    # GLSL shaders / PointsMaterial / opacity / blending live in the latter half
+    # of most piece files — the old head-only 6000-char cut missed all of them.
+    if len(html) <= 8000:
+        html_excerpt = html
+    else:
+        html_excerpt = (
+            html[:4000]
+            + f"\n\n... [middle truncated — {len(html) - 8000} chars omitted] ...\n\n"
+            + html[-4000:]
+        )
 
     system = (
         "You are an aesthetic gate critic for an evolutionary particle-art gallery. "
