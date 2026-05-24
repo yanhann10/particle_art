@@ -85,26 +85,52 @@ def collect_system_state() -> dict:
     return {"pieces": pieces, "queue_depth": queue, "last_tick": last_tick}
 
 
+VM_SSH = "ubuntu@ec2-13-223-233-226.compute-1.amazonaws.com"
+VM_KEY = Path.home() / "Downloads/cloud/aws_microvm.pem"
+
+
+def _vm_crontab() -> str:
+    """Return VM crontab text, or '' on failure."""
+    if not VM_KEY.exists():
+        return ""
+    out, ok = run(
+        f'ssh -i {VM_KEY} -o ConnectTimeout=6 -o StrictHostKeyChecking=no '
+        f'{VM_SSH} "crontab -l 2>/dev/null"'
+    )
+    return out if ok else ""
+
+
 def collect_agents() -> list[dict]:
     scripts_dir = REPO / "scripts"
-    # Any executable script in scripts/ is a candidate agent
     candidates = sorted(
         p.name for p in scripts_dir.iterdir()
         if p.suffix in (".py", ".sh") and p.stat().st_size > 0
         and any(kw in p.name for kw in ("tick", "cron", "inbox", "drain", "scout", "agent", "bot"))
     )
 
-    launchd_out, _ = run("launchctl list 2>/dev/null")
-    cron_out, _ = run("crontab -l 2>/dev/null")
+    # Scheduling lives on the VM, not local
+    vm_cron = _vm_crontab()
+    vm_ok = bool(vm_cron)
 
     result = []
     for name in candidates:
-        scheduled = name in launchd_out or name in cron_out
-        # Also check for a LaunchAgent plist
-        plist_glob = list(Path.home().glob(f"Library/LaunchAgents/*{Path(name).stem}*"))
-        if plist_glob:
-            scheduled = True
-        result.append({"script": name, "scheduled": scheduled})
+        sched_line = next(
+            (l for l in vm_cron.splitlines() if name in l and not l.startswith("#")), None
+        )
+        # Extract just the time spec (first 5 fields)
+        schedule = ""
+        if sched_line:
+            parts = sched_line.split()
+            if parts[0].startswith("@"):
+                schedule = parts[0]
+            elif len(parts) >= 5:
+                schedule = " ".join(parts[:5])
+        result.append({
+            "script": name,
+            "scheduled": bool(sched_line),
+            "schedule": schedule,
+            "vm_ok": vm_ok,
+        })
     return result
 
 
@@ -156,7 +182,7 @@ def print_report(issues, branches, prs, state, agents):
         print(f"  [{label}]")
         for iss in sorted(grouped[label], key=lambda x: x["number"]):
             n = iss["number"]
-            title = iss["title"][:44].ljust(44)
+            title = iss["title"][:58]
             feat = next((b for b in branches if b.startswith(f"feat/{n}-")), None)
             pr = pr_by_branch.get(feat) if feat else None
 
@@ -169,15 +195,20 @@ def print_report(issues, branches, prs, state, agents):
             else:
                 icon, note = "○", ""
 
-            print(f"    {icon} #{n:<3} {title}  {note}")
+            print(f"    {icon} #{n:<3}  {title}")
+            if note:
+                print(f"           └─ {note}")
         print()
 
     # ── Agents ────────────────────────────────────────────────────────────────
     if agents:
-        print("  AGENTS")
+        vm_status = "VM" if agents[0].get("vm_ok") else "VM unreachable"
+        print(f"  AGENTS  [{vm_status}]")
         for a in agents:
-            sched = "✓" if a["scheduled"] else "○"
-            print(f"    {sched}  {a['script']}")
+            if a["scheduled"]:
+                print(f"    ✓  {a['script']:<32}  {a['schedule']}")
+            else:
+                print(f"    ○  {a['script']}")
         print()
 
     bar()
