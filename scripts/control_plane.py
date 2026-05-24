@@ -100,6 +100,24 @@ def _vm_crontab() -> str:
     return out if ok else ""
 
 
+def collect_blocked() -> list[dict]:
+    """Return unresolved entries from scripts/blocked_tasks.jsonl."""
+    blocked_file = REPO / "scripts" / "blocked_tasks.jsonl"
+    if not blocked_file.exists():
+        return []
+    tasks = []
+    for line in blocked_file.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                entry = json.loads(line)
+                if not entry.get("resolved", False):
+                    tasks.append(entry)
+            except json.JSONDecodeError:
+                pass
+    return tasks
+
+
 def collect_agents() -> list[dict]:
     scripts_dir = REPO / "scripts"
     candidates = sorted(
@@ -153,7 +171,7 @@ def fmt_age(ts_str: str | None) -> str:
         return ts_str[:16]
 
 
-def print_report(issues, branches, prs, state, agents):
+def print_report(issues, branches, prs, state, agents, blocked=None):
     W = 72
     pr_by_branch = {pr["headRefName"]: pr for pr in prs}
 
@@ -211,6 +229,13 @@ def print_report(issues, branches, prs, state, agents):
                 print(f"    ○  {a['script']}")
         print()
 
+    # ── Blocked ───────────────────────────────────────────────────────────────
+    if blocked:
+        print(f"\n  BLOCKED")
+        for b in blocked:
+            print(f"    ! {b['agent']:<20}  — {b['reason']}  →  {b['needs']}")
+        print()
+
     bar()
 
 
@@ -224,6 +249,7 @@ def main():
     prs     = collect_prs()
     state   = collect_system_state()
     agents  = collect_agents()
+    blocked = collect_blocked()
 
     if as_json:
         print(json.dumps({
@@ -232,9 +258,10 @@ def main():
             "issues": {"open": [i for i in issues if i["state"] == "OPEN"],
                        "closed_count": sum(1 for i in issues if i["state"] == "CLOSED")},
             "agents": agents,
+            "blocked": blocked,
         }, indent=2))
     else:
-        print_report(issues, branches, prs, state, agents)
+        print_report(issues, branches, prs, state, agents, blocked)
 
 
 if __name__ == "__main__":
