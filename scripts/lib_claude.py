@@ -115,7 +115,10 @@ def call_bedrock_vision(system: str, user_text: str, image_b64: str,
 
 
 def call(system: str, user: str) -> tuple[str, str]:
-    """Try subscription → Bedrock. Returns (response_text, provider_used)."""
+    """Try Bedrock (if PARTICLE_ART_PROVIDER=bedrock) or subscription → Bedrock. Returns (response_text, provider_used)."""
+    if os.environ.get("PARTICLE_ART_PROVIDER") == "bedrock":
+        out = call_bedrock(system, user)
+        return out, "bedrock"
     out = call_subscription(system, user)
     if out:
         return out, "subscription"
