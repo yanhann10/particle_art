@@ -31,6 +31,7 @@ import budget
 import codes
 import element_counts
 import lib_claude
+from evaluator import read_top_eval_note
 
 LINEAGE = REPO / "lineage.json"
 PIECES = REPO / "pieces"
@@ -312,6 +313,7 @@ def build_prompt(parent: dict, parent_html: str, directive: str, seed_block: str
     rejection = _rejection_block()
     swarm = _swarm_block()
     iterate_note = _iterate_when_chosen_block(parent["id"])
+    eval_note = read_top_eval_note()
     system = (
         "You are a creative-coding shader/three.js mutation engine for a particle-art "
         "evolutionary gallery. Each mutation produces ONE self-contained HTML file "
@@ -338,7 +340,8 @@ def build_prompt(parent: dict, parent_html: str, directive: str, seed_block: str
         "(d) if you fetch external resources (GLB, websocket), have a fallback geometry "
         "that paints something on load failure."
     )
-    user = f"""# Mutation request
+    eval_prefix = (eval_note + "\n\n") if eval_note else ""
+    user = f"""{eval_prefix}# Mutation request
 
 ## Parent piece metadata
 ```json

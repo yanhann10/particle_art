@@ -5,6 +5,11 @@
 #
 # Install crontab line example (every 6 hours at :17):
 #   17 */6 * * *  /home/ubuntu/git_repo/particle_art/scripts/cron_tick.sh
+#
+# evaluator.py should be called after each tick to score new pieces and
+# queue feedback into eval_queue.jsonl for the next tick to consume.
+# Suggested crontab line (runs 2 min after the tick, giving git time to settle):
+#   19 */6 * * *  cd /home/ubuntu/git_repo/particle_art && .venv/bin/python3 scripts/evaluator.py
 
 set -u
 REPO="${PARTICLE_ART_REPO:-$HOME/git_repo/particle_art}"

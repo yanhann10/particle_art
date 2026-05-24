@@ -40,6 +40,7 @@ import budget
 import codes
 import element_counts
 import lib_claude
+from evaluator import read_top_eval_note
 
 LINEAGE = REPO / "lineage.json"
 PIECES  = REPO / "pieces"
@@ -184,6 +185,7 @@ def _rejection_block() -> str:
 def build_prompt(parent: dict, parent_html: str, word: str,
                  mode: str, extras: dict) -> tuple[str, str]:
     rejection = _rejection_block()
+    eval_note = read_top_eval_note()
 
     # Mode-specific framing inserted into the user message.
     if mode == "chain":
@@ -247,7 +249,8 @@ def build_prompt(parent: dict, parent_html: str, word: str,
             "fog mixing; never set `fog: true` + raw uniforms — silent compile fail).\n"
     )
 
-    user = f"""# Improv tick (mode: {mode})
+    eval_prefix = (eval_note + "\n\n") if eval_note else ""
+    user = f"""{eval_prefix}# Improv tick (mode: {mode})
 
 {framing}
 ## Parent piece metadata
