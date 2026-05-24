@@ -53,6 +53,14 @@ def main():
     LINEAGE.write_text(json.dumps(lineage, indent=2))
     print(f"Dropped {args.drop}, re-parented {args.new_id} → {orig_parent or 'root'}")
 
+    # Move dropped piece's code folder to pieces/archive/
+    src = REPO / "pieces" / args.drop
+    dst_dir = REPO / "pieces" / "archive"
+    dst_dir.mkdir(exist_ok=True)
+    if src.exists():
+        run_git("mv", f"pieces/{args.drop}", f"pieces/archive/{args.drop}")
+        print(f"Archived pieces/{args.drop} → pieces/archive/{args.drop}")
+
     run_git("add", "lineage.json")
     run_git("commit", "-m", f"replace: drop {args.drop}, reparent {args.new_id} to {orig_parent or 'root'}")
     run_git("push")
