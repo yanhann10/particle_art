@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sf0 · Solar Filament</title>
+<!-- MOTION: drift, intensity: hypnotic -->
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#000; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#c9a86a; opacity:.55; font-size:11px; letter-spacing:.06em; z-index:5; }
+</style>
+</head>
+<body>
+<div class="id">sf0</div>
+<canvas id="c"></canvas>
+
+<!-- piece control panel -->
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button><button id="pc-close" title="close / go back" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 10px;color:rgba(255,255,255,0.45);cursor:pointer;font-size:11px;line-height:1">×</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';};
+  document.getElementById('pc-close').onclick=function(){window.parent!==window?window.parent.postMessage({type:"dismiss-and-next"},"*"):history.back();};
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+<script>
+// ── SDF RAYMARCHER — WebGL2 / GLSL ES 3.00 ────────────────────────────────
+const cv = document.getElementById('c');
+const gl  = cv.getContext('webgl2');
+if (!gl) { document.body.style.cssText='display:flex;align-items:center;justify-content:center;height:100vh'; document.body.innerHTML='<p style="color:#c9a86a;font-family:monospace">WebGL2 required</p>'; throw 0; }
+
+const VS = `#version 300 es
+in vec2 a;
+void main() { gl_Position = vec4(a, 0., 1.); }`;
+
+const FS = `#version 300 es
+precision highp float;
+uniform float iTime;
+uniform vec2  iRes;
+out vec4 fragColor;
+
+vec3 path(float z) {
+  return vec3(
+    sin(z*.013)*24. + sin(z*.007)*52.,
+    cos(z*.009)*18. + cos(z*.006)*36.,
+    z
+  );
+}
+mat2 rot2(float a) { float c=cos(a),s=sin(a); return mat2(c,-s,s,c); }
+
+vec4 glow;
+
+float sdf(vec3 p) {
+  vec3 q = path(p.z);
+  p.xy -= q.xy;
+
+  // double helix — gold, π apart
+  float phi = p.z * .034;
+  float rA  = length(p.xy - vec2( cos(phi), sin(phi)) * 12.) - .75;
+  float rB  = length(p.xy - vec2(-cos(phi),-sin(phi)) * 12.) - .75;
+
+  // counter-helix — cyan, inner
+  float phiC = -p.z * .022 + .8;
+  float rC   = length(p.xy - vec2(cos(phiC), sin(phiC)) * 7.5) - .4;
+
+  // glow — boosted 10× vs first attempt; tight falloff so rails pop against dark BG
+  glow += vec4(6., 3.5, .15, 0.) / (.04 + rA*rA*.5);
+  glow += vec4(6., 3.5, .15, 0.) / (.04 + rB*rB*.5);
+  glow += vec4(.1, 2.8, 7.,  0.) / (.03 + rC*rC*.4);
+
+  // circular tunnel + arch ribs + radial columns
+  float r   = length(p.xy);
+  float rib = cos(p.z*.18)*2. + cos(p.z*.09)*3.;
+  float col = cos(atan(p.y, p.x)*12.)*.55;
+  float tun = (24. + rib*.4 + col*.3) - r;
+
+  // faint amber wall haze
+  glow += vec4(.5,.28,.03,0.) / (.8 + tun*tun*.04) * .12;
+
+  return min(min(rA, rB), min(rC, tun));
+}
+
+void main() {
+  vec2 u = (gl_FragCoord.xy - iRes*.5) / iRes.y;
+
+  float T = iTime*85. + 200.;
+  vec3 ro  = path(T);
+  vec3 Z   = normalize(path(T+9.) - ro);
+  vec3 X   = normalize(vec3(Z.z, 0., -Z.x));
+  vec2 ru  = rot2(sin(T*.0032)*.28) * u;
+  vec3 D   = normalize(vec3(rot2(sin(T*.0045)*.22)*ru, 1.) * mat3(-X, cross(X,Z), Z));
+
+  glow = vec4(0.);
+  vec4 o = vec4(0.);
+  float d = 0., s = 0.;
+
+  for (float i = 0.; i < 120.; i++) {
+    vec3 p = ro + D*d;
+    s = sdf(p) * .85;
+    d += s;
+    o += glow + 1./max(s, .01);
+  }
+
+  // simple Reinhard-style per-channel tone map — no d dependency
+  o = o / (o + 5e4);
+  o.r *= 1.10;
+  o.b *= .82;
+
+  fragColor = clamp(o, 0., 1.);
+}`;
+
+function mksh(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS))
+    console.error(type === gl.VERTEX_SHADER ? 'VS' : 'FS', gl.getShaderInfoLog(sh));
+  return sh;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, mksh(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, mksh(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) console.error('link', gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const aLoc = gl.getAttribLocation(prog, 'a');
+gl.enableVertexAttribArray(aLoc);
+gl.vertexAttribPointer(aLoc, 2, gl.FLOAT, false, 0, 0);
+
+const uTime = gl.getUniformLocation(prog, 'iTime');
+const uRes  = gl.getUniformLocation(prog, 'iRes');
+
+function resize() {
+  cv.width = innerWidth; cv.height = innerHeight;
+  gl.viewport(0, 0, innerWidth, innerHeight);
+  gl.uniform2f(uRes, innerWidth, innerHeight);
+}
+resize();
+addEventListener('resize', resize);
+
+const t0 = performance.now();
+(function loop() {
+  gl.uniform1f(uTime, (performance.now()-t0)/1000);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
