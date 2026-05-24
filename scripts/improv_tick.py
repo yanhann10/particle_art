@@ -183,12 +183,22 @@ def _rejection_block() -> str:
 
 
 def build_prompt(parent: dict, parent_html: str, word: str,
-                 mode: str, extras: dict) -> tuple[str, str]:
+                 mode: str, extras: dict,
+                 user_directive: str | None = None) -> tuple[str, str]:
     rejection = _rejection_block()
     eval_note = read_top_eval_note()
 
+    # User-submitted directive overrides mode framing entirely.
+    if user_directive:
+        framing = (
+            f"## User direction (highest priority — implement this directly)\n"
+            f"{user_directive}\n\n"
+            "Apply this request as a CONTINUOUS MORPH of the parent piece. "
+            "Implement every named effect faithfully. Keep all WebGL/three.js "
+            "plumbing intact; only change what the request targets.\n"
+        )
     # Mode-specific framing inserted into the user message.
-    if mode == "chain":
+    elif mode == "chain":
         framing = (
             f"## Word\n**{word}**\n\n"
             "Treat this word as the directive. What does it _feel_ like? What "
@@ -197,7 +207,7 @@ def build_prompt(parent: dict, parent_html: str, word: str,
             "piece must read as the parent after the word has passed through "
             "it, not a fresh start.\n"
         )
-    elif mode == "surprise":
+    elif not user_directive and mode == "surprise":
         framing = (
             f"## Word (SURPRISE-TURN mode)\n**{word}**\n\n"
             "This is a SURPRISE/DELIGHT branch. Take the parent piece as your "
@@ -210,7 +220,7 @@ def build_prompt(parent: dict, parent_html: str, word: str,
             "self-recovers. Keep the surprise tasteful (no jump-scare); "
             "playful, not chaotic.\n"
         )
-    elif mode == "artist":
+    elif not user_directive and mode == "artist":
         artist = extras.get("artist", "?")
         practice = extras.get("practice", "")
         framing = (
@@ -225,7 +235,7 @@ def build_prompt(parent: dict, parent_html: str, word: str,
             f"particle-art medium, NOT like a literal pastiche of their "
             f"famous works.\n"
         )
-    else:
+    elif not user_directive:
         framing = f"## Word\n**{word}**\n"
 
     system = (
@@ -307,13 +317,15 @@ def append_log(entry: dict):
 
 
 def _generate_one(parent: dict, parent_html: str, word: str,
-                  mode: str, extras: dict, refine_feedback: str | None = None
+                  mode: str, extras: dict, refine_feedback: str | None = None,
+                  user_directive: str | None = None,
                   ) -> tuple[str, str]:
     """Run one generation pass. Optionally append critic feedback.
 
     Returns (extracted_html, provider). Raises on extraction/validation failure.
     """
-    system, user = build_prompt(parent, parent_html, word, mode, extras)
+    system, user = build_prompt(parent, parent_html, word, mode, extras,
+                                user_directive=user_directive)
     if refine_feedback:
         user = (user + "\n\n## Critic feedback from a prior attempt — fix these in this version:\n"
                 + refine_feedback + "\n")
@@ -332,6 +344,8 @@ def main():
     ap.add_argument("--parent", help="force a specific parent id")
     ap.add_argument("--no-critic", action="store_true",
                     help="skip the critic+refine step (faster, lower quality)")
+    ap.add_argument("--user-directive", default=None,
+                    help="user-submitted feedback text (overrides word/mode framing)")
     args = ap.parse_args()
 
     # budget gate. Two budget calls per tick (gen + refine) plus 2 critic
@@ -356,7 +370,10 @@ def main():
         parent, policy = pick_parent(lineage, prefs, mode)
 
     parent_html = (PIECES / parent["id"] / "index.html").read_text()
-    if args.word:
+    if args.user_directive:
+        word, extras = args.user_directive[:60], {}
+        mode = "chain"  # user directives are continuous morphs
+    elif args.word:
         word, extras = args.word, {}
     else:
         word, extras = sample_word(mode, recent)
@@ -365,9 +382,12 @@ def main():
     print(f"parent: {parent['id']} ({parent.get('title','')}) [policy={policy}]")
     print(f"word: {word}" + (f"  (artist={extras.get('artist')})" if extras.get("artist") else ""))
 
+    user_dir = args.user_directive
+
     # === Generation v1 ===
     try:
-        html_v1, provider_v1 = _generate_one(parent, parent_html, word, mode, extras)
+        html_v1, provider_v1 = _generate_one(parent, parent_html, word, mode, extras,
+                                             user_directive=user_dir)
     except lib_claude.ProviderError as e:
         print(f"provider failure (v1): {e}"); return 4
     except Exception as e:
@@ -385,7 +405,8 @@ def main():
         # refinement attempt
         try:
             html_v2, provider_v2 = _generate_one(parent, parent_html, word, mode, extras,
-                                                 refine_feedback=s1["feedback"])
+                                                 refine_feedback=s1["feedback"],
+                                                 user_directive=user_dir)
             html_v2_holder["html"] = html_v2
             s2 = critic.judge(html_v2, mode, word, extras, parent["id"], parent.get("title", ""))
             score_log["v2"] = s2
@@ -398,6 +419,7 @@ def main():
 
     new_id = codes.generate(LINEAGE, n=1)[0]
     final_html = final_html.replace("<NEW_ID>", new_id)
+    print(f"new_id: {new_id}")
 
     if args.dry_run:
         print(f"[dry-run] would create pieces/{new_id}/  (parent={parent['id']}, word={word}, mode={mode}, provider={final_provider}, picked={score_log['picked']})")

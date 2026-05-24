@@ -75,10 +75,12 @@ def call_bedrock(system: str, user: str, max_tokens: int = 8000) -> str:
 
 def call_bedrock_vision(system: str, user_text: str, image_b64: str,
                         media_type: str = "image/jpeg",
-                        model_id: str = "us.amazon.nova-pro-v1:0",
+                        model_id: str | None = None,
                         max_tokens: int = 1024) -> str:
-    """Multimodal Bedrock call with one image. Uses Nova Pro (cheap + capable).
+    """Multimodal Bedrock call with one image using Claude (Anthropic format).
     image_b64: base64-encoded image bytes. Raises ProviderError on failure."""
+    if model_id is None:
+        model_id = BEDROCK_MODEL_ID
     try:
         import boto3  # type: ignore
     except ImportError:
