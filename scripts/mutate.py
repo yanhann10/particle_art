@@ -37,10 +37,35 @@ PIECES = REPO / "pieces"
 PREFS = REPO / "scripts" / "preferences.json"
 DIRECTIVES = REPO / "scripts" / "mutation_directives.json"
 LOG = REPO / "scripts" / "mutation_log.jsonl"
+PENDING_QUEUE = REPO / "scripts" / "pending_directives.jsonl"
 
 
 def load_json(p: Path) -> dict:
     return json.loads(p.read_text())
+
+
+def _pop_pending_directive() -> tuple[str, str] | None:
+    """Pop the first valid directive from pending_directives.jsonl.
+
+    Handles both 'directive' (pinterest_agent) and 'priority_directive'
+    (pinterest_critic_agent) field names. Returns (directive_text, source)
+    or None if the queue is empty.
+    """
+    if not PENDING_QUEUE.exists():
+        return None
+    lines = [l for l in PENDING_QUEUE.read_text().splitlines() if l.strip()]
+    for i, line in enumerate(lines):
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        directive = entry.get("priority_directive") or entry.get("directive", "")
+        if not directive:
+            continue
+        remaining = [l for j, l in enumerate(lines) if j != i]
+        PENDING_QUEUE.write_text(("\n".join(remaining) + "\n") if remaining else "")
+        return directive, entry.get("source", "pending")
+    return None
 
 
 def _tags_from_directive(directive_id: str, parent: dict) -> list[str]:
@@ -425,7 +450,12 @@ def main():
     elif seed_override_directive:
         directive_id, directive = "seed_channel", seed_override_directive
     else:
-        directive_id, directive = sample_directive(DIRECTIVES, parent["id"], recent)
+        pending = _pop_pending_directive()
+        if pending:
+            directive, directive_id = pending[0], f"pending:{pending[1]}"
+            print(f"using pending directive (source={pending[1]}): {directive[:80]}")
+        else:
+            directive_id, directive = sample_directive(DIRECTIVES, parent["id"], recent)
 
     print(f"parent: {parent['id']} ({parent['title']})")
     print(f"directive: {directive_id} — {directive[:120]}{'...' if len(directive) > 120 else ''}")

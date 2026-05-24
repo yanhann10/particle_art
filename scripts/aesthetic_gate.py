@@ -18,6 +18,38 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 BUG_MD = REPO / "bug.md"
 IDEA_LOG = REPO / "scripts" / "idea_extracts.jsonl"
+QUEUE = REPO / "scripts" / "pending_directives.jsonl"
+FEEDBACK_LOG = REPO / "scripts" / "aesthetic_feedback.jsonl"
+
+
+def _requeue_ideas(ideas: list[str], piece_id: str, hits: list[str]) -> None:
+    """Append each extracted idea as a new pending directive so the next tick retries."""
+    if not ideas:
+        return
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with QUEUE.open("a") as f:
+        for idea in ideas:
+            entry = {
+                "source": "aesthetic_recovery",
+                "directive": idea,
+                "origin_piece": piece_id,
+                "anti_patterns_avoided": hits,
+                "queued_at": ts,
+            }
+            f.write(json.dumps(entry) + "\n")
+
+
+def _log_feedback(piece_id: str, hits: list[str], directive: str) -> None:
+    """Append failure summary so pinterest_agent can learn what patterns fail."""
+    entry = {
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "piece": piece_id,
+        "anti_patterns_hit": hits,
+        "directive_fragment": directive[:200],
+    }
+    FEEDBACK_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with FEEDBACK_LOG.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 def _read_bugs() -> str:
@@ -128,6 +160,9 @@ def check(html: str, piece_id: str, parent: dict, directive: str) -> tuple[bool,
             with IDEA_LOG.open("a") as f:
                 f.write(json.dumps(entry) + "\n")
             print(f"    extracted {len(ideas)} idea(s) → scripts/idea_extracts.jsonl")
+            _requeue_ideas(ideas, piece_id, hits)
+            print(f"    re-queued {len(ideas)} idea(s) → pending_directives.jsonl")
+        _log_feedback(piece_id, hits, directive)
     else:
         print(f"  aesthetic gate: PASS")
 

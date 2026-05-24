@@ -28,10 +28,11 @@ import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO   = Path(os.environ.get("PARTICLE_ART_REPO", Path(__file__).resolve().parent.parent))
-SEEN   = REPO / "scripts" / "seen_pins.json"
-QUEUE  = REPO / "scripts" / "pending_directives.jsonl"
-TASTE  = REPO / "taste.json"
+REPO         = Path(os.environ.get("PARTICLE_ART_REPO", Path(__file__).resolve().parent.parent))
+SEEN         = REPO / "scripts" / "seen_pins.json"
+QUEUE        = REPO / "scripts" / "pending_directives.jsonl"
+TASTE        = REPO / "taste.json"
+FEEDBACK_LOG = REPO / "scripts" / "aesthetic_feedback.jsonl"
 
 PINTEREST_API = "https://api.pinterest.com/v5"
 
@@ -90,6 +91,24 @@ def _load_taste() -> dict:
     return {}
 
 
+def _load_aesthetic_failures(n: int = 20) -> list[str]:
+    """Return recent distinct anti-pattern labels from aesthetic_feedback.jsonl."""
+    if not FEEDBACK_LOG.exists():
+        return []
+    lines = FEEDBACK_LOG.read_text().splitlines()[-n:]
+    patterns: list[str] = []
+    seen: set[str] = set()
+    for ln in lines:
+        try:
+            for p in json.loads(ln).get("anti_patterns_hit", []):
+                if p not in seen:
+                    patterns.append(p)
+                    seen.add(p)
+        except Exception:
+            pass
+    return patterns[:10]
+
+
 def taste_gate(directive: str) -> tuple[bool, str]:
     """Return (approved, reason). Rejects if directive echoes a disliked direction."""
     taste = _load_taste()
@@ -113,14 +132,21 @@ SYSTEM = (
 USER_TMPL = (
     "The user pinned this image to their art inspiration board on Pinterest.\n"
     "Title/description hint: {desc}\n\n"
+    "{failure_block}"
     "Respond with a JSON object only — no prose:\n"
     '{{"directive": "<15-30 word mutation directive for the particle-art creator>", '
     '"rationale": "<1 sentence on what formal/material move you extracted>", '
     '"score": <1-10 how visually inventive this is for a generative-art system>}}'
 )
 
+_FAILURE_TMPL = (
+    "ANTI-PATTERNS that have recently caused pieces to be rejected — "
+    "do NOT generate directives that would produce these:\n"
+    "{items}\n\n"
+)
 
-def analyse_pin(pin: dict, dry_run: bool) -> dict | None:
+
+def analyse_pin(pin: dict, dry_run: bool, failures: list[str] | None = None) -> dict | None:
     """Download pin image, call vision LLM, return parsed result or None."""
     media = pin.get("media") or {}
     images = media.get("images") or {}
@@ -145,9 +171,13 @@ def analyse_pin(pin: dict, dry_run: bool) -> dict | None:
         print(f"  download failed: {e}")
         return None
 
+    failure_block = ""
+    if failures:
+        failure_block = _FAILURE_TMPL.format(items="\n".join(f"  - {p}" for p in failures))
+
     from lib_claude import call_bedrock_vision, ProviderError
     try:
-        raw = call_bedrock_vision(SYSTEM, USER_TMPL.format(desc=desc), b64, media_type)
+        raw = call_bedrock_vision(SYSTEM, USER_TMPL.format(desc=desc, failure_block=failure_block), b64, media_type)
     except ProviderError as e:
         print(f"  vision call failed: {e}")
         return None
@@ -223,9 +253,13 @@ def main():
     new_pins = [p for p in pins if p["id"] not in seen]
     print(f"Pinterest agent: {len(pins)} pins, {len(new_pins)} new")
 
+    failures = _load_aesthetic_failures()
+    if failures:
+        print(f"aesthetic feedback: {len(failures)} recent anti-pattern(s) loaded as negative context")
+
     queued, skipped = 0, 0
     for pin in new_pins:
-        result = analyse_pin(pin, args.dry_run)
+        result = analyse_pin(pin, args.dry_run, failures=failures)
         seen.add(pin["id"])
 
         if not result:
