@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>d00 · Riley flow strokes (curl-directed growth)</title>
+<!-- MOTION: flow, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#8a7d6f; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#8a7d6f; }
+</style>
+</head>
+<body>
+<div class="id">d00</div>
+<div class="hint">click to regenerate field</div>
+<div class="src">Riley · curl-flow strokes · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 28;
+const camera = new THREE.OrthographicCamera(
+  frustumSize * aspect / -2, frustumSize * aspect / 2,
+  frustumSize / 2, frustumSize / -2,
+  0.1, 100
+);
+camera.position.set(0, 0, 10);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+let geom, points, mat;
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uFlowScale: { value: 1.2 },
+  uFlowSpeed: { value: 0.3 },
+  uPhaseMode: { value: 0 },
+  uCoalesce: { value: 0 }
+};
+
+mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uFlowScale;
+    uniform float uFlowSpeed;
+    uniform float uPhaseMode;
+    uniform float uCoalesce;
+    
+    attribute vec3 strokeOrigin;
+    attribute vec3 strokeDir;
+    attribute float strokePhase;
+    attribute float strokeLength;
+    attribute float particleT;
+    attribute float seed;
+    
+    varying vec3 vColor;
+    varying float vAlpha;
+    
+    // Curl noise potential function
+    float psi(vec2 p, float t){
+      float s1 = sin(p.x * 1.3 + p.y * 0.7 + t * 0.5) * 0.5;
+      float s2 = sin(p.x * 0.8 - p.y * 1.1 + t * 0.3) * 0.5;
+      float s3 = sin(p.x * 2.1 + p.y * 1.7 - t * 0.4) * 0.25;
+      return s1 + s2 + s3;
+    }
+    
+    // 2D curl: (∂ψ/∂y, −∂ψ/∂x)
+    vec2 curl(vec2 p, float t){
+      float eps = 0.01;
+      float py = (psi(vec2(p.x, p.y + eps), t) - psi(vec2(p.x, p.y - eps), t)) / (2.0 * eps);
+      float px = (psi(vec2(p.x + eps, p.y), t) - psi(vec2(p.x - eps, p.y), t)) / (2.0 * eps);
+      return vec2(py, -px);
+    }
+    
+    void main(){
+      float phase = mod(uTime * uFlowSpeed + strokePhase, 6.28318);
+      float activePhase = smoothstep(0.0, 0.8, sin(phase * 0.5));
+      
+      // Stroke travels along curl field direction
+      vec2 curlVec = curl(strokeOrigin.xy * uFlowScale, uTime * 0.2 + seed * 6.28);
+      vec3 flowDir = vec3(normalize(curlVec), 0.0);
+      
+      float t = particleT * strokeLength * activePhase;
+      vec3 basePos = strokeOrigin + flowDir * t;
+      
+      // Small perpendicular jitter for stroke width
+      vec2 perpDir = vec2(-flowDir.y, flowDir.x);
+      float jitter = (seed - 0.5) * 0.08;
+      basePos.xy += perpDir * jitter;
+      
+      // Phase transition: particles coalesce into fluid ribbons
+      float coalesceFactor = smoothstep(0.3, 0.7, sin(phase + particleT * 3.14));
+      float ribbonWidth = mix(0.0, 0.3, uCoalesce * coalesceFactor);
+      basePos.xy += perpDir * ribbonWidth * (seed - 0.5);
+      
+      vec4 mv = modelViewMatrix * vec4(basePos, 1.0);
+      gl_PointSize = uPixel * mix(1.8, 3.2, uCoalesce);
+      gl_Position = projectionMatrix * mv;
+      
+      // Three-color palette: deep teal (phase 0), warm rose (phase 1), pale cream (phase 2)
+      float phaseVal = mod(uPhaseMode + strokePhase + sin(particleT * 6.28) * 0.5, 3.0);
+      vec3 c1 = vec3(0.15, 0.35, 0.40); // teal
+      vec3 c2 = vec3(0.55, 0.25, 0.22); // rose
+      vec3 c3 = vec3(0.78, 0.72, 0.65); // cream
+      
+      if(phaseVal < 1.0){
+        vColor = mix(c1, c2, phaseVal);
+      } else if(phaseVal < 2.0){
+        vColor = mix(c2, c3, phaseVal - 1.0);
+      } else {
+        vColor = mix(c3, c1, phaseVal - 2.0);
+      }
+      
+      vAlpha = activePhase * 0.5;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vAlpha;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      
+      float falloff = 1.0 - smoothstep(0.1, 0.25, r);
+      gl_FragColor = vec4(vColor, vAlpha * falloff);
+    }
+  `
+});
+
+function buildStrokes(numStrokes, seed){
+  const positions = new Float32Array(N * 3);
+  const origins = new Float32Array(N * 3);
+  const dirs = new Float32Array(N * 3);
+  const phases = new Float32Array(N);
+  const lengths = new Float32Array(N);
+  const particleTs = new Float32Array(N);
+  const seeds = new Float32Array(N);
+  
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  
+  const particlesPerStroke = Math.floor(N / numStrokes);
+  let idx = 0;
+  
+  for(let i = 0; i < numStrokes && idx < N; i++){
+    const ox = (rng() - 0.5) * 22;
+    const oy = (rng() - 0.5) * 22;
+    const oz = 0;
+    
+    const angle = rng() * 6.28318;
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    
+    const strokeLen = 2.0 + rng() * 4.0;
+    const strokePhase = rng() * 6.28318;
+    
+    for(let j = 0; j < particlesPerStroke && idx < N; j++){
+      origins[idx * 3] = ox;
+      origins[idx * 3 + 1] = oy;
+      origins[idx * 3 + 2] = oz;
+      
+      dirs[idx * 3] = dx;
+      dirs[idx * 3 + 1] = dy;
+      dirs[idx * 3 + 2] = 0;
+      
+      phases[idx] = strokePhase;
+      lengths[idx] = strokeLen;
+      particleTs[idx] = j / particlesPerStroke;
+      seeds[idx] = rng();
+      
+      positions[idx * 3] = ox;
+      positions[idx * 3 + 1] = oy;
+      positions[idx * 3 + 2] = oz;
+      
+      idx++;
+    }
+  }
+  
+  while(idx < N){
+    origins[idx * 3] = (rng() - 0.5) * 22;
+    origins[idx * 3 + 1] = (rng() - 0.5) * 22;
+    origins[idx * 3 + 2] = 0;
+    dirs[idx * 3] = 1;
+    dirs[idx * 3 + 1] = 0;
+    dirs[idx * 3 + 2] = 0;
+    phases[idx] = rng() * 6.28318;
+    lengths[idx] = 3;
+    particleTs[idx] = rng();
+    seeds[idx] = rng();
+    positions[idx * 3] = origins[idx * 3];
+    positions[idx * 3 + 1] = origins[idx * 3 + 1];
+    positions[idx * 3 + 2] = 0;
+    idx++;
+  }
+  
+  return { positions, origins, dirs, phases, lengths, particleTs, seeds };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random() * 1e9);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  
+  const numStrokes = 180 + Math.floor(rng() * 140);
+  
+  uniforms.uFlowScale.value = 0.8 + rng() * 1.0;
+  uniforms.uFlowSpeed.value = 0.2 + rng() * 0.3;
+  uniforms.uPhaseMode.value = rng() * 3.0;
+  uniforms.uCoalesce.value = rng();
+  
+  const { positions, origins, dirs, phases, lengths, particleTs, seeds } = buildStrokes(numStrokes, seed);
+  
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('strokeOrigin', new THREE.BufferAttribute(origins, 3));
+    geom.setAttribute('strokeDir', new THREE.BufferAttribute(dirs, 3));
+    geom.setAttribute('strokePhase', new THREE.BufferAttribute(phases, 1));
+    geom.setAttribute('strokeLength', new THREE.BufferAttribute(lengths, 1));
+    geom.setAttribute('particleT', new THREE.BufferAttribute(particleTs, 1));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.strokeOrigin.array.set(origins);
+    geom.attributes.strokeOrigin.needsUpdate = true;
+    geom.attributes.strokeDir.array.set(dirs);
+    geom.attributes.strokeDir.needsUpdate = true;
+    geom.attributes.strokePhase.array.set(phases);
+    geom.attributes.strokePhase.needsUpdate = true;
+    geom.attributes.strokeLength.array.set(lengths);
+    geom.attributes.strokeLength.needsUpdate = true;
+    geom.attributes.particleT.array.set(particleTs);
+    geom.attributes.particleT.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);
+    geom.attributes.seed.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+}
+
+regenerate();
+addEventListener('click', regenerate);
+
+addEventListener('resize', () => {
+  const newAspect = innerWidth / innerHeight;
+  camera.left = frustumSize * newAspect / -2;
+  camera.right = frustumSize * newAspect / 2;
+  camera.top = frustumSize / 2;
+  camera.bottom = frustumSize / -2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  uniforms.uTime.value = (now - start) / 1000;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
