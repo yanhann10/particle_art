@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>49h · woven dash field · teal to amber gradient</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0e14; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">49h</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0e14, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 22);
+camera.lookAt(0, 0, 0);
+
+const N = 80000;
+
+// Dash geometry: a thin flat rectangle (6:1 aspect). Long axis = local X.
+// Slightly larger dashes so they're visible and stack well.
+const dashGeom = new THREE.PlaneGeometry(0.22, 0.035);
+
+// Per-instance arrays
+const positions = new Float32Array(N * 3);  // world-space birth position
+const velocities = new Float32Array(N * 3); // flow-field velocity (normalised)
+const birthXArr = new Float32Array(N);       // birth x, for color mapping
+const phases = new Float32Array(N);          // random phase offset
+
+// Simple deterministic curl-noise flow field
+function flowField(x, y, z) {
+  const f = 0.18;
+  const vx = Math.cos(y * f * 0.9 + 0.3) * Math.sin(z * f * 1.1);
+  const vy = Math.sin(x * f * 1.0 + 1.2) * Math.cos(z * f * 0.8);
+  const vz = Math.cos(x * f * 0.7) * Math.sin(y * f * 1.3 + 0.7);
+  const len = Math.sqrt(vx*vx + vy*vy + vz*vz) + 1e-6;
+  return [vx/len, vy/len, vz/len];
+}
+
+const dummy = new THREE.Object3D();
+const vel3 = new THREE.Vector3();
+const xAxis = new THREE.Vector3(1, 0, 0);
+
+for (let i = 0; i < N; i++) {
+  const px = (Math.random() - 0.5) * 44;
+  const py = (Math.random() - 0.5) * 32;
+  const pz = (Math.random() - 0.5) * 8;
+
+  positions[i*3]   = px;
+  positions[i*3+1] = py;
+  positions[i*3+2] = pz;
+
+  const [vx, vy, vz] = flowField(px, py, pz);
+  velocities[i*3]   = vx;
+  velocities[i*3+1] = vy;
+  velocities[i*3+2] = vz;
+
+  birthXArr[i] = px;
+  phases[i] = Math.random() * Math.PI * 2;
+
+  // Orient dash: align local X toward velocity
+  vel3.set(vx, vy, vz).normalize();
+  dummy.position.set(px, py, pz);
+  dummy.quaternion.setFromUnitVectors(xAxis,
+    Math.abs(vel3.dot(xAxis)) > 0.999
+      ? new THREE.Vector3(0, 1, 0)
+      : vel3
+  );
+  dummy.updateMatrix();
+  // We will override position via shader, so store identity-like matrix
+  // (position baked into attribute, rotation from dummy)
+  dummy.position.set(0, 0, 0);
+  dummy.updateMatrix();
+
+}
+
+const material = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    varying vec3  vColor;
+    varying float vAlpha;
+    varying vec2  vUv;
+
+    attribute vec3  aBirthPos;   // original world position
+    attribute vec3  aVel;        // normalised flow velocity
+    attribute float aBirthX;     // birth x for color map
+    attribute float aPhase;      // random phase
+
+    void main() {
+      vUv = uv;
+
+      // Animate: translate along velocity, wrap in world space
+      float speed = 1.2;
+      vec3 offset = aVel * uTime * speed;
+
+      float wx = mod(aBirthPos.x + offset.x + 22.0, 44.0) - 22.0;
+      float wy = mod(aBirthPos.y + offset.y + 16.0, 32.0) - 16.0;
+      float wz = mod(aBirthPos.z + offset.z +  4.0,  8.0) -  4.0;
+      vec3 worldPos = vec3(wx, wy, wz);
+
+      // Color: deep teal (left) → warm amber (right) — boosted for additive brightness
+      float t = clamp((aBirthX + 22.0) / 44.0, 0.0, 1.0);
+      vec3 teal  = vec3(0.10, 0.85, 0.90);
+      vec3 amber = vec3(1.00, 0.75, 0.15);
+      vColor = mix(teal, amber, t);
+
+      // Soft breathing alpha — kept moderate so additive stacking creates bright peaks
+      float breath = 0.50 + 0.40 * sin(uTime * 1.1 + aPhase);
+      vAlpha = breath;
+
+      // Build final clip position:
+      // instanceMatrix encodes the rotation (orientation toward velocity).
+      // We override the translation with worldPos.
+      mat4 rotMat = instanceMatrix;
+      rotMat[3] = vec4(worldPos, 1.0); // replace translation column
+
+      vec4 mvPos = modelViewMatrix * rotMat * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mvPos;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vColor;
+    varying float vAlpha;
+    varying vec2  vUv;
+
+    void main() {
+      // Soft-edge along short axis, hard on long axis → dash shape
+      float longEdge  = 1.0 - smoothstep(0.80, 1.00, abs(vUv.x * 2.0 - 1.0));
+      float shortEdge = 1.0 - smoothstep(0.50, 1.00, abs(vUv.y * 2.0 - 1.0));
+      float mask = longEdge * shortEdge;
+      if (mask < 0.01) discard;
+      gl_FragColor = vec4(vColor * vAlpha * mask, vAlpha * mask);
+    }
+  `
+});
+
+const instancedMesh = new THREE.InstancedMesh(dashGeom, material, N);
+instancedMesh.frustumCulled = false;
+
+// Fill instanceMatrix with rotation only (translation will be overridden in shader)
+const dummyObj = new THREE.Object3D();
+for (let i = 0; i < N; i++) {
+  const vx = velocities[i*3], vy = velocities[i*3+1], vz = velocities[i*3+2];
+  vel3.set(vx, vy, vz).normalize();
+
+  const refAxis = Math.abs(vel3.x) < 0.9 ? xAxis : new THREE.Vector3(0, 1, 0);
+  dummyObj.quaternion.setFromUnitVectors(refAxis, vel3);
+  dummyObj.position.set(positions[i*3], positions[i*3+1], positions[i*3+2]);
+  dummyObj.scale.set(1, 1, 1);
+  dummyObj.updateMatrix();
+  instancedMesh.setMatrixAt(i, dummyObj.matrix);
+}
+instancedMesh.instanceMatrix.needsUpdate = true;
+
+// Attach per-instance attributes
+dashGeom.setAttribute('aBirthPos', new THREE.InstancedBufferAttribute(positions, 3));
+dashGeom.setAttribute('aVel',      new THREE.InstancedBufferAttribute(velocities, 3));
+dashGeom.setAttribute('aBirthX',   new THREE.InstancedBufferAttribute(birthXArr, 1));
+dashGeom.setAttribute('aPhase',    new THREE.InstancedBufferAttribute(phases, 1));
+
+scene.add(instancedMesh);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let t0 = performance.now();
+(function loop() {
+  requestAnimationFrame(loop);
+  const t = (performance.now() - t0) / 1000;
+  material.uniforms.uTime.value = t;
+
+  // Slow drift
+  camera.position.x = Math.sin(t * 0.04) * 5;
+  camera.position.y = Math.cos(t * 0.06) * 3;
+  camera.position.z = 22 + Math.sin(t * 0.05) * 3;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+})();
+</script>
+<!-- MOTION: flow, intensity: moderate -->
+</body>
+</html>
