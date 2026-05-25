@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2gl · Riley curl-flow membrane (phase transition)</title>
+<!-- MOTION: flow, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1612; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; color:#a89984; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; color:#a89984; }
+</style>
+</head>
+<body>
+<div class="id">2gl</div>
+<div class="hint">click to regenerate · curl-driven flow</div>
+<div class="src">Riley lines → fluid phase · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 28;
+const camera = new THREE.OrthographicCamera(
+  frustumSize * aspect / -2, frustumSize * aspect / 2,
+  frustumSize / 2, frustumSize / -2,
+  0.1, 100
+);
+camera.position.set(0, 0, 10);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+let geom, points, mat;
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uFlowScale: { value: 1.0 },
+  uFluidThreshold: { value: 0.5 },
+};
+
+mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uFlowScale;
+    uniform float uFluidThreshold;
+    
+    attribute vec2 birthPos;
+    attribute float seed;
+    attribute float strokeId;
+    
+    varying vec3 vColor;
+    varying float vAlpha;
+    
+    // Curl noise: stream function → curl
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      float a = hash(i);
+      float b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0));
+      float d = hash(i + vec2(1.0, 1.0));
+      return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+    
+    // Stream function ψ(x,y,t)
+    float streamFunc(vec2 p, float t) {
+      float n1 = noise(p * 0.8 + t * 0.15);
+      float n2 = noise(p * 1.6 - vec2(t * 0.2, 0.0));
+      return n1 * 2.0 + n2 * 0.5;
+    }
+    
+    // Curl = (∂ψ/∂y, -∂ψ/∂x)
+    vec2 curl(vec2 p, float t) {
+      float eps = 0.01;
+      float dx = streamFunc(p + vec2(eps, 0.0), t) - streamFunc(p - vec2(eps, 0.0), t);
+      float dy = streamFunc(p + vec2(0.0, eps), t) - streamFunc(p - vec2(0.0, eps), t);
+      return vec2(dy, -dx) / (2.0 * eps);
+    }
+    
+    void main(){
+      float t = uTime * 0.3;
+      vec2 p = birthPos;
+      
+      // Travel along curl field
+      float age = mod(seed * 100.0 + t * 0.4, 1.0);
+      vec2 flow = vec2(0.0);
+      
+      for(float i = 0.0; i < 1.0; i += 0.1) {
+        if(i > age) break;
+        vec2 c = curl(p * uFlowScale, t + i * 3.0);
+        flow += c * 0.1;
+      }
+      
+      vec3 pos = vec3(p + flow * 4.0, 0.0);
+      
+      // Phase transition: local density determines particle vs fluid
+      float localDensity = noise(p * 2.0 + t * 0.2);
+      float fluidPhase = smoothstep(uFluidThreshold - 0.1, uFluidThreshold + 0.1, localDensity);
+      
+      // Fluid particles coalesce (smaller, more opaque)
+      // Particle phase dispersed (larger, more transparent)
+      float size = mix(2.8, 1.4, fluidPhase);
+      float alpha = mix(0.15, 0.6, fluidPhase);
+      
+      // Color palette: rust orange → cool teal → warm cream
+      vec3 c1 = vec3(0.82, 0.45, 0.28); // rust
+      vec3 c2 = vec3(0.35, 0.62, 0.65); // teal
+      vec3 c3 = vec3(0.92, 0.88, 0.78); // cream
+      
+      float colorMix = fract(strokeId * 0.381966 + localDensity);
+      vec3 col = mix(c1, c2, smoothstep(0.3, 0.7, colorMix));
+      col = mix(col, c3, fluidPhase * 0.3);
+      
+      vColor = col;
+      vAlpha = alpha * smoothstep(0.0, 0.15, age) * smoothstep(1.0, 0.85, age);
+      
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      gl_PointSize = uPixel * size;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vAlpha;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      
+      float fade = 1.0 - smoothstep(0.3, 0.5, r);
+      gl_FragColor = vec4(vColor, vAlpha * fade);
+    }
+  `
+});
+
+function buildStrokes(seed){
+  const positions = new Float32Array(N * 3);
+  const birthPositions = new Float32Array(N * 2);
+  const seeds = new Float32Array(N);
+  const strokeIds = new Float32Array(N);
+  
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  
+  const numStrokes = 120 + Math.floor(rng() * 80);
+  const particlesPerStroke = Math.floor(N / numStrokes);
+  
+  let idx = 0;
+  for (let i = 0; i < numStrokes && idx < N; i++){
+    // Birth point for each stroke
+    const angle = i * 2.399963; // golden angle
+    const radius = Math.sqrt(rng()) * 10.0;
+    const bx = Math.cos(angle) * radius;
+    const by = Math.sin(angle) * radius;
+    
+    for (let j = 0; j < particlesPerStroke && idx < N; j++){
+      const x = bx + (rng() - 0.5) * 0.3;
+      const y = by + (rng() - 0.5) * 0.3;
+      
+      positions[idx * 3] = x;
+      positions[idx * 3 + 1] = y;
+      positions[idx * 3 + 2] = 0;
+      
+      birthPositions[idx * 2] = x;
+      birthPositions[idx * 2 + 1] = y;
+      
+      seeds[idx] = rng();
+      strokeIds[idx] = i;
+      idx++;
+    }
+  }
+  
+  // Fill remainder
+  while (idx < N){
+    const angle = rng() * Math.PI * 2;
+    const radius = Math.sqrt(rng()) * 10.0;
+    const x = Math.cos(angle) * radius;
+    const y = Math.sin(angle) * radius;
+    
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = 0;
+    birthPositions[idx * 2] = x;
+    birthPositions[idx * 2 + 1] = y;
+    seeds[idx] = rng();
+    strokeIds[idx] = numStrokes + idx;
+    idx++;
+  }
+  
+  return { positions, birthPositions, seeds, strokeIds };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random() * 1e9);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  
+  uniforms.uFlowScale.value = 0.4 + rng() * 0.8;
+  uniforms.uFluidThreshold.value = 0.35 + rng() * 0.3;
+  
+  const { positions, birthPositions, seeds, strokeIds } = buildStrokes(seed);
+  
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('birthPos', new THREE.BufferAttribute(birthPositions, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('strokeId', new THREE.BufferAttribute(strokeIds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.birthPos.array.set(birthPositions);
+    geom.attributes.birthPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);
+    geom.attributes.seed.needsUpdate = true;
+    geom.attributes.strokeId.array.set(strokeIds);
+    geom.attributes.strokeId.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+}
+
+regenerate();
+addEventListener('click', regenerate);
+
+addEventListener('resize', () => {
+  const newAspect = innerWidth / innerHeight;
+  camera.left = frustumSize * newAspect / -2;
+  camera.right = frustumSize * newAspect / 2;
+  camera.top = frustumSize / 2;
+  camera.bottom = frustumSize / -2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  uniforms.uTime.value = (now - start) / 1000;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
