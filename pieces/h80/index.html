@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h80 · vessel / vessel</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#1a1714; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  .form { position:fixed; right:14px; bottom:12px; opacity:0.6; font-size:10px;
+          letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+</style>
+</head>
+<body>
+<div class="id">h80</div>
+<div class="form" id="formLabel">organic</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  INTENTION: the same desire to hold something — whether the vessel is soft flesh
+             or hard crystal, the cupping gesture is unchanged
+  ARC: 0s → organic calyx; warm Turrell amber-rose on petal lips; Riley waves drift
+       the particles in languid Lorenz flow; 25s → crystals seed in from the rim,
+       angular steps replace the smooth curve, the light turns cold and catches
+       geometry; 50s → full crystal chalice, still and faceted; 65s → the crystal
+       yields back to the original softness
+  HOOK: the depth at the bowl's center never changes between forms — you can always
+        see the bottom; only the walls change material
+  After: zv4 Riley calyx × Turrell light (2024) · kam cypress↔tower morph (2024)
+*/
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+// ── background: warm gallery wall (from zv4) ────────────────────────────────
+const bgScene = new THREE.Scene();
+const bgCam   = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const bgMat   = new THREE.ShaderMaterial({
+  depthWrite: false,
+  vertexShader:   `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.0,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      vec3 top=vec3(0.19,0.16,0.14); vec3 mid=vec3(0.16,0.13,0.11); vec3 bot=vec3(0.11,0.09,0.08);
+      vec3 col=mix(bot,mid,smoothstep(0.0,0.5,vUv.y));
+      col=mix(col,top,smoothstep(0.5,1.0,vUv.y));
+      float vig=1.0-0.35*pow(length((vUv-0.5)*vec2(1.0,0.8)),2.0);
+      col*=vig;
+      float grain=fract(sin(dot(vUv*512.0,vec2(12.9898,78.233)))*43758.5453);
+      col+=(grain-0.5)*0.012;
+      gl_FragColor=vec4(col,1.0);
+    }`
+});
+bgScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat));
+
+// ── CPU geometry builder ─────────────────────────────────────────────────────
+const N = 80000;
+const PETALS = 5;
+const CUP_DEPTH = 4.2;
+const MAX_R = 12.0;
+
+// Seeded RNG (same as zv4)
+let rngState = 0xC0FFEE;
+function rng() {
+  rngState = (rngState + 0x6D2B79F5) | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// Build grid: 2D source positions scattered across 24×24
+const gridPos = new Float32Array(N * 2);  // raw 2D positions
+{
+  const W = 24, rows = 100, cols = 100;
+  const cW = W / cols, cH = W / rows;
+  let idx = 0;
+  const ppc = Math.floor(N / (rows * cols));
+  for (let i = 0; i < rows && idx < N; i++) {
+    for (let j = 0; j < cols && idx < N; j++) {
+      for (let k = 0; k < ppc && idx < N; k++) {
+        gridPos[idx * 2]     = (j + rng() - 0.5) * cW - W * 0.5;
+        gridPos[idx * 2 + 1] = (i + rng() - 0.5) * cH - W * 0.5;
+        idx++;
+      }
+    }
+  }
+  while (idx < N) {
+    gridPos[idx * 2]     = (rng() - 0.5) * W;
+    gridPos[idx * 2 + 1] = (rng() - 0.5) * W;
+    idx++;
+  }
+}
+
+// Compute ORGANIC calyx positions (CPU — matches zv4 shader at m=1, no waves, no drift)
+const calyxPos = new Float32Array(N * 3);
+for (let i = 0; i < N; i++) {
+  const gx = gridPos[i * 2], gy = gridPos[i * 2 + 1];
+  const r = Math.sqrt(gx * gx + gy * gy);
+  const nr = Math.min(r / MAX_R, 1.0);
+  const th = Math.atan2(gy, gx);
+  const petal = 0.5 + 0.5 * Math.cos(th * PETALS);
+  const flare = 1.0 + 0.15 * nr * nr;
+  calyxPos[i * 3]     = gx * flare;
+  calyxPos[i * 3 + 1] = gy * flare;
+  calyxPos[i * 3 + 2] = CUP_DEPTH * nr * nr * (0.6 + 0.4 * petal);
+}
+
+// Compute CRYSTAL chalice positions (CPU — stepped tiers, continuous angles)
+// Stepped height/radius creates the crystalline band structure.
+// Continuous angle distribution keeps 80k particles spread across the full bowl —
+// crystal faceting comes from the shader's snapped normals, not from position clustering.
+const crystalPos = new Float32Array(N * 3);
+{
+  const TIERS = 5;
+  for (let i = 0; i < N; i++) {
+    const gx = gridPos[i * 2], gy = gridPos[i * 2 + 1];
+    const r = Math.sqrt(gx * gx + gy * gy);
+    const nr = Math.min(r / MAX_R, 1.0);
+    const th = Math.atan2(gy, gx);
+
+    // Quantize to discrete tiers (stepped ring structure)
+    const tierIdx = Math.min(Math.floor(nr * TIERS), TIERS - 1);
+    const tierNr  = (tierIdx + 0.5) / TIERS;  // 0.1, 0.3, 0.5, 0.7, 0.9
+
+    // Keep continuous angle — ensures full bowl coverage
+    const petal = 0.5 + 0.5 * Math.cos(th * PETALS);
+
+    // Stepped height (flat tier bands)
+    const crystalHeight = CUP_DEPTH * tierNr * tierNr * (0.6 + 0.4 * petal);
+
+    // Stepped radius + subtle angular corrugation (creates visible facet ridges at edges)
+    const ridges = 10 + tierIdx * 2;
+    const corrugation = 0.035 * Math.cos(th * ridges);
+    const tierR = tierNr * MAX_R * (1.0 + corrugation);
+
+    crystalPos[i * 3]     = Math.cos(th) * tierR;
+    crystalPos[i * 3 + 1] = Math.sin(th) * tierR;
+    crystalPos[i * 3 + 2] = crystalHeight;
+  }
+}
+
+const seeds = new Float32Array(N);
+for (let i = 0; i < N; i++) seeds[i] = rng();
+
+// ── uniforms ─────────────────────────────────────────────────────────────────
+const uniforms = {
+  uTime:     { value: 0 },
+  uPixel:    { value: renderer.getPixelRatio() },
+  uMix:      { value: 0.0 },   // 0=organic calyx, 1=crystal chalice
+  // wave interference (stays subtle, mostly visible on organic)
+  uRowFreq:  { value: 1.2 },
+  uColFreq:  { value: 1.0 },
+  uWaveAmp:  { value: 0.45 },
+  uPetals:   { value: parseFloat(PETALS.toFixed(1)) },
+  uCupDepth: { value: CUP_DEPTH },
+  // Turrell drifting lights
+  uLight1:   { value: new THREE.Vector3(1, 0.5, 0.3) },
+  uLight2:   { value: new THREE.Vector3(-0.5, 0.3, 1) },
+};
+
+// ── shader material ──────────────────────────────────────────────────────────
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime, uPixel, uMix;
+    uniform float uRowFreq, uColFreq, uWaveAmp;
+    uniform float uPetals, uCupDepth;
+
+    attribute vec3 calyxPos;
+    attribute vec3 crystalPos;
+    attribute vec2 gridPos;
+    attribute float seed;
+
+    varying float vDensity, vHeight, vNR;
+    varying vec3 vPos, vNorm;
+    varying float vMix;
+
+    void main(){
+      float t = uTime;
+      float m = smoothstep(0.0, 1.0, uMix);
+      vMix = m;
+
+      // lerp between the two CPU-computed poses
+      vec3 p = mix(calyxPos, crystalPos, m);
+
+      // Riley wave interference — attenuated in crystal form
+      float wAtten = 1.0 - m * 0.75;
+      float rowW = sin(gridPos.y * uRowFreq + t * 1.1) * uWaveAmp * wAtten;
+      float colW = sin(gridPos.x * uColFreq + t * 0.68) * uWaveAmp * wAtten;
+      p.x += colW * 0.5;
+      p.y += rowW * 0.5;
+
+      // Lorenz-inspired surface drift — also attenuated in crystal
+      float dAtten = 1.0 - m * 0.85;
+      float r2 = length(gridPos);
+      float nr2 = clamp(r2 / 12.0, 0.0, 1.0);
+      float th2 = atan(gridPos.y, gridPos.x);
+      float flowA = sin(th2 * 3.0 + t * 0.45) * 0.28
+                  + cos(r2  * 0.5  - t * 0.32) * 0.18;
+      p.x += sin((th2 + flowA * seed) * 10.0 + t * 0.55) * nr2 * 0.22 * dAtten;
+      p.y += cos((th2 + flowA * seed) *  7.0 + t * 0.38) * nr2 * 0.22 * dAtten;
+
+      // surface normal — approximate from calyx formula for lighting
+      float petal   = 0.5 + 0.5 * cos(th2 * uPetals);
+      float dzdr    = uCupDepth * 2.0 * nr2 / 12.0 * (0.6 + 0.4 * petal);
+      float dzdt    = uCupDepth * nr2 * nr2 * 0.4 * (-sin(th2 * uPetals) * uPetals);
+      float rSafe   = r2 + 0.01;
+      vec3 normOrganic = normalize(vec3(
+        -dzdr * cos(th2) + dzdt * sin(th2) / rSafe,
+        -dzdr * sin(th2) - dzdt * cos(th2) / rSafe,
+        1.0));
+      // crystal normal: much more vertical — facets catch sharp glints
+      float ridges = 10.0;
+      float snappedTh = round(th2 / (6.28318 / ridges)) * (6.28318 / ridges);
+      vec3 normCrystal = normalize(vec3(
+        cos(snappedTh) * 0.35,
+        sin(snappedTh) * 0.35,
+        0.93));
+      vNorm = normalize(mix(normOrganic, normCrystal, m));
+
+      // density for luminous glow
+      float interf = sin(gridPos.y * uRowFreq * 2.0 + t * 1.2)
+                   * sin(gridPos.x * uColFreq * 2.0 + t * 0.7);
+      float vein   = sin(th2 * uPetals * 3.0 + r2 * 1.5 + t * 0.4);
+      vDensity = mix(interf, interf * 0.6 + vein * 0.4, m);
+      vHeight  = p.z;
+      vPos     = p;
+      vNR      = nr2;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * max(1.8, 3.6 - dist * 0.05);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime, uMix;
+    uniform vec3  uLight1, uLight2;
+
+    varying float vDensity, vHeight, vNR;
+    varying vec3  vPos, vNorm;
+    varying float vMix;
+
+    void main(){
+      vec2 dc = gl_PointCoord - 0.5;
+      float rr = dot(dc, dc);
+      if (rr > 0.25) discard;
+
+      vec3 n = normalize(vNorm);
+
+      // Turrell drifting lights — organic palette
+      float d1 = max(0.0, dot(n, normalize(uLight1)));
+      float d2 = max(0.0, dot(n, normalize(uLight2)));
+      vec3 c1_org = vec3(0.95, 0.52, 0.30);   // amber-rose
+      vec3 c2_org = vec3(0.35, 0.42, 0.88);   // lavender-blue
+      // crystal palette: cold silver + bronze glint
+      vec3 c1_cry = vec3(0.60, 0.72, 0.88);   // cool silver-blue
+      vec3 c2_cry = vec3(0.85, 0.70, 0.40);   // bronze-gold
+
+      float m = vMix;
+      vec3 c1 = mix(c1_org, c1_cry, m);
+      vec3 c2 = mix(c2_org, c2_cry, m);
+
+      // ambient: warm gallery → cooler as crystal grows
+      vec3 ambient = mix(vec3(0.14, 0.11, 0.09), vec3(0.08, 0.09, 0.13), m);
+      vec3 lit = ambient + c1 * d1 * 0.72 + c2 * d2 * 0.48;
+
+      // luminous glow on organic flow regions; sharp specular on crystal
+      float flowGlow = smoothstep(-0.3, 0.6, vDensity) * 0.35 * (1.0 - m * 0.8);
+      float specular  = pow(max(0.0, dot(n, normalize(vec3(0.5,1.0,0.8)))), 6.0) * m * 0.55;
+      float phase     = sin(uTime * 0.12) * 0.5 + 0.5;
+      vec3 trailCol   = mix(c1, c2, phase) * flowGlow * 0.35;
+
+      // base: warm cream → cool white-silver
+      vec3 base_org = vec3(0.92, 0.87, 0.80);
+      vec3 base_cry = vec3(0.88, 0.92, 0.98);
+      vec3 base = mix(base_org, base_cry, m);
+      vec3 col  = base * lit + trailCol;
+
+      // rim catch-light: amber rim → cold gleam
+      float rim = smoothstep(0.35, 1.0, vNR) * 0.22;
+      col += rim * mix(c1, c2, 0.4) * (0.45 + m * 0.35);
+
+      // crystal specular highlight
+      col += specular * c1_cry;
+
+      // interior shadow
+      float inner = smoothstep(0.45, 0.0, vNR);
+      col *= 0.72 + 0.28 * (1.0 - inner * 0.45);
+
+      // height luminosity
+      col += smoothstep(0.0, 5.0, vHeight) * mix(
+        vec3(0.06, 0.04, 0.02),
+        vec3(0.02, 0.04, 0.08),
+        m);
+
+      float alpha = (0.72 + flowGlow * 0.28 + specular * 0.4)
+                  * (1.0 - smoothstep(0.17, 0.25, rr));
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+// ── geometry ────────────────────────────────────────────────────────────────
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position',   new THREE.BufferAttribute(calyxPos.slice(), 3));
+geom.setAttribute('calyxPos',   new THREE.BufferAttribute(calyxPos, 3));
+geom.setAttribute('crystalPos', new THREE.BufferAttribute(crystalPos, 3));
+geom.setAttribute('gridPos',    new THREE.BufferAttribute(gridPos, 2));
+geom.setAttribute('seed',       new THREE.BufferAttribute(seeds, 1));
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ── orbit: auto + manual ─────────────────────────────────────────────────────
+let isDrag = false, pX = 0, pY = 0;
+let orbTh = 0, orbPh = 0.55;
+const cv = renderer.domElement;
+cv.addEventListener('pointerdown', e => { isDrag = true; pX = e.clientX; pY = e.clientY; e.preventDefault(); });
+addEventListener('pointermove', e => {
+  if (!isDrag) return;
+  orbTh -= (e.clientX - pX) * 0.005;
+  orbPh  = Math.max(0.1, Math.min(1.4, orbPh - (e.clientY - pY) * 0.005));
+  pX = e.clientX; pY = e.clientY;
+});
+addEventListener('pointerup', () => { isDrag = false; });
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const formEl = document.getElementById('formLabel');
+const t0 = performance.now();
+
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+  uniforms.uTime.value = t;
+
+  // morph cycle: ~32s period, smooth ease at each end
+  const rawMix = Math.sin(t * 0.196) * 0.5 + 0.5;  // 0→1→0, period ~32s
+  uniforms.uMix.value = rawMix;
+
+  if (rawMix < 0.15) formEl.textContent = 'organic';
+  else if (rawMix > 0.85) formEl.textContent = 'crystal';
+  else formEl.textContent = rawMix < 0.5 ? 'crystallizing' : 'softening';
+
+  // Turrell drifting lights
+  const la1 = t * 0.13, la2 = t * 0.09 + 2.1;
+  uniforms.uLight1.value.set(
+    Math.sin(la1) * 0.8, 0.5 + 0.3 * Math.sin(la1 * 0.7), Math.cos(la1) * 0.6);
+  uniforms.uLight2.value.set(
+    Math.cos(la2) * 0.6, 0.3 + 0.2 * Math.cos(la2 * 0.5), Math.sin(la2) * 0.8);
+
+  // camera
+  const autoTh = t * 0.07;
+  const theta  = autoTh + orbTh;
+  const phi    = orbPh;
+  const radius = 22;
+  const cY     = 1.5;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    cY + radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi));
+  camera.lookAt(0, cY, 0);
+
+  renderer.clear();
+  renderer.render(bgScene, bgCam);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){location.href='/compare?a='+pid+'&directive='+encodeURIComponent(txt);});
+  };
+})();
+</script>
+</body>
+</html>

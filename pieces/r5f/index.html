@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>r5f · a cord that mends</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .arc  { position:fixed; left:14px; top:14px; opacity:0.42; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">r5f</div>
+<div class="arc" id="arcLabel">together</div>
+<div class="src">FGT light strings · differential growth · sav arc</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*
+  INTENTION: a cord of incandescent light that can break and grow back together —
+             the topological form of tenderness; severance visible as a drooping catenary
+  ARC: 0s→30s → cord grows and drapes under gravity, incandescent bulbs warm and present;
+       30s→65s → midpoint vertex escapes, severed end sags away — two tips reach across the gap;
+       65s→90s → tips find each other, the cord re-fuses — geometry of repair
+  HOOK: when the cord breaks, the break is not sudden — it droops first, like someone
+        letting go slowly, and the reunion is not straight but curved, the joined form
+        remembers having been separated.
+  After Felix Gonzalez-Torres (light strings) · sav emotional arc (boids, 2024)
+*/
+
+const BG = 0x0a0807;
+const CYCLE = 90;     // seconds per full arc cycle
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 2, 20);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, -1, 0);
+
+// ── differential growth parameters ───────────────────────────────────────────
+const MAX_VERTS = 3200;
+const ATTRACT   = 0.045;
+const REPEL_R   = 0.48;
+const REPEL_STR = 0.09;
+const NOISE     = 0.002;
+const PRESSURE  = 0.002;
+const GRAVITY   = 0.009;
+const MAX_D     = 0.36;
+const ANCHOR_N  = 6;
+
+const verts = [];
+const NV0 = 40;
+for (let i = 0; i < NV0; i++) {
+  const t = (i / (NV0 - 1)) * 2 - 1;
+  const x = t * 6;
+  const y = -Math.abs(t) * 1.2 + Math.sin(t * Math.PI * 2) * 0.3;
+  verts.push({ x, z: 0, y, age: 0, pinY: i < ANCHOR_N || i >= NV0 - ANCHOR_N });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i], k = gridKey(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function nearby(v) {
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+// ── arc state ─────────────────────────────────────────────────────────────────
+// 0=TOGETHER  1=SEVERED  2=SEEKING  3=HEALING  (cycles)
+let arcPhase = 0;
+let cutIdx = -1;        // index in verts where cord was cut
+let wanderer = null;    // the escaped vertex (object: {x,z,y,vx,vy,vz})
+const TOGETHER_END = 28;
+const SEVERED_END  = 50;
+const SEEKING_END  = 75;
+const HEAL_END     = CYCLE;
+
+function arcLabel(t) {
+  const ct = t % CYCLE;
+  if (ct < TOGETHER_END) return 'together';
+  if (ct < SEVERED_END)  return 'severed';
+  if (ct < SEEKING_END)  return 'seeking';
+  return 'returning';
+}
+
+function doSever(n) {
+  // find midpoint index
+  cutIdx = Math.floor(n / 2);
+  // wanderer gets midpoint coords + escape velocity (upward + rightward)
+  const mv = verts[cutIdx];
+  wanderer = {
+    x: mv.x, z: mv.z, y: mv.y,
+    vx: 0.08, vy: 0.04, vz: 0.01,
+    age: mv.age
+  };
+  // remove midpoint from verts — the two halves now have free ends
+  verts.splice(cutIdx, 1);
+}
+
+function stepWanderer() {
+  if (!wanderer) return;
+  const grav = 0.018;
+  wanderer.vx *= 0.97;
+  wanderer.vy -= grav;
+  wanderer.vz *= 0.97;
+  wanderer.x += wanderer.vx;
+  wanderer.y += wanderer.vy;
+  wanderer.z += wanderer.vz;
+  wanderer.age += 0.0003;
+}
+
+function stepSeek() {
+  if (!wanderer || cutIdx < 0 || cutIdx >= verts.length) return;
+  // left end = verts[0], right end = verts[verts.length-1]
+  // wanderer seeks the nearer free end
+  const lv = verts[0];
+  const rv = verts[verts.length - 1];
+  const dl = Math.hypot(wanderer.x - lv.x, wanderer.y - lv.y, wanderer.z - lv.z);
+  const dr = Math.hypot(wanderer.x - rv.x, wanderer.y - rv.y, wanderer.z - rv.z);
+  const target = dl < dr ? lv : rv;
+  const dx = target.x - wanderer.x, dy = target.y - wanderer.y, dz = target.z - wanderer.z;
+  const d = Math.hypot(dx, dy, dz) + 1e-6;
+  const str = 0.008;
+  wanderer.vx += (dx / d) * str;
+  wanderer.vy += (dy / d) * str;
+  wanderer.vz += (dz / d) * str;
+  // light damping
+  wanderer.vx *= 0.97;
+  wanderer.vy *= 0.97;
+  wanderer.vz *= 0.97;
+  wanderer.x += wanderer.vx;
+  wanderer.y += wanderer.vy;
+  wanderer.z += wanderer.vz;
+  wanderer.age += 0.0003;
+
+  // check if close enough to fuse
+  return d < 0.45;
+}
+
+function doFuse() {
+  if (!wanderer) return;
+  // re-insert wanderer near the nearest endpoint
+  const lv = verts[0];
+  const rv = verts[verts.length - 1];
+  const dl = Math.hypot(wanderer.x - lv.x, wanderer.y - lv.y, wanderer.z - lv.z);
+  if (dl < Math.hypot(wanderer.x - rv.x, wanderer.y - rv.y, wanderer.z - rv.z)) {
+    verts.unshift({ x: wanderer.x, z: wanderer.z, y: wanderer.y, age: wanderer.age, pinY: false });
+  } else {
+    verts.push({ x: wanderer.x, z: wanderer.z, y: wanderer.y, age: wanderer.age, pinY: false });
+  }
+  wanderer = null;
+  cutIdx = -1;
+}
+
+function step(ct) {
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+  const dy = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? verts[i - 1] : null;
+    const next = i < n - 1 ? verts[i + 1] : null;
+    const v = verts[i];
+    if (prev) { dx[i] += (prev.x - v.x) * ATTRACT; dz[i] += (prev.z - v.z) * ATTRACT; dy[i] += (prev.y - v.y) * ATTRACT; }
+    if (next)  { dx[i] += (next.x - v.x) * ATTRACT; dz[i] += (next.z - v.z) * ATTRACT; dy[i] += (next.y - v.y) * ATTRACT; }
+  }
+  let cx = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cz += verts[i].z; }
+  cx /= n; cz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - cx, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE;
+    dz[i] += (oz / d) * PRESSURE;
+  }
+
+  for (let i = 0; i < n; i++) {
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+    const grav = verts[i].pinY ? GRAVITY * 0.05 : GRAVITY;
+    verts[i].y += dy[i] - grav + (Math.random() - 0.5) * NOISE * 0.5;
+    verts[i].age += 0.0004;
+  }
+
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    grown.push(a);
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    if (ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({ x: (a.x+b.x)*0.5+(Math.random()-0.5)*0.02, z: (a.z+b.z)*0.5+(Math.random()-0.5)*0.02,
+                   y: (a.y+b.y)*0.5, age: Math.max(a.age,b.age)*0.7, pinY: false });
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// ── rendering ─────────────────────────────────────────────────────────────────
+const N_RENDER = 42000;
+const rPos   = new Float32Array(N_RENDER * 3);
+const rSeeds = new Float32Array(N_RENDER);
+const rAge   = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+// extra slot for wanderer particles
+const WN = 800;
+const wPos  = new Float32Array(WN * 3);
+const wSeeds = new Float32Array(WN);
+const wAge   = new Float32Array(WN);
+for (let i = 0; i < WN; i++) { wSeeds[i] = Math.random(); wAge[i] = 0.8; }
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+
+const wGeom = new THREE.BufferGeometry();
+wGeom.setAttribute('position', new THREE.BufferAttribute(wPos, 3));
+wGeom.setAttribute('seed',     new THREE.BufferAttribute(wSeeds, 1));
+wGeom.setAttribute('age',      new THREE.BufferAttribute(wAge, 1));
+
+const uniforms = {
+  uTime:       { value: 0 },
+  uPixel:      { value: renderer.getPixelRatio() },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.035 },
+  uPhase:      { value: 0 }  // 0=together 1=severed 2=seeking 3=healing
+};
+
+const vertSrc = `
+  uniform float uTime;
+  uniform float uPixel;
+  uniform float uFogDensity;
+  uniform float uPhase;
+  attribute float seed;
+  attribute float age;
+  varying vec3 vCol;
+  varying float vAlpha;
+  varying float vFogFactor;
+
+  void main() {
+    vec3 p = position;
+    float t = uTime * 0.3 + seed * 6.28;
+    float sway = sin(t) * 0.008 * (1.0 + seed);
+    p.x += sway;
+    p.z += cos(t * 0.7) * 0.005;
+    float pulse = 0.85 + 0.15 * sin(uTime * 1.2 + seed * 40.0);
+
+    vec3 amber = vec3(1.0, 0.72, 0.32);
+    vec3 warm  = vec3(1.0, 0.88, 0.72);
+    vec3 white = vec3(1.0, 0.96, 0.92);
+    float k = clamp(age * 1.2, 0.0, 1.0);
+    vCol = mix(amber, warm, k);
+    vCol = mix(vCol, white, smoothstep(0.7, 1.0, k) * 0.3);
+    vCol *= pulse;
+    vAlpha = 0.55 + 0.2 * pulse;
+
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    float dist = -mv.z;
+    gl_PointSize = 3.0 * uPixel * (45.0 / dist);
+    gl_Position = projectionMatrix * mv;
+    float fogDepth = length(mv.xyz);
+    vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+  }
+`;
+
+const fragSrc = `
+  varying vec3 vCol;
+  varying float vAlpha;
+  varying float vFogFactor;
+  uniform vec3 uFogColor;
+
+  void main() {
+    vec2 d = gl_PointCoord - 0.5;
+    float r = dot(d, d);
+    if (r > 0.25) discard;
+    float core = exp(-r * 24.0);
+    float halo = exp(-r * 8.0) * 0.35;
+    float a = (core + halo) * vAlpha;
+    vec3 col = mix(vCol, uFogColor, vFogFactor);
+    a *= (1.0 - vFogFactor * 0.8);
+    gl_FragColor = vec4(col * a, a);
+  }
+`;
+
+// wanderer uses a warmer/dimmer palette — the severed strand
+const wUniformsSrc = `
+  uniform float uTime;
+  uniform float uPixel;
+  uniform float uFogDensity;
+  uniform float uPhase;
+  attribute float seed;
+  attribute float age;
+  varying vec3 vCol;
+  varying float vAlpha;
+  varying float vFogFactor;
+
+  void main() {
+    vec3 p = position;
+    float t = uTime * 0.5 + seed * 6.28;
+    float pulse = 0.6 + 0.4 * sin(t * 1.8);
+    // cooler, dimmer — like a bulb losing power
+    float phase = clamp(uPhase, 0.0, 1.0);  // 0=severed, 1=healed
+    vec3 cold   = vec3(0.9, 0.65, 0.28) * pulse;
+    vec3 bright = vec3(1.0, 0.88, 0.62) * pulse;
+    vCol = mix(cold, bright, phase);
+    vAlpha = mix(0.38, 0.60, phase) + 0.1 * pulse;
+
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    float dist = max(-mv.z, 0.1);
+    gl_PointSize = 3.2 * uPixel * (45.0 / dist);
+    gl_Position = projectionMatrix * mv;
+    float fogDepth = length(mv.xyz);
+    vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+  }
+`;
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: vertSrc, fragmentShader: fragSrc
+});
+const wUniforms = {
+  uTime:       uniforms.uTime,
+  uPixel:      uniforms.uPixel,
+  uFogColor:   uniforms.uFogColor,
+  uFogDensity: uniforms.uFogDensity,
+  uPhase:      { value: 0 }
+};
+const wMat = new THREE.ShaderMaterial({
+  uniforms: wUniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: wUniformsSrc, fragmentShader: fragSrc
+});
+
+const points  = new THREE.Points(geom, mat);
+const wPoints = new THREE.Points(wGeom, wMat);
+scene.add(points);
+scene.add(wPoints);
+
+// wire
+const wireGeom = new THREE.BufferGeometry();
+const wirePositions = new Float32Array(MAX_VERTS * 3);
+wireGeom.setAttribute('position', new THREE.BufferAttribute(wirePositions, 3));
+const wireMat = new THREE.LineBasicMaterial({ color: 0x2a2420, transparent: true, opacity: 0.28 });
+const wireLine = new THREE.Line(wireGeom, wireMat);
+scene.add(wireLine);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow
+for (let s = 0; s < 500; s++) step(0);
+
+const arcEl  = document.getElementById('arcLabel');
+const start  = performance.now();
+let severed  = false;
+let healed   = false;
+
+function distributeParticles(srcVerts, posArr, ageArr, nRender) {
+  const n = srcVerts.length;
+  if (n < 2) return;
+  const lengths = [];
+  let total = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const a = srcVerts[i], b = srcVerts[i + 1];
+    const L = Math.sqrt((b.x-a.x)**2+(b.z-a.z)**2+(b.y-a.y)**2);
+    lengths.push(L); total += L;
+  }
+  if (total <= 0) return;
+  let written = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const share = i === n-2 ? nRender-written : Math.max(1, Math.floor(nRender*lengths[i]/total));
+    const a = srcVerts[i], b = srcVerts[i+1];
+    for (let k = 0; k < share && written < nRender; k++) {
+      const u = Math.random();
+      const cu = u < 0.5 ? u*u*2 : 1-(1-u)*(1-u)*2;
+      const sp = 0.015;
+      posArr[written*3]   = a.x+(b.x-a.x)*cu+(Math.random()-0.5)*sp;
+      posArr[written*3+1] = a.y+(b.y-a.y)*cu+(Math.random()-0.5)*sp*0.5;
+      posArr[written*3+2] = a.z+(b.z-a.z)*cu+(Math.random()-0.5)*sp;
+      ageArr[written] = Math.max(a.age, b.age);
+      written++;
+    }
+  }
+}
+
+function loop() {
+  const elapsed = (performance.now() - start) / 1000;
+  const ct = elapsed % CYCLE;
+  uniforms.uTime.value = elapsed;
+
+  // arc state machine
+  if (ct < TOGETHER_END) {
+    arcPhase = 0; severed = false; healed = false;
+    if (wanderer) wanderer = null;
+    arcEl.textContent = 'together';
+    wPoints.visible = false;
+    for (let s = 0; s < 3; s++) step(ct);
+  } else if (ct < SEVERED_END) {
+    if (!severed) { doSever(verts.length); severed = true; }
+    arcPhase = 1;
+    arcEl.textContent = 'severed';
+    wPoints.visible = true;
+    stepWanderer();
+    for (let s = 0; s < 2; s++) step(ct);
+  } else if (ct < SEEKING_END) {
+    arcPhase = 2;
+    arcEl.textContent = 'seeking';
+    wPoints.visible = true;
+    const fused = stepSeek();
+    if (fused) { doFuse(); healed = true; }
+    for (let s = 0; s < 2; s++) step(ct);
+  } else {
+    arcPhase = 3;
+    arcEl.textContent = 'returning';
+    wPoints.visible = wanderer !== null;
+    if (wanderer) {
+      const fused = stepSeek();
+      if (fused) { doFuse(); healed = true; }
+    }
+    for (let s = 0; s < 3; s++) step(ct);
+  }
+
+  // update wanderer phase uniform for colour
+  wUniforms.uPhase.value = arcPhase === 3 ? 1.0 : 0.0;
+
+  // update main cord wire
+  const n = verts.length;
+  for (let i = 0; i < n; i++) {
+    wirePositions[i*3]   = verts[i].x;
+    wirePositions[i*3+1] = verts[i].y;
+    wirePositions[i*3+2] = verts[i].z;
+  }
+  wireGeom.setDrawRange(0, n);
+  wireGeom.attributes.position.needsUpdate = true;
+
+  // centroid tracking
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  if (n > 0) { cx /= n; cy /= n; cz /= n; }
+  controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.02);
+
+  // distribute main cord particles
+  distributeParticles(verts, rPos, rAge, N_RENDER);
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+
+  // distribute wanderer particles (cluster tightly around wanderer position)
+  if (wanderer) {
+    const sp = 0.12;
+    for (let i = 0; i < WN; i++) {
+      const r = Math.random() * sp;
+      const th = Math.random() * Math.PI * 2;
+      const ph = Math.acos(2 * Math.random() - 1);
+      wPos[i*3]   = wanderer.x + r*Math.sin(ph)*Math.cos(th);
+      wPos[i*3+1] = wanderer.y + r*Math.sin(ph)*Math.sin(th);
+      wPos[i*3+2] = wanderer.z + r*Math.cos(ph);
+    }
+    wGeom.attributes.position.needsUpdate = true;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){location.href='/compare?a='+pid+'&directive='+encodeURIComponent(txt);});
+  };
+})();
+</script>
+</body>
+</html>
