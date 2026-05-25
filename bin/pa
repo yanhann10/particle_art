@@ -1,0 +1,394 @@
+#!/usr/bin/env bash
+# pa — particle_art local CLI
+# Covers the common operations without needing Claude.
+# Usage: ./bin/pa <command> [args]
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+PIECES_DIR="$REPO/pieces"
+SCRIPTS_DIR="$REPO/scripts"
+
+if [[ -x "$REPO/.venv/bin/python3" ]]; then
+    PY="$REPO/.venv/bin/python3"
+else
+    PY="python3"
+fi
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+_find_free_port() {
+    local port="${1:-8787}"
+    while lsof -ti tcp:"$port" &>/dev/null 2>&1; do
+        port=$(( port + 1 ))
+    done
+    echo "$port"
+}
+
+_serve_bg() {
+    # Start an HTTP server in the background; echo the base URL.
+    local port
+    port=$(_find_free_port 8787)
+    (cd "$REPO" && "$PY" -m http.server "$port" 2>/dev/null) &
+    disown $! 2>/dev/null || true
+    sleep 0.5
+    echo "  server: http://localhost:$port  (stop: lsof -ti tcp:$port | xargs kill)" >&2
+    echo "http://localhost:$port"
+}
+
+_open() {
+    open "$1" 2>/dev/null || xdg-open "$1" 2>/dev/null || echo "Visit: $1"
+}
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+cmd_view() {
+    local code="${1:?Usage: pa view <code>}"
+    [[ -d "$PIECES_DIR/$code" ]] || { echo "No piece found: $code"; exit 1; }
+    local base
+    base=$(_serve_bg)
+    local url="$base/pieces/$code/index.html"
+    echo "Opening $url"
+    _open "$url"
+}
+
+cmd_gallery() {
+    local page="${1:-index.html}"
+    local base
+    base=$(_serve_bg)
+    echo "Opening $base/$page"
+    _open "$base/$page"
+}
+
+cmd_stats() {
+    local piece_count thumb_count queue_depth last_tick pct
+    piece_count=$(find "$PIECES_DIR" -maxdepth 1 -mindepth 1 -type d | wc -l | tr -d ' ')
+    thumb_count=$(find "$REPO/thumbs" -name "*.png" 2>/dev/null | wc -l | tr -d ' ')
+    pct=$(( thumb_count * 100 / (piece_count > 0 ? piece_count : 1) ))
+    queue_depth=0
+    [[ -f "$SCRIPTS_DIR/pending_directives.jsonl" ]] && \
+        queue_depth=$(grep -c . "$SCRIPTS_DIR/pending_directives.jsonl" 2>/dev/null || echo 0)
+    last_tick="—"
+    if [[ -f "$SCRIPTS_DIR/mutation_log.jsonl" ]]; then
+        last_tick=$(LOGFILE="$SCRIPTS_DIR/mutation_log.jsonl" "$PY" - <<'PYEOF'
+import json, os
+from pathlib import Path
+lines = [l for l in Path(os.environ["LOGFILE"]).read_text().splitlines() if l.strip()]
+if lines:
+    d = json.loads(lines[-1])
+    ts = d.get("ts") or d.get("timestamp") or d.get("created_at") or "?"
+    pid = d.get("parent") or d.get("parent_id") or "?"
+    nid = d.get("id") or "?"
+    print(f"{ts[:19]}  {pid} → {nid}")
+else:
+    print("no entries")
+PYEOF
+        ) || last_tick="?"
+    fi
+    printf "pieces  : %s\n" "$piece_count"
+    printf "thumbs  : %s (%s%% coverage)\n" "$thumb_count" "$pct"
+    printf "queue   : %s pending directives\n" "$queue_depth"
+    printf "tick    : %s\n" "$last_tick"
+}
+
+cmd_log() {
+    local n="${1:-10}"
+    local logfile="$SCRIPTS_DIR/mutation_log.jsonl"
+    [[ -f "$logfile" ]] || { echo "No mutation log at $logfile"; exit 1; }
+    N="$n" LOGFILE="$logfile" "$PY" - <<'PYEOF'
+import json, os
+from pathlib import Path
+n = int(os.environ["N"])
+lines = [l for l in Path(os.environ["LOGFILE"]).read_text().splitlines() if l.strip()]
+for line in lines[-n:]:
+    d = json.loads(line)
+    ts = (d.get("ts") or d.get("timestamp") or d.get("created_at") or "")[:16]
+    child  = d.get("id") or d.get("child_id") or d.get("new_id") or "?"
+    parent = d.get("parent") or d.get("parent_id") or "?"
+    did    = (d.get("directive_id") or d.get("directive") or "")[:52]
+    prov   = d.get("provider", "")[:4]
+    cost   = d.get("cost_usd", 0)
+    cost_s = f"${cost:.3f}" if cost else "  —  "
+    print(f"  {ts}  {parent} → {child}  {prov}  {cost_s}  {did}")
+PYEOF
+}
+
+cmd_budget() {
+    local bfile="$HOME/.particle_art_budget.json"
+    [[ -f "$bfile" ]] || { echo "No budget file: $bfile"; exit 1; }
+    BFILE="$bfile" "$PY" - <<'PYEOF'
+import json, os
+from datetime import datetime
+from pathlib import Path
+from collections import defaultdict
+
+d = json.loads(Path(os.environ["BFILE"]).read_text())
+key = datetime.now().strftime("%Y-%m")
+
+# Sum events for current month by provider
+by_provider = defaultdict(lambda: {"usd": 0.0, "runs": 0})
+for ev in d.get("events", []):
+    if ev.get("ts", "")[:7] == key:
+        p = ev.get("provider", "unknown")
+        by_provider[p]["usd"]  += ev.get("usd", 0.0)
+        by_provider[p]["runs"] += 1
+
+month_usd = d.get("months", {}).get(key, {}).get("usd", 0.0)
+print(f"Month : {key}   total ${month_usd:.4f}")
+if by_provider:
+    for prov, info in sorted(by_provider.items()):
+        print(f"  {prov:<15}  ${info['usd']:.4f}   ({info['runs']} runs)")
+else:
+    print("  (no events recorded for this month)")
+
+# Show last 5 events
+events = d.get("events", [])
+recent = [e for e in events if e.get("ts", "")[:7] == key][-5:]
+if recent:
+    print("\nRecent events:")
+    for ev in recent:
+        ts   = ev.get("ts", "")[:16]
+        prov = ev.get("provider", "?")[:4]
+        note = ev.get("note", "")[:55]
+        cost = ev.get("usd", 0.0)
+        print(f"  {ts}  {prov}  ${cost:.4f}  {note}")
+PYEOF
+}
+
+cmd_drop() {
+    [[ $# -ge 1 ]] || { echo "Usage: pa drop <code> [code ...]"; exit 1; }
+    local codes_json
+    codes_json=$(printf '"%s",' "$@"); codes_json="[${codes_json%,}]"
+    REPO="$REPO" CODES="$codes_json" "$PY" - <<'PYEOF'
+import json, os, shutil
+from pathlib import Path
+
+repo       = Path(os.environ["REPO"])
+codes      = json.loads(os.environ["CODES"])
+lin_file   = repo / "lineage.json"
+archive    = repo / "pieces" / "archive"
+archive.mkdir(exist_ok=True)
+
+lineage    = json.loads(lin_file.read_text())
+piece_map  = {p["id"]: p for p in lineage["pieces"]}
+dropped    = []
+
+for code in codes:
+    if code not in piece_map:
+        print(f"  SKIP  {code}: not in lineage")
+        continue
+    piece_map[code]["dropped"] = True
+    src = repo / "pieces" / code
+    if src.exists():
+        dst = archive / code
+        if dst.exists():
+            shutil.rmtree(str(dst))
+        shutil.move(str(src), str(dst))
+        print(f"  archive  pieces/{code}")
+    else:
+        print(f"  mark-dropped  {code}  (dir missing)")
+    dropped.append(code)
+
+lin_file.write_text(json.dumps(lineage, indent=2))
+print(f"\nlineage.json updated — {len(dropped)} dropped")
+PYEOF
+
+    cd "$REPO"
+    if [[ -n "$(git status --short 2>/dev/null)" ]]; then
+        git add lineage.json "pieces/archive/" 2>/dev/null || git add lineage.json
+        local msg="drop: $(echo "$@" | tr ' ' ',')"
+        git commit -m "$msg"
+        echo "Committed. Run: git push"
+    else
+        echo "Nothing new to commit."
+    fi
+}
+
+cmd_mark() {
+    local code="${1:?Usage: pa mark <code> keep|drop [\"note\"]}"
+    local action="${2:?Usage: pa mark <code> keep|drop [\"note\"]}"
+    local note="${3:-marked via pa}"
+    REPO="$REPO" CODE="$code" ACTION="$action" NOTE="$note" \
+        PREFS="$SCRIPTS_DIR/preferences.json" "$PY" - <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+
+code   = os.environ["CODE"]
+action = os.environ["ACTION"]
+note   = os.environ["NOTE"]
+pfile  = Path(os.environ["PREFS"])
+
+valid = {"keep": "favorite", "drop": "drop", "favorite": "favorite"}
+if action not in valid:
+    print(f"Unknown action '{action}'. Use: keep  drop"); sys.exit(1)
+
+prefs = json.loads(pfile.read_text()) if pfile.exists() else {}
+marks = prefs.setdefault("marks", {})
+marks[code] = {valid[action]: True, "note": note}
+pfile.write_text(json.dumps(prefs, indent=2))
+print(f"Marked {code} → {action}  ("{note}")")
+PYEOF
+}
+
+cmd_find() {
+    local dir_filter="" gen_filter="" limit=20 show_dropped=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dir)     dir_filter="$2";  shift 2 ;;
+            --gen)     gen_filter="$2";  shift 2 ;;
+            --limit)   limit="$2";       shift 2 ;;
+            --dropped) show_dropped=1;   shift   ;;
+            *) echo "Unknown option: $1  (see: pa help)"; exit 1 ;;
+        esac
+    done
+    REPO="$REPO" DIR_F="$dir_filter" GEN_F="$gen_filter" \
+        LIMIT="$limit" SHOW_DROPPED="$show_dropped" "$PY" - <<'PYEOF'
+import json, os
+from pathlib import Path
+
+repo         = Path(os.environ["REPO"])
+dir_filter   = os.environ["DIR_F"]
+gen_filter   = os.environ["GEN_F"]
+limit        = int(os.environ["LIMIT"])
+show_dropped = os.environ["SHOW_DROPPED"] == "1"
+
+lineage = json.loads((repo / "lineage.json").read_text())
+results = []
+for p in lineage["pieces"]:
+    if not show_dropped and p.get("dropped"):
+        continue
+    if dir_filter and dir_filter not in p.get("direction", ""):
+        continue
+    if gen_filter and str(p.get("generation", "")) != gen_filter:
+        continue
+    results.append(p)
+
+for p in results[-limit:]:
+    flag = " [dropped]" if p.get("dropped") else ""
+    ts   = (p.get("created_at") or "")[:10]
+    print(f"  {p['id']}  gen={p.get('generation','?'):<3}  {ts}  {p.get('direction','')[:40]}{flag}")
+print(f"\n  {len(results)} results")
+PYEOF
+}
+
+cmd_tick() {
+    echo "Running one mutation tick..."
+    cd "$REPO"
+    "$PY" "$SCRIPTS_DIR/mutate.py"
+}
+
+cmd_serve() {
+    local port="${1:-8787}"
+    echo "Serving http://localhost:$port  (Ctrl+C to stop)"
+    cd "$REPO"
+    exec "$PY" -m http.server "$port"
+}
+
+cmd_recent() {
+    # Show the N most recently created pieces with their directions.
+    local n="${1:-10}"
+    REPO="$REPO" N="$n" "$PY" - <<'PYEOF'
+import json, os
+from pathlib import Path
+
+repo = Path(os.environ["REPO"])
+n    = int(os.environ["N"])
+lin  = json.loads((repo / "lineage.json").read_text())
+
+pieces = [p for p in lin["pieces"] if not p.get("dropped")]
+pieces.sort(key=lambda p: p.get("created_at") or "", reverse=True)
+for p in pieces[:n]:
+    ts  = (p.get("created_at") or "")[:16]
+    prov = (p.get("provider") or "")[:4]
+    print(f"  {p['id']}  {ts}  gen={p.get('generation','?'):<3}  {prov}  {p.get('direction','')[:40]}")
+PYEOF
+}
+
+cmd_lineage() {
+    # Show the ancestor chain for a piece.
+    local code="${1:?Usage: pa lineage <code>}"
+    REPO="$REPO" CODE="$code" "$PY" - <<'PYEOF'
+import json, os
+from pathlib import Path
+
+repo  = Path(os.environ["REPO"])
+code  = os.environ["CODE"]
+lin   = json.loads((repo / "lineage.json").read_text())
+pmap  = {p["id"]: p for p in lin["pieces"]}
+
+chain, cur = [], code
+while cur:
+    p = pmap.get(cur)
+    if not p:
+        print(f"  {cur}  (not found)")
+        break
+    ts  = (p.get("created_at") or "")[:10]
+    did = (p.get("mutation_directive") or "")[:50]
+    print(f"  {p['id']}  gen={p.get('generation','?')}  {ts}  {p.get('direction','')[:30]}  {did}")
+    cur = p.get("parent_id")
+PYEOF
+}
+
+# ── dispatch ─────────────────────────────────────────────────────────────────
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+    view)    cmd_view    "$@" ;;
+    gallery) cmd_gallery "$@" ;;
+    stats)   cmd_stats       ;;
+    log)     cmd_log     "$@" ;;
+    budget)  cmd_budget      ;;
+    drop)    cmd_drop    "$@" ;;
+    mark)    cmd_mark    "$@" ;;
+    find)    cmd_find    "$@" ;;
+    tick)    cmd_tick        ;;
+    serve)   cmd_serve   "$@" ;;
+    recent)  cmd_recent  "$@" ;;
+    lineage) cmd_lineage "$@" ;;
+    help|--help|-h)
+        cat <<'HELP'
+pa — particle_art local CLI
+
+USAGE
+  ./bin/pa <command> [args]
+
+COMMANDS
+  view     <code>               Open a piece in browser (auto-starts local server)
+  gallery  [page=index.html]    Open gallery in browser
+  stats                         Piece count, thumbs coverage, queue depth, last tick
+  log      [N=10]               Last N mutation log entries
+  budget                        Token spend for current month by provider
+  drop     <code> [code ...]    Archive pieces, mark dropped in lineage, commit
+  mark     <code> keep|drop ["note"]   Update preferences.json
+  find     [--dir D] [--gen N] [--limit N] [--dropped]   Search pieces
+  recent   [N=10]               Most recently created pieces
+  lineage  <code>               Ancestor chain for a piece
+  tick                          Run one mutation manually (mutate.py)
+  serve    [port=8787]          Start HTTP server in foreground (Ctrl+C to stop)
+  help                          Show this message
+
+EXAMPLES
+  ./bin/pa view ac2
+  ./bin/pa gallery best.html
+  ./bin/pa stats
+  ./bin/pa log 20
+  ./bin/pa budget
+  ./bin/pa drop n5l x7q bad9
+  ./bin/pa mark zs4 keep "Lorenz attractor - strong shape"
+  ./bin/pa find --dir differential
+  ./bin/pa find --gen 3 --limit 30
+  ./bin/pa recent 5
+  ./bin/pa lineage htb
+
+NOTES
+  - view / gallery start a background server on port 8787 (increments if busy)
+  - drop commits to git but does NOT push; run "git push" yourself
+  - tick uses .venv/bin/python3 if present, falls back to system python3
+HELP
+        ;;
+    *)
+        echo "Unknown command: $cmd  (try: ./bin/pa help)"
+        exit 1
+        ;;
+esac
