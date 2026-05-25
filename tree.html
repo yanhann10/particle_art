@@ -113,17 +113,23 @@
   <span><span class="dot" style="background:#c9a86a"></span><span style="color:#c9a86a">encouraged</span> — system favors these branches</span>
   <span><span class="dot" style="background:#2a3a5a"></span> active</span>
   <span style="color:rgba(201,168,106,0.4)">── dashed gold</span><span> = cross-lineage (hybrid)</span>
+  <span><span style="display:inline-block;width:28px;height:10px;border:1px solid rgba(201,168,106,0.6);border-radius:5px;vertical-align:middle;margin-right:4px;"></span> style group — right-click to drop</span>
 </div>
 <svg id="stage"></svg>
 <div id="tooltip"></div>
 <div id="ctx-menu">
   <div class="ctx-title" id="ctx-label">—</div>
-  <button id="ctx-make-more" class="primary">Make more like this</button>
-  <div class="sep"></div>
-  <button id="ctx-drop-node">Drop this node</button>
-  <button id="ctx-drop-tree" class="danger">Drop entire subtree</button>
-  <div class="sep"></div>
-  <button id="ctx-restore">Restore subtree</button>
+  <div id="ctx-piece-buttons">
+    <button id="ctx-make-more" class="primary">Make more like this</button>
+    <div class="sep"></div>
+    <button id="ctx-drop-node">Drop this node</button>
+    <button id="ctx-drop-tree" class="danger">Drop entire subtree</button>
+    <div class="sep"></div>
+    <button id="ctx-restore">Restore subtree</button>
+  </div>
+  <div id="ctx-group-buttons">
+    <button id="ctx-drop-group" class="danger">Drop entire group</button>
+  </div>
 </div>
 <div id="toast"></div>
 <div id="drop-footer">
@@ -222,23 +228,50 @@ function render(){
     knownIds.has(e.from)&&knownIds.has(e.to)&&primaryParent[e.to]!==e.from
   );
 
-  /* ── compact mode: collapse leaf children into parent badge ── */
-  /* childCount counts how many cleanPieces children each node has */
+  /* ── group nodes: for parents with > GROUP_THRESHOLD active children,
+     insert virtual "style bucket" intermediate nodes between parent and pieces ── */
+  const GROUP_THRESHOLD=8;
+  /* coarse 3-bucket for grouping: channel / improv / directive */
+  function styleBucket(sk){
+    if(!sk) return 'directive';
+    if(sk.startsWith('channel:')) return 'channel';
+    if(sk.startsWith('mode:')) return 'improv';
+    return 'directive';
+  }
+  /* count active children per parent */
+  const activeChildCount={};
+  cleanPieces.forEach(p=>{
+    const par=showDropped?(p.parent_id||null):effectiveParent(p);
+    if(par) activeChildCount[par]=(activeChildCount[par]||0)+1;
+  });
+  /* build groups */
+  const groupNodes={};    /* groupId → {id,label,parent_id,childIds,style_key,is_group} */
+  const pieceToGroup={};  /* pieceId → groupId */
+  cleanPieces.forEach(p=>{
+    const par=showDropped?(p.parent_id||null):effectiveParent(p);
+    if(!par||(activeChildCount[par]||0)<=GROUP_THRESHOLD) return;
+    const bucket=styleBucket(p.style_key||'');
+    const gid=`${par}__grp__${bucket}`;
+    if(!groupNodes[gid]) groupNodes[gid]={id:gid,label:bucket,parent_id:par,childIds:[],style_key:bucket,is_group:true};
+    groupNodes[gid].childIds.push(p.id);
+    pieceToGroup[p.id]=gid;
+  });
+  const groupNodesList=Object.values(groupNodes);
+  const allGroupIds=new Set(Object.keys(groupNodes));
+
+  /* ── compact mode: collapse leaf children into parent badge (skip grouped leaves) ── */
   const childCount={};
   cleanPieces.forEach(p=>{childCount[p.id]=0});
   cleanPieces.forEach(p=>{
     const par=showDropped?(p.parent_id||null):effectiveParent(p);
     if(par && par in childCount) childCount[par]++;
   });
-
-  /* collapsedLeaves[parentId] = count of leaf children hidden in compact mode */
   const collapsedLeaves={};
   let compactPieces=cleanPieces;
   if(compactMode){
     const hiddenLeafIds=new Set();
     cleanPieces.forEach(p=>{
-      /* a piece is a collapsible leaf if it has no children of its own */
-      if(childCount[p.id]===0){
+      if(childCount[p.id]===0 && !pieceToGroup[p.id]){
         const par=showDropped?(p.parent_id||null):effectiveParent(p);
         if(par){
           collapsedLeaves[par]=(collapsedLeaves[par]||0)+1;
@@ -251,20 +284,29 @@ function render(){
 
   /* ── D3 stratify + left-to-right tree ── */
   const SYNTH='__root__';
-  const compactIds=new Set(compactPieces.map(p=>p.id));
-  const stratData=[{id:SYNTH,parent_id:null},...compactPieces.map(p=>({
-    ...p,
-    parent_id: showDropped
-      ? (p.parent_id && compactIds.has(p.parent_id) ? p.parent_id : SYNTH)
-      : (()=>{
-          /* walk up until we find a parent that is in compactPieces */
-          let cur=effectiveParent(p);
-          while(cur && !compactIds.has(cur)){
-            cur=allById[cur]?.parent_id||null;
-          }
-          return cur||SYNTH;
-        })()
-  }))];
+  const compactIds=new Set([...compactPieces.map(p=>p.id),...allGroupIds]);
+  const stratData=[
+    {id:SYNTH,parent_id:null},
+    /* virtual group nodes */
+    ...groupNodesList.map(g=>({
+      id:g.id, parent_id:compactIds.has(g.parent_id)?g.parent_id:SYNTH,
+      is_group:true, label:g.label, childIds:g.childIds, style_key:g.style_key,
+    })),
+    /* actual pieces */
+    ...compactPieces.map(p=>({
+      ...p,
+      parent_id:(()=>{
+        /* grouped pieces point to their group node */
+        if(pieceToGroup[p.id]) return pieceToGroup[p.id];
+        const ep=showDropped?(p.parent_id||null):effectiveParent(p);
+        if(!ep) return SYNTH;
+        if(compactIds.has(ep)) return ep;
+        let cur=allById[ep]?.parent_id||null;
+        while(cur&&!compactIds.has(cur)) cur=allById[cur]?.parent_id||null;
+        return cur||SYNTH;
+      })(),
+    })),
+  ];
   const root=d3.stratify().id(d=>d.id).parentId(d=>d.parent_id)(stratData);
 
   const SIBLING_GAP=compactMode?72:88, DEPTH_GAP=120, THUMB=66, HALF=33, PAD_TOP=20;
@@ -275,17 +317,18 @@ function render(){
 
   const synthDepth=pos[SYNTH].y;
   const OFFSET_X=-synthDepth+20;
-  const svgX=id=>pos[id].y+OFFSET_X;
-  const svgY=id=>pos[id].x;
+  const svgX=id=>pos[id]?.y+OFFSET_X;
+  const svgY=id=>pos[id]?.x;
 
-  const allX=compactPieces.map(p=>svgX(p.id));
-  const allY=compactPieces.map(p=>svgY(p.id));
+  const allDisplayNodes=[...compactPieces,...groupNodesList];
+  const allX=allDisplayNodes.map(n=>svgX(n.id));
+  const allY=allDisplayNodes.map(n=>svgY(n.id));
   const minYVal=Math.min(...allY);
   const SHIFT_Y=-minYVal+PAD_TOP;
 
   /* ── rebuild SVG ── */
   const stage=document.getElementById('stage');
-  stage.innerHTML='';                                      /* clear previous render */
+  stage.innerHTML='';
   stage.setAttribute('width',  Math.max(...allX)+HALF+24);
   stage.setAttribute('height', Math.max(...allY)-minYVal+PAD_TOP+HALF+16+20);
 
@@ -300,16 +343,17 @@ function render(){
   const edgeG=g.append('g').attr('fill','none');
   root.links().forEach(link=>{
     if(link.source.id===SYNTH) return;
-    const px=svgX(link.source.id)+HALF, py=svgY(link.source.id);
-    const cx=svgX(link.target.id)-HALF, cy=svgY(link.target.id);
+    const srcIsGrp=allGroupIds.has(link.source.id), tgtIsGrp=allGroupIds.has(link.target.id);
+    const px=svgX(link.source.id)+(srcIsGrp?HALF:HALF), py=svgY(link.source.id);
+    const cx=svgX(link.target.id)-(tgtIsGrp?HALF:HALF), cy=svgY(link.target.id);
     const midX=(px+cx)/2;
-    /* dim edges that lead to or from dropped nodes (in show-dropped mode) */
     const srcDropped=byId[link.source.id]?.dropped, tgtDropped=byId[link.target.id]?.dropped;
     const edgeDrop=srcDropped||tgtDropped;
     edgeG.append('path')
       .attr('d',`M${px},${py} C${midX},${py} ${midX},${cy} ${cx},${cy}`)
-      .attr('stroke', edgeDrop?'#222230':'#2a3a5a')
-      .attr('stroke-width',1.2).attr('opacity', edgeDrop?0.5:0.8);
+      .attr('stroke',srcIsGrp||tgtIsGrp?'#2d3045':edgeDrop?'#222230':'#2a3a5a')
+      .attr('stroke-width',srcIsGrp||tgtIsGrp?1:1.2)
+      .attr('opacity',edgeDrop?0.5:srcIsGrp||tgtIsGrp?0.5:0.8);
   });
   crossEdges.forEach(e=>{
     if(!pos[e.from]||!pos[e.to]) return;
@@ -322,7 +366,40 @@ function render(){
       .attr('stroke-width',1).attr('opacity',0.5);
   });
 
-  /* ── nodes ── */
+  /* ── group node pills ── */
+  const grpG=g.append('g');
+  const grpEnter=grpG.selectAll('g.grp-node').data(groupNodesList,d=>d.id).enter()
+    .append('g').attr('class','grp-node').attr('data-id',d=>d.id)
+    .attr('transform',d=>`translate(${svgX(d.id)},${svgY(d.id)})`)
+    .style('cursor','pointer');
+  grpEnter.append('rect')
+    .attr('x',-HALF).attr('y',-11).attr('width',THUMB).attr('height',22).attr('rx',11)
+    .attr('fill','#111118').attr('stroke','#c9a86a').attr('stroke-width',1.2).attr('opacity',0.92);
+  grpEnter.append('text')
+    .attr('text-anchor','middle').attr('dominant-baseline','middle')
+    .attr('y',0).attr('font-size','8.5px').attr('font-family','ui-monospace,monospace')
+    .attr('fill','#c9a86a').style('pointer-events','none')
+    .text(d=>`${d.label} · ${d.childIds.length}`);
+  grpEnter
+    .on('mouseover',(e,d)=>{
+      tip.innerHTML=`
+        <div class="code">${d.label}</div>
+        <div class="row"><b>style</b> · ${d.style_key}</div>
+        <div class="row"><b>${d.childIds.length} pieces</b> in this group</div>
+        <div class="row" style="color:#8a8a93">right-click → drop group</div>
+      `;
+      tip.style.display='block';
+      tip.style.left=Math.min(window.innerWidth-380,e.clientX+12)+'px';
+      tip.style.top=Math.min(window.innerHeight-200,e.clientY+12)+'px';
+    })
+    .on('mousemove',(e)=>{
+      tip.style.left=Math.min(window.innerWidth-380,e.clientX+12)+'px';
+      tip.style.top=Math.min(window.innerHeight-200,e.clientY+12)+'px';
+    })
+    .on('mouseout',hideTip)
+    .on('contextmenu',onGrpCtx);
+
+  /* ── piece nodes ── */
   const nodeG=g.append('g');
   const enter=nodeG.selectAll('g.node').data(compactPieces,d=>d.id).enter()
     .append('g').attr('class','node').attr('data-id',d=>d.id)
@@ -383,6 +460,7 @@ function render(){
   const collapsedTotal=Object.values(collapsedLeaves).reduce((a,b)=>a+b,0);
   document.getElementById('counts').textContent=
     `${compactPieces.length} shown · ${(lineage.edges||[]).length} edges · ${favCount} encouraged`+
+    (groupNodesList.length>0?` · ${groupNodesList.length} groups`:'')+
     (compactMode&&collapsedTotal>0?` · ${collapsedTotal} leaves collapsed`:'')+
     (showDropped?` · ${droppedCount} dropped (visible)`:'');
   document.getElementById('drop-count-label').textContent=
@@ -395,15 +473,13 @@ function render(){
     compactMode?'compact view ✓':'compact view';
 
   /* rebind ctx menu to updated data */
-  _allPieces=allPieces; _byId=byId;
+  _allPieces=allPieces; _byId=byId; _groupNodes=groupNodes;
 }
 
 /* ── tooltip / ctx menu (closure refs updated per render) ────────── */
-let _allPieces=[], _byId={};
+let _allPieces=[], _byId={}, _groupNodes={};
 const tip=document.getElementById('tooltip');
 function showTip(e,d){
-  const descCount={};
-  /* lazy: use pre-computed via mark or just show 0 */
   tip.innerHTML=`
     <div class="code">${d.id}${d.favored?' ♥':''}</div>
     <div class="title">${d.title||''}</div>
@@ -420,18 +496,32 @@ function hideTip(){tip.style.display='none';}
 
 const ctxMenu=document.getElementById('ctx-menu');
 const ctxLabel=document.getElementById('ctx-label');
+const ctxPieceButtons=document.getElementById('ctx-piece-buttons');
+const ctxGroupButtons=document.getElementById('ctx-group-buttons');
 let ctxTarget=null;
 function closeCtx(){ctxMenu.style.display='none';ctxTarget=null;}
 document.addEventListener('click',closeCtx);
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCtx();});
+
+function _showCtx(e,label,isGroup){
+  ctxLabel.textContent=label;
+  ctxPieceButtons.style.display=isGroup?'none':'block';
+  ctxGroupButtons.style.display=isGroup?'block':'none';
+  ctxMenu.style.display='block';
+  ctxMenu.style.left=Math.min(window.innerWidth-200,e.clientX)+'px';
+  ctxMenu.style.top =Math.min(window.innerHeight-160,e.clientY)+'px';
+}
 function onCtx(e,d){
   e.preventDefault();e.stopPropagation();hideTip();
   ctxTarget=d;
-  ctxLabel.textContent=d.id+' · '+(d.direction||d.title||'');
-  ctxMenu.style.display='block';
-  ctxMenu.style.left=Math.min(window.innerWidth-200,e.clientX)+'px';
-  ctxMenu.style.top =Math.min(window.innerHeight-140,e.clientY)+'px';
+  _showCtx(e, d.id+' · '+(d.direction||d.title||''), false);
 }
+function onGrpCtx(e,d){
+  e.preventDefault();e.stopPropagation();hideTip();
+  ctxTarget=d;
+  _showCtx(e, `${d.label} · ${d.childIds.length} pieces`, true);
+}
+
 document.getElementById('ctx-drop-node').addEventListener('click',()=>{
   if(!ctxTarget)return;
   dropNode(ctxTarget.id);render();closeCtx();
@@ -443,6 +533,17 @@ document.getElementById('ctx-drop-tree').addEventListener('click',()=>{
 document.getElementById('ctx-restore').addEventListener('click',()=>{
   if(!ctxTarget)return;
   restoreSubtree(ctxTarget.id,_allPieces);render();closeCtx();
+});
+document.getElementById('ctx-drop-group').addEventListener('click',()=>{
+  if(!ctxTarget||!ctxTarget.is_group)return;
+  const d=getDismissed();
+  ctxTarget.childIds.forEach(id=>{
+    d.add(id);
+    getDescendants(id,_allPieces).forEach(desc=>d.add(desc));
+  });
+  saveDismissed(d);
+  showToast(`Dropped ${ctxTarget.childIds.length} pieces from "${ctxTarget.label}"`);
+  render();closeCtx();
 });
 
 let _toastTimer=null;

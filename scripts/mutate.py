@@ -100,6 +100,21 @@ def _tags_from_directive(directive_id: str, parent: dict) -> list[str]:
     return out
 
 
+def _style_key_from_tags(tags: list[str]) -> str:
+    """Compact style bucket for lineage tree grouping (stored in lineage.json)."""
+    for t in tags:
+        if t.startswith("channel:"):
+            return t
+    for t in tags:
+        if t.startswith("mode:"):
+            return t
+    # Last non-inherited tag that looks like a directive name
+    directives = [t for t in tags if ":" not in t and t not in (
+        "improv", "cross-pollinated", "volumetric-light", "multi-state", "object-cloud",
+    )]
+    return directives[-1] if directives else "directive"
+
+
 def _read_recent_log(n: int = 50) -> list[dict]:
     """Read the last n entries from mutation_log.jsonl. Empty list if missing."""
     if not LOG.exists():
@@ -624,6 +639,7 @@ def main():
             "parent_id": parent["id"],
             "generation": new_meta["generation"],
             "created_at": new_meta["created_at"],
+            "style_key": _style_key_from_tags(new_meta["tags"]),
         })
         lineage.setdefault("edges", []).append({
             "from": parent["id"], "to": new_id, "directive": directive_id,
