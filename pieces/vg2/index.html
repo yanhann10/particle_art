@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vg2 · cell bloom scatter return</title>
+<!-- MOTION: propagate, intensity: gentle -->
+<!-- Palette: warm living-green #c8f0c0, dark nucleus #204020 on near-black #040808 -->
+<!-- Artist: cellular biology — mitosis, colony growth, radial dispersal, morphogenesis -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#040808; overflow:hidden;
+               color:#80a880; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.50; font-size:11px; letter-spacing:0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size:10px; letter-spacing:0.04em; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.65; font-size:10px; letter-spacing:0.06em; color:#90c890; }
+</style>
+</head>
+<body>
+<div class="id">vg2</div>
+<div class="hint">BLOOM → SCATTER → DRIFT → RETURN · 40-second cycle</div>
+<div class="src">cellular biology · mitosis · colony dispersal · morphogenesis</div>
+<div class="arc" id="arc">BLOOM · 0s</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* Cellular biology narrative. 320 cells as Points with circle sprite.
+   Four phases looping every 40 seconds:
+   - BLOOM (0–10s): cells divide from center, colony grows
+   - SCATTER (10–20s): radial force pushes all cells outward
+   - DRIFT (20–28s): Brownian noise — cells meander
+   - RETURN (28–40s): all attracted back to centroid */
+
+const CYCLE = 40.0;
+const MAX_CELLS = 320;
+
+const BG = new THREE.Color('#040808');
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 9);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+
+// Build circle sprite texture using canvas
+function makeCircleTexture(size) {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const cx = size / 2, cy = size / 2, r = size / 2 - 1;
+  // Outer glow ring
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(200,240,192,0.18)';
+  ctx.fill();
+  // Main cell body
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.72, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(200,240,192,0.85)';
+  ctx.fill();
+  // Nucleus
+  ctx.beginPath();
+  ctx.arc(cx + r * 0.06, cy - r * 0.06, r * 0.22, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(32,64,32,0.90)';
+  ctx.fill();
+  return new THREE.CanvasTexture(canvas);
+}
+
+const cellTex = makeCircleTexture(64);
+
+// Cell state
+const cellPos = []; // {x, y, vx, vy, seed, born} alive cells
+const ORIGINS = []; // original bloom positions (for RETURN)
+
+// Start with a seed colony of 12 cells in a small cluster at center
+for (let i = 0; i < 12; i++) {
+  const angle = (i / 12) * Math.PI * 2;
+  const r = i === 0 ? 0 : 0.3 + (i % 3) * 0.2;
+  const x = i === 0 ? 0 : Math.cos(angle) * r;
+  const y = i === 0 ? 0 : Math.sin(angle) * r;
+  cellPos.push({ x, y, vx: 0, vy: 0, seed: Math.random(), born: 0 });
+  ORIGINS.push({ x, y });
+}
+
+// Geometry: pre-allocate for MAX_CELLS
+const posArr = new Float32Array(MAX_CELLS * 3);
+const alphaArr = new Float32Array(MAX_CELLS);
+const seedArr = new Float32Array(MAX_CELLS);
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+geom.setAttribute('cellAlpha', new THREE.BufferAttribute(alphaArr, 1));
+geom.setAttribute('cellSeed', new THREE.BufferAttribute(seedArr, 1));
+
+const uniforms = {
+  uTime:    { value: 0.0 },
+  uMap:     { value: cellTex },
+  uPixel:   { value: renderer.getPixelRatio() },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float cellAlpha;
+    attribute float cellSeed;
+    varying float vAlpha;
+    varying float vSeed;
+    void main(){
+      vAlpha = cellAlpha;
+      vSeed  = cellSeed;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+      // Cell size: 0.3 world units → projected to screen
+      gl_PointSize = 0.3 * uPixel * (600.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uMap;
+    varying float vAlpha;
+    varying float vSeed;
+    void main(){
+      vec4 tex = texture2D(uMap, gl_PointCoord);
+      if (tex.a < 0.05) discard;
+      // Slight per-cell hue variation — living green range
+      float hv = vSeed * 0.12;
+      vec3 col = tex.rgb * (vec3(0.82 - hv, 1.0, 0.80 - hv));
+      gl_FragColor = vec4(col, tex.a * vAlpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const arcEl = document.getElementById('arc');
+
+let lastDivideTime = 0;
+
+function getPhase(t) {
+  const cyc = t % CYCLE;
+  if (cyc < 10)  return { phase: 'BLOOM',   local: cyc / 10 };
+  if (cyc < 20)  return { phase: 'SCATTER', local: (cyc - 10) / 10 };
+  if (cyc < 28)  return { phase: 'DRIFT',   local: (cyc - 20) / 8 };
+  return            { phase: 'RETURN',  local: (cyc - 28) / 12 };
+}
+
+function step(t, dt) {
+  const { phase, local } = getPhase(t);
+
+  // BLOOM: divide cells
+  if (phase === 'BLOOM') {
+    const n = cellPos.length;
+    if (n < MAX_CELLS) {
+      // 80% per second chance for each undivided cell during bloom
+      for (let i = 0; i < n && cellPos.length < MAX_CELLS; i++) {
+        if (Math.random() < 0.80 * dt) {
+          const c = cellPos[i];
+          const angle = Math.random() * Math.PI * 2;
+          const d = 0.3;
+          const nx = c.x + Math.cos(angle) * d;
+          const ny = c.y + Math.sin(angle) * d;
+          cellPos.push({ x: nx, y: ny, vx: Math.cos(angle) * 0.06, vy: Math.sin(angle) * 0.06, seed: Math.random(), born: t });
+          ORIGINS.push({ x: nx, y: ny });
+        }
+      }
+    }
+  }
+
+  const n = cellPos.length;
+  for (let i = 0; i < n; i++) {
+    const c = cellPos[i];
+
+    if (phase === 'SCATTER') {
+      // radial force outward
+      const d = Math.sqrt(c.x * c.x + c.y * c.y) + 0.001;
+      const force = 2.0 * local; // ramp up over phase
+      c.vx += (c.x / d) * force * dt;
+      c.vy += (c.y / d) * force * dt;
+    }
+
+    if (phase === 'DRIFT') {
+      // Brownian noise
+      c.vx += (Math.random() - 0.5) * 0.01;
+      c.vy += (Math.random() - 0.5) * 0.01;
+    }
+
+    if (phase === 'RETURN') {
+      // Attract toward origin position
+      const ox = ORIGINS[i].x, oy = ORIGINS[i].y;
+      const dx = ox - c.x, dy = oy - c.y;
+      const d = Math.sqrt(dx * dx + dy * dy) + 0.001;
+      const pullStr = 1.5 * local; // grows stronger over phase
+      c.vx += (dx / d) * pullStr * dt;
+      c.vy += (dy / d) * pullStr * dt;
+    }
+
+    // Damping
+    const damp = (phase === 'SCATTER') ? 0.988 : 0.970;
+    c.vx *= damp;
+    c.vy *= damp;
+
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+  }
+
+  arcEl.textContent = `${phase} · ${(t % CYCLE).toFixed(1)}s`;
+}
+
+function updateGeom() {
+  const n = cellPos.length;
+  for (let i = 0; i < n; i++) {
+    posArr[i * 3]     = cellPos[i].x;
+    posArr[i * 3 + 1] = cellPos[i].y;
+    posArr[i * 3 + 2] = 0;
+    alphaArr[i] = 0.88;
+    seedArr[i]  = cellPos[i].seed;
+  }
+  geom.setDrawRange(0, n);
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.cellAlpha.needsUpdate = true;
+  geom.attributes.cellSeed.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Pre-warm BLOOM
+let fakeT = 0;
+for (let s = 0; s < 300; s++) {
+  fakeT += 0.016;
+  step(fakeT, 0.016);
+}
+
+let lastTime = performance.now();
+function loop() {
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  const t = now / 1000;
+  uniforms.uTime.value = t;
+  step(t, dt);
+  updateGeom();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(201,168,106,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>
