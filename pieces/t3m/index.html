@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>morphing torus</title>
+<style>* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #020305; overflow: hidden; }
+canvas { display: block; }</style>
+</head>
+<body>
+<!-- INTENTION: 25600 particles on a torus whose major and minor radii breathe slowly
+     out of phase. A spherical-harmonic ripple (Y_3^2) travels around the surface,
+     crinkling it like a living organism. Color maps z-height: cold teal at the
+     equator, white-hot at the crown, warm amber at the nadir. The torus never
+     repeats — two coupled oscillators ensure the waveform drifts forever. -->
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x020305);
+
+const camera = new THREE.PerspectiveCamera(44, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(9, 3, 5);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.35;
+
+// ── Torus particle system ─────────────────────────────────────────────────────
+// 160 × 160 = 25600 particles on parametric torus surface; recomputed each frame
+const NU = 160, NV = 160, NS = NU * NV;
+
+const rPos  = new Float32Array(NS * 3);
+const rSeed = new Float32Array(NS);
+
+// Pre-compute (u, v) angles and per-particle random seed
+const uArr = new Float32Array(NS);
+const vArr = new Float32Array(NS);
+for (let i = 0; i < NU; i++) {
+  for (let j = 0; j < NV; j++) {
+    const idx = i * NV + j;
+    uArr[idx] = (i / NU) * Math.PI * 2;
+    vArr[idx] = (j / NV) * Math.PI * 2;
+    rSeed[idx] = Math.random();
+  }
+}
+
+// Jitter offsets (tiny static noise so particles don't lie perfectly on surface)
+const jitter = 0.10;
+const jX = new Float32Array(NS).map(() => (Math.random() - 0.5) * jitter);
+const jY = new Float32Array(NS).map(() => (Math.random() - 0.5) * jitter);
+const jZ = new Float32Array(NS).map(() => (Math.random() - 0.5) * jitter);
+
+const geo = new THREE.BufferGeometry();
+const posAttr  = new THREE.BufferAttribute(rPos,  3);
+const seedAttr = new THREE.BufferAttribute(rSeed, 1);
+posAttr.setUsage(THREE.DynamicDrawUsage);
+geo.setAttribute('position', posAttr);
+geo.setAttribute('seed',     seedAttr);
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPixel: { value: 700 / innerHeight } },
+  vertexShader: `
+    uniform float uTime, uPixel;
+    attribute float seed;
+    varying float vZ;   // world z → color ramp
+    varying float vA;   // shimmer alpha
+    void main() {
+      vZ  = clamp((position.z + 4.0) / 8.0, 0.0, 1.0);
+      vA  = 0.50 + 0.36 * sin(uTime * 2.9 + seed * 19.7);
+      vec4 mv  = modelViewMatrix * vec4(position, 1.0);
+      float d  = max(-mv.z, 0.5);
+      gl_PointSize = 2.6 * uPixel * (38.0 / d);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vZ, vA;
+    void main() {
+      if (length(gl_PointCoord - 0.5) > 0.44) discard;
+      // cold teal equator → white crown → amber nadir
+      vec3 teal  = vec3(0.05, 0.55, 0.72);
+      vec3 white = vec3(0.95, 0.95, 0.88);
+      vec3 amber = vec3(0.90, 0.55, 0.10);
+      vec3 col = vZ < 0.5
+        ? mix(amber, white, vZ * 2.0)
+        : mix(white, teal,  (vZ - 0.5) * 2.0);
+      gl_FragColor = vec4(col, vA);
+    }
+  `,
+  transparent: true,
+  depthWrite:  false,
+  blending:    THREE.AdditiveBlending,
+});
+scene.add(new THREE.Points(geo, mat));
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  mat.uniforms.uPixel.value = 700 / innerHeight;
+});
+
+const clock = new THREE.Clock();
+let elapsed = 0;
+
+// Recompute torus positions each frame with time-varying radii and harmonic ripple
+const TWO_PI = Math.PI * 2;
+const animate = () => {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.033);
+  elapsed += dt;
+
+  // Two coupled oscillators — radii breathe out of phase; never repeats exactly
+  const R = 2.8 + 0.40 * Math.sin(elapsed * 0.55);          // major radius
+  const r = 1.0 + 0.22 * Math.cos(elapsed * 0.82);          // minor radius
+  // Spherical-harmonic-inspired ripple: Y_3^2 envelope traveling around tube
+  const ripAmp   = 0.22;
+  const ripSpeed = 0.38;
+
+  for (let i = 0; i < NS; i++) {
+    const u = uArr[i];
+    const v = vArr[i];
+    // Ripple displaces the minor circle outward along its normal
+    const ripple = ripAmp * Math.cos(3 * u + elapsed * ripSpeed)
+                          * Math.cos(2 * v + elapsed * 0.20);
+    const rEff = r + ripple;
+    // Standard torus parametrization: +Z is up
+    const cosU = Math.cos(u), sinU = Math.sin(u);
+    const cosV = Math.cos(v), sinV = Math.sin(v);
+    rPos[i*3]   = (R + rEff * cosV) * cosU + jX[i];
+    rPos[i*3+1] = (R + rEff * cosV) * sinU + jY[i];
+    rPos[i*3+2] = rEff * sinV                + jZ[i];
+  }
+
+  posAttr.needsUpdate = true;
+  mat.uniforms.uTime.value = elapsed;
+  controls.update();
+  renderer.render(scene, camera);
+};
+
+animate();
+</script>
+</body>
+</html>

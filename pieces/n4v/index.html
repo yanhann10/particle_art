@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>attractor</title>
+<style>* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #030406; overflow: hidden; }
+canvas { display: block; }</style>
+</head>
+<body>
+<!-- INTENTION: 9000 independent particles each riding the Lorenz strange
+     attractor. Left wing (x<0) = deep amber. Right wing (x>0) = periwinkle.
+     The two-lobe butterfly silhouette is immediately readable; auto-rotation
+     reveals its 3D depth. Brightness ramps with height so the lobe crowns glow
+     warmest. This is deterministic chaos made visible: same rules, never the
+     same path twice. -->
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x030406);
+
+const camera = new THREE.PerspectiveCamera(46, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(4, -8, 3);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.4;
+
+// ── Lorenz system: σ=10, ρ=28, β=8/3 ─────────────────────────────────────────
+const σ = 10, ρ = 28, β = 8 / 3;
+const DT = 0.005, HDT = DT * 0.5, DT6 = DT / 6;
+const NS = 9000;
+// attractor center ≈ (0, 0, 26) in Lorenz coords; scale 0.10 → fits ±2 world units
+const SCALE = 0.10, OZ = -2.60;
+
+const trX = new Float32Array(NS);
+const trY = new Float32Array(NS);
+const trZ = new Float32Array(NS);
+const rPos  = new Float32Array(NS * 3);
+const rSeed = new Float32Array(NS);
+for (let i = 0; i < NS; i++) rSeed[i] = Math.random();
+
+// RK4 with zero heap allocations — critical for 9k × 3 steps / frame
+let _x = 0, _y = 0, _z = 0;
+const rk4 = (x, y, z) => {
+  const k1x = σ*(y-x),                           k1y = x*(ρ-z)-y,    k1z = x*y-β*z;
+  const ax = x+k1x*HDT, ay = y+k1y*HDT, az = z+k1z*HDT;
+  const k2x = σ*(ay-ax),                          k2y = ax*(ρ-az)-ay, k2z = ax*ay-β*az;
+  const bx = x+k2x*HDT, by = y+k2y*HDT, bz = z+k2z*HDT;
+  const k3x = σ*(by-bx),                          k3y = bx*(ρ-bz)-by, k3z = bx*by-β*bz;
+  const cx = x+k3x*DT,  cy = y+k3y*DT,  cz = z+k3z*DT;
+  const k4x = σ*(cy-cx),                          k4y = cx*(ρ-cz)-cy, k4z = cx*cy-β*cz;
+  _x = x + (k1x+2*k2x+2*k3x+k4x)*DT6;
+  _y = y + (k1y+2*k2y+2*k3y+k4y)*DT6;
+  _z = z + (k1z+2*k2z+2*k3z+k4z)*DT6;
+};
+
+// seed all 9k tracers on the attractor manifold (4k warmup + stride-10 sampling)
+let rx = 0.1, ry = 0.0, rz = 0.0;
+for (let i = 0; i < 4000; i++) { rk4(rx,ry,rz); rx=_x; ry=_y; rz=_z; }
+for (let i = 0; i < NS; i++) {
+  for (let s = 0; s < 10; s++) { rk4(rx,ry,rz); rx=_x; ry=_y; rz=_z; }
+  trX[i]=rx; trY[i]=ry; trZ[i]=rz;
+  rPos[i*3]=rx*SCALE; rPos[i*3+1]=ry*SCALE; rPos[i*3+2]=rz*SCALE+OZ;
+}
+
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.BufferAttribute(rPos,  3));
+geo.setAttribute('seed',     new THREE.BufferAttribute(rSeed, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPixel: { value: 700 / innerHeight } },
+  vertexShader: `
+    uniform float uTime, uPixel;
+    attribute float seed;
+    varying float vX;   // which lobe: negative=amber, positive=periwinkle
+    varying float vZ;   // lobe height → brightness ramp
+    varying float vA;
+    void main() {
+      vX  = position.x;
+      vZ  = clamp((position.z + 2.6) / 4.4, 0.0, 1.0);
+      vA  = 0.45 + 0.40 * sin(uTime * 3.7 + seed * 23.1);
+      vec4  mv = modelViewMatrix * vec4(position, 1.0);
+      float d  = max(-mv.z, 0.5);
+      gl_PointSize = 2.4 * uPixel * (36.0 / d);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vX, vZ, vA;
+    void main() {
+      if (length(gl_PointCoord - 0.5) > 0.44) discard;
+      // dim base tones ramp to saturated tip tones with height
+      vec3 amber = mix(vec3(0.65, 0.28, 0.04), vec3(1.00, 0.80, 0.28), vZ);
+      vec3 periw = mix(vec3(0.08, 0.22, 0.62), vec3(0.38, 0.68, 1.00), vZ);
+      gl_FragColor = vec4(mix(amber, periw, smoothstep(-0.18, 0.18, vX)), vA);
+    }
+  `,
+  transparent: true,
+  depthWrite:  false,
+  blending:    THREE.AdditiveBlending,
+});
+scene.add(new THREE.Points(geo, mat));
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  mat.uniforms.uPixel.value = 700 / innerHeight;
+});
+
+const clock = new THREE.Clock();
+let elapsed = 0;
+
+const animate = () => {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.033);
+  elapsed += dt;
+
+  // advance every tracer by 3 RK4 steps; write world-space position
+  for (let i = 0; i < NS; i++) {
+    let x=trX[i], y=trY[i], z=trZ[i];
+    rk4(x,y,z); x=_x; y=_y; z=_z;
+    rk4(x,y,z); x=_x; y=_y; z=_z;
+    rk4(x,y,z); x=_x; y=_y; z=_z;
+    trX[i]=x; trY[i]=y; trZ[i]=z;
+    rPos[i*3]=x*SCALE; rPos[i*3+1]=y*SCALE; rPos[i*3+2]=z*SCALE+OZ;
+  }
+  geo.attributes.position.needsUpdate = true;
+  mat.uniforms.uTime.value = elapsed;
+  controls.update();
+  renderer.render(scene, camera);
+};
+
+animate();
+</script>
+</body>
+</html>

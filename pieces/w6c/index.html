@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sap tree</title>
+<style>* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #010204; overflow: hidden; }
+canvas { display: block; }</style>
+</head>
+<body>
+<!-- INTENTION: Three bare winter trees grown by recursive branching (6 levels,
+     seeded LCG). ~14 000 static particles sit on every branch segment — density
+     thins with depth. Color flows from warm ivory at the trunk base through
+     dusty amber mid-branches to pale sage-green at the twig tips. The vertex
+     shader adds two alive signals: a slow whole-tree sway (sin wave in x/z)
+     and a sap-pulse that travels upward — a brightening front that climbs from
+     root to crown every 4 seconds, giving each tree a heartbeat. -->
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x010204);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 3, 8);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 3, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.25;
+
+// ── Seeded LCG ────────────────────────────────────────────────────────────────
+let lcgState = 0x4d3f9a12;
+const lcg = () => {
+  lcgState = (Math.imul(lcgState, 1664525) + 1013904223) >>> 0;
+  return lcgState / 0x100000000;
+};
+const lcgRange = (lo, hi) => lo + lcg() * (hi - lo);
+
+// ── Branch builder ────────────────────────────────────────────────────────────
+// Returns array of {start, end, depth, treeIdx} branch records
+const LEVELS = 6;
+const FORK   = 2;  // children per node
+// Per-level particles along the segment
+const DENSITY = [1100, 650, 360, 200, 110, 60];
+
+const branches = [];
+const buildBranch = (start, dir, len, depth, treeIdx) => {
+  if (depth > LEVELS) return;
+  const end = start.clone().addScaledVector(dir, len);
+  branches.push({ start, end, depth, treeIdx });
+  if (depth === LEVELS) return;
+  for (let c = 0; c < FORK; c++) {
+    // Random deflection angle from parent direction
+    const theta = lcgRange(0.28, 0.52);  // polar deflection
+    const phi   = lcgRange(0, Math.PI * 2);
+    // Build rotation: find axis perpendicular to dir, rotate by theta around it
+    const perp = new THREE.Vector3(lcg() - 0.5, lcg() - 0.5, lcg() - 0.5)
+                   .crossVectors(dir, new THREE.Vector3(lcg() - 0.5, lcg() - 0.5, 0.01).normalize())
+                   .normalize();
+    const childDir = dir.clone()
+      .applyAxisAngle(perp, theta)
+      .applyAxisAngle(dir, phi)
+      .normalize();
+    buildBranch(end.clone(), childDir, len * lcgRange(0.62, 0.72), depth + 1, treeIdx);
+  }
+};
+
+// Three trees spaced across x = -4, 0, +4 with slight z offset for depth
+const treeRoots = [
+  { pos: new THREE.Vector3(-4.2, 0, -0.8), seed: 0x4d3f9a12 },
+  { pos: new THREE.Vector3( 0.1, 0,  0.3), seed: 0x9e217b34 },
+  { pos: new THREE.Vector3( 4.0, 0, -0.5), seed: 0x1a8c3d57 },
+];
+
+for (let t = 0; t < treeRoots.length; t++) {
+  lcgState = treeRoots[t].seed;
+  const base = treeRoots[t].pos;
+  // Slight lean
+  const lean = new THREE.Vector3(lcgRange(-0.08, 0.08), 1, lcgRange(-0.06, 0.06)).normalize();
+  buildBranch(base.clone(), lean, 2.0, 1, t);
+}
+
+// ── Scatter particles along every branch ────────────────────────────────────
+// Attribute: position (xyz), depth (0..1), treeIdx (0..2), along (0..1 up tree)
+const totalP = branches.reduce((s, b) => s + DENSITY[b.depth - 1], 0);
+const aPos   = new Float32Array(totalP * 3);
+const aDepth = new Float32Array(totalP);   // normalized depth 0=trunk 1=tip
+const aAlong = new Float32Array(totalP);   // progress up full tree (for sap)
+const aTree  = new Float32Array(totalP);   // which tree [0,1,2]
+
+let pi = 0;
+// First pass: record raw along as depth + fraction within level
+for (const br of branches) {
+  const n    = DENSITY[br.depth - 1];
+  const dNorm = (br.depth - 1) / (LEVELS - 1);
+  const seg   = br.end.clone().sub(br.start);
+  const len   = seg.length();
+  // Scatter radius decreases with depth
+  const scatR = 0.18 * Math.pow(0.65, br.depth - 1);
+  for (let p = 0; p < n; p++) {
+    const t    = Math.random();
+    const tx   = br.start.x + seg.x * t + (Math.random() - 0.5) * scatR;
+    const ty   = br.start.y + seg.y * t + (Math.random() - 0.5) * scatR;
+    const tz   = br.start.z + seg.z * t + (Math.random() - 0.5) * scatR;
+    aPos[pi*3]   = tx;
+    aPos[pi*3+1] = ty;
+    aPos[pi*3+2] = tz;
+    aDepth[pi]   = dNorm;
+    // along = depth contribution + within-level t (normalized to full range)
+    aAlong[pi]   = dNorm + t / LEVELS;
+    aTree[pi]    = br.treeIdx;
+    pi++;
+  }
+}
+
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.BufferAttribute(aPos,   3));
+geo.setAttribute('aDepth',   new THREE.BufferAttribute(aDepth, 1));
+geo.setAttribute('aAlong',   new THREE.BufferAttribute(aAlong, 1));
+geo.setAttribute('aTree',    new THREE.BufferAttribute(aTree,  1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime:  { value: 0 },
+    uPixel: { value: 700 / innerHeight },
+  },
+  vertexShader: `
+    uniform float uTime, uPixel;
+    attribute float aDepth, aAlong, aTree;
+    varying float vDepth;
+    varying float vSap;
+    varying float vA;
+
+    void main() {
+      vDepth = aDepth;
+
+      // Sap pulse: front climbs from 0→1 in 4s, then resets
+      float sapCycle = mod(uTime * 0.25 + aTree * 0.33, 1.0);
+      // Glow when pulse front passes through this particle
+      float dist = abs(aAlong - sapCycle);
+      vSap = smoothstep(0.12, 0.0, dist);
+
+      // Whole-tree sway: low-frequency sinusoid, amplitude scales with height
+      float sway = sin(uTime * 0.7 + aTree * 1.1) * aDepth * 0.08;
+      vec3 swayPos = position + vec3(sway, 0.0, sway * 0.4);
+
+      vA   = 0.55 + 0.30 * sin(uTime * 3.1 + aDepth * 11.3);
+
+      vec4  mv = modelViewMatrix * vec4(swayPos, 1.0);
+      float d  = max(-mv.z, 0.5);
+      gl_PointSize = (2.2 - aDepth * 1.0) * uPixel * (40.0 / d);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDepth, vSap, vA;
+    void main() {
+      if (length(gl_PointCoord - 0.5) > 0.44) discard;
+      // ivory trunk → dusty amber mid → sage green tips
+      vec3 trunk = vec3(0.88, 0.82, 0.68);
+      vec3 mid   = vec3(0.75, 0.58, 0.28);
+      vec3 tip   = vec3(0.55, 0.68, 0.42);
+      vec3 base  = vDepth < 0.5
+                   ? mix(trunk, mid, vDepth * 2.0)
+                   : mix(mid,   tip, (vDepth - 0.5) * 2.0);
+      // Sap pulse brightens toward warm gold
+      vec3 sapCol = mix(base, vec3(1.0, 0.88, 0.45), vSap * 0.90);
+      gl_FragColor = vec4(sapCol, vA);
+    }
+  `,
+  transparent: true,
+  depthWrite:  false,
+  blending:    THREE.AdditiveBlending,
+});
+scene.add(new THREE.Points(geo, mat));
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  mat.uniforms.uPixel.value = 700 / innerHeight;
+});
+
+const clock = new THREE.Clock();
+let elapsed = 0;
+const animate = () => {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.033);
+  elapsed += dt;
+  mat.uniforms.uTime.value = elapsed;
+  controls.update();
+  renderer.render(scene, camera);
+};
+animate();
+</script>
+</body>
+</html>
