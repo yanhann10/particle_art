@@ -128,6 +128,7 @@
 <div id="toast"></div>
 <div id="drop-footer">
   <button id="toggleDropped">show dropped nodes</button>
+  <button id="toggleCompact">compact view</button>
   <span id="drop-count-label"></span>
 </div>
 
@@ -153,6 +154,7 @@ function restoreSubtree(rootId,all){const d=getDismissed();d.delete(rootId);getD
 
 /* ── state ───────────────────────────────────────────────────────── */
 let showDropped = false;
+let compactMode = false;
 let lineageData = null, prefsData = null;
 
 /* ── render ──────────────────────────────────────────────────────── */
@@ -220,17 +222,52 @@ function render(){
     knownIds.has(e.from)&&knownIds.has(e.to)&&primaryParent[e.to]!==e.from
   );
 
+  /* ── compact mode: collapse leaf children into parent badge ── */
+  /* childCount counts how many cleanPieces children each node has */
+  const childCount={};
+  cleanPieces.forEach(p=>{childCount[p.id]=0});
+  cleanPieces.forEach(p=>{
+    const par=showDropped?(p.parent_id||null):effectiveParent(p);
+    if(par && par in childCount) childCount[par]++;
+  });
+
+  /* collapsedLeaves[parentId] = count of leaf children hidden in compact mode */
+  const collapsedLeaves={};
+  let compactPieces=cleanPieces;
+  if(compactMode){
+    const hiddenLeafIds=new Set();
+    cleanPieces.forEach(p=>{
+      /* a piece is a collapsible leaf if it has no children of its own */
+      if(childCount[p.id]===0){
+        const par=showDropped?(p.parent_id||null):effectiveParent(p);
+        if(par){
+          collapsedLeaves[par]=(collapsedLeaves[par]||0)+1;
+          hiddenLeafIds.add(p.id);
+        }
+      }
+    });
+    compactPieces=cleanPieces.filter(p=>!hiddenLeafIds.has(p.id));
+  }
+
   /* ── D3 stratify + left-to-right tree ── */
   const SYNTH='__root__';
-  const stratData=[{id:SYNTH,parent_id:null},...cleanPieces.map(p=>({
+  const compactIds=new Set(compactPieces.map(p=>p.id));
+  const stratData=[{id:SYNTH,parent_id:null},...compactPieces.map(p=>({
     ...p,
     parent_id: showDropped
-      ? (p.parent_id && knownIds.has(p.parent_id) ? p.parent_id : SYNTH)
-      : (effectiveParent(p)||SYNTH)
+      ? (p.parent_id && compactIds.has(p.parent_id) ? p.parent_id : SYNTH)
+      : (()=>{
+          /* walk up until we find a parent that is in compactPieces */
+          let cur=effectiveParent(p);
+          while(cur && !compactIds.has(cur)){
+            cur=allById[cur]?.parent_id||null;
+          }
+          return cur||SYNTH;
+        })()
   }))];
   const root=d3.stratify().id(d=>d.id).parentId(d=>d.parent_id)(stratData);
 
-  const SIBLING_GAP=110, DEPTH_GAP=120, THUMB=66, HALF=33, PAD_TOP=20;
+  const SIBLING_GAP=compactMode?72:88, DEPTH_GAP=120, THUMB=66, HALF=33, PAD_TOP=20;
   d3.tree().nodeSize([SIBLING_GAP,DEPTH_GAP])(root);
 
   const pos={};
@@ -241,8 +278,8 @@ function render(){
   const svgX=id=>pos[id].y+OFFSET_X;
   const svgY=id=>pos[id].x;
 
-  const allX=cleanPieces.map(p=>svgX(p.id));
-  const allY=cleanPieces.map(p=>svgY(p.id));
+  const allX=compactPieces.map(p=>svgX(p.id));
+  const allY=compactPieces.map(p=>svgY(p.id));
   const minYVal=Math.min(...allY);
   const SHIFT_Y=-minYVal+PAD_TOP;
 
@@ -287,7 +324,7 @@ function render(){
 
   /* ── nodes ── */
   const nodeG=g.append('g');
-  const enter=nodeG.selectAll('g.node').data(cleanPieces,d=>d.id).enter()
+  const enter=nodeG.selectAll('g.node').data(compactPieces,d=>d.id).enter()
     .append('g').attr('class','node').attr('data-id',d=>d.id)
     .attr('transform',d=>`translate(${svgX(d.id)},${svgY(d.id)})`)
     .style('cursor','pointer');
@@ -299,7 +336,16 @@ function render(){
     .attr('href',d=>`thumbs/${d.id}.png`)
     .attr('x',-HALF).attr('y',-HALF).attr('width',THUMB).attr('height',THUMB)
     .attr('clip-path','url(#clip-round)').attr('preserveAspectRatio','xMidYMid slice')
-    .attr('opacity',d=>d.dropped?0.18:1);
+    .attr('opacity',d=>d.dropped?0.18:1)
+    .on('error',function(e,d){
+      d3.select(this).attr('opacity',0);
+      d3.select(this.parentNode).select('rect').attr('fill','#161622');
+      d3.select(this.parentNode).append('text')
+        .attr('text-anchor','middle').attr('dominant-baseline','middle')
+        .attr('y',0).attr('font-size','8px')
+        .attr('font-family','ui-monospace,monospace')
+        .attr('fill','#4a4a5a').text(d.id);
+    });
   enter.append('rect').attr('class','drop-overlay')
     .attr('x',-HALF).attr('y',-HALF).attr('width',THUMB).attr('height',THUMB)
     .attr('rx',5).attr('fill','#0a0a0d').attr('opacity',d=>d.dropped?0.62:0);
@@ -315,6 +361,17 @@ function render(){
     .attr('fill',d=>d.dropped?'#33333d':d.favored?'#c9a86a':'#8a8a93')
     .text(d=>d.id);
 
+  /* compact mode: +N badge for collapsed leaf children */
+  if(compactMode){
+    enter.filter(d=>!!(collapsedLeaves[d.id]))
+      .append('text')
+        .attr('x',HALF-2).attr('y',-HALF+2)
+        .attr('text-anchor','end').attr('dominant-baseline','hanging')
+        .attr('font-size','8px').attr('font-family','ui-monospace,monospace')
+        .attr('fill','#8a8a93').style('pointer-events','none')
+        .text(d=>'+'+collapsedLeaves[d.id]);
+  }
+
   enter
     .on('mouseover',showTip).on('mousemove',showTip).on('mouseout',hideTip)
     .on('contextmenu',onCtx)
@@ -323,14 +380,19 @@ function render(){
   /* ── counts ── */
   const droppedCount=allPieces.filter(p=>p.dropped).length;
   const favCount=allPieces.filter(p=>p.favored).length;
+  const collapsedTotal=Object.values(collapsedLeaves).reduce((a,b)=>a+b,0);
   document.getElementById('counts').textContent=
-    `${cleanPieces.length} shown · ${(lineage.edges||[]).length} edges · ${favCount} encouraged`+
+    `${compactPieces.length} shown · ${(lineage.edges||[]).length} edges · ${favCount} encouraged`+
+    (compactMode&&collapsedTotal>0?` · ${collapsedTotal} leaves collapsed`:'')+
     (showDropped?` · ${droppedCount} dropped (visible)`:'');
   document.getElementById('drop-count-label').textContent=
     `${droppedCount} dropped piece${droppedCount===1?'':'s'} hidden`;
   document.getElementById('toggleDropped').className=showDropped?'active':'';
   document.getElementById('toggleDropped').textContent=
     showDropped?'hide dropped nodes':'show dropped nodes';
+  document.getElementById('toggleCompact').className=compactMode?'active':'';
+  document.getElementById('toggleCompact').textContent=
+    compactMode?'compact view ✓':'compact view';
 
   /* rebind ctx menu to updated data */
   _allPieces=allPieces; _byId=byId;
@@ -406,9 +468,15 @@ document.getElementById('ctx-make-more').addEventListener('click',()=>{
   closeCtx();
 });
 
-/* ── toggle ──────────────────────────────────────────────────────── */
+/* ── toggles ─────────────────────────────────────────────────────── */
 document.getElementById('toggleDropped').addEventListener('click',()=>{
   showDropped=!showDropped;
+  render();
+});
+document.getElementById('toggleCompact').addEventListener('click',()=>{
+  compactMode=!compactMode;
+  document.getElementById('toggleCompact').className=compactMode?'active':'';
+  document.getElementById('toggleCompact').textContent=compactMode?'compact view ✓':'compact view';
   render();
 });
 

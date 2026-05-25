@@ -43,7 +43,7 @@ def _warmup_for(piece_id: str) -> int:
     return WARMUP_MS_DEFAULT
 
 
-def render(only=None):
+def render(only=None, force=False):
     lineage = json.loads(LINEAGE.read_text())
     pieces = lineage["pieces"]
     if only:
@@ -63,6 +63,10 @@ def render(only=None):
             device_scale_factor=2,
         )
         for p in pieces:
+            out = THUMBS / f"{p['id']}.png"
+            if not force and out.exists():
+                print(f"  skip {p['id']} — thumbnail exists")
+                continue
             piece_html = REPO / "pieces" / p["id"] / "index.html"
             if not piece_html.exists():
                 print(f"  skip {p['id']} — missing index.html", file=sys.stderr)
@@ -73,7 +77,6 @@ def render(only=None):
                 page.goto(url, wait_until="load")
                 warmup = _warmup_for(p["id"])
                 page.wait_for_timeout(warmup)
-                out = THUMBS / f"{p['id']}.png"
                 page.screenshot(path=str(out), type="png")
                 print(f"  ok  {p['id']} (warmup {warmup}ms) → {out.relative_to(REPO)}")
             except Exception as e:
@@ -85,5 +88,8 @@ def render(only=None):
 
 
 if __name__ == "__main__":
-    only = set(sys.argv[1:]) if len(sys.argv) > 1 else None
-    render(only=only)
+    args = sys.argv[1:]
+    force = "--force" in args
+    only_ids = [a for a in args if not a.startswith("--")]
+    only = set(only_ids) if only_ids else None
+    render(only=only, force=force)
