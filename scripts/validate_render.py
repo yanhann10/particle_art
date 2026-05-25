@@ -47,8 +47,12 @@ MIN_LUMA_DYNAMIC_RANGE = 35.0   # p95 - p5 of luminance, 0..255 scale
 # sprites, Gaussian-smeared particles, soft halos drowning the form) score near zero;
 # sharp renders score 50+. Pieces like si0/7wq/610 that the user flagged as "blurry"
 # would fail this gate. Tunable via env PARTICLE_ART_MIN_SHARPNESS.
+#
+# Calibration 2026-05-24: raised from 30 → 150 after r5f (sharpness=85) was
+# flagged as blurry despite clearing the old gate. Reference scores post-fix:
+# zv4=3661, h80=1140, kam=976, p9l=215. sav=49.9 is a pre-gate legacy piece.
 MIN_SHARPNESS_VARIANCE = float(
-    __import__("os").environ.get("PARTICLE_ART_MIN_SHARPNESS", "30.0")
+    __import__("os").environ.get("PARTICLE_ART_MIN_SHARPNESS", "150.0")
 )
 
 W, H = 800, 500
