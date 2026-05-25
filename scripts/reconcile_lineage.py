@@ -80,7 +80,8 @@ def main():
                 })
                 edges_known.add(edge_key)
         added += 1
-        print(f"  + {pid:6s}  parent={meta.get('parent_id'):>5}  {meta.get('title','')[:60]}")
+        parent_str = meta.get('parent_id') or "root"
+        print(f"  + {pid:6s}  parent={parent_str:>5}  {meta.get('title','')[:60]}")
 
     # Re-sort pieces by created_at to keep the manifest stable across reconciles
     lineage["pieces"].sort(key=lambda p: p.get("created_at", ""))
