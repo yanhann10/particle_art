@@ -228,34 +228,83 @@ function render(){
     knownIds.has(e.from)&&knownIds.has(e.to)&&primaryParent[e.to]!==e.from
   );
 
-  /* ── group nodes: for parents with > GROUP_THRESHOLD active children,
-     insert virtual "style bucket" intermediate nodes between parent and pieces ── */
-  const GROUP_THRESHOLD=8;
-  /* coarse 3-bucket for grouping: channel / improv / directive */
-  function styleBucket(sk){
-    if(!sk) return 'directive';
-    if(sk.startsWith('channel:')) return 'channel';
-    if(sk.startsWith('mode:')) return 'improv';
-    return 'directive';
+  /* ── group nodes: fine-grained similarity clustering ──────────────────
+     Rules:
+       1. group highly similar siblings (same style_key → same group)
+       2. avoid large groups: if a style_key bucket > SUB_THRESHOLD,
+          sub-split by direction-family into ≤2 sub-groups
+       3. singletons (only 1 sibling with a style_key) connect directly
+     Applies to any parent with > GROUP_THRESHOLD active children.       */
+  const GROUP_THRESHOLD = 6;
+  const SUB_THRESHOLD   = 6;
+  const MIN_BUCKET_SIZE = 2;
+  const GHALF = 45;   /* half-width of group pill (wider than piece HALF=33) */
+
+  function dirFamily(dir){
+    if(!dir) return 'other';
+    const d=dir.toLowerCase();
+    if(d.includes('attractor'))                         return 'attractor';
+    if(d.includes('growth'))                            return 'growth';
+    if(d.includes('lsystem')||d.includes('l-system'))   return 'lsystem';
+    if(d.includes('point-cloud')||d.includes('cloud'))  return 'cloud';
+    if(d.includes('audio'))                             return 'audio';
+    if(d.includes('boid')||d.includes('biological'))    return 'systems';
+    if(d.includes('morph'))                             return 'morph';
+    return 'other';
   }
+  function bucketLabel(sk){
+    if(!sk||sk==='other') return 'other';
+    if(sk.startsWith('channel:')){ const n=sk.slice(8).replace(/_/g,' '); return n.length>16?n.slice(0,14)+'…':n; }
+    if(sk.startsWith('mode:'))    return sk.slice(5);
+    const c=sk.replace(/_/g,' ');
+    return c.length>16?c.slice(0,14)+'…':c;
+  }
+
   /* count active children per parent */
   const activeChildCount={};
   cleanPieces.forEach(p=>{
     const par=showDropped?(p.parent_id||null):effectiveParent(p);
     if(par) activeChildCount[par]=(activeChildCount[par]||0)+1;
   });
-  /* build groups */
-  const groupNodes={};    /* groupId → {id,label,parent_id,childIds,style_key,is_group} */
-  const pieceToGroup={};  /* pieceId → groupId */
+
+  /* pass 1: bucket siblings by style_key for large parents */
+  const rawBuckets={};   /* key → {parId,sk,pieces:[]} */
   cleanPieces.forEach(p=>{
     const par=showDropped?(p.parent_id||null):effectiveParent(p);
     if(!par||(activeChildCount[par]||0)<=GROUP_THRESHOLD) return;
-    const bucket=styleBucket(p.style_key||'');
-    const gid=`${par}__grp__${bucket}`;
-    if(!groupNodes[gid]) groupNodes[gid]={id:gid,label:bucket,parent_id:par,childIds:[],style_key:bucket,is_group:true};
-    groupNodes[gid].childIds.push(p.id);
-    pieceToGroup[p.id]=gid;
+    const sk=p.style_key||'other';
+    const key=`${par}|||${sk}`;
+    if(!rawBuckets[key]) rawBuckets[key]={parId:par,sk,pieces:[]};
+    rawBuckets[key].pieces.push(p);
   });
+
+  /* pass 2: materialise group nodes; sub-split oversized buckets by dirFamily */
+  const groupNodes={};
+  const pieceToGroup={};
+  Object.values(rawBuckets).forEach(({parId,sk,pieces})=>{
+    if(pieces.length<MIN_BUCKET_SIZE) return;   /* singleton: direct edge */
+    if(pieces.length>SUB_THRESHOLD){
+      /* sub-split by direction family */
+      const subMap={};
+      pieces.forEach(p=>{ const f=dirFamily(p.direction||''); (subMap[f]=subMap[f]||[]).push(p); });
+      const families=Object.keys(subMap);
+      if(families.length>1){
+        families.forEach(fam=>{
+          const sub=subMap[fam];
+          if(sub.length<MIN_BUCKET_SIZE) return;
+          const gid=`${parId}__grp__${sk}__${fam}`;
+          groupNodes[gid]={id:gid,label:`${bucketLabel(sk)} · ${fam}`,parent_id:parId,childIds:sub.map(p=>p.id),style_key:sk,is_group:true};
+          sub.forEach(p=>{pieceToGroup[p.id]=gid;});
+        });
+        return;
+      }
+    }
+    /* single group for this bucket */
+    const gid=`${parId}__grp__${sk}`;
+    groupNodes[gid]={id:gid,label:bucketLabel(sk),parent_id:parId,childIds:pieces.map(p=>p.id),style_key:sk,is_group:true};
+    pieces.forEach(p=>{pieceToGroup[p.id]=gid;});
+  });
+
   const groupNodesList=Object.values(groupNodes);
   const allGroupIds=new Set(Object.keys(groupNodes));
 
@@ -344,8 +393,8 @@ function render(){
   root.links().forEach(link=>{
     if(link.source.id===SYNTH) return;
     const srcIsGrp=allGroupIds.has(link.source.id), tgtIsGrp=allGroupIds.has(link.target.id);
-    const px=svgX(link.source.id)+(srcIsGrp?HALF:HALF), py=svgY(link.source.id);
-    const cx=svgX(link.target.id)-(tgtIsGrp?HALF:HALF), cy=svgY(link.target.id);
+    const px=svgX(link.source.id)+(srcIsGrp?GHALF:HALF), py=svgY(link.source.id);
+    const cx=svgX(link.target.id)-(tgtIsGrp?GHALF:HALF), cy=svgY(link.target.id);
     const midX=(px+cx)/2;
     const srcDropped=byId[link.source.id]?.dropped, tgtDropped=byId[link.target.id]?.dropped;
     const edgeDrop=srcDropped||tgtDropped;
@@ -373,7 +422,7 @@ function render(){
     .attr('transform',d=>`translate(${svgX(d.id)},${svgY(d.id)})`)
     .style('cursor','pointer');
   grpEnter.append('rect')
-    .attr('x',-HALF).attr('y',-11).attr('width',THUMB).attr('height',22).attr('rx',11)
+    .attr('x',-GHALF).attr('y',-11).attr('width',GHALF*2).attr('height',22).attr('rx',11)
     .attr('fill','#111118').attr('stroke','#c9a86a').attr('stroke-width',1.2).attr('opacity',0.92);
   grpEnter.append('text')
     .attr('text-anchor','middle').attr('dominant-baseline','middle')
