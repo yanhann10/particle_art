@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fv1 · sparse vertical columns · 4 bands</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">fv1</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Four narrow Gaussian-distributed vertical bands of particles rising slowly.
+// Particles fade top-bright → bottom-dark. Warm amber-white palette.
+// Sharp circular point sprites, no soft halos.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 8, 22);
+camera.lookAt(0, 8, 0);
+
+// Four column centers along x-axis
+const COLUMNS = [
+  { x: -6.0, sigma: 0.8 },
+  { x: -2.0, sigma: 0.7 },
+  { x:  2.0, sigma: 0.9 },
+  { x:  6.0, sigma: 0.75 }
+];
+
+const N_PER_COLUMN = 6400;
+const N = N_PER_COLUMN * COLUMNS.length;
+
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const ages = new Float32Array(N);
+
+let idx = 0;
+for (let col of COLUMNS) {
+  for (let i = 0; i < N_PER_COLUMN; i++) {
+    // Gaussian distribution around column center
+    const u1 = Math.random(), u2 = Math.random();
+    const r = col.sigma * Math.sqrt(-2.0 * Math.log(u1));
+    const theta = 2.0 * Math.PI * u2;
+    const dx = r * Math.cos(theta);
+    const dz = r * Math.sin(theta);
+    
+    positions[idx * 3]     = col.x + dx;
+    positions[idx * 3 + 1] = Math.random() * 16.0;
+    positions[idx * 3 + 2] = dz;
+    
+    // Slow upward drift with slight turbulence
+    velocities[idx * 3]     = (Math.random() - 0.5) * 0.02;
+    velocities[idx * 3 + 1] = 0.3 + Math.random() * 0.15;
+    velocities[idx * 3 + 2] = (Math.random() - 0.5) * 0.02;
+    
+    ages[idx] = Math.random();
+    idx++;
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('velocity', new THREE.BufferAttribute(velocities, 3));
+geom.setAttribute('age', new THREE.BufferAttribute(ages, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute vec3 velocity;
+    attribute float age;
+    varying float vBrightness;
+    
+    void main() {
+      vec3 pos = position + velocity * uTime;
+      
+      // Wrap vertically
+      float y = mod(pos.y, 16.0);
+      
+      // Brightness: bright at top (y=16), dim at bottom (y=0)
+      vBrightness = smoothstep(0.0, 16.0, y);
+      
+      vec3 wrapped = vec3(pos.x, y, pos.z);
+      vec4 mvPosition = modelViewMatrix * vec4(wrapped, 1.0);
+      gl_Position = projectionMatrix * mvPosition;
+      
+      // Sharp point size: 3-5px based on depth and brightness
+      float depth = -mvPosition.z;
+      gl_PointSize = (3.0 + 2.0 * vBrightness) * uPixel * (10.0 / depth);
+    }
+  `,
+  fragmentShader: `
+    varying float vBrightness;
+    
+    void main() {
+      // Sharp circular sprite
+      vec2 center = gl_PointCoord - 0.5;
+      float dist = length(center);
+      if (dist > 0.5) discard;
+      
+      // Sharp edge: steep falloff only at rim
+      float alpha = 1.0 - smoothstep(0.40, 0.50, dist);
+      
+      // Warm amber-white palette
+      vec3 amber = vec3(1.0, 0.85, 0.65);
+      vec3 warm = vec3(1.0, 0.95, 0.88);
+      vec3 col = mix(amber, warm, vBrightness * 0.6);
+      
+      // Brightness modulation
+      float intensity = 0.4 + 0.6 * vBrightness;
+      
+      gl_FragColor = vec4(col * intensity * alpha, alpha * intensity);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let startTime = performance.now();
+function loop() {
+  const elapsed = (performance.now() - startTime) / 1000;
+  mat.uniforms.uTime.value = elapsed;
+  
+  // Gentle camera drift
+  camera.position.x = Math.sin(elapsed * 0.08) * 2.0;
+  camera.position.z = 22 + Math.cos(elapsed * 0.06) * 3.0;
+  camera.lookAt(0, 8, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<!-- MOTION: drift, intensity: calm -->
+</body>
+</html>
