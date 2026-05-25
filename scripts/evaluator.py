@@ -85,6 +85,18 @@ def _call(system, user):
     return call_bedrock(system, user).strip()
 
 
+def read_top_eval_note():
+    """Return the most recent evaluator directive text, or None."""
+    if not PENDING.exists(): return None
+    for line in reversed(PENDING.read_text().splitlines()):
+        try:
+            e = json.loads(line)
+            if e.get("source") == "evaluator":
+                return e.get("directive") or e.get("priority_directive")
+        except Exception: pass
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description="Taste-aware LLM evaluator")
     ap.add_argument("--limit", type=int, default=15)
