@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ty6 · the field that holds</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#a8b8d0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body { background: #07060f; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .arc  { position:fixed; right:14px; bottom:12px; opacity:0.8; font-size:10px; letter-spacing:0.06em; color:#9FD43A; }
+</style>
+</head>
+<body>
+<div class="id">ty6 · the field that holds</div>
+<div class="hint">pointer nudges σ/ρ · watch the cage form and dissolve</div>
+<div class="src">zs4 × sav × inner light — lorenz field · cohort cage · ruled lines</div>
+<div class="arc" id="arc">together · 100%</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── CONCEPT ────────────────────────────────────────────────────────────────
+// 100k Lorenz GPGPU particles form a mathematical field (zs4 lineage).
+// 24 cohort particles orbit the same field in CPU, bound by weak cohesion.
+// When together their pairwise connections form a ruled-line cage —
+// the visual language of "inner light" (Hannah Yan, Seeds board):
+// a hyperboloid built from straight lines. The cage breathes with the arc:
+//   TOGETHER → cage tight, yellow-green glow
+//   LOSS → one particle drifts with the attractor, cage stretches to teal
+//   SEEKING → flock slows, reaching; cage distorts toward straggler
+//   RETURN → cage reconstitutes with a pulse of acid green
+// Palette: inner-light yellow-green (#9FD43A) ↔ teal (#1A7A6E) for cage;
+//          indigo → magenta → gold for Lorenz field; dawn sky background.
+
+// ── RENDERER ──────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x07060f, 1);
+document.body.appendChild(renderer.domElement);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 600);
+camera.position.set(0, 0, 58);
+camera.lookAt(0, 0, 0);
+const scene = new THREE.Scene();
+
+// ── GPGPU LORENZ (100k particles, 320×320 ping-pong) ──────────────────────
+const W = 320, H = 320, N = W * H;
+const rtP = {
+  type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false
+};
+let rtA = new THREE.WebGLRenderTarget(W, H, rtP);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtP);
+
+const initD = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  initD[i*4]   = (Math.random()*2-1) * 8;
+  initD[i*4+1] = (Math.random()*2-1) * 8;
+  initD[i*4+2] = (Math.random()*2-1) * 8 + 25;
+  initD[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(initD, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const blitSc = new THREE.Scene();
+blitSc.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
+  uniforms: { t: { value: initTex } },
+  vertexShader:   `varying vec2 v; void main(){ v=uv; gl_Position=vec4(position,1.); }`,
+  fragmentShader: `uniform sampler2D t; varying vec2 v; void main(){ gl_FragColor=texture2D(t,v); }`
+})));
+renderer.setRenderTarget(rtA); renderer.render(blitSc, ortho); renderer.setRenderTarget(null);
+
+const simU = {
+  prev:   { value: rtA.texture },
+  uDt:    { value: 0.005 },
+  uSigma: { value: 10.0 },
+  uRho:   { value: 28.0 },
+  uBeta:  { value: 8.0/3.0 }
+};
+const simSc = new THREE.Scene();
+simSc.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
+  uniforms: simU,
+  vertexShader: `varying vec2 v; void main(){ v=uv; gl_Position=vec4(position,1.); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uSigma, uRho, uBeta;
+    varying vec2 v;
+    void main(){
+      vec4 s = texture2D(prev, v);
+      vec3 p = s.xyz;
+      vec3 dp = vec3(uSigma*(p.y-p.x), p.x*(uRho-p.z)-p.y, p.x*p.y-uBeta*p.z);
+      p += dp * uDt;
+      gl_FragColor = vec4(p, mod(s.w + uDt*0.05, 1.0));
+    }
+  `
+})));
+
+// ── LORENZ POINTS (background field, dimmed to let cage read clearly) ─────
+const fGeom = new THREE.BufferGeometry();
+const uvArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = y*W+x; uvArr[i*2]=(x+.5)/W; uvArr[i*2+1]=(y+.5)/H;
+}
+fGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+fGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(uvArr, 2));
+const fMat = new THREE.ShaderMaterial({
+  uniforms: { state: { value: rtA.texture }, uPx: { value: renderer.getPixelRatio() } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state; uniform float uPx;
+    attribute vec2 uvIdx; varying float vAge, vSpd;
+    void main(){
+      vec4 s = texture2D(state, uvIdx); vec3 p = s.xyz; p.z -= 25.;
+      float spd = length(vec3(10.*(p.y-p.x), p.x*28.-p.y-p.x*(p.z+25.), p.x*p.y-(8./3.)*(p.z+25.)))*0.005;
+      vSpd = clamp(spd,0.,1.); vAge = s.w;
+      vec4 mv = modelViewMatrix * vec4(p,1.);
+      gl_PointSize = (1.2+1.8*vSpd)*uPx*(58./max(0.1,-mv.z));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge, vSpd;
+    void main(){
+      vec2 d=gl_PointCoord-.5; if(dot(d,d)>.25) discard;
+      float a=exp(-dot(d,d)*22.);
+      vec3 ca=vec3(.18,.28,.72), cb=vec3(.82,.28,.58), cc=vec3(.96,.84,.46);
+      float k=mod(vAge+vSpd*.4,1.);
+      vec3 col=mix(mix(ca,cb,smoothstep(0.,.5,k)),cc,smoothstep(.5,1.,k));
+      gl_FragColor=vec4(col*a*(0.55+vSpd*.7), a*0.85);
+    }
+  `
+});
+scene.add(new THREE.Points(fGeom, fMat));
+
+// ── CPU COHORT (24 particles, Lorenz + cohesion arc from sav) ─────────────
+const NC = 24, STRAG = 0;
+const cPos = new Float32Array(NC*3);
+const cVel = new Float32Array(NC*3);
+
+// Seed near right Lorenz lobe
+for (let i = 0; i < NC; i++) {
+  cPos[i*3]   =  9 + (Math.random()-.5)*5;
+  cPos[i*3+1] =  9 + (Math.random()-.5)*5;
+  cPos[i*3+2] = 22 + (Math.random()-.5)*4;
+  const x=cPos[i*3],y=cPos[i*3+1],z=cPos[i*3+2];
+  cVel[i*3]   = 10*(y-x)*0.005;
+  cVel[i*3+1] = (x*(28-z)-y)*0.005;
+  cVel[i*3+2] = (x*y-(8/3)*z)*0.005;
+}
+
+let cohesion = 1.0, arcStage = 'together';
+const arcEl = document.getElementById('arc');
+const arcColors = { together:'#9FD43A', loss:'#5aaa8a', seeking:'#1A7A6E', return:'#c8e860' };
+
+function stepCohort(dt) {
+  const s = simU.uSigma.value, r = simU.uRho.value, b = simU.uBeta.value;
+  let cx=0,cy=0,cz=0;
+  for (let i=1; i<NC; i++) { cx+=cPos[i*3]; cy+=cPos[i*3+1]; cz+=cPos[i*3+2]; }
+  cx/=(NC-1); cy/=(NC-1); cz/=(NC-1);
+  const sdx=cPos[0]-cx, sdy=cPos[1]-cy, sdz=cPos[2]-cz;
+  const sDist = Math.sqrt(sdx*sdx+sdy*sdy+sdz*sdz);
+  cohesion += (Math.max(0,Math.min(1,1-sDist/13)) - cohesion) * dt * 0.4;
+  if      (cohesion > 0.82) arcStage = 'together';
+  else if (cohesion > 0.5 && sDist > 5) arcStage = 'loss';
+  else if (cohesion < 0.5)  arcStage = 'seeking';
+  else if (arcStage==='seeking' && cohesion>0.62) arcStage = 'return';
+  arcEl.textContent = `${arcStage} · ${Math.round(cohesion*100)}%`;
+  arcEl.style.color = arcColors[arcStage];
+
+  const speedMul = (arcStage==='loss'||arcStage==='seeking') ? 0.5 : 1.0;
+  const t = performance.now();
+
+  for (let i=0; i<NC; i++) {
+    const x=cPos[i*3],y=cPos[i*3+1],z=cPos[i*3+2];
+    // Lorenz field force
+    let ax = s*(y-x)*dt;
+    let ay = (x*(r-z)-y)*dt;
+    let az = (x*y-b*z)*dt;
+    // cohesion pull toward centroid
+    const dx=cx-x, dy=cy-y, dz=cz-z;
+    const dist = Math.sqrt(dx*dx+dy*dy+dz*dz)+.001;
+    const cf = (i===STRAG) ? 0.25 : 1.1;
+    ax += (dx/dist)*cf*dt;
+    ay += (dy/dist)*cf*dt;
+    az += (dz/dist)*cf*dt;
+    // straggler drift — a remembered wandering
+    if (i===STRAG) {
+      ax += Math.sin(t*.00028)*0.6*dt;
+      ay += Math.cos(t*.00022)*0.3*dt;
+    }
+    // flock seeking straggler during loss/return arc
+    if (i!==STRAG && (arcStage==='seeking'||arcStage==='return')) {
+      const tx=cPos[0]-x,ty=cPos[1]-y,tz=cPos[2]-z;
+      const td=Math.sqrt(tx*tx+ty*ty+tz*tz)+.001;
+      const sf = arcStage==='seeking' ? 0.4 : 0.25;
+      ax+=(tx/td)*sf*dt; ay+=(ty/td)*sf*dt; az+=(tz/td)*sf*dt;
+    }
+    cVel[i*3]  +=ax; cVel[i*3+1]+=ay; cVel[i*3+2]+=az;
+    // soft speed cap
+    const sp=Math.sqrt(cVel[i*3]**2+cVel[i*3+1]**2+cVel[i*3+2]**2);
+    if(sp>1.2){cVel[i*3]/=sp*1.2/1.2;cVel[i*3+1]/=sp*1.2/1.2;cVel[i*3+2]/=sp*1.2/1.2;}
+    cPos[i*3]  +=cVel[i*3]  *speedMul;
+    cPos[i*3+1]+=cVel[i*3+1]*speedMul;
+    cPos[i*3+2]+=cVel[i*3+2]*speedMul;
+    // soft basin boundary (attractor lives in ≈ ±25 from center)
+    const bx=cPos[i*3],by=cPos[i*3+1],bz=cPos[i*3+2]-25;
+    const bd=Math.sqrt(bx*bx+by*by+bz*bz);
+    if(bd>35){const inv=0.02/bd;cVel[i*3]-=bx*inv;cVel[i*3+1]-=by*inv;cVel[i*3+2]-=bz*inv;}
+  }
+}
+
+// ── COHORT POINTS (large, warm — straggler glows brighter) ────────────────
+const cDisp = new Float32Array(NC*3);
+const cGeom = new THREE.BufferGeometry();
+cGeom.setAttribute('position', new THREE.BufferAttribute(cDisp, 3));
+const stragAttr = new Float32Array(NC); stragAttr[STRAG]=1;
+cGeom.setAttribute('strag', new THREE.BufferAttribute(stragAttr,1));
+const cMat = new THREE.ShaderMaterial({
+  uniforms: { uPx:{value:renderer.getPixelRatio()}, uCoh:{value:1}, uTime:{value:0} },
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uPx, uCoh, uTime; attribute float strag; varying vec3 vCol;
+    void main(){
+      vec4 mv=modelViewMatrix*vec4(position,1.);
+      gl_PointSize=(3.2+strag*3.0)*uPx*(65./max(0.1,-mv.z));
+      vec3 yg=vec3(0.624,0.831,0.227), tl=vec3(0.102,0.478,0.431), cr=vec3(0.78,0.91,0.29);
+      vCol=mix(tl,yg,smoothstep(0.,1.,uCoh));
+      vCol=mix(vCol,cr,strag*0.6+(1.-strag)*smoothstep(0.9,1.,uCoh)*0.2);
+      gl_Position=projectionMatrix*mv;
+    }
+  `,
+  fragmentShader:`
+    varying vec3 vCol;
+    void main(){
+      vec2 d=gl_PointCoord-.5; float r=dot(d,d);
+      if(r>.25) discard;
+      float a=1.0-smoothstep(0.18,0.25,r);
+      gl_FragColor=vec4(vCol*a*1.2,a);
+    }
+  `
+});
+scene.add(new THREE.Points(cGeom, cMat));
+
+// ── RULED-LINE CAGE (inner light construction: every cohort pair) ─────────
+// When particles are close, lines between them form a hyperboloid cage.
+// Connect_dist controls max distance to draw; fades with cohesion.
+const NPAIRS = NC*(NC-1)/2;  // 276
+const lPos = new Float32Array(NPAIRS*2*3);
+const lAlp = new Float32Array(NPAIRS*2);
+const lGeom = new THREE.BufferGeometry();
+lGeom.setAttribute('position', new THREE.BufferAttribute(lPos,3));
+lGeom.setAttribute('alpha',    new THREE.BufferAttribute(lAlp,1));
+const lMat = new THREE.ShaderMaterial({
+  uniforms: { uCoh:{value:1} },
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  vertexShader:`
+    attribute float alpha; varying float vA;
+    void main(){ vA=alpha; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.); }
+  `,
+  fragmentShader:`
+    uniform float uCoh; varying float vA;
+    void main(){
+      vec3 yg=vec3(0.624,0.831,0.227), tl=vec3(0.102,0.478,0.431);
+      gl_FragColor=vec4(mix(tl,yg,uCoh)*1.1, vA*0.95);
+    }
+  `
+});
+scene.add(new THREE.LineSegments(lGeom, lMat));
+
+function updateCage() {
+  const CDIST = 28.0;
+  let k = 0;
+  for (let a=0; a<NC; a++) for (let b=a+1; b<NC; b++) {
+    const ax=cDisp[a*3],ay=cDisp[a*3+1],az=cDisp[a*3+2];
+    const bx=cDisp[b*3],by=cDisp[b*3+1],bz=cDisp[b*3+2];
+    const d=Math.sqrt((ax-bx)**2+(ay-by)**2+(az-bz)**2);
+    const al=Math.max(0,1-d/CDIST)*cohesion;
+    lPos[k*6]=ax;lPos[k*6+1]=ay;lPos[k*6+2]=az;
+    lPos[k*6+3]=bx;lPos[k*6+4]=by;lPos[k*6+5]=bz;
+    lAlp[k*2]=al; lAlp[k*2+1]=al;
+    k++;
+  }
+  lGeom.attributes.position.needsUpdate=true;
+  lGeom.attributes.alpha.needsUpdate=true;
+}
+
+// ── INTERACTION ────────────────────────────────────────────────────────────
+const target = { sigma:10, rho:28 };
+addEventListener('pointermove', e=>{
+  target.rho   = 28+(e.clientY/innerHeight-.5)*7;
+  target.sigma = 10+(e.clientX/innerWidth -.5)*3;
+});
+addEventListener('resize', ()=>{
+  camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+// Pre-warm cohort so thumbnail catches a meaningful configuration
+for (let i=0;i<300;i++) stepCohort(0.005);
+
+// ── MAIN LOOP ──────────────────────────────────────────────────────────────
+let lastT = performance.now();
+function loop() {
+  const now = performance.now();
+  lastT = now;
+  simU.uSigma.value += (target.sigma-simU.uSigma.value)*0.04;
+  simU.uRho.value   += (target.rho  -simU.uRho.value  )*0.04;
+
+  // 4 GPU Lorenz substeps
+  for (let i=0;i<4;i++){
+    simU.prev.value=rtA.texture;
+    renderer.setRenderTarget(rtB); renderer.render(simSc,ortho);
+    [rtA,rtB]=[rtB,rtA];
+  }
+  renderer.setRenderTarget(null);
+  fMat.uniforms.state.value=rtA.texture;
+
+  // 4 CPU cohort substeps (matching GPU dt)
+  for (let i=0;i<4;i++) stepCohort(0.005);
+
+  // upload cohort positions (z -= 25 to match Lorenz render offset)
+  for (let i=0;i<NC;i++){
+    cDisp[i*3]=cPos[i*3]; cDisp[i*3+1]=cPos[i*3+1]; cDisp[i*3+2]=cPos[i*3+2]-25;
+  }
+  cGeom.attributes.position.needsUpdate=true;
+  cMat.uniforms.uCoh.value=cohesion;
+  cMat.uniforms.uTime.value=now/1000;
+
+  updateCage();
+  lMat.uniforms.uCoh.value=cohesion;
+
+  // slow camera orbit
+  const ang=now*0.00011;
+  camera.position.x=Math.sin(ang)*58;
+  camera.position.z=Math.cos(ang)*58;
+  camera.lookAt(0,0,0);
+
+  renderer.render(scene,camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(201,168,106,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var pid='ty6';
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(k,id){try{var s=new Set(JSON.parse(localStorage.getItem(k)||'[]'));s.add(id);localStorage.setItem(k,JSON.stringify([...s]));}catch(e){}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){
+    _set(DKEY,pid);this.style.color='#d76b5a';
+    window.parent!==window?window.parent.postMessage({type:'dismiss-and-next'},'*'):history.back();
+  };
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim(); if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){location.href='/compare?a='+pid+(d.job_id?'&job='+d.job_id:'')+'&directive='+encodeURIComponent(txt);})
+    .catch(function(){location.href='/compare?a='+pid+'&directive='+encodeURIComponent(txt);});
+  };
+})();
+</script>
+</body>
+</html>
