@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ttd · tender crystalline growth</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0f0d0c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">ttd</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Felix Gonzalez-Torres · reaction-diffusion lattice · soft mineral accretion</div>
+<div class="stat" id="stat">cells=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Tender crystalline growth — hexagonal lattice cells emerge via
+   reaction-diffusion rules. Two chemical concentrations A (activator)
+   and B (inhibitor) drive spontaneous pattern formation. The mineral
+   grows slowly, asymmetrically, with soft warm light illuminating
+   each occupied lattice site. Gonzalez-Torres intimacy preserved:
+   low contrast, gentle palette, quiet emergence. */
+
+const BG = 0x0f0d0c;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 8, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, 0, 0);
+controls.minDistance = 10;
+controls.maxDistance = 60;
+
+// hexagonal lattice parameters
+const HEX_R = 0.42;  // hex radius
+const HEX_H = HEX_R * Math.sqrt(3);
+const GRID_W = 44;
+const GRID_H = 44;
+
+// reaction-diffusion parameters (Gray-Scott model, tuned for coral-like spots)
+const DA = 1.0;
+const DB = 0.5;
+const F  = 0.055;   // feed rate
+const K  = 0.062;   // kill rate
+const DT = 1.0;
+
+// lattice state: each cell stores {a, b, occupied, age, y}
+const grid = Array.from({ length: GRID_H }, () =>
+  Array.from({ length: GRID_W }, () => ({
+    a: 1.0,
+    b: 0.0,
+    occupied: false,
+    age: 0,
+    y: 0
+  }))
+);
+
+// seed: small cluster at center with high B (activator seed)
+const cxg = Math.floor(GRID_W / 2);
+const cyg = Math.floor(GRID_H / 2);
+for (let dy = -1; dy <= 1; dy++) {
+  for (let dx = -1; dx <= 1; dx++) {
+    const cx = cxg + dx, cy = cyg + dy;
+    if (cx >= 0 && cx < GRID_W && cy >= 0 && cy < GRID_H) {
+      grid[cy][cx].b = 1.0;
+      grid[cy][cx].occupied = true;
+    }
+  }
+}
+
+// hex grid coordinate → world position
+function hexToWorld(i, j) {
+  const x = i * HEX_R * 1.5;
+  const z = j * HEX_H + (i % 2) * HEX_H * 0.5;
+  return { x, z };
+}
+
+// hex neighbors (6 directions)
+function neighbors(i, j) {
+  const even = i % 2 === 0;
+  return even
+    ? [[i+1,j],[i+1,j-1],[i,j-1],[i-1,j-1],[i-1,j],[i,j+1]]
+    : [[i+1,j+1],[i+1,j],[i,j+1],[i-1,j],[i-1,j+1],[i,j-1]];
+}
+
+// laplacian for hex grid (average of neighbors - self)
+function laplacian(i, j, field) {
+  let sum = 0, count = 0;
+  for (const [ni, nj] of neighbors(i, j)) {
+    if (ni >= 0 && ni < GRID_W && nj >= 0 && nj < GRID_H) {
+      sum += grid[nj][ni][field];
+      count++;
+    }
+  }
+  return count > 0 ? sum / count - grid[j][i][field] : 0;
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+// reaction-diffusion step
+function stepRD() {
+  if (paused) return;
+  const nextA = Array.from({ length: GRID_H }, () => Array(GRID_W).fill(0));
+  const nextB = Array.from({ length: GRID_H }, () => Array(GRID_W).fill(0));
+
+  for (let j = 0; j < GRID_H; j++) {
+    for (let i = 0; i < GRID_W; i++) {
+      const cell = grid[j][i];
+      const a = cell.a, b = cell.b;
+      const la = laplacian(i, j, 'a');
+      const lb = laplacian(i, j, 'b');
+      const reaction = a * b * b;
+
+      nextA[j][i] = a + (DA * la - reaction + F * (1 - a)) * DT;
+      nextB[j][i] = b + (DB * lb + reaction - (K + F) * b) * DT;
+
+      // clamp
+      nextA[j][i] = Math.max(0, Math.min(1, nextA[j][i]));
+      nextB[j][i] = Math.max(0, Math.min(1, nextB[j][i]));
+    }
+  }
+
+  // update and occupy cells where B exceeds threshold
+  const OCCUPY_THRESH = 0.36;
+  for (let j = 0; j < GRID_H; j++) {
+    for (let i = 0; i < GRID_W; i++) {
+      grid[j][i].a = nextA[j][i];
+      grid[j][i].b = nextB[j][i];
+      if (!grid[j][i].occupied && nextB[j][i] > OCCUPY_THRESH) {
+        grid[j][i].occupied = true;
+        grid[j][i].age = 0;
+        // slight vertical displacement on emergence
+        grid[j][i].y = (Math.random() - 0.5) * 0.06;
+      }
+      if (grid[j][i].occupied) {
+        grid[j][i].age += 0.0012;
+      }
+    }
+  }
+}
+
+// --- rendering: 40k particles distributed across occupied cells ---
+const N_RENDER = 40000;
+const rPos   = new Float32Array(N_RENDER * 3);
+const rSeeds = new Float32Array(N_RENDER);
+const rAge   = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.022 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float age;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform float uFogDensity;
+
+    void main() {
+      vec3 p = position;
+
+      // very gentle breathing — mineral slowly pulses as it mineralizes
+      float breath = sin(uTime * 0.2 + seed * 6.28) * 0.008;
+      p.y += breath * (0.5 + 0.5 * age);
+
+      // palette: warm amber → pale rose quartz → cool opal
+      vec3 amber = vec3(1.0, 0.78, 0.52);
+      vec3 rose  = vec3(0.96, 0.82, 0.74);
+      vec3 opal  = vec3(0.88, 0.90, 0.94);
+      float k = clamp(age * 0.8, 0.0, 1.0);
+      vCol = mix(amber, rose, smoothstep(0.0, 0.5, k));
+      vCol = mix(vCol, opal, smoothstep(0.5, 1.0, k));
+
+      // subtle per-particle pulse
+      float pulse = 0.9 + 0.1 * sin(uTime * 0.8 + seed * 20.0);
+      vCol *= pulse;
+
+      vAlpha = 0.5 + 0.15 * pulse;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      gl_PointSize = 1.6 * uPixel * (38.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      float core = exp(-r * 20.0);
+      float halo = exp(-r * 6.0) * 0.3;
+      float a = (core + halo) * vAlpha;
+
+      vec3 col = vCol;
+      col = mix(col, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.75);
+
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ambient light (low key)
+const ambientLight = new THREE.AmbientLight(0x2a2420, 0.6);
+scene.add(ambientLight);
+
+// soft directional light from upper-left
+const dirLight = new THREE.DirectionalLight(0xffd9b3, 0.4);
+dirLight.position.set(-6, 10, 4);
+scene.add(dirLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow: let pattern establish before render
+for (let s = 0; s < 420; s++) stepRD();
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // run RD steps
+  for (let s = 0; s < 2; s++) stepRD();
+
+  // count occupied cells
+  let occupiedCount = 0;
+  const occupied = [];
+  for (let j = 0; j < GRID_H; j++) {
+    for (let i = 0; i < GRID_W; i++) {
+      if (grid[j][i].occupied) {
+        occupiedCount++;
+        occupied.push({ i, j, age: grid[j][i].age, y: grid[j][i].y });
+      }
+    }
+  }
+
+  // distribute particles across occupied cells
+  if (occupied.length > 0) {
+    const perCell = Math.max(1, Math.floor(N_RENDER / occupied.length));
+    let written = 0;
+    for (const cell of occupied) {
+      const share = Math.min(perCell, N_RENDER - written);
+      const { x, z } = hexToWorld(cell.i, cell.j);
+      for (let k = 0; k < share; k++) {
+        // cluster particles in hex cell with slight randomness
+        const angle = Math.random() * Math.PI * 2;
+        const rad = Math.sqrt(Math.random()) * HEX_R * 0.65;
+        const px = x + Math.cos(angle) * rad;
+        const pz = z + Math.sin(angle) * rad;
+        const py = cell.y + (Math.random() - 0.5) * 0.03;
+        rPos[written * 3]     = px;
+        rPos[written * 3 + 1] = py;
+        rPos[written * 3 + 2] = pz;
+        rAge[written] = cell.age;
+        written++;
+        if (written >= N_RENDER) break;
+      }
+      if (written >= N_RENDER) break;
+    }
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.age.needsUpdate = true;
+  }
+
+  // camera tracks centroid of occupied cells
+  if (occupied.length > 0) {
+    let cx = 0, cz = 0;
+    for (const cell of occupied) {
+      const { x, z } = hexToWorld(cell.i, cell.j);
+      cx += x;
+      cz += z;
+    }
+    cx /= occupied.length;
+    cz /= occupied.length;
+    controls.target.lerp(new THREE.Vector3(cx, 0, cz), 0.01);
+  }
+
+  statEl.textContent = `cells=${occupiedCount}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+<!-- MOTION: emergence, intensity: calm -->
+</body>
+</html>
