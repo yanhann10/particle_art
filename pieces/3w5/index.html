@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: shatter, intensity: vigorous -->
+<!-- Phase-space portrait: 4 attractors cycling on click.
+     THE TRANSITION IS THE ART: particles LERP through a chaotic transient over 4s,
+     momentarily exploding into chaos before settling into the new attractor shape.
+     Palette: warm amber (#e09030) stable, bright white (#ffffff) in chaotic transient.
+     80k THREE.Points. Click to advance. -->
+<title>6dp · attractor phase-space portrait</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#04060a; overflow:hidden;
+               color:#cfe1d4; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id    { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+  .hint  { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .stage { position:fixed; right:14px; bottom:12px; opacity:0.7; font-size:11px; letter-spacing:0.08em; }
+</style>
+</head>
+<body>
+<div class="id">6dp · phase-space portrait</div>
+<div class="hint">click to cycle attractor</div>
+<div class="stage" id="stageLabel">lorenz</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.167.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.167.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── Attractor definitions ─────────────────────────────────────────────────────
+// Each attractor returns [dx,dy,dz] given [x,y,z]
+const ATTRACTORS = [
+  {
+    name: 'lorenz',
+    init: () => [(Math.random()-0.5)*8, (Math.random()-0.5)*8, (Math.random()-0.5)*8 + 25],
+    step: (x,y,z) => {
+      const s=10, r=28, b=8/3;
+      return [s*(y-x), x*(r-z)-y, x*y - b*z];
+    },
+    dt: 0.005, scale: 1/25, warmup: 1000
+  },
+  {
+    name: 'thomas',
+    init: () => [(Math.random()-0.5)*2, (Math.random()-0.5)*2, (Math.random()-0.5)*2],
+    step: (x,y,z) => {
+      const b=0.208168;
+      return [Math.sin(y) - b*x, Math.sin(z) - b*y, Math.sin(x) - b*z];
+    },
+    dt: 0.08, scale: 1/5, warmup: 200
+  },
+  {
+    name: 'halvorsen',
+    init: () => [(Math.random()-0.5)*3, (Math.random()-0.5)*3, (Math.random()-0.5)*3],
+    step: (x,y,z) => {
+      const a=1.89;
+      return [-a*x - 4*y - 4*z - y*y, -a*y - 4*z - 4*x - z*z, -a*z - 4*x - 4*y - x*x];
+    },
+    dt: 0.001, scale: 1/10, warmup: 5000
+  },
+  {
+    name: 'rössler',
+    init: () => [(Math.random()-0.5)*4, (Math.random()-0.5)*4, (Math.random()-0.5)*2 + 2],
+    step: (x,y,z) => {
+      const a=0.2, b=0.2, c=5.7;
+      return [-(y+z), x + a*y, b + z*(x-c)];
+    },
+    dt: 0.01, scale: 1/12, warmup: 500
+  }
+];
+
+const N = 80000;
+let modeIdx = 0;
+
+// Per-particle state
+const px = new Float32Array(N);
+const py = new Float32Array(N);
+const pz = new Float32Array(N);
+
+// Pre-integrate reference trajectories for each attractor (used to seed new mode)
+function buildTraj(attr, count) {
+  let x = attr.init()[0], y = attr.init()[1], z = attr.init()[2];
+  // warmup
+  for (let i=0; i<attr.warmup; i++) {
+    const [dx,dy,dz] = attr.step(x,y,z);
+    x+=dx*attr.dt; y+=dy*attr.dt; z+=dz*attr.dt;
+  }
+  const traj = new Float32Array(count*3);
+  for (let i=0; i<count; i++) {
+    const [dx,dy,dz] = attr.step(x,y,z);
+    x+=dx*attr.dt; y+=dy*attr.dt; z+=dz*attr.dt;
+    traj[i*3]=x*attr.scale; traj[i*3+1]=y*attr.scale; traj[i*3+2]=z*attr.scale;
+  }
+  return traj;
+}
+
+// Init: seed particles on Lorenz
+function seedMode(idx) {
+  const attr = ATTRACTORS[idx];
+  const traj = buildTraj(attr, N);
+  for (let i=0; i<N; i++) {
+    px[i] = traj[i*3];
+    py[i] = traj[i*3+1];
+    pz[i] = traj[i*3+2];
+  }
+}
+
+seedMode(0);
+
+// Copy of target positions for transition
+const targetX = new Float32Array(N);
+const targetY = new Float32Array(N);
+const targetZ = new Float32Array(N);
+
+// Transition state
+let transitioning   = false;
+let transT          = 0;    // 0→1 over TRANS_DUR
+const TRANS_DUR     = 4.0;  // seconds
+const CHAOS_PEAK    = 0.4;  // fraction where chaos peaks (explode)
+const CHAOS_SCALE   = 8.0;  // explosion scale
+
+// ── Three.js scene ────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x04060a, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(44, innerWidth / innerHeight, 0.01, 500);
+camera.position.set(0, 0, 4);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping  = true;
+controls.dampingFactor  = 0.06;
+controls.autoRotate     = true;
+controls.autoRotateSpeed= 0.25;
+
+const posArr = new Float32Array(N * 3);
+const colArr = new Float32Array(N * 3);
+
+for (let i=0; i<N; i++) {
+  posArr[i*3]=px[i]; posArr[i*3+1]=py[i]; posArr[i*3+2]=pz[i];
+  colArr[i*3]=0.878; colArr[i*3+1]=0.564; colArr[i*3+2]=0.188; // amber
+}
+
+const geo = new THREE.BufferGeometry();
+const posBuf = new THREE.BufferAttribute(posArr, 3);
+const colBuf = new THREE.BufferAttribute(colArr, 3);
+posBuf.setUsage(THREE.DynamicDrawUsage);
+colBuf.setUsage(THREE.DynamicDrawUsage);
+geo.setAttribute('position', posBuf);
+geo.setAttribute('color',    colBuf);
+
+const mat = new THREE.PointsMaterial({
+  size:           0.025,
+  vertexColors:   true,
+  blending:       THREE.AdditiveBlending,
+  transparent:    true,
+  depthWrite:     false,
+  sizeAttenuation:true
+});
+scene.add(new THREE.Points(geo, mat));
+
+// ── Click handler ─────────────────────────────────────────────────────────────
+function nextMode() {
+  if (transitioning) return;
+  modeIdx = (modeIdx + 1) % ATTRACTORS.length;
+  document.getElementById('stageLabel').textContent = ATTRACTORS[modeIdx].name;
+
+  // Build target positions for next attractor
+  const traj = buildTraj(ATTRACTORS[modeIdx], N);
+  for (let i=0; i<N; i++) {
+    targetX[i] = traj[i*3];
+    targetY[i] = traj[i*3+1];
+    targetZ[i] = traj[i*3+2];
+  }
+
+  transitioning = true;
+  transT        = 0;
+}
+
+renderer.domElement.addEventListener('click', nextMode);
+window.addEventListener('keydown', e => { if (e.key===' ') nextMode(); });
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Animation ─────────────────────────────────────────────────────────────────
+let prevTime = performance.now() / 1000;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const now  = performance.now() / 1000;
+  const dt   = Math.min(now - prevTime, 0.05);
+  prevTime   = now;
+
+  if (transitioning) {
+    transT = Math.min(transT + dt / TRANS_DUR, 1.0);
+
+    // Chaos envelope: rises to peak at CHAOS_PEAK, falls back to 0 at 1.0
+    // Use a triangle wave in t
+    let chaos;
+    if (transT < CHAOS_PEAK) {
+      chaos = transT / CHAOS_PEAK;
+    } else {
+      chaos = 1.0 - (transT - CHAOS_PEAK) / (1.0 - CHAOS_PEAK);
+    }
+    chaos = Math.pow(chaos, 0.7); // soften
+
+    for (let i=0; i<N; i++) {
+      // LERP toward target + chaotic explosion (pseudo-random using index)
+      const noise = (Math.sin(i * 127.1 + transT * 31.7) * 0.5 + 0.5 - 0.5); // -0.5..0.5
+      const lerp  = transT;
+      const nx = px[i] + (targetX[i] - px[i]) * lerp + noise * CHAOS_SCALE * chaos;
+      const ny = py[i] + (targetY[i] - py[i]) * lerp + noise * CHAOS_SCALE * chaos;
+      const nz = pz[i] + (targetZ[i] - pz[i]) * lerp + noise * CHAOS_SCALE * chaos;
+
+      posArr[i*3]   = nx;
+      posArr[i*3+1] = ny;
+      posArr[i*3+2] = nz;
+
+      // Color: amber in stable, white during chaotic peak
+      const w = chaos * chaos;
+      colArr[i*3]   = 0.878 + (1.0 - 0.878) * w;
+      colArr[i*3+1] = 0.564 + (1.0 - 0.564) * w;
+      colArr[i*3+2] = 0.188 + (1.0 - 0.188) * w;
+    }
+
+    if (transT >= 1.0) {
+      transitioning = false;
+      // Snap to target exactly
+      for (let i=0; i<N; i++) {
+        px[i] = targetX[i]; py[i] = targetY[i]; pz[i] = targetZ[i];
+        posArr[i*3]=px[i]; posArr[i*3+1]=py[i]; posArr[i*3+2]=pz[i];
+        colArr[i*3]=0.878; colArr[i*3+1]=0.564; colArr[i*3+2]=0.188;
+      }
+    }
+
+    posBuf.needsUpdate = true;
+    colBuf.needsUpdate = true;
+  } else {
+    // Continue integrating on current attractor (keeps the swirl alive)
+    const attr = ATTRACTORS[modeIdx];
+    for (let i=0; i<N; i++) {
+      const [dx,dy,dz] = attr.step(px[i]/attr.scale, py[i]/attr.scale, pz[i]/attr.scale);
+      px[i] += dx * attr.dt * attr.scale;
+      py[i] += dy * attr.dt * attr.scale;
+      pz[i] += dz * attr.dt * attr.scale;
+      posArr[i*3]=px[i]; posArr[i*3+1]=py[i]; posArr[i*3+2]=pz[i];
+    }
+    posBuf.needsUpdate = true;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

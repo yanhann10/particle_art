@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<!-- MOTION: drift, intensity: gentle -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bhs · venus de milo · point cloud</title>
+<!-- Palette rationale: cool blue-white (#d0e8f8) at top evokes marble veining and cold
+     museum light on white stone; warm amber (#d08040) at base suggests earth/pedestal
+     origin — classical sculpture born from the ground. Height gradient = temporal meaning:
+     the divine descending into clay. -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06040a; overflow:hidden;
+               color:#c8c0d8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id      { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+  .hint    { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src     { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.7; letter-spacing:0.08em; }
+</style>
+</head>
+<body>
+<div class="id">bhs · venus de milo · point cloud</div>
+<div class="hint">drag to orbit · scroll to zoom · height gradient: marble to earth</div>
+<div class="src">descended from n8q · classical sculpture point cloud</div>
+<div class="loading" id="loading">loading venus geometry…</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.167.0/build/three.module.min.js",
+    "three/addons/": "https://unpkg.com/three@0.167.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 6);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06040a, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.4;
+
+const N_POINTS = 50000;
+const loadingEl = document.getElementById('loading');
+
+// ── Vertex shader: height-gradient color + distance falloff (no fog uniforms)
+const vertexShader = `
+  uniform float uTime;
+  uniform float uYMin;
+  uniform float uYMax;
+  attribute float aSeed;
+  varying float vHeightT;
+  varying float vDist;
+  void main() {
+    // Gentle drift: small per-point oscillation based on seed
+    float drift = sin(uTime * 0.6 + aSeed * 6.2832) * 0.008;
+    vec3 pos = position + normal * drift;
+    vHeightT = clamp((pos.y - uYMin) / (uYMax - uYMin), 0.0, 1.0);
+    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+    vDist = -mvPosition.z;
+    gl_PointSize = clamp(120.0 / vDist, 0.8, 3.5);
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+
+// ── Fragment shader: smooth circle, height gradient
+const fragmentShader = `
+  varying float vHeightT;
+  varying float vDist;
+  void main() {
+    // Circular point
+    vec2 uv = gl_PointCoord * 2.0 - 1.0;
+    if (dot(uv,uv) > 1.0) discard;
+    // Height gradient: warm amber at base → cool blue-white at top
+    vec3 colBase = vec3(0.816, 0.502, 0.251); // #d08040
+    vec3 colTop  = vec3(0.816, 0.910, 0.973); // #d0e8f8
+    vec3 col = mix(colBase, colTop, vHeightT);
+    // Distance falloff (replaces fog)
+    float fade = clamp(1.0 - (vDist - 2.0) / 15.0, 0.3, 1.0);
+    gl_FragColor = vec4(col * fade, 0.85);
+  }
+`;
+
+const uniforms = {
+  uTime: { value: 0 },
+  uYMin: { value: -2.0 },
+  uYMax: { value: 2.0 },
+};
+
+function buildPointCloud(positions, normals) {
+  const N = Math.min(positions.length / 3, N_POINTS);
+  const pos = new Float32Array(N * 3);
+  const nor = new Float32Array(N * 3);
+  const seeds = new Float32Array(N);
+
+  // Sample up to N_POINTS from positions
+  const step = Math.max(1, Math.floor(positions.length / 3 / N));
+  let count = 0;
+  for (let i = 0; i < positions.length / 3 && count < N; i += step) {
+    pos[count*3]   = positions[i*3];
+    pos[count*3+1] = positions[i*3+1];
+    pos[count*3+2] = positions[i*3+2];
+    if (normals && normals.length > i*3+2) {
+      nor[count*3]   = normals[i*3];
+      nor[count*3+1] = normals[i*3+1];
+      nor[count*3+2] = normals[i*3+2];
+    }
+    seeds[count] = Math.random();
+    count++;
+  }
+
+  // Compute Y range for gradient
+  let yMin = Infinity, yMax = -Infinity;
+  for (let i = 0; i < count; i++) {
+    yMin = Math.min(yMin, pos[i*3+1]);
+    yMax = Math.max(yMax, pos[i*3+1]);
+  }
+  uniforms.uYMin.value = yMin;
+  uniforms.uYMax.value = yMax;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos.slice(0, count*3), 3));
+  geo.setAttribute('normal',   new THREE.BufferAttribute(nor.slice(0, count*3), 3));
+  geo.setAttribute('aSeed',    new THREE.BufferAttribute(seeds.slice(0, count), 1));
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms,
+    vertexShader,
+    fragmentShader,
+    transparent: true,
+    depthWrite: false,
+  });
+
+  const points = new THREE.Points(geo, mat);
+  // Center the geometry
+  geo.computeBoundingBox();
+  const box = geo.boundingBox;
+  const centerY = (box.min.y + box.max.y) / 2;
+  const height = box.max.y - box.min.y;
+  points.position.y = -centerY;
+  // Scale to fit camera view
+  const scale = 3.5 / height;
+  points.scale.setScalar(scale);
+  scene.add(points);
+
+  loadingEl.style.display = 'none';
+  return points;
+}
+
+// ── Strategy A: Load venus OBJ from GitHub CDN
+let cloudObject = null;
+const loader = new OBJLoader();
+const OBJ_URL = 'https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/data/venus.obj';
+
+loader.load(
+  OBJ_URL,
+  (obj) => {
+    // Extract all vertices and normals
+    let allPos = [], allNor = [];
+    obj.traverse(child => {
+      if (child.isMesh) {
+        const geo = child.geometry;
+        if (!geo.attributes.position) return;
+        const p = geo.attributes.position;
+        const n = geo.attributes.normal;
+        for (let i = 0; i < p.count; i++) {
+          allPos.push(p.getX(i), p.getY(i), p.getZ(i));
+          if (n) allNor.push(n.getX(i), n.getY(i), n.getZ(i));
+          else allNor.push(0,1,0);
+        }
+      }
+    });
+    if (allPos.length > 0) {
+      cloudObject = buildPointCloud(new Float32Array(allPos), new Float32Array(allNor));
+    } else {
+      buildProcedural();
+    }
+  },
+  null,
+  () => {
+    // Strategy B: procedural female torso via Lathe geometry
+    buildProcedural();
+  }
+);
+
+function buildProcedural() {
+  // Lathe profile: shoulder to hip (classical female torso proportion)
+  const profilePts = [
+    new THREE.Vector2(0.05, 3.5),  // neck
+    new THREE.Vector2(0.35, 3.0),  // shoulder
+    new THREE.Vector2(0.50, 2.5),  // upper chest
+    new THREE.Vector2(0.45, 2.0),  // mid chest
+    new THREE.Vector2(0.35, 1.5),  // waist
+    new THREE.Vector2(0.40, 1.0),  // hip flare
+    new THREE.Vector2(0.50, 0.5),  // hip
+    new THREE.Vector2(0.60, 0.0),  // widest hip
+    new THREE.Vector2(0.55, -0.5), // upper thigh
+    new THREE.Vector2(0.40, -1.0), // mid thigh
+  ];
+
+  const latheGeo = new THREE.LatheGeometry(profilePts, 64);
+  latheGeo.computeVertexNormals();
+
+  // Sample 50k points on the surface
+  const pos = latheGeo.attributes.position;
+  const nor = latheGeo.attributes.normal;
+  const N = N_POINTS;
+  const sampledPos = new Float32Array(N * 3);
+  const sampledNor = new Float32Array(N * 3);
+
+  const triCount = latheGeo.index
+    ? latheGeo.index.count / 3
+    : pos.count / 3;
+
+  for (let i = 0; i < N; i++) {
+    // Random triangle
+    const tri = Math.floor(Math.random() * triCount) * 3;
+    let ia, ib, ic;
+    if (latheGeo.index) {
+      ia = latheGeo.index.getX(tri);
+      ib = latheGeo.index.getX(tri+1);
+      ic = latheGeo.index.getX(tri+2);
+    } else {
+      ia = tri; ib = tri+1; ic = tri+2;
+    }
+    // Barycentric random
+    let u = Math.random(), v = Math.random();
+    if (u + v > 1) { u = 1 - u; v = 1 - v; }
+    const w = 1 - u - v;
+
+    sampledPos[i*3]   = w*pos.getX(ia) + u*pos.getX(ib) + v*pos.getX(ic);
+    sampledPos[i*3+1] = w*pos.getY(ia) + u*pos.getY(ib) + v*pos.getY(ic);
+    sampledPos[i*3+2] = w*pos.getZ(ia) + u*pos.getZ(ib) + v*pos.getZ(ic);
+    if (nor) {
+      sampledNor[i*3]   = w*nor.getX(ia) + u*nor.getX(ib) + v*nor.getX(ic);
+      sampledNor[i*3+1] = w*nor.getY(ia) + u*nor.getY(ib) + v*nor.getY(ic);
+      sampledNor[i*3+2] = w*nor.getZ(ia) + u*nor.getZ(ib) + v*nor.getZ(ic);
+    }
+  }
+
+  latheGeo.dispose();
+  cloudObject = buildPointCloud(sampledPos, sampledNor);
+}
+
+// Zoom pulse: gentle periodic zoom in/out
+let time = 0;
+let zoomPhase = 0;
+const baseZ = 6;
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let paused = false;
+renderer.domElement.addEventListener('click', () => { paused = !paused; });
+
+function animate(ts) {
+  requestAnimationFrame(animate);
+  if (paused) return;
+  time = ts * 0.001;
+
+  uniforms.uTime.value = time;
+
+  // Periodic zoom pulse: camera z oscillates gently
+  const zPulse = baseZ + Math.sin(time * 0.25) * 0.8;
+  camera.position.z += (zPulse - camera.position.z) * 0.01;
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate(0);
+</script>
+</body>
+</html>

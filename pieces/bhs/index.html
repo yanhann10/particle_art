@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<!-- MOTION: breathe, intensity: gentle -->
+<!-- PIECE: bhs — Anadol Biophilia Coral -->
+<!-- PALETTE: bioluminescent cyan #00e8d0 on midnight blue #04080f -->
+<!-- CONCEPT: Channel Refik Anadol Large Nature Model: Coral. 12 coral polyp structures.
+     Each polyp: recursive 3-level LineSegments tree. All polyps breathe (1.2x↔0.9x scale,
+     ~0.05 Hz, random phase offset). Depth atmosphere via vertex shader distance falloff
+     (NOT fog:true — avoids silent shader compile failure). Camera drifts around colony. -->
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>bhs · anadol coral</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #04080f; overflow: hidden; width: 100vw; height: 100vh; }
+  canvas { display: block; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.167.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.167.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const W = window.innerWidth, H = window.innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x04080f);
+
+const camera = new THREE.PerspectiveCamera(70, W / H, 0.1, 300);
+camera.position.set(0, 5, 10);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.35;
+controls.target.set(0, 5, 0);
+
+// Minimal ambient (emissive materials only need slight ambient to avoid pitch black)
+scene.add(new THREE.AmbientLight(0x051010, 2.0));
+// Subtle point light at top for gleam on tips
+const tipLight = new THREE.PointLight(0x00ffee, 2.5, 60);
+tipLight.position.set(0, 22, 0);
+scene.add(tipLight);
+// Fill from below
+const fillLight = new THREE.PointLight(0x004040, 1.0, 30);
+fillLight.position.set(0, -2, 8);
+scene.add(fillLight);
+
+// ── Vertex + Fragment shaders with manual distance falloff ──────────────────
+// (NO fog: true — that injects fogColor/fogDensity which breaks ShaderMaterial)
+const vertShader = `
+varying float vDepth;
+varying vec3 vWorldPos;
+
+void main() {
+  vec4 worldPos = modelMatrix * vec4(position, 1.0);
+  vWorldPos = worldPos.xyz;
+  vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+  vDepth = -mvPos.z;   // positive = farther
+  gl_Position = projectionMatrix * mvPos;
+}
+`;
+
+const fragShader = `
+uniform vec3 baseColor;  // bioluminescent cyan
+uniform vec3 bgColor;    // midnight
+uniform float fogNear;
+uniform float fogFar;
+
+varying float vDepth;
+varying vec3 vWorldPos;
+
+void main() {
+  // Manual exponential fog: attenuates color toward bgColor with depth
+  float fogFactor = 1.0 - clamp((fogFar - vDepth) / (fogFar - fogNear), 0.0, 1.0);
+  // Height-based brightness: tips glow brighter
+  float heightGlow = clamp(vWorldPos.y / 15.0, 0.0, 1.0);
+  vec3 col = mix(baseColor * 0.55, baseColor, heightGlow);
+  col = mix(col, bgColor, fogFactor * fogFactor);
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+// One shared shader material for all coral lines (kept for potential fallback)
+const coralMat = new THREE.ShaderMaterial({
+  uniforms: {
+    baseColor: { value: new THREE.Color(0x00e8d0) },
+    bgColor:   { value: new THREE.Color(0x04080f) },
+    fogNear:   { value: 15.0 },
+    fogFar:    { value: 55.0 },
+  },
+  vertexShader: vertShader,
+  fragmentShader: fragShader,
+  transparent: false,
+});
+
+// MeshStandardMaterial for TubeGeometry coral branches
+// Emissive so they glow without needing complex lighting
+const coralMat2 = new THREE.MeshStandardMaterial({
+  color: 0x00e8d0,
+  emissive: 0x00b090,
+  emissiveIntensity: 0.8,
+  metalness: 0.1,
+  roughness: 0.5,
+  side: THREE.DoubleSide,
+});
+
+// ── Build one polyp as a group of TubeGeometry branches ──────────────────────
+// TubeGeometry gives visible width unlike 1px LineSegments
+function buildPolyp(x0, y0, z0, height, spread) {
+  const group = new THREE.Group();
+  const segments = [];
+
+  function branch(ox, oy, oz, dx, dy, dz, len, depth) {
+    if (depth <= 0 || len < 0.3) return;
+    const ex = ox + dx * len;
+    const ey = oy + dy * len;
+    const ez = oz + dz * len;
+    segments.push({ ox, oy, oz, ex, ey, ez, len, depth });
+    if (depth > 1) {
+      const nFork = 3;
+      for (let k = 0; k < nFork; k++) {
+        const angle = (k / nFork) * Math.PI * 2 + Math.random() * 0.5;
+        const tilt  = 0.35 + Math.random() * 0.25;
+        const ndx = dx * Math.cos(tilt) + Math.cos(angle) * Math.sin(tilt) * spread;
+        const ndy = dy * Math.cos(tilt) + Math.sin(angle) * Math.sin(tilt) * 0.4 + Math.random() * 0.1;
+        const ndz = dz * Math.cos(tilt) + Math.cos(angle + 1.57) * Math.sin(tilt) * spread;
+        const nl  = Math.sqrt(ndx*ndx + ndy*ndy + ndz*ndz);
+        branch(ex, ey, ez, ndx/nl, ndy/nl, ndz/nl, len * 0.6, depth - 1);
+      }
+    }
+  }
+
+  // Trunk
+  branch(x0, y0, z0, 0, 1, 0, height * 0.45, 3);
+  // Lateral sub-trunks for bushy look
+  for (let k = 0; k < 3; k++) {
+    const angle = (k / 3) * Math.PI * 2;
+    branch(
+      x0, y0 + height * 0.2, z0,
+      Math.cos(angle) * 0.4, 0.9, Math.sin(angle) * 0.4,
+      height * 0.35, 2
+    );
+  }
+
+  // Build TubeGeometry for each segment — radius proportional to depth
+  segments.forEach(({ ox, oy, oz, ex, ey, ez, len, depth }) => {
+    const r = depth === 3 ? 0.055 : depth === 2 ? 0.035 : 0.018;
+    const curve = new THREE.LineCurve3(
+      new THREE.Vector3(ox, oy, oz),
+      new THREE.Vector3(ex, ey, ez)
+    );
+    const tubeGeo = new THREE.TubeGeometry(curve, 4, r, 5, false);
+    const mesh = new THREE.Mesh(tubeGeo, coralMat2);
+    group.add(mesh);
+  });
+
+  return group;
+}
+
+// ── Place 12 polyps in a colony arrangement ─────────────────────────────────
+const polyps = [];
+const N_POLYPS = 12;
+
+// Tighter cluster, tall polyps, camera close
+const polyp_metadata = [
+  { x:  0,   z:  0,   h: 11.0, s: 0.55 },
+  { x:  2.5, z:  0.5, h:  9.0, s: 0.48 },
+  { x: -2.2, z:  1.0, h: 10.0, s: 0.52 },
+  { x:  1.2, z: -2.5, h:  8.0, s: 0.44 },
+  { x: -3.2, z: -0.8, h:  9.0, s: 0.50 },
+  { x:  3.8, z: -1.0, h:  7.0, s: 0.38 },
+  { x: -1.0, z:  3.0, h:  7.5, s: 0.42 },
+  { x:  0.5, z:  3.5, h:  6.5, s: 0.36 },
+  { x: -3.5, z:  2.0, h:  6.0, s: 0.32 },
+  { x:  3.2, z:  2.5, h:  6.0, s: 0.35 },
+  { x: -2.5, z: -3.0, h:  7.0, s: 0.40 },
+  { x:  2.0, z: -3.5, h:  6.0, s: 0.33 },
+];
+
+polyp_metadata.forEach((pm, idx) => {
+  const mesh = buildPolyp(pm.x, 0, pm.z, pm.h, pm.s);
+  mesh.userData = {
+    baseScale: 1.0,
+    phase: Math.random() * Math.PI * 2, // random breathing phase
+    baseY: 0,
+  };
+  scene.add(mesh);
+  polyps.push(mesh);
+});
+
+// ── Camera drift path ────────────────────────────────────────────────────────
+// Slow Lissajous-like drift
+const CAM_RADIUS = 10;
+const CAM_HEIGHT_BASE = 5;
+
+let t = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  t += 0.004;
+
+  // Breathe each polyp
+  polyps.forEach((p) => {
+    const ph = p.userData.phase;
+    const FREQ = 0.05 * Math.PI * 2; // ~0.05 Hz
+    const breathe = 0.9 + 0.3 * (0.5 + 0.5 * Math.sin(t * FREQ * 8 + ph));
+    // breathe oscillates 0.9 ↔ 1.2
+    const scale = 0.9 + (1.2 - 0.9) * ((breathe - 0.9) / 0.3);
+    p.scale.set(1.0, scale, 1.0);
+  });
+
+  // Slow camera orbit (different from autoRotate — more organic path)
+  camera.position.x = Math.sin(t * 0.12) * CAM_RADIUS;
+  camera.position.z = Math.cos(t * 0.12) * CAM_RADIUS;
+  camera.position.y = CAM_HEIGHT_BASE + Math.sin(t * 0.07) * 3;
+  camera.lookAt(controls.target);
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  const W2 = window.innerWidth, H2 = window.innerHeight;
+  camera.aspect = W2 / H2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(W2, H2);
+});
+</script>
+</body>
+</html>

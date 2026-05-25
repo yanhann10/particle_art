@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<!-- MOTION: trace, intensity: gentle -->
+<!-- PIECE: 6dp — Ikeda Data-Cosm -->
+<!-- PALETTE: white digits on pure black, high-velocity → bright cyan -->
+<!-- CONCEPT: Channel Ryoji Ikeda data.cosm. 60k particles following Lorenz attractor.
+     Each particle's velocity magnitude maps to brightness (white→cyan for fast movers).
+     Canvas-generated digit atlas for particle UV-based digit display via vertex shader.
+     Mathematical substrate of reality made visible. -->
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>6dp · ikeda data-cosm</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; width: 100vw; height: 100vh; }
+  canvas { display: block; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.167.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.167.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── Font atlas: 10 digits 0-9 on a canvas ──────────────────────────────────
+// Each digit occupies 1/10 of a 320×32 canvas (32×32 per digit)
+function makeDigitAtlas() {
+  const W = 320, H = 32, CELL = 32;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${CELL * 0.85}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let d = 0; d < 10; d++) {
+    ctx.fillText(String(d), CELL * d + CELL * 0.5, H * 0.5);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  return tex;
+}
+
+const W = window.innerWidth, H = window.innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+
+const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 200);
+camera.position.set(0, 0, 32);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.25;
+controls.target.set(0, 0, 0);
+
+// ── Lorenz attractor simulation ─────────────────────────────────────────────
+const N = 60000;
+// Position buffer (current and previous for velocity)
+const posArr   = new Float32Array(N * 3);
+const prevArr  = new Float32Array(N * 3);
+const digitArr = new Float32Array(N); // 0-9 digit per particle
+
+// Lorenz params
+const sigma = 10, rho = 28, beta = 8/3;
+const DT = 0.004;
+
+// Seed particles along attractor using warm-up
+function lorenzStep(x, y, z) {
+  const dx = sigma * (y - x);
+  const dy = x * (rho - z) - y;
+  const dz = x * y - beta * z;
+  return [x + dx * DT, y + dy * DT, z + dz * DT];
+}
+
+// Warm up N particles from a single orbit
+let sx = 0.1, sy = 0, sz = 0;
+for (let w = 0; w < 5000; w++) [sx, sy, sz] = lorenzStep(sx, sy, sz);
+
+// Lorenz attractor center: x≈0, y≈0, z≈24 (Lorenz center z=rho-1=27 approx)
+// We scale by 0.45 so the attractor fits ~±10 world units
+// Center: (0, 0, 24*0.45) ≈ (0,0,10.8) → subtract to center at origin
+const LZ_OFFSET_Z = 24 * 0.45;
+const LZ_OFFSET_Y = 0;
+// Spread particles along the attractor by walking with offsets
+for (let i = 0; i < N; i++) {
+  for (let w = 0; w < 3; w++) [sx, sy, sz] = lorenzStep(sx, sy, sz);
+  posArr[i*3]   = sx * 0.45;
+  posArr[i*3+1] = sy * 0.45;
+  posArr[i*3+2] = sz * 0.45 - LZ_OFFSET_Z;
+  prevArr[i*3]   = posArr[i*3];
+  prevArr[i*3+1] = posArr[i*3+1];
+  prevArr[i*3+2] = posArr[i*3+2];
+  digitArr[i] = i % 10;
+}
+
+const digitAtlas = makeDigitAtlas();
+
+// ── Shader material ─────────────────────────────────────────────────────────
+const vertShader = `
+attribute float digit;
+attribute float velocity; // pre-computed speed
+
+varying float vVelocity;
+varying float vDigit;
+
+void main() {
+  vVelocity = velocity;
+  vDigit = digit;
+  vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+  // Size attenuated based on distance
+  gl_PointSize = clamp(28.0 / -mvPos.z, 3.0, 18.0);
+  gl_Position = projectionMatrix * mvPos;
+}
+`;
+
+const fragShader = `
+uniform sampler2D digitAtlas;
+varying float vVelocity;
+varying float vDigit;
+
+void main() {
+  // Map digit index to atlas UV column
+  float col = floor(vDigit + 0.5); // 0-9
+  float u = (col + gl_PointCoord.x) / 10.0;
+  float v = 1.0 - gl_PointCoord.y;
+  vec4 texel = texture2D(digitAtlas, vec2(u, v));
+
+  // Discard near-black pixels (letter outline anti-alias)
+  float alpha = texel.r;
+  if (alpha < 0.12) discard;
+
+  // Base: white digits. High velocity: shift toward bright cyan
+  float cyan = clamp(vVelocity * 1.8, 0.0, 1.0);
+  vec3 col3 = mix(vec3(0.82, 0.82, 0.82), vec3(0.0, 0.93, 0.95), cyan);
+  gl_FragColor = vec4(col3, alpha * 0.92);
+}
+`;
+
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+geo.setAttribute('digit', new THREE.BufferAttribute(digitArr, 1));
+
+const velArr = new Float32Array(N);
+geo.setAttribute('velocity', new THREE.BufferAttribute(velArr, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: { digitAtlas: { value: digitAtlas } },
+  vertexShader: vertShader,
+  fragmentShader: fragShader,
+  transparent: true,
+  depthWrite: false,
+});
+
+const points = new THREE.Points(geo, mat);
+scene.add(points);
+
+// ── Per-particle Lorenz state (for integration) ─────────────────────────────
+// Store as flat arrays to avoid GC
+const lx = new Float32Array(N);
+const ly = new Float32Array(N);
+const lz = new Float32Array(N);
+// Init from initial positions (reverse the scaling + centering)
+for (let i = 0; i < N; i++) {
+  lx[i] = posArr[i*3]   / 0.45;
+  ly[i] = posArr[i*3+1] / 0.45;
+  lz[i] = (posArr[i*3+2] + LZ_OFFSET_Z) / 0.45;
+}
+
+// Steps per frame (larger = faster attractor evolution)
+const STEPS_PER_FRAME = 2;
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  for (let s = 0; s < STEPS_PER_FRAME; s++) {
+    for (let i = 0; i < N; i++) {
+      const x = lx[i], y = ly[i], z = lz[i];
+      const dx = sigma * (y - x);
+      const dy = x * (rho - z) - y;
+      const dz = x * y - beta * z;
+      lx[i] = x + dx * DT;
+      ly[i] = y + dy * DT;
+      lz[i] = z + dz * DT;
+    }
+  }
+
+  for (let i = 0; i < N; i++) {
+    const nx = lx[i] * 0.45;
+    const ny = ly[i] * 0.45;
+    const nz = lz[i] * 0.45 - LZ_OFFSET_Z;
+    const ox = posArr[i*3], oy = posArr[i*3+1], oz = posArr[i*3+2];
+    // Velocity magnitude (scaled down for color mapping)
+    const vx = nx-ox, vy = ny-oy, vz = nz-oz;
+    velArr[i] = Math.sqrt(vx*vx+vy*vy+vz*vz) / (DT * STEPS_PER_FRAME * 12);
+    posArr[i*3]   = nx;
+    posArr[i*3+1] = ny;
+    posArr[i*3+2] = nz;
+  }
+
+  geo.attributes.position.needsUpdate = true;
+  geo.attributes.velocity.needsUpdate = true;
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  const W2 = window.innerWidth, H2 = window.innerHeight;
+  camera.aspect = W2 / H2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(W2, H2);
+});
+</script>
+</body>
+</html>
