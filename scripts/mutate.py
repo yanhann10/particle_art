@@ -472,10 +472,17 @@ def main():
 
     seed_block_text, seed_override_directive = _seed_block(args.seed)
 
+    feedback_note = (_read_taste().get("iterate_when_chosen") or {}).get(parent["id"])
+
     if args.directive:
         directive_id, directive = "manual", args.directive
     elif seed_override_directive:
         directive_id, directive = "seed_channel", seed_override_directive
+    elif feedback_note:
+        # User feedback for this specific parent takes priority over pending queue
+        # and sampled directives — it IS the directive.
+        directive_id, directive = "feedback", feedback_note
+        print(f"using feedback directive for {parent['id']}: {feedback_note[:80]}...")
     else:
         pending = _pop_pending_directive()
         if pending:
