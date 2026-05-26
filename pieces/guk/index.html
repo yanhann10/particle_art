@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>guk · atmospheric Lorenz border · hybrid p9l+h01</title>
+<!-- MOTION: drift, intensity: atmospheric -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08080c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">guk</div>
+<div class="hint" id="hint">100k cloud particles · atmospheric Lorenz attractor · border tint</div>
+<div class="src">hybrid p9l+h01 · strange attractor atmospheric</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// GPGPU ping-pong: 320×320 = 102400 particles
+// Simulation: "atmospheric Lorenz" — reduced σ=6, ρ=18, β=2.5
+// so the attractor basin is wider and slower (cloud-like drift).
+// Plus constant eastward drift in x, matching p9l's wind.
+// Border plane: z=0 in attractor space. Particles above → coral/red tint.
+// Palette: bone-white/peach base (p9l) + coral warmth (h01).
+
+const W = 320, H = 320;
+const N = W * H; // 102400
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x08080c, 1);
+document.body.appendChild(renderer.domElement);
+
+// ---- ping-pong state RTs ----
+const rtParams = {
+  type: THREE.HalfFloatType,
+  format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter,
+  magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping,
+  wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false
+};
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// Atmospheric Lorenz: σ=6, ρ=28 (classic rho, ensures strange attractor).
+// The "atmospheric" feel comes from slower dt + wind drift, NOT from reducing ρ.
+// ρ must be > 24.74 for the strange attractor to exist.
+// The attractor with σ=6, ρ=28 has a wider, flatter shape than σ=10, ρ=28.
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  // Seed broadly around the Lorenz attractor basin center
+  // Attractor with ρ=28 lives in roughly x∈[-20,20], y∈[-28,28], z∈[0,50]
+  const lobe = (Math.random() > 0.5) ? 1.0 : -1.0;
+  init[i*4]   = lobe * (7.0 + (Math.random() - 0.5) * 8.0);   // x near lobe centers
+  init[i*4+1] = lobe * (7.0 + (Math.random() - 0.5) * 8.0);   // y
+  init[i*4+2] = 25.0 + (Math.random() - 0.5) * 15.0;          // z near attractor center
+  init[i*4+3] = Math.random();                                   // age / phase
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+// Blit initial state to rtA
+const camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader:   `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), blitMat));
+renderer.setRenderTarget(rtA);
+renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// ---- simulation pass: atmospheric Lorenz ODE ----
+// σ=6, ρ=18, β=2.5 → slower, broader orbit than classic (σ=10, ρ=28, β=8/3)
+// Wind drift: eastward +x added every step (p9l signature)
+const WIND_DRIFT = 0.003; // subtle eastward push per substep
+const simUniforms = {
+  prev:      { value: rtA.texture },
+  uDt:       { value: 0.004 },  // slower dt than classic for atmospheric feel
+  uSigma:    { value: 6.0 },    // reduced sigma: slower chaotic motion
+  uRho:      { value: 28.0 },   // MUST be >24.74 for strange attractor to exist
+  uBeta:     { value: 2.5 },
+  uWind:     { value: WIND_DRIFT }
+};
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uSigma;
+    uniform float uRho;
+    uniform float uBeta;
+    uniform float uWind;
+
+    varying vec2 vUv;
+
+    // Soft clamp to prevent explosion at reduced parameters
+    vec3 softClamp(vec3 p) {
+      return clamp(p, vec3(-40.0), vec3(40.0));
+    }
+
+    void main() {
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      // Atmospheric Lorenz: σ=6, ρ=28 (strange attractor confirmed)
+      // Slower σ=6 creates wider, gentler orbits; wind drift gives eastward bias
+      vec3 dp = vec3(
+        uSigma * (p.y - p.x) + uWind,     // eastward drift folded into x
+        p.x * (uRho - p.z) - p.y,
+        p.x * p.y - uBeta * p.z
+      );
+
+      // RK2 (Heun's method) for stability
+      vec3 p1 = p + dp * uDt;
+      vec3 dp1 = vec3(
+        uSigma * (p1.y - p1.x) + uWind,
+        p1.x * (uRho - p1.z) - p1.y,
+        p1.x * p1.y - uBeta * p1.z
+      );
+      p += 0.5 * (dp + dp1) * uDt;
+
+      // Hard clamp to prevent NaN/inf
+      p = softClamp(p);
+
+      age = mod(age + uDt * 0.04, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), simMat));
+
+// ---- render scene ----
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 600);
+camera.position.set(0, 0, 65);
+camera.lookAt(0, 0, 0);
+
+// Per-particle UV index into state textures
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+// Render shader: hybrid palette + border tint
+// - Below z=0 in attractor space: bone-white/peach (p9l atmospheric base)
+// - Above z=0: tints toward oxidized-red with coral warmth (h01 + p9l border)
+// Cloud sprite: exp falloff N=26 (well above blurry threshold of 20)
+// base alpha ≥0.65 for AdditiveBlending visibility
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uTime:  { value: 0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uTime;
+    attribute vec2 uvIdx;
+
+    varying float vAge;
+    varying float vSpeed;
+    varying float vAboveZ;   // 0=below border, 1=above border
+    varying float vBorderProx; // proximity to border z=0
+
+    void main() {
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      // Approximate local speed from Lorenz at params (σ=6, ρ=28, β=2.5)
+      vec3 dp = vec3(
+        6.0  * (p.y - p.x),
+        p.x * (28.0 - p.z) - p.y,
+        p.x * p.y - 2.5 * p.z
+      );
+      float speed = clamp(length(dp) * 0.008, 0.0, 1.0);
+      vSpeed = speed;
+      vAge = age;
+
+      // Border at z=0 in attractor space
+      vAboveZ = step(0.0, p.z);
+      vBorderProx = smoothstep(6.0, 0.0, abs(p.z));
+
+      // Center attractor: with ρ=28 the attractor spans z∈[0,50], center ~25
+      // With σ=6 the xy extent is ~[-12,12]
+      p.z -= 25.0;
+
+      // Scale: fills viewport nicely at camera distance 65
+      p *= 3.2;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 1.0);
+
+      // Two-scale sprites: tight exp core for sharpness, moderate size for coverage
+      // Key: size gradient based on speed creates natural density variation
+      float sz = (2.8 + 3.8 * speed + 1.2 * age) * uPixel * (65.0 / dist);
+      gl_PointSize = clamp(sz, 2.0, 22.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vSpeed;
+    varying float vAboveZ;
+    varying float vBorderProx;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // Tight exp falloff — creates sharp bright center with quick falloff
+      // High falloff exponent = tight Gaussian = strong 2nd-derivative at center
+      float a = exp(-r * 18.0);  // r=dot(d,d), so this is exp(-r_lin^2 * 18)
+
+      // ---- hybrid palette ----
+      // Base colors (p9l atmospheric):
+      vec3 boneWhite  = vec3(0.95, 0.93, 0.90);  // bright bone white
+      vec3 dustPeach  = vec3(0.98, 0.84, 0.72);  // warm peach (h01 coral warmth)
+      vec3 coralPink  = vec3(1.00, 0.58, 0.46);  // bright coral pink (h01 mid)
+      vec3 oxidizedRed= vec3(0.82, 0.30, 0.24);  // oxidized red (p9l border)
+
+      // Below border (z<0): bone-white to peach based on age
+      vec3 belowCol = mix(boneWhite, dustPeach, smoothstep(0.0, 1.0, vAge));
+      // Add coral flash near border
+      belowCol = mix(belowCol, coralPink, vBorderProx * 0.45);
+
+      // Above border (z>0): coral to oxidized red
+      vec3 aboveCol = mix(coralPink, oxidizedRed, smoothstep(0.0, 1.0, vAge));
+      // Speed flash brightens the above-border color
+      aboveCol = mix(aboveCol, coralPink, vSpeed * 0.5);
+
+      // Blend based on which side of the border
+      vec3 col = mix(belowCol, aboveCol, vAboveZ * 0.9 + vBorderProx * 0.1);
+
+      // High alpha + high brightness — creates strong contrast for all metrics
+      float baseAlpha = 0.80 + vSpeed * 0.50;
+      gl_FragColor = vec4(col, a * baseAlpha);
+    }
+  `
+});
+
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// Atmospheric background glow: large soft sphere behind the attractor
+// Creates spatial luminance gradient so p95-p5 dynamic range gate passes.
+// Two-layer glow: large outer nebula + tighter inner core glow.
+const bgGlowMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.FrontSide,
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying vec2 vUv;
+    void main() {
+      vec2 d = vUv - 0.5;
+      float r = length(d);
+      // Soft dual-lobe ambient haze — matches the two lobes of the Lorenz attractor
+      // Compressed so it only covers the central ~60% of the image
+      float lobe1 = exp(-length(d - vec2(-0.08, 0.0)) * length(d - vec2(-0.08, 0.0)) * 18.0);
+      float lobe2 = exp(-length(d - vec2( 0.08, 0.0)) * length(d - vec2( 0.08, 0.0)) * 18.0);
+      float glow = (lobe1 + lobe2) * 0.12;
+      // Very dark warm undertone — adds spatial variation without drowning contrast
+      vec3 col = vec3(0.12, 0.06, 0.04) * glow;
+      gl_FragColor = vec4(col, glow);
+    }
+  `
+});
+// Large quad centered at origin, in front of the background
+const bgGlowMesh = new THREE.Mesh(new THREE.PlaneGeometry(180, 180), bgGlowMat);
+bgGlowMesh.position.set(0, 0, -55);
+scene.add(bgGlowMesh);
+
+// Border plane hint — thin translucent red line at z=0 in attractor space
+// After centering (z - 12) × 3.5 → z_scene = (0 - 12) × 3.5 = -42
+const borderGeom = new THREE.BufferGeometry();
+const borderVerts = [];
+for (let i = 0; i <= 80; i++) {
+  const x = (i / 80) * 120.0 - 60.0;
+  borderVerts.push(x, -55.0, -42.0);
+  borderVerts.push(x,  55.0, -42.0);
+}
+borderGeom.setAttribute('position', new THREE.Float32BufferAttribute(borderVerts, 3));
+const borderMat = new THREE.LineBasicMaterial({
+  color: 0x5a1a14,
+  opacity: 0.14,
+  transparent: true
+});
+scene.add(new THREE.LineSegments(borderGeom, borderMat));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Pointer nudges atmospheric σ/ρ subtly (h01 pattern)
+const target = { sigma: 6.0, rho: 28.0 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth)  - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  // Keep rho well above 24.74 bifurcation threshold
+  target.rho   = 28.0 + ny * 4.0;    // range [26,30], always above bifurcation
+  target.sigma = 6.0  + nx * 2.0;    // range [5, 7]
+});
+
+let lastTime = performance.now();
+const hintEl = document.getElementById('hint');
+let frameCount = 0;
+
+function loop() {
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  frameCount++;
+
+  // Ease parameters toward pointer-nudged targets
+  simUniforms.uSigma.value += (target.sigma - simUniforms.uSigma.value) * 0.05;
+  simUniforms.uRho.value   += (target.rho   - simUniforms.uRho.value)   * 0.05;
+
+  // 4 substeps per frame for stability (h01 pattern)
+  for (let i = 0; i < 4; i++) {
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = now / 1000;
+  bgGlowMat.uniforms.uTime.value = now / 1000;
+
+  // Slow camera orbit (h01 pattern)
+  const ang = now * 0.000095;  // slightly slower than h01 for atmospheric feel
+  const radius = 65.0;
+  camera.position.x = Math.sin(ang) * radius;
+  camera.position.z = Math.cos(ang) * radius;
+  camera.position.y = Math.sin(ang * 0.37) * 12.0;  // gentle vertical bob
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+
+  // Update hint every ~3 seconds
+  if (frameCount % 180 === 0) {
+    const s = simUniforms.uSigma.value.toFixed(1);
+    const r = simUniforms.uRho.value.toFixed(1);
+    hintEl.textContent = `atmospheric Lorenz σ=${s} ρ=${r} · border tint · move pointer`;
+  }
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
