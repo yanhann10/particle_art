@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nx2 · Tinguely thread installation</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0e0a0a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#999; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#999; }
+</style>
+</head>
+<body>
+<div class="id">nx2</div>
+<div class="hint">click to jam · threads shudder</div>
+<div class="src">Tinguely · Shiota · 80k particles · crimson threads</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 0, 26);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0e0a0a, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+const partCount = 12;
+const THREAD_COUNT = 8000;
+
+const uTime    = { value: 0.0 };
+const uPixelR  = { value: renderer.getPixelRatio() };
+const uJam     = { value: 0.0 };
+const uShudder = { value: 0.0 };
+
+// 12 parts arranged in a ring at radius 14, in the XY plane.
+// Wide enough for FOV 65° at dist 26 (frustum ±26*tan(32.5°)=±16.4 units wide).
+// Each part center: angle = i * (2π/12)
+const RING_RADIUS = 12.0; // world units
+const RING_GLSL = `
+vec3 getCenter(float partId) {
+  float angle = partId * 0.52360; // 2*PI/12
+  return vec3(cos(angle) * ${RING_RADIUS.toFixed(1)}, sin(angle) * ${RING_RADIUS.toFixed(1)}, 0.0);
+}
+`;
+
+// Shared position function: each part is a fuzzy filled disk (not a thin orbit).
+// particleR ∈ [0, maxR] (filled disk), localAngle ∈ [0, 2π].
+const PART_POS_FN = `
+${RING_GLSL}
+vec3 partWorldPos(
+    float partId, float localAngle, float radius,
+    float axX, float axY, float axZ,
+    float speed, float phase, float wobble,
+    float particleR,
+    float time, float jam
+) {
+  float t = time * speed + phase;
+  t += sin(time * 15.0 + partId * 3.14159) * jam * 0.5;
+
+  vec3 axis = normalize(vec3(axX, axY, axZ));
+  // Filled disk: use actual particleR (varies 0..maxR) instead of fixed radius
+  vec3 circlePos = vec3(cos(localAngle) * particleR, sin(localAngle) * particleR, 0.0);
+
+  float ct = cos(t), st = sin(t);
+  vec3 rotated = circlePos * ct
+               + cross(axis, circlePos) * st
+               + axis * dot(axis, circlePos) * (1.0 - ct);
+
+  rotated += axis * (sin(t * 3.0 + phase) * wobble);
+  return getCenter(partId) + rotated;
+}
+`;
+
+// ---- MACHINE PARTICLES ----
+const machineMat = new THREE.ShaderMaterial({
+  uniforms: { uTime, uPixel: uPixelR, uJam },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uJam;
+
+    attribute float partId;
+    attribute float localAngle;
+    attribute float radius;      // max disk radius (stored per particle but same per part)
+    attribute float axisX;
+    attribute float axisY;
+    attribute float axisZ;
+    attribute float speed;
+    attribute float phase;
+    attribute float wobble;
+    attribute float particleR;   // actual radius for THIS particle (0..maxR)
+
+    varying float vBrightness;
+
+    ${PART_POS_FN}
+
+    void main(){
+      vec3 p = partWorldPos(partId, localAngle, radius,
+                            axisX, axisY, axisZ,
+                            speed, phase, wobble,
+                            particleR, uTime, uJam);
+
+      float t = uTime * speed + phase;
+      // Vary brightness by radial distance from center (edge = brighter rim)
+      float radFrac = particleR / max(radius, 0.001);
+      vBrightness = 0.40 + 0.60 * (0.5 + 0.5 * abs(sin(t + phase))) * (0.3 + 0.7 * radFrac);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = length(mv.xyz);
+      // At dist~26, 200/26 = 7.7px. Good for N=28 falloff.
+      gl_PointSize = uPixel * clamp(200.0 / dist, 2.0, 22.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vBrightness;
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // N=28 — crisp falloff
+      float sharpness = pow(max(0.0, 1.0 - r * 4.0), 28.0);
+
+      vec3 rust = mix(
+        vec3(0.93, 0.43, 0.07),
+        vec3(0.99, 0.77, 0.16),
+        vBrightness
+      );
+
+      float alpha = sharpness * (0.60 + 0.35 * vBrightness);
+      gl_FragColor = vec4(rust, alpha);
+    }
+  `
+});
+
+// ---- CRIMSON THREAD LAYER ----
+const threadMat = new THREE.ShaderMaterial({
+  uniforms: { uTime, uJam, uShudder },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uJam;
+    uniform float uShudder;
+
+    attribute float aPartId;   attribute float aLocalAngle;
+    attribute float aRadius;   attribute float aAxisX;
+    attribute float aAxisY;    attribute float aAxisZ;
+    attribute float aSpeed;    attribute float aPhase;
+    attribute float aWobble;   attribute float aParticleR;
+
+    attribute float bPartId;   attribute float bLocalAngle;
+    attribute float bRadius;   attribute float bAxisX;
+    attribute float bAxisY;    attribute float bAxisZ;
+    attribute float bSpeed;    attribute float bPhase;
+    attribute float bWobble;   attribute float bParticleR;
+
+    attribute float endpointFlag;
+    attribute float threadVariance;
+    varying float vOpacity;
+
+    ${PART_POS_FN}
+
+    void main(){
+      vec3 pA = partWorldPos(aPartId, aLocalAngle, aRadius,
+                             aAxisX, aAxisY, aAxisZ,
+                             aSpeed, aPhase, aWobble,
+                             aParticleR, uTime, uJam);
+      vec3 pB = partWorldPos(bPartId, bLocalAngle, bRadius,
+                             bAxisX, bAxisY, bAxisZ,
+                             bSpeed, bPhase, bWobble,
+                             bParticleR, uTime, uJam);
+
+      float sh = uShudder * 0.10;
+      float sid = aPartId * 7.0 + bPartId * 13.0;
+      pA.x += sin(uTime * 40.0 + sid * 1.3) * sh;
+      pA.y += cos(uTime * 31.0 + sid * 2.1) * sh;
+      pB.x += sin(uTime * 40.0 + sid * 1.7) * sh;
+      pB.y += cos(uTime * 31.0 + sid * 2.5) * sh;
+
+      vec3 p = mix(pA, pB, endpointFlag);
+      vOpacity = threadVariance;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vOpacity;
+    void main(){
+      vec3 crimson = vec3(0.52, 0.10, 0.10);
+      float alpha = (0.15 + 0.10 * vOpacity) * vOpacity;
+      gl_FragColor = vec4(crimson, alpha);
+    }
+  `
+});
+
+// ---- GEOMETRY ----
+let machineGeom, machinePoints, threadGeom, threadLines;
+
+function buildMachine(seed) {
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  // Part parameters
+  const parts = [];
+  for (let i = 0; i < partCount; i++) {
+    const maxR = 1.5 + rng() * 2.0;
+    const spd  = (0.3 + rng() * 2.0) * (rng() > 0.5 ? 1 : -1);
+    const ph   = rng() * Math.PI * 2;
+    const wob  = rng() * 0.20;
+    let axX = rng()*2-1, axY = rng()*2-1, axZ = rng()*2-1;
+    const axLen = Math.sqrt(axX*axX + axY*axY + axZ*axZ);
+    const angle = i * (2 * Math.PI / 12);
+    const cx = Math.cos(angle) * RING_RADIUS;
+    const cy = Math.sin(angle) * RING_RADIUS;
+    parts.push({ maxR, spd, ph, wob,
+                 axX: axX/axLen, axY: axY/axLen, axZ: axZ/axLen,
+                 cx, cy });
+  }
+
+  const perPart = Math.floor(N / partCount);
+  const total   = perPart * partCount;
+
+  const pos      = new Float32Array(total * 3);
+  const pId      = new Float32Array(total);
+  const lAng     = new Float32Array(total);
+  const rad      = new Float32Array(total);
+  const axXa     = new Float32Array(total);
+  const axYa     = new Float32Array(total);
+  const axZa     = new Float32Array(total);
+  const spd_a    = new Float32Array(total);
+  const ph_a     = new Float32Array(total);
+  const wob_a    = new Float32Array(total);
+  const partR_a  = new Float32Array(total); // per-particle radius (filled disk)
+
+  let idx = 0;
+  for (let i = 0; i < partCount; i++) {
+    const p = parts[i];
+    for (let j = 0; j < perPart; j++, idx++) {
+      const a   = (j / perPart) * Math.PI * 2;
+      // Uniform-area distribution: sqrt(rand) * maxR gives uniform disk
+      const pr  = Math.sqrt(rng()) * p.maxR;
+
+      // Set position to part center for bounding sphere
+      pos[idx*3]   = p.cx;
+      pos[idx*3+1] = p.cy;
+      pos[idx*3+2] = 0;
+
+      pId[idx]    = i;
+      lAng[idx]   = a;
+      rad[idx]    = p.maxR;
+      axXa[idx]   = p.axX;
+      axYa[idx]   = p.axY;
+      axZa[idx]   = p.axZ;
+      spd_a[idx]  = p.spd;
+      ph_a[idx]   = p.ph;
+      wob_a[idx]  = p.wob;
+      partR_a[idx] = pr;
+    }
+  }
+
+  // Thread geometry
+  const T2 = THREAD_COUNT * 2;
+  const mk = () => new Float32Array(T2);
+  const ta_pId = mk(), ta_lAng = mk(), ta_rad = mk(), ta_axX = mk(), ta_axY = mk(), ta_axZ = mk();
+  const ta_spd = mk(), ta_ph  = mk(), ta_wob = mk(), ta_pR  = mk();
+  const tb_pId = mk(), tb_lAng = mk(), tb_rad = mk(), tb_axX = mk(), tb_axY = mk(), tb_axZ = mk();
+  const tb_spd = mk(), tb_ph  = mk(), tb_wob = mk(), tb_pR  = mk();
+  const tFlag  = mk(), tVar   = mk();
+  const tPos   = new Float32Array(T2 * 3);
+
+  let ts = (seed ^ 0xCAFEBABE) >>> 0;
+  const trng = () => { ts = (ts * 1664525 + 1013904223) >>> 0; return ts / 4294967296; };
+
+  const pOff = new Int32Array(partCount);
+  for (let i = 0; i < partCount; i++) pOff[i] = i * perPart;
+
+  for (let i = 0; i < THREAD_COUNT; i++) {
+    const partA = Math.floor(trng() * partCount);
+    const partB = (partA + 1 + Math.floor(trng() * (partCount - 1))) % partCount;
+    const jA    = Math.floor(trng() * perPart);
+    const jB    = Math.floor(trng() * perPart);
+    const iA    = pOff[partA] + jA;
+    const iB    = pOff[partB] + jB;
+
+    const v0 = i*2, v1 = v0+1;
+
+    ta_pId[v0] = ta_pId[v1] = pId[iA];
+    ta_lAng[v0]= ta_lAng[v1]= lAng[iA];
+    ta_rad[v0] = ta_rad[v1] = rad[iA];
+    ta_axX[v0] = ta_axX[v1] = axXa[iA];
+    ta_axY[v0] = ta_axY[v1] = axYa[iA];
+    ta_axZ[v0] = ta_axZ[v1] = axZa[iA];
+    ta_spd[v0] = ta_spd[v1] = spd_a[iA];
+    ta_ph[v0]  = ta_ph[v1]  = ph_a[iA];
+    ta_wob[v0] = ta_wob[v1] = wob_a[iA];
+    ta_pR[v0]  = ta_pR[v1]  = partR_a[iA];
+
+    tb_pId[v0] = tb_pId[v1] = pId[iB];
+    tb_lAng[v0]= tb_lAng[v1]= lAng[iB];
+    tb_rad[v0] = tb_rad[v1] = rad[iB];
+    tb_axX[v0] = tb_axX[v1] = axXa[iB];
+    tb_axY[v0] = tb_axY[v1] = axYa[iB];
+    tb_axZ[v0] = tb_axZ[v1] = axZa[iB];
+    tb_spd[v0] = tb_spd[v1] = spd_a[iB];
+    tb_ph[v0]  = tb_ph[v1]  = ph_a[iB];
+    tb_wob[v0] = tb_wob[v1] = wob_a[iB];
+    tb_pR[v0]  = tb_pR[v1]  = partR_a[iB];
+
+    tFlag[v0] = 0.0; tFlag[v1] = 1.0;
+    const vv = 0.5 + trng() * 0.5;
+    tVar[v0]  = vv;  tVar[v1]  = vv;
+
+    const cA = parts[partA], cB = parts[partB];
+    tPos[v0*3] = cA.cx; tPos[v0*3+1] = cA.cy; tPos[v0*3+2] = 0;
+    tPos[v1*3] = cB.cx; tPos[v1*3+1] = cB.cy; tPos[v1*3+2] = 0;
+  }
+
+  return {
+    total, pos, pId, lAng, rad, axXa, axYa, axZa, spd_a, ph_a, wob_a, partR_a,
+    threads: {
+      T2, tPos,
+      ta_pId, ta_lAng, ta_rad, ta_axX, ta_axY, ta_axZ, ta_spd, ta_ph, ta_wob, ta_pR,
+      tb_pId, tb_lAng, tb_rad, tb_axX, tb_axY, tb_axZ, tb_spd, tb_ph, tb_wob, tb_pR,
+      tFlag, tVar
+    }
+  };
+}
+
+function setupOrUpdate(data) {
+  const { total, pos, pId, lAng, rad, axXa, axYa, axZa, spd_a, ph_a, wob_a, partR_a } = data;
+  const t = data.threads;
+
+  if (!machineGeom) {
+    machineGeom = new THREE.BufferGeometry();
+    machineGeom.setAttribute('position',   new THREE.BufferAttribute(pos,    3));
+    machineGeom.setAttribute('partId',     new THREE.BufferAttribute(pId,    1));
+    machineGeom.setAttribute('localAngle', new THREE.BufferAttribute(lAng,   1));
+    machineGeom.setAttribute('radius',     new THREE.BufferAttribute(rad,    1));
+    machineGeom.setAttribute('axisX',      new THREE.BufferAttribute(axXa,   1));
+    machineGeom.setAttribute('axisY',      new THREE.BufferAttribute(axYa,   1));
+    machineGeom.setAttribute('axisZ',      new THREE.BufferAttribute(axZa,   1));
+    machineGeom.setAttribute('speed',      new THREE.BufferAttribute(spd_a,  1));
+    machineGeom.setAttribute('phase',      new THREE.BufferAttribute(ph_a,   1));
+    machineGeom.setAttribute('wobble',     new THREE.BufferAttribute(wob_a,  1));
+    machineGeom.setAttribute('particleR',  new THREE.BufferAttribute(partR_a, 1));
+    machineGeom.setDrawRange(0, total);
+    machineGeom.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 22);
+    machinePoints = new THREE.Points(machineGeom, machineMat);
+    machinePoints.frustumCulled = false;
+    scene.add(machinePoints);
+
+    threadGeom = new THREE.BufferGeometry();
+    threadGeom.setAttribute('position',       new THREE.BufferAttribute(t.tPos,    3));
+    threadGeom.setAttribute('aPartId',        new THREE.BufferAttribute(t.ta_pId,  1));
+    threadGeom.setAttribute('aLocalAngle',    new THREE.BufferAttribute(t.ta_lAng, 1));
+    threadGeom.setAttribute('aRadius',        new THREE.BufferAttribute(t.ta_rad,  1));
+    threadGeom.setAttribute('aAxisX',         new THREE.BufferAttribute(t.ta_axX,  1));
+    threadGeom.setAttribute('aAxisY',         new THREE.BufferAttribute(t.ta_axY,  1));
+    threadGeom.setAttribute('aAxisZ',         new THREE.BufferAttribute(t.ta_axZ,  1));
+    threadGeom.setAttribute('aSpeed',         new THREE.BufferAttribute(t.ta_spd,  1));
+    threadGeom.setAttribute('aPhase',         new THREE.BufferAttribute(t.ta_ph,   1));
+    threadGeom.setAttribute('aWobble',        new THREE.BufferAttribute(t.ta_wob,  1));
+    threadGeom.setAttribute('aParticleR',     new THREE.BufferAttribute(t.ta_pR,   1));
+    threadGeom.setAttribute('bPartId',        new THREE.BufferAttribute(t.tb_pId,  1));
+    threadGeom.setAttribute('bLocalAngle',    new THREE.BufferAttribute(t.tb_lAng, 1));
+    threadGeom.setAttribute('bRadius',        new THREE.BufferAttribute(t.tb_rad,  1));
+    threadGeom.setAttribute('bAxisX',         new THREE.BufferAttribute(t.tb_axX,  1));
+    threadGeom.setAttribute('bAxisY',         new THREE.BufferAttribute(t.tb_axY,  1));
+    threadGeom.setAttribute('bAxisZ',         new THREE.BufferAttribute(t.tb_axZ,  1));
+    threadGeom.setAttribute('bSpeed',         new THREE.BufferAttribute(t.tb_spd,  1));
+    threadGeom.setAttribute('bPhase',         new THREE.BufferAttribute(t.tb_ph,   1));
+    threadGeom.setAttribute('bWobble',        new THREE.BufferAttribute(t.tb_wob,  1));
+    threadGeom.setAttribute('bParticleR',     new THREE.BufferAttribute(t.tb_pR,   1));
+    threadGeom.setAttribute('endpointFlag',   new THREE.BufferAttribute(t.tFlag,   1));
+    threadGeom.setAttribute('threadVariance', new THREE.BufferAttribute(t.tVar,    1));
+    threadGeom.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 22);
+    threadLines = new THREE.LineSegments(threadGeom, threadMat);
+    threadLines.frustumCulled = false;
+    scene.add(threadLines);
+
+  } else {
+    const ug = (g, name, arr) => { g.attributes[name].array.set(arr); g.attributes[name].needsUpdate = true; };
+    ug(machineGeom, 'position',   pos);
+    ug(machineGeom, 'partId',     pId);
+    ug(machineGeom, 'localAngle', lAng);
+    ug(machineGeom, 'radius',     rad);
+    ug(machineGeom, 'axisX',      axXa);
+    ug(machineGeom, 'axisY',      axYa);
+    ug(machineGeom, 'axisZ',      axZa);
+    ug(machineGeom, 'speed',      spd_a);
+    ug(machineGeom, 'phase',      ph_a);
+    ug(machineGeom, 'wobble',     wob_a);
+    ug(machineGeom, 'particleR',  partR_a);
+
+    ug(threadGeom, 'position',       t.tPos);
+    ug(threadGeom, 'aPartId',        t.ta_pId);
+    ug(threadGeom, 'aLocalAngle',    t.ta_lAng);
+    ug(threadGeom, 'aRadius',        t.ta_rad);
+    ug(threadGeom, 'aAxisX',         t.ta_axX);
+    ug(threadGeom, 'aAxisY',         t.ta_axY);
+    ug(threadGeom, 'aAxisZ',         t.ta_axZ);
+    ug(threadGeom, 'aSpeed',         t.ta_spd);
+    ug(threadGeom, 'aPhase',         t.ta_ph);
+    ug(threadGeom, 'aWobble',        t.ta_wob);
+    ug(threadGeom, 'aParticleR',     t.ta_pR);
+    ug(threadGeom, 'bPartId',        t.tb_pId);
+    ug(threadGeom, 'bLocalAngle',    t.tb_lAng);
+    ug(threadGeom, 'bRadius',        t.tb_rad);
+    ug(threadGeom, 'bAxisX',         t.tb_axX);
+    ug(threadGeom, 'bAxisY',         t.tb_axY);
+    ug(threadGeom, 'bAxisZ',         t.tb_axZ);
+    ug(threadGeom, 'bSpeed',         t.tb_spd);
+    ug(threadGeom, 'bPhase',         t.tb_ph);
+    ug(threadGeom, 'bWobble',        t.tb_wob);
+    ug(threadGeom, 'bParticleR',     t.tb_pR);
+    ug(threadGeom, 'endpointFlag',   t.tFlag);
+    ug(threadGeom, 'threadVariance', t.tVar);
+  }
+}
+
+function regenerate() {
+  const seed = Math.floor(Math.random() * 1e9);
+  setupOrUpdate(buildMachine(seed));
+  uJam.value = 1.0; uShudder.value = 1.0;
+  setTimeout(() => { uJam.value = 0; uShudder.value = 0; }, 900);
+}
+
+regenerate();
+addEventListener('click', regenerate);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uPixelR.value = renderer.getPixelRatio();
+});
+
+let orbitAngle = 0;
+const start = performance.now();
+function loop() {
+  const now = performance.now();
+  uTime.value = (now - start) / 1000;
+  orbitAngle += 0.002;
+  camera.position.x = Math.cos(orbitAngle) * 26;
+  camera.position.z = Math.sin(orbitAngle) * 26;
+  camera.lookAt(0, 0, 0);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
