@@ -183,16 +183,16 @@ def _rejection_block() -> str:
     dislikes = taste.get("dislikes", {})
     if dislikes.get("directions"):
         lines.append("Directions the user has rejected — DO NOT produce:")
-        for d in dislikes["directions"][:6]:
+        for d in dislikes["directions"]:
             lines.append(f"  - {d}")
     if dislikes.get("techniques"):
         lines.append("Technical patterns that have failed silently — AVOID:")
-        for t in dislikes["techniques"][:4]:
+        for t in dislikes["techniques"]:
             lines.append(f"  - {t}")
     principles = taste.get("principles") or []
     if principles:
         lines.append("Principles the user holds — every output should respect:")
-        for p in principles[:6]:
+        for p in principles:
             lines.append(f"  - {p}")
     return "\n".join(lines) if lines else ""
 
@@ -435,6 +435,22 @@ def main():
     new_id = codes.generate(LINEAGE, n=1)[0]
     final_html = final_html.replace("<NEW_ID>", new_id)
     print(f"new_id: {new_id}")
+
+    # static precheck — catches hard-banned code patterns before disk write
+    from precheck import run as _precheck
+    _pc = _precheck(final_html)
+    if not _pc["passed"]:
+        for _v in _pc["violations"]:
+            print(f"precheck REJECT [{_v['id']}]: {_v['description']}")
+            print(f"  match: {_v['match']!r}")
+            if _v.get("fix"):
+                print(f"  fix:   {_v['fix']}")
+        rej = REPO / "scripts" / f"reject_{new_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
+        rej.write_text(final_html)
+        print(f"precheck-rejected HTML saved to {rej.name}")
+        return 6
+    for _w in _pc.get("warnings", []):
+        print(f"precheck WARN [{_w['id']}]: {_w['match']!r}")
 
     if args.dry_run:
         print(f"[dry-run] would create pieces/{new_id}/  (parent={parent['id']}, word={word}, mode={mode}, provider={final_provider}, picked={score_log['picked']})")

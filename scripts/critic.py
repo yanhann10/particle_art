@@ -36,7 +36,7 @@ import lib_claude
 
 
 def _read_taste_summary() -> str:
-    """One-paragraph taste reminder for the critic."""
+    """Taste context for the critic — all dislikes, no truncation."""
     p = REPO / "taste.json"
     if not p.exists():
         return ""
@@ -47,14 +47,15 @@ def _read_taste_summary() -> str:
     likes = t.get("likes") or {}
     dislikes = t.get("dislikes") or {}
     parts = []
-    # `likes` and `dislikes` are dicts keyed by category (directions / techniques / specific_pieces);
-    # values are lists of strings.
     likes_dirs = likes.get("directions") if isinstance(likes, dict) else (likes if isinstance(likes, list) else [])
     if likes_dirs:
-        parts.append("LIKES: " + "; ".join(likes_dirs[:6]))
+        parts.append("USER LIKES: " + "; ".join(likes_dirs))
     if dislikes.get("directions"):
-        parts.append("DISLIKES: " + "; ".join(dislikes["directions"][:5]))
-    return "\n".join(parts)
+        parts.append("USER DISLIKES (directions):\n" + "\n".join(f"  - {d}" for d in dislikes["directions"]))
+    if dislikes.get("techniques"):
+        parts.append("USER DISLIKES (banned techniques — penalize heavily if detected in the HTML):\n"
+                     + "\n".join(f"  - {t}" for t in dislikes["techniques"]))
+    return "\n\n".join(parts)
 
 
 def judge(html: str, mode: str, word: str, extras: dict,
@@ -99,14 +100,20 @@ def judge(html: str, mode: str, word: str, extras: dict,
     system = (
         "You are an aesthetic critic for a particle-art evolutionary gallery. "
         "You read ONE HTML particle-art piece and rate it on two independent "
-        "axes given a brief that describes the linked idea the piece was "
-        "supposed to execute. Be honest and specific — the user has explicit "
-        "taste. Penalize: noise blobs without form, tiny subjects in vast "
-        "empty canvases, fixed cameras when the form grows past frame, "
-        "code that just renames a variable but doesn't actually morph the "
-        "form, copy-pasted parent shader without the idea showing up. "
-        "Reward: form readable in 2s, restrained palette, motion that earns "
-        "its compute, signs that the linked idea actually drove the design."
+        "axes. Be honest and specific — the user has explicit taste.\n\n"
+        "HARD PENALIZE (score aesthetic_score ≤ 3 for any of these):\n"
+        "  - controls.autoRotate = true — Y-axis spinning is explicitly banned\n"
+        "  - camera.position.[xyz] += Math.random() — per-frame camera jitter\n"
+        "  - oversaturated colors: pure primaries (#ff0000, 0x00ff00, etc.) or "
+        "hsl() with saturation >65%\n"
+        "  - fast rotation increments (rotation.y += 0.02 or higher)\n\n"
+        "STANDARD PENALIZE:\n"
+        "  - noise blobs without recognizable form\n"
+        "  - tiny subjects in vast empty canvases\n"
+        "  - fixed cameras when the form grows past frame\n"
+        "  - code that renames a variable without morphing the form\n\n"
+        "REWARD: form readable in 2s, restrained earth-tone palette, "
+        "contemplative motion, signs the linked idea actually drove the design."
     )
     user = f"""# Critique brief
 {taste}

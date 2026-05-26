@@ -268,11 +268,11 @@ def _rejection_block() -> str:
     dislikes = taste.get("dislikes", {})
     if dislikes.get("directions"):
         lines.append("Directions the user has explicitly rejected — DO NOT produce these:")
-        for d in dislikes["directions"][:8]:
+        for d in dislikes["directions"]:
             lines.append(f"  - {d}")
     if dislikes.get("techniques"):
         lines.append("Technical patterns that have failed silently — AVOID:")
-        for t in dislikes["techniques"][:5]:
+        for t in dislikes["techniques"]:
             lines.append(f"  - {t}")
     n_voted = [k for k, v in prefs.items() if v == "n"]
     if n_voted:
@@ -353,8 +353,8 @@ def build_prompt(parent: dict, parent_html: str, directive: str, seed_block: str
         + "If your output would violate any of the above, redesign before emitting. "
         "Better to produce a structurally simple piece that respects the guardrails "
         "than an ambitious piece that breaks them.\n\n"
-        "MANDATORY RENDER GATE — the piece WILL be opened in a headless browser within "
-        "5 seconds of generation and the screenshot must contain ≥0.5% non-background "
+        "MANDATORY RENDER GATE — the piece WILL be opened in a headless browser and "
+        "screenshot taken at 5 seconds. The screenshot must contain ≥0.5% non-background "
         "pixels or it is auto-rejected and DELETED. This means: (a) do NOT design pieces "
         "that stay blank until a peer connects / a websocket pulses / mic permission is "
         "granted / a user clicks. The default-state-with-zero-input must already be "
@@ -362,7 +362,15 @@ def build_prompt(parent: dict, parent_html: str, directive: str, seed_block: str
         "three.js auto-injected uniforms (fogColor/fogDensity/etc.) without #include. "
         "(c) keep the camera framed on the form (track centroid for growing forms). "
         "(d) if you fetch external resources (GLB, websocket), have a fallback geometry "
-        "that paints something on load failure."
+        "that paints something on load failure. "
+        "(e) CRITICAL: intro/unfurl animations must be 80%+ complete by t=3s — do NOT "
+        "use slow reveal animations where particles are coiled/hidden for more than 3 "
+        "seconds; at t=0 most particles should already be at or near their final positions. "
+        "If you use a reveal animation, start uUnfurl at 1.0 or use elapsed/1.5 not "
+        "elapsed/3.5 — the screenshot is taken at 5s but intro animations lasting 6-10s "
+        "will look empty. "
+        "(f) use ≥40,000 particles or dense enough geometry to cover at least 5%% of "
+        "frame area — isolated sparse points fail the 0.5%% non-bg threshold."
     )
     eval_prefix = (eval_note + "\n\n") if eval_note else ""
     user = f"""{eval_prefix}# Mutation request
@@ -519,6 +527,22 @@ def main():
         rej.write_text(text)
         print(f"raw response saved to {rej}")
         return 5
+
+    # static precheck — catches hard-banned code patterns before disk write
+    from precheck import run as _precheck
+    _pc = _precheck(html)
+    if not _pc["passed"]:
+        for _v in _pc["violations"]:
+            print(f"precheck REJECT [{_v['id']}]: {_v['description']}")
+            print(f"  match: {_v['match']!r}")
+            if _v.get("fix"):
+                print(f"  fix:   {_v['fix']}")
+        rej = REPO / "scripts" / f"reject_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.txt"
+        rej.write_text(html)
+        print(f"precheck-rejected HTML saved to {rej.name}")
+        return 5
+    for _w in _pc.get("warnings", []):
+        print(f"precheck WARN [{_w['id']}]: {_w['match']!r}")
 
     new_id = codes.generate(LINEAGE, n=1)[0]
     # tolerant replace — covers `<NEW_ID>` and HTML-escaped `&lt;NEW_ID&gt;`
