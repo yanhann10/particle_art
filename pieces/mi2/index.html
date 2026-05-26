@@ -17,7 +17,7 @@
 <body>
 <div class="id">mi2</div>
 <div class="hint">drag to orbit · click to pause/resume</div>
-<div class="src">Gonzalez-Torres · gloaming · multi-strand differential growth w/ fraying</div>
+<div class="src">Gonzalez-Torres · gloaming · spring-chain Hooke's law</div>
 <div class="stat" id="stat">N=0</div>
 
 <script type="importmap">
@@ -30,12 +30,20 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-/*  Gloaming — the parent's single tender light string multiplies into
-    a Gonzalez-Torres multi-strand installation (5 catenaries at staggered
-    depths). As twilight deepens the strands fray at their ends: the
-    differential-growth curve bifurcates, splitting into sub-branches
-    that dissolve into darkness. Palette drifts amber → lavender → indigo.
-    Per-bulb guttering simulates filaments dying in the dusk. */
+/*  Gloaming — five catenary light strings hang in twilight depth, drifting
+    amber → lavender → indigo as night comes. Each strand is governed by a
+    single physical law. Per-bulb guttering simulates filaments dying in the dusk.
+
+    PHYSICAL LAW: Spring-chain (Hooke's Law + viscous damping + uniform gravity)
+      Each interior particle i feels:
+        F_spring = Σ_{j∈{i-1,i+1}}  k · (|r_ij| − L0) · r̂_ij   (restoring)
+        F_damp   = −c · v_i                                        (damping)
+        F_grav   = m · g  (downward, −y)                          (gravity)
+      Endpoints are pinned (kinematic anchors, zero velocity).
+      Integration: explicit Euler at fixed timestep dt.
+      At rest the chain adopts a catenary; perturbations propagate as
+      transverse waves and decay via viscous damping.
+*/
 
 const BG = 0x08070a;
 const scene = new THREE.Scene();
@@ -50,196 +58,132 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.target.set(0, -2, 0);
 
-// --- strand parameters ---
+// --- Spring-chain physical constants ---
+const K       = 80.0;   // spring stiffness  [Hooke's law: F = k·(|r|−L0)]
+const C       = 6.0;    // viscous damping coefficient  [F = −c·v]
+const G       = 9.8;    // gravitational acceleration (downward, −y)
+const M       = 1.0;    // mass per particle (uniform)
+const DT      = 0.004;  // Euler integration timestep [s]
+const STEPS_PER_FRAME = 6; // sub-steps per animation frame
+
+// --- Strand layout ---
 const STRAND_COUNT = 5;
-const MAX_VERTS_PER = 800;
-const ATTRACT   = 0.05;
-const REPEL_R   = 0.44;
-const REPEL_STR = 0.09;
-const NOISE     = 0.002;
-const PRESSURE  = 0.0015;
-const GRAVITY   = 0.012;
-const MAX_D     = 0.34;
-const FRAY_AFTER = 500;   // vertex count threshold to begin fraying ends
-const FRAY_PROB  = 0.12;  // chance a subdivision at the ends spawns a branch
+const NODES_PER    = 60;   // particles in each chain
 
-// z-positions for depth spread
-const STRAND_Z = [-2.8, -1.2, 0.0, 1.4, 3.0];
-const STRAND_SAG = [1.0, 1.3, 0.9, 1.15, 1.05]; // droop multipliers
-const STRAND_WIDTH = [5.5, 6.2, 5.0, 6.8, 5.8]; // horizontal extent
+const STRAND_Z     = [-2.8, -1.2, 0.0, 1.4, 3.0];
+const STRAND_SAG   = [1.0,  1.3,  0.9, 1.15, 1.05]; // droop scale (rest-length ratio)
+const STRAND_WIDTH = [5.5,  6.2,  5.0, 6.8,  5.8];  // half-span in x
 
-// Each strand: array of branches, each branch is array of verts
+// Build spring-chain strands.
+// Each strand: { nodes: [{x,y,z,vx,vy,vz,pinned}], L0: rest_length_per_segment }
 const strands = [];
 
 function initStrand(si) {
-  const w = STRAND_WIDTH[si];
+  const W   = STRAND_WIDTH[si];
   const sag = STRAND_SAG[si];
-  const zBase = STRAND_Z[si];
-  const NV0 = 32;
-  const mainBranch = [];
-  for (let i = 0; i < NV0; i++) {
-    const t = (i / (NV0 - 1)) * 2 - 1;
-    const x = t * w;
-    const y = -Math.abs(t) * 1.4 * sag + Math.sin(t * Math.PI * 2) * 0.25;
-    mainBranch.push({
-      x, y, z: zBase + (Math.random() - 0.5) * 0.15,
-      age: 0,
-      pinY: i < 4 || i >= NV0 - 4,
-      strand: si
+  const z0  = STRAND_Z[si];
+  const N   = NODES_PER;
+  const nodes = [];
+
+  // Place nodes along an initial catenary approximation so the chain
+  // starts near equilibrium and doesn't thrash on the first frames.
+  for (let i = 0; i < N; i++) {
+    const t  = i / (N - 1);            // 0 → 1
+    const tx = (t * 2 - 1);            // −1 → +1
+    const x  = tx * W;
+    // catenary-like sag: y = −sag · (cosh(a·tx) − 1) approximated by parabola
+    const y  = -sag * 2.2 * tx * tx;
+    nodes.push({
+      x, y,
+      z: z0 + (Math.random() - 0.5) * 0.1,
+      vx: 0, vy: 0, vz: 0,
+      pinned: i === 0 || i === N - 1   // endpoint anchors
     });
   }
-  return { branches: [mainBranch], zBase };
+
+  // Natural rest length: arc length of the initial curve divided by (N-1).
+  // Using a slightly longer rest length than the straight-line spacing
+  // lets the chain sag further under gravity, giving a deeper catenary.
+  let arcLen = 0;
+  for (let i = 0; i < N - 1; i++) {
+    const a = nodes[i], b = nodes[i + 1];
+    arcLen += Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+  }
+  const L0 = arcLen / (N - 1);
+
+  return { nodes, L0, z0 };
 }
 
 for (let si = 0; si < STRAND_COUNT; si++) {
   strands.push(initStrand(si));
 }
 
-// spatial hash per strand
-const CELL = REPEL_R;
-function gridKey(x, z) { return ((x / CELL) | 0) + ',' + ((z / CELL) | 0); }
-
-function rebuildGrid(branch) {
-  const grid = new Map();
-  for (let i = 0; i < branch.length; i++) {
-    const v = branch[i], k = gridKey(v.x, v.z);
-    if (!grid.has(k)) grid.set(k, []);
-    grid.get(k).push(i);
-  }
-  return grid;
-}
-
-function nearby(grid, v) {
-  const cx = (v.x / CELL) | 0, cz = (v.z / CELL) | 0;
-  const out = [];
-  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
-    const arr = grid.get((cx + dx) + ',' + (cz + dz));
-    if (arr) for (const idx of arr) out.push(idx);
-  }
-  return out;
-}
-
 let paused = false;
 addEventListener('click', () => { paused = !paused; });
 
-function stepBranch(branch, sag, totalVerts) {
-  const n = branch.length;
-  if (n < 2) return branch;
-  const grid = rebuildGrid(branch);
-  const dx = new Float32Array(n);
-  const dz = new Float32Array(n);
-  const dy = new Float32Array(n);
+// --- Physics integration: one Euler step for one strand ---
+function stepStrand(strand) {
+  const { nodes, L0 } = strand;
+  const N = nodes.length;
 
-  for (let i = 0; i < n; i++) {
-    const v = branch[i];
-    for (const j of nearby(grid, v)) {
-      if (j === i) continue;
-      const u = branch[j];
-      const ex = v.x - u.x, ez = v.z - u.z;
-      const d2 = ex * ex + ez * ez;
-      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
-      const d = Math.sqrt(d2);
-      const f = REPEL_STR * (1 - d / REPEL_R) / d;
-      dx[i] += ex * f;
-      dz[i] += ez * f;
+  // Accumulate forces → accelerations
+  const ax = new Float64Array(N);
+  const ay = new Float64Array(N);
+  const az = new Float64Array(N);
+
+  for (let i = 0; i < N; i++) {
+    const v = nodes[i];
+    if (v.pinned) continue;
+
+    // Gravity (downward)
+    ay[i] -= G;
+
+    // Damping
+    ax[i] -= (C / M) * v.vx;
+    ay[i] -= (C / M) * v.vy;
+    az[i] -= (C / M) * v.vz;
+
+    // Spring forces from left and right neighbors
+    for (const j of [i - 1, i + 1]) {
+      if (j < 0 || j >= N) continue;
+      const u = nodes[j];
+      const ex = u.x - v.x;
+      const ey = u.y - v.y;
+      const ez = u.z - v.z;
+      const dist = Math.hypot(ex, ey, ez);
+      if (dist < 1e-8) continue;
+      // Hooke: F = k · (dist − L0) in the direction of the neighbor
+      const fmag = (K / M) * (dist - L0) / dist;
+      ax[i] += fmag * ex;
+      ay[i] += fmag * ey;
+      az[i] += fmag * ez;
     }
   }
 
-  for (let i = 0; i < n; i++) {
-    const v = branch[i];
-    const prev = i > 0 ? branch[i - 1] : null;
-    const next = i < n - 1 ? branch[i + 1] : null;
-    if (prev) {
-      dx[i] += (prev.x - v.x) * ATTRACT;
-      dz[i] += (prev.z - v.z) * ATTRACT * 0.3;
-      dy[i] += (prev.y - v.y) * ATTRACT;
-    }
-    if (next) {
-      dx[i] += (next.x - v.x) * ATTRACT;
-      dz[i] += (next.z - v.z) * ATTRACT * 0.3;
-      dy[i] += (next.y - v.y) * ATTRACT;
-    }
+  // Euler integration: v += a·dt,  x += v·dt
+  for (let i = 0; i < N; i++) {
+    const v = nodes[i];
+    if (v.pinned) continue;
+    v.vx += ax[i] * DT;
+    v.vy += ay[i] * DT;
+    v.vz += az[i] * DT;
+    v.x  += v.vx * DT;
+    v.y  += v.vy * DT;
+    v.z  += v.vz * DT;
   }
-
-  let ccx = 0, ccz = 0;
-  for (let i = 0; i < n; i++) { ccx += branch[i].x; ccz += branch[i].z; }
-  ccx /= n; ccz /= n;
-  for (let i = 0; i < n; i++) {
-    const ox = branch[i].x - ccx, oz = branch[i].z - ccz;
-    const d = Math.hypot(ox, oz) + 1e-6;
-    dx[i] += (ox / d) * PRESSURE;
-    dz[i] += (oz / d) * PRESSURE;
-  }
-
-  for (let i = 0; i < n; i++) {
-    branch[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
-    branch[i].z += dz[i] + (Math.random() - 0.5) * NOISE * 0.6;
-    const grav = branch[i].pinY ? GRAVITY * 0.03 : GRAVITY * sag;
-    branch[i].y += dy[i] - grav + (Math.random() - 0.5) * NOISE * 0.4;
-    branch[i].age += 0.0003;
-  }
-
-  // subdivide with fraying at ends
-  const grown = [];
-  const endZone = Math.floor(n * 0.18); // outer 18% of each end
-  for (let i = 0; i < n - 1; i++) {
-    const a = branch[i], b = branch[i + 1];
-    grown.push(a);
-    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
-    const dist2 = ex * ex + ez * ez + ey * ey;
-    if (dist2 > MAX_D * MAX_D && totalVerts < MAX_VERTS_PER * STRAND_COUNT) {
-      const isEnd = i < endZone || i > n - 1 - endZone;
-      const zJitter = isEnd ? (Math.random() - 0.5) * 0.35 : (Math.random() - 0.5) * 0.04;
-      grown.push({
-        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.02,
-        y: (a.y + b.y) * 0.5,
-        z: (a.z + b.z) * 0.5 + zJitter,
-        age: Math.max(a.age, b.age) * 0.7,
-        pinY: false,
-        strand: a.strand
-      });
-    }
-  }
-  grown.push(branch[n - 1]);
-  return grown;
 }
 
 function stepAll() {
   if (paused) return;
-  let totalV = 0;
-  for (const s of strands) for (const b of s.branches) totalV += b.length;
-
-  for (let si = 0; si < strands.length; si++) {
-    const s = strands[si];
-    const newBranches = [];
-    for (let bi = 0; bi < s.branches.length; bi++) {
-      let branch = s.branches[bi];
-      if (branch.length >= MAX_VERTS_PER) { newBranches.push(branch); continue; }
-      branch = stepBranch(branch, STRAND_SAG[si], totalV);
-
-      // fraying: occasionally split a branch at the ends
-      if (branch.length > FRAY_AFTER && s.branches.length + newBranches.length < 4 && Math.random() < FRAY_PROB * 0.04) {
-        const splitAt = Math.random() < 0.5 ? Math.floor(branch.length * 0.12) : Math.floor(branch.length * 0.88);
-        const fray = branch.splice(splitAt);
-        // offset the fray in z
-        const zOff = (Math.random() - 0.5) * 1.2;
-        for (const v of fray) { v.z += zOff; v.pinY = false; }
-        newBranches.push(branch);
-        newBranches.push(fray);
-      } else {
-        newBranches.push(branch);
-      }
-    }
-    s.branches = newBranches;
-  }
+  for (const s of strands) stepStrand(s);
 }
 
-// --- rendering: 40k particles across all strands ---
-const N_RENDER = 40000;
-const rPos   = new Float32Array(N_RENDER * 3);
-const rSeeds = new Float32Array(N_RENDER);
-const rAge   = new Float32Array(N_RENDER);
-const rStrand = new Float32Array(N_RENDER);
+// --- Rendering: 40k particles distributed along all strands ---
+const N_RENDER  = 40000;
+const rPos      = new Float32Array(N_RENDER * 3);
+const rSeeds    = new Float32Array(N_RENDER);
+const rAge      = new Float32Array(N_RENDER);
+const rStrand   = new Float32Array(N_RENDER);
 for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
 
 const geom = new THREE.BufferGeometry();
@@ -249,8 +193,8 @@ geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
 geom.setAttribute('strandId', new THREE.BufferAttribute(rStrand, 1));
 
 const uniforms = {
-  uTime:  { value: 0 },
-  uPixel: { value: renderer.getPixelRatio() },
+  uTime:       { value: 0 },
+  uPixel:      { value: renderer.getPixelRatio() },
   uFogColor:   { value: new THREE.Color(BG) },
   uFogDensity: { value: 0.03 },
   uGloaming:   { value: 0.0 }
@@ -276,49 +220,38 @@ const mat = new THREE.ShaderMaterial({
     void main() {
       vec3 p = position;
 
-      float t = uTime * 0.25 + seed * 6.28;
-      float sway = sin(t) * 0.01 * (1.0 + seed);
-      p.x += sway;
-      p.z += cos(t * 0.7) * 0.006;
-
       // guttering: per-bulb flicker that increases with gloaming
-      float gutter = 1.0;
-      float flickerFreq = 3.0 + seed * 8.0;
+      float flickerFreq  = 3.0 + seed * 8.0;
       float flickerPhase = uTime * flickerFreq + seed * 100.0;
       float flicker = sin(flickerPhase) * sin(flickerPhase * 0.37) * sin(flickerPhase * 0.13);
       float gutterChance = smoothstep(0.3, 1.0, uGloaming) * 0.6;
-      gutter = mix(1.0, max(0.08, flicker * 0.5 + 0.5), gutterChance * step(0.7, seed));
+      float gutter = mix(1.0, max(0.08, flicker * 0.5 + 0.5), gutterChance * step(0.7, seed));
 
       // pulse per-bulb
-      float pulse = 0.85 + 0.15 * sin(uTime * 1.0 + seed * 40.0);
-      pulse *= gutter;
+      float pulse = (0.85 + 0.15 * sin(uTime * 1.0 + seed * 40.0)) * gutter;
 
       // palette: amber → lavender → deep indigo as gloaming deepens
-      vec3 amber   = vec3(1.0, 0.72, 0.32);
-      vec3 warm    = vec3(1.0, 0.85, 0.65);
+      vec3 amber    = vec3(1.0,  0.72, 0.32);
+      vec3 warm     = vec3(1.0,  0.85, 0.65);
       vec3 lavender = vec3(0.72, 0.58, 0.82);
       vec3 indigo   = vec3(0.30, 0.22, 0.55);
 
       float k = clamp(age * 1.2, 0.0, 1.0);
-      // base color from age
       vec3 baseCol = mix(amber, warm, k);
-      // gloaming shift
       vec3 twilightCol = mix(lavender, indigo, smoothstep(0.4, 1.0, uGloaming));
       baseCol = mix(baseCol, twilightCol, uGloaming * 0.65);
-      // per-strand slight hue variation
       float strandShift = strandId * 0.08;
       baseCol = mix(baseCol, lavender, strandShift * uGloaming);
 
       vCol = baseCol * pulse;
 
-      // dimming with gloaming
       float baseBright = mix(0.6, 0.25, uGloaming * 0.5);
       vAlpha = baseBright + 0.15 * pulse;
 
       vec4 mv = modelViewMatrix * vec4(p, 1.0);
       float dist = -mv.z;
       gl_PointSize = 1.6 * uPixel * (42.0 / dist);
-      gl_Position = projectionMatrix * mv;
+      gl_Position  = projectionMatrix * mv;
 
       float fogDepth = length(mv.xyz);
       vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
@@ -336,7 +269,7 @@ const mat = new THREE.ShaderMaterial({
       if (r > 0.25) discard;
 
       float core = exp(-r * 22.0);
-      float halo = exp(-r * 7.0) * 0.3;
+      float halo = exp(-r *  7.0) * 0.3;
       float a = (core + halo) * vAlpha;
 
       vec3 col = vCol;
@@ -351,19 +284,14 @@ const mat = new THREE.ShaderMaterial({
 const points = new THREE.Points(geom, mat);
 scene.add(points);
 
-// wires for each strand/branch
-const MAX_WIRE = STRAND_COUNT * 4; // max branches we'll draw
+// Wire underlay — one line per strand
 const wires = [];
-for (let i = 0; i < MAX_WIRE; i++) {
+for (let si = 0; si < STRAND_COUNT; si++) {
   const wg = new THREE.BufferGeometry();
-  const wp = new Float32Array(MAX_VERTS_PER * 3);
+  const wp = new Float32Array(NODES_PER * 3);
   wg.setAttribute('position', new THREE.BufferAttribute(wp, 3));
-  wg.setDrawRange(0, 0);
-  const wm = new THREE.LineBasicMaterial({
-    color: 0x1e1a24,
-    transparent: true,
-    opacity: 0.25
-  });
+  wg.setDrawRange(0, NODES_PER);
+  const wm = new THREE.LineBasicMaterial({ color: 0x1e1a24, transparent: true, opacity: 0.25 });
   const wl = new THREE.Line(wg, wm);
   scene.add(wl);
   wires.push({ geom: wg, positions: wp, line: wl });
@@ -375,84 +303,81 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-// pre-grow
-for (let s = 0; s < 400; s++) stepAll();
+// Pre-settle: run physics without rendering so strands start in catenary pose
+for (let s = 0; s < 800; s++) stepAll();
 
 const statEl = document.getElementById('stat');
 const startT = performance.now();
 
+// Per-strand age accumulator (replaces per-vertex age from differential growth era)
+const strandAge = new Float32Array(STRAND_COUNT);
+
 function loop() {
   const t = (performance.now() - startT) / 1000;
-  uniforms.uTime.value = t;
-  // gloaming deepens over ~90 seconds, then holds
+  uniforms.uTime.value  = t;
   uniforms.uGloaming.value = Math.min(1.0, t / 90.0);
 
-  for (let s = 0; s < 2; s++) stepAll();
+  // Physics sub-steps
+  for (let s = 0; s < STEPS_PER_FRAME; s++) stepAll();
 
-  // collect all verts and segments for particle distribution
-  const allSegments = []; // {a, b, len, strandId}
+  // Update age slowly (drives colour drift along each strand)
+  for (let si = 0; si < STRAND_COUNT; si++) strandAge[si] = Math.min(1.0, t / 120.0);
+
+  // Collect segments for particle distribution
+  const allSegments = [];  // { ax,ay,az, bx,by,bz, len, strandId }
   let totalLen = 0;
   let totalVerts = 0;
   let gcx = 0, gcy = 0, gcz = 0, gn = 0;
 
-  let wireIdx = 0;
-  for (let si = 0; si < strands.length; si++) {
-    for (let bi = 0; bi < strands[si].branches.length; bi++) {
-      const branch = strands[si].branches[bi];
-      const n = branch.length;
-      totalVerts += n;
+  for (let si = 0; si < STRAND_COUNT; si++) {
+    const { nodes } = strands[si];
+    const N = nodes.length;
+    totalVerts += N;
 
-      // update wire
-      if (wireIdx < MAX_WIRE) {
-        const w = wires[wireIdx];
-        for (let i = 0; i < n && i < MAX_VERTS_PER; i++) {
-          w.positions[i * 3]     = branch[i].x;
-          w.positions[i * 3 + 1] = branch[i].y;
-          w.positions[i * 3 + 2] = branch[i].z;
-        }
-        w.geom.setDrawRange(0, Math.min(n, MAX_VERTS_PER));
-        w.geom.attributes.position.needsUpdate = true;
-        w.line.visible = true;
-        wireIdx++;
-      }
+    // Update wire
+    const w = wires[si];
+    for (let i = 0; i < N; i++) {
+      w.positions[i * 3]     = nodes[i].x;
+      w.positions[i * 3 + 1] = nodes[i].y;
+      w.positions[i * 3 + 2] = nodes[i].z;
+      gcx += nodes[i].x; gcy += nodes[i].y; gcz += nodes[i].z; gn++;
+    }
+    w.geom.attributes.position.needsUpdate = true;
 
-      for (let i = 0; i < n; i++) {
-        gcx += branch[i].x; gcy += branch[i].y; gcz += branch[i].z; gn++;
-      }
-      for (let i = 0; i < n - 1; i++) {
-        const a = branch[i], b = branch[i + 1];
-        const L = Math.sqrt((b.x-a.x)**2 + (b.y-a.y)**2 + (b.z-a.z)**2);
-        allSegments.push({ a, b, len: L, strandId: si });
-        totalLen += L;
-      }
+    for (let i = 0; i < N - 1; i++) {
+      const a = nodes[i], b = nodes[i + 1];
+      const L = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+      allSegments.push({ ax: a.x, ay: a.y, az: a.z,
+                         bx: b.x, by: b.y, bz: b.z,
+                         len: L, strandId: si });
+      totalLen += L;
     }
   }
-  // hide unused wires
-  for (let i = wireIdx; i < MAX_WIRE; i++) wires[i].line.visible = false;
 
-  // camera tracks centroid
+  // Camera tracks centroid
   if (gn > 0) {
     gcx /= gn; gcy /= gn; gcz /= gn;
     controls.target.lerp(new THREE.Vector3(gcx, gcy, gcz), 0.02);
   }
 
-  // distribute particles
+  // Distribute 40k particles across segments proportional to length
   if (totalLen > 0) {
     let written = 0;
+    const spread = 0.018;
     for (let si = 0; si < allSegments.length; si++) {
       const seg = allSegments[si];
       const share = (si === allSegments.length - 1)
         ? N_RENDER - written
         : Math.max(1, Math.floor(N_RENDER * seg.len / totalLen));
-      const { a, b } = seg;
+      const age = strandAge[seg.strandId];
       for (let k = 0; k < share && written < N_RENDER; k++) {
-        const u = Math.random();
+        const u  = Math.random();
+        // slight bias toward particle endpoints for bulb-cluster look
         const cu = u < 0.5 ? u * u * 2 : 1 - (1 - u) * (1 - u) * 2;
-        const spread = 0.018;
-        rPos[written * 3]     = a.x + (b.x - a.x) * cu + (Math.random() - 0.5) * spread;
-        rPos[written * 3 + 1] = a.y + (b.y - a.y) * cu + (Math.random() - 0.5) * spread * 0.5;
-        rPos[written * 3 + 2] = a.z + (b.z - a.z) * cu + (Math.random() - 0.5) * spread;
-        rAge[written] = Math.max(a.age, b.age);
+        rPos[written * 3]     = seg.ax + (seg.bx - seg.ax) * cu + (Math.random() - 0.5) * spread;
+        rPos[written * 3 + 1] = seg.ay + (seg.by - seg.ay) * cu + (Math.random() - 0.5) * spread * 0.5;
+        rPos[written * 3 + 2] = seg.az + (seg.bz - seg.az) * cu + (Math.random() - 0.5) * spread;
+        rAge[written]    = age;
         rStrand[written] = seg.strandId / STRAND_COUNT;
         written++;
       }
@@ -462,7 +387,7 @@ function loop() {
     geom.attributes.strandId.needsUpdate = true;
   }
 
-  statEl.textContent = `vertices=${totalVerts}${paused ? ' · paused' : ''}`;
+  statEl.textContent = `nodes=${totalVerts}${paused ? ' · paused' : ''}`;
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
