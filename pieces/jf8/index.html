@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: orbit, intensity: vivid -->
+<!-- lissajous accretion (ikc × uzb hybrid).
+     Lissajous figures become orbital ring trajectories in an accretion disk.
+     8 rings at radii [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0], each tilted index*15° around x-axis.
+     Rings spin at Keplerian speeds (inner faster). Lorenz perturbation breathes with time.
+     60k Keplerian particles fill between rings. Singularity at center.
+     Palette: electric indigo (#4040d8) lines, hot-blue inner → amber outer particles. -->
+<title>jf8 · lissajous accretion (ikc × uzb)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+  .src { position:fixed; right:14px; bottom:12px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">jf8 · lissajous accretion (ikc × uzb)</div>
+<div class="src">8 orbital rings · 60k particles · keplerian</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.167.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.167.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── Lorenz derivative ─────────────────────────────────────────────────────────
+function lorenzDeriv(x, y, z) {
+  const s = 10, r = 28, b = 8/3;
+  return [s*(y-x), x*(r-z)-y, x*y - b*z];
+}
+
+// ── Scene setup ───────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+
+const camera = new THREE.PerspectiveCamera(46, innerWidth/innerHeight, 0.01, 200);
+camera.position.set(0, 6, 14);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping   = true;
+controls.dampingFactor   = 0.05;
+controls.autoRotate      = true;
+controls.autoRotateSpeed = 0.35;
+controls.target.set(0, 0, 0);
+
+// ── 1. Central singularity ────────────────────────────────────────────────────
+const singularity = new THREE.Mesh(
+  new THREE.SphereGeometry(0.3, 32, 32),
+  new THREE.MeshBasicMaterial({ color: 0x000000 })
+);
+scene.add(singularity);
+
+// Event-horizon glow ring
+const glowGeo = new THREE.RingGeometry(0.30, 0.46, 64);
+const glowMat = new THREE.MeshBasicMaterial({
+  color: 0x6080ff,
+  side: THREE.DoubleSide,
+  transparent: true,
+  opacity: 0.6,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false
+});
+scene.add(new THREE.Mesh(glowGeo, glowMat));
+
+// ── 2. Accretion disk: 60k Keplerian particles ────────────────────────────────
+const DISK_N   = 60000;
+const diskPos  = new Float32Array(DISK_N * 3);
+const diskCol  = new Float32Array(DISK_N * 3);
+const diskAngle= new Float32Array(DISK_N);
+const diskR    = new Float32Array(DISK_N);
+const diskOmega= new Float32Array(DISK_N);
+const diskYOff = new Float32Array(DISK_N);
+
+const R_INNER = 0.46;
+const R_OUTER = 8.0;
+
+for (let i = 0; i < DISK_N; i++) {
+  const r  = R_INNER + Math.pow(Math.random(), 1.4) * (R_OUTER - R_INNER);
+  const th = Math.random() * Math.PI * 2;
+  const yOff = (Math.random() - 0.5) * 0.35 * Math.exp(-r * 0.3);
+
+  diskR[i]     = r;
+  diskAngle[i] = th;
+  diskOmega[i] = 1.0 / Math.sqrt(r);
+  diskYOff[i]  = yOff;
+
+  diskPos[i*3]   = r * Math.cos(th);
+  diskPos[i*3+1] = yOff;
+  diskPos[i*3+2] = r * Math.sin(th);
+
+  // Color: inner hot white-blue (#d0e8ff) → outer warm amber (#e08020)
+  const t = (r - R_INNER) / (R_OUTER - R_INNER);
+  diskCol[i*3]   = 0.816 + (0.878 - 0.816) * t;
+  diskCol[i*3+1] = 0.910 + (0.502 - 0.910) * t;
+  diskCol[i*3+2] = 1.000 + (0.125 - 1.000) * t;
+}
+
+const diskVS = `
+  attribute vec3 color;
+  varying vec3 vColor;
+  void main() {
+    vColor = color;
+    vec3 pos = position;
+    float r = length(pos.xz);
+    // gravitational lensing stretch near center
+    if (r > 0.001 && r < 1.5) {
+      float lens = 1.0 + 0.22 * exp(-r * 2.0) / (r + 0.1);
+      pos.xz *= lens;
+    }
+    gl_Position  = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    float t = clamp((r - ${R_INNER.toFixed(2)}) / ${(R_OUTER - R_INNER).toFixed(2)}, 0.0, 1.0);
+    gl_PointSize = mix(2.8, 1.2, t);
+  }
+`;
+const diskFS = `
+  varying vec3 vColor;
+  void main() {
+    float d = length(gl_PointCoord - 0.5) * 2.0;
+    if (d > 1.0) discard;
+    float a = 1.0 - smoothstep(0.4, 1.0, d);
+    gl_FragColor = vec4(vColor * 1.4, a);
+  }
+`;
+
+const diskGeo = new THREE.BufferGeometry();
+const diskPosBuf = new THREE.BufferAttribute(diskPos, 3);
+const diskColBuf = new THREE.BufferAttribute(diskCol, 3);
+diskPosBuf.setUsage(THREE.DynamicDrawUsage);
+diskGeo.setAttribute('position', diskPosBuf);
+diskGeo.setAttribute('color',    diskColBuf);
+
+const diskMat = new THREE.ShaderMaterial({
+  vertexShader:   diskVS,
+  fragmentShader: diskFS,
+  blending:       THREE.AdditiveBlending,
+  transparent:    true,
+  depthWrite:     false
+});
+scene.add(new THREE.Points(diskGeo, diskMat));
+
+// ── 3. Lissajous orbital rings ─────────────────────────────────────────────────
+// 8 rings at increasing radii, each tilted by index*15° around x-axis
+// Each ring's Lissajous figure is normalized to [-1,1] then scaled to orbital radius
+
+const RING_RADII   = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0];
+const RING_COUNT   = RING_RADII.length;
+const PTS_PER_RING = 800;
+
+// Lissajous param sets alternating 3:4 and 5:4
+const RATIOS = [
+  { a: 3, b: 4 },
+  { a: 5, b: 4 },
+];
+
+// Lorenz perturbation strength — more for inner (hotter) rings
+function ringEps(idx) {
+  return 0.025 + (RING_COUNT - idx) / RING_COUNT * 0.03;
+}
+
+// Build normalized Lissajous points (output in [-1,1]²), returns flat array of x,y
+function buildLissajous(ratio, delta, eps, time) {
+  const rawX = [], rawY = [];
+  for (let i = 0; i <= PTS_PER_RING; i++) {
+    const tParam = (i / PTS_PER_RING) * Math.PI * 2 * 4;
+    let x = Math.sin(ratio.a * tParam + delta);
+    let y = Math.sin(ratio.b * tParam);
+    // Lorenz perturbation
+    const [dlx, dly] = lorenzDeriv(x, y, 0);
+    const pscale = eps * (1 + 0.4 * Math.sin(time * 0.6 + delta));
+    x += dlx * pscale;
+    y += dly * pscale;
+    rawX.push(x);
+    rawY.push(y);
+  }
+  // Normalize to [-1, 1]
+  const maxV = Math.max(...rawX.map(Math.abs), ...rawY.map(Math.abs)) || 1;
+  return rawX.map((x, i) => [x / maxV, rawY[i] / maxV]);
+}
+
+// Build ring geometry: project 2D Lissajous onto tilted orbital plane at given radius
+// Tilt: idx * 15° around x-axis. Ring center at origin; the figure is in (x,y) of its orbital plane.
+function buildRingPoints(idx, orbitR, time) {
+  const ratio = RATIOS[idx % 2];
+  const delta = idx * Math.PI / 4;
+  const eps   = ringEps(idx);
+  const pts2d = buildLissajous(ratio, delta, eps, time);
+
+  // Tilt matrix around x-axis by angle = idx * 15°
+  const tiltAngle = idx * (Math.PI / 12); // 15°
+  const cosT = Math.cos(tiltAngle);
+  const sinT = Math.sin(tiltAngle);
+
+  const result = [];
+  for (const [lx, ly] of pts2d) {
+    // Scale figure by orbital radius
+    const fx = lx * orbitR * 0.92; // slight margin so figure fits orbit
+    const fy = ly * orbitR * 0.92;
+    // Apply tilt: rotate in the y-z plane
+    // local x-axis stays as x; local y rotates into (y,z)
+    const wx = fx;
+    const wy = fy * cosT;
+    const wz = fy * sinT;
+    result.push(wx, wy, wz);
+  }
+  return result;
+}
+
+// Create ring objects
+const rings = [];
+const ringPosBufs = [];
+// Each ring has its own Y-rotation which advances at Keplerian speed
+const ringAngle = new Float32Array(RING_COUNT); // current rotation angle around Y
+const ringOmega = RING_RADII.map(r => 0.8 / Math.sqrt(r)); // Keplerian angular speed
+
+// Electric indigo base + slight hue per ring
+const INDIGO_BASE = new THREE.Color(0x4040d8);
+
+for (let f = 0; f < RING_COUNT; f++) {
+  const r   = RING_RADII[f];
+  const pts = buildRingPoints(f, r, 0);
+  const posArr = new Float32Array(pts);
+
+  const geo = new THREE.BufferGeometry();
+  const posBuf = new THREE.BufferAttribute(posArr, 3);
+  posBuf.setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute('position', posBuf);
+
+  // Slight color shift: inner rings more violet, outer more indigo-blue
+  const hshift = f / RING_COUNT;
+  const col = new THREE.Color(
+    0.251 + hshift * 0.1,
+    0.251 + hshift * 0.08,
+    0.847 - hshift * 0.1
+  );
+
+  const mat = new THREE.LineBasicMaterial({
+    color:       col,
+    transparent: true,
+    opacity:     0.85,
+    blending:    THREE.AdditiveBlending,
+    depthWrite:  false,
+    linewidth:   1
+  });
+
+  const line = new THREE.Line(geo, mat);
+  scene.add(line);
+  rings.push({ f, r: r });
+  ringPosBufs.push(posBuf);
+}
+
+// ── Resize ────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Animation ─────────────────────────────────────────────────────────────────
+let time = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  time += 0.012;
+
+  // Update disk particles (Keplerian orbit)
+  for (let i = 0; i < DISK_N; i++) {
+    diskAngle[i] += diskOmega[i] * 0.008;
+    const r  = diskR[i];
+    const th = diskAngle[i];
+    diskPos[i*3]   = r * Math.cos(th);
+    diskPos[i*3+2] = r * Math.sin(th);
+    diskPos[i*3+1] = diskYOff[i] * (0.97 + 0.03 * Math.sin(time * diskOmega[i] * 2.1 + i * 0.001));
+  }
+  diskPosBuf.needsUpdate = true;
+
+  // Update Lissajous rings: advance Keplerian rotation + update Lorenz breathing
+  for (let f = 0; f < RING_COUNT; f++) {
+    ringAngle[f] += ringOmega[f] * 0.008;
+
+    const r   = RING_RADII[f];
+    const pts = buildRingPoints(f, r, time);
+    const posBuf = ringPosBufs[f];
+
+    // Apply Y-axis rotation to the ring points
+    const cosA = Math.cos(ringAngle[f]);
+    const sinA = Math.sin(ringAngle[f]);
+    for (let i = 0; i <= PTS_PER_RING; i++) {
+      const px = pts[i*3];
+      const py = pts[i*3+1];
+      const pz = pts[i*3+2];
+      // Rotate around Y axis
+      posBuf.array[i*3]   = px * cosA + pz * sinA;
+      posBuf.array[i*3+1] = py;
+      posBuf.array[i*3+2] = -px * sinA + pz * cosA;
+    }
+    posBuf.needsUpdate = true;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button><button id="pc-close" title="close / go back" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 10px;color:rgba(255,255,255,0.45);cursor:pointer;font-size:11px;line-height:1">×</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-close').onclick=function(){window.parent!==window?window.parent.postMessage({type:"dismiss-and-next"},"*"):history.back();};
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>
