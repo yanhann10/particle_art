@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>49h · woven dash field · teal to amber gradient</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0e14; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">49h</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0e14, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 28);
+camera.lookAt(0, 0, 0);
+
+const N = 80000;
+
+// Dash geometry: 6×1 pixel flat rectangle
+const dashGeom = new THREE.PlaneGeometry(0.12, 0.02);
+const instancedMesh = new THREE.InstancedMesh(
+  dashGeom,
+  new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 }
+    },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexShader: `
+      uniform float uTime;
+      varying vec3 vColor;
+      varying float vAlpha;
+      
+      attribute vec3 instanceVelocity;
+      attribute float instanceBirthX;
+      attribute float instancePhase;
+      
+      void main() {
+        // Flow-based position offset
+        vec3 offset = instanceVelocity * uTime * 0.5;
+        
+        // Wrap position into visible area
+        float wrapX = mod(instancePosition.x + offset.x + 20.0, 40.0) - 20.0;
+        float wrapY = mod(instancePosition.y + offset.y + 15.0, 30.0) - 15.0;
+        float wrapZ = mod(instancePosition.z + offset.z + 5.0, 10.0) - 5.0;
+        
+        vec3 wrappedPos = vec3(wrapX, wrapY, wrapZ);
+        
+        // Color gradient: birth x-position maps to teal → amber
+        float t = (instanceBirthX + 20.0) / 40.0;
+        vec3 teal = vec3(0.15, 0.55, 0.60);
+        vec3 amber = vec3(1.0, 0.72, 0.35);
+        vColor = mix(teal, amber, t);
+        
+        // Subtle phase-based brightness variation
+        float pulse = 0.6 + 0.4 * sin(uTime * 0.8 + instancePhase * 6.28);
+        vAlpha = pulse * 0.45;
+        
+        // Apply instance transform with wrapped position
+        vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+        mvPosition.xyz += wrappedPos;
+        
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      varying float vAlpha;
+      
+      void main() {
+        // Sharp rectangular dash with slight edge softening
+        vec2 uv = gl_PointCoord * 2.0 - 1.0;
+        float edgeSoft = 1.0 - smoothstep(0.7, 1.0, max(abs(uv.x), abs(uv.y)));
+        
+        gl_FragColor = vec4(vColor * vAlpha, vAlpha * edgeSoft);
+      }
+    `
+  }),
+  N
+);
+
+// Per-instance attributes
+const velocities = new Float32Array(N * 3);
+const birthX = new Float32Array(N);
+const phases = new Float32Array(N);
+
+const matrix = new THREE.Matrix4();
+const quaternion = new THREE.Quaternion();
+const position = new THREE.Vector3();
+const scale = new THREE.Vector3(1, 1, 1);
+
+// Curl-noise-inspired flow field
+function flowField(x, y, z, t) {
+  const freq = 0.15;
+  const s = Math.sin(x * freq + t * 0.1) * Math.cos(y * freq * 0.7);
+  const c = Math.cos(y * freq + t * 0.08) * Math.sin(z * freq * 1.2);
+  const n = Math.sin(z * freq * 0.5) * Math.cos(x * freq * 0.9 + t * 0.12);
+  
+  return {
+    x: c * 0.8 + n * 0.3,
+    y: n * 0.6 + s * 0.4,
+    z: s * 0.5 + c * 0.2
+  };
+}
+
+// Initialize instances
+for (let i = 0; i < N; i++) {
+  // Dense coverage: fill -20 to +20 in x, -15 to +15 in y, -5 to +5 in z
+  const px = (Math.random() - 0.5) * 40;
+  const py = (Math.random() - 0.5) * 30;
+  const pz = (Math.random() - 0.5) * 10;
+  
+  position.set(px, py, pz);
+  
+  // Flow field velocity
+  const flow = flowField(px, py, pz, 0);
+  velocities[i * 3] = flow.x;
+  velocities[i * 3 + 1] = flow.y;
+  velocities[i * 3 + 2] = flow.z;
+  
+  // Orient dash along velocity vector
+  const vel = new THREE.Vector3(flow.x, flow.y, flow.z).normalize();
+  const up = new THREE.Vector3(0, 1, 0);
+  
+  // Rotate to align with velocity
+  if (Math.abs(vel.dot(up)) < 0.99) {
+    quaternion.setFromUnitVectors(new THREE.Vector3(1, 0, 0), vel);
+  } else {
+    quaternion.setFromUnitVectors(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 1));
+  }
+  
+  // Add slight random roll
+  const rollQuat = new THREE.Quaternion().setFromAxisAngle(vel, Math.random() * Math.PI * 2);
+  quaternion.multiply(rollQuat);
+  
+  matrix.compose(position, quaternion, scale);
+  instancedMesh.setMatrixAt(i, matrix);
+  
+  birthX[i] = px;
+  phases[i] = Math.random();
+}
+
+instancedMesh.geometry.setAttribute('instanceVelocity', new THREE.InstancedBufferAttribute(velocities, 3));
+instancedMesh.geometry.setAttribute('instanceBirthX', new THREE.InstancedBufferAttribute(birthX, 1));
+instancedMesh.geometry.setAttribute('instancePhase', new THREE.InstancedBufferAttribute(phases, 1));
+
+instancedMesh.instanceMatrix.needsUpdate = true;
+scene.add(instancedMesh);
+
+// Ambient fill light
+const ambient = new THREE.AmbientLight(0x446688, 0.3);
+scene.add(ambient);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let startTime = performance.now();
+function loop() {
+  const elapsed = (performance.now() - startTime) / 1000;
+  instancedMesh.material.uniforms.uTime.value = elapsed;
+  
+  // Slow camera drift through the field
+  camera.position.x = Math.sin(elapsed * 0.05) * 4.0;
+  camera.position.y = Math.cos(elapsed * 0.07) * 3.0;
+  camera.position.z = 28 + Math.sin(elapsed * 0.04) * 3.0;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<!-- MOTION: drift, intensity: gentle -->
+</body>
+</html>

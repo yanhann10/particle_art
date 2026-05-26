@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>l3p · binary plasma orbit</title>
+<!-- MOTION: orbit, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#050818; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">l3p</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Two dense plasma spheres locked in binary orbit across a forbidden void.
+// North=warm amber-white (K/G-type), south=cool blue-white (A/B-type).
+// They orbit in opposite phases, eternally separated by the Roche gap at y=±3.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050818, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 24);
+camera.lookAt(0, 0, 0);
+
+const N_PER = 5000;
+const N     = N_PER * 2;
+const positions = new Float32Array(N * 3);
+const aClusters = new Float32Array(N); // 1=north, 0=south
+const aPhases   = new Float32Array(N);
+
+function uniformSphere(cx, cy, cz, R) {
+  let x, y, z, len;
+  do {
+    x = Math.random() * 2 - 1;
+    y = Math.random() * 2 - 1;
+    z = Math.random() * 2 - 1;
+    len = Math.sqrt(x*x + y*y + z*z);
+  } while (len >= 1.0 || len < 1e-5);
+  const r = R * Math.cbrt(Math.random());
+  return [cx + (x/len)*r, cy + (y/len)*r, cz + (z/len)*r];
+}
+
+let i = 0;
+for (let n = 0; n < N_PER; n++, i++) {
+  const [px, py, pz] = uniformSphere(0, 7, 0, 2.0);
+  positions[i*3] = px; positions[i*3+1] = py; positions[i*3+2] = pz;
+  aClusters[i] = 1.0;
+  aPhases[i]   = Math.random() * 6.2832;
+}
+for (let n = 0; n < N_PER; n++, i++) {
+  const [px, py, pz] = uniformSphere(0, -7, 0, 2.0);
+  positions[i*3] = px; positions[i*3+1] = py; positions[i*3+2] = pz;
+  aClusters[i] = 0.0;
+  aPhases[i]   = Math.random() * 6.2832;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('aCluster', new THREE.BufferAttribute(aClusters, 1));
+geom.setAttribute('aPhase',   new THREE.BufferAttribute(aPhases,   1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime:  { value: 0.0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float aCluster;
+    attribute float aPhase;
+    varying vec3 vColor;
+
+    void main() {
+      // Binary orbital motion — clusters sweep opposite arcs around Y axis
+      float orbitR = 1.2;
+      float angle  = uTime * 0.18;
+      float ph     = aCluster > 0.5 ? 0.0 : 3.14159265;
+      vec3 orbit   = vec3(orbitR * sin(angle + ph), 0.0, orbitR * cos(angle + ph));
+
+      // Particle micro-drift: slow breathing within sphere
+      float m   = 0.045;
+      vec3 drift = vec3(
+        m * sin(uTime * 0.42 + aPhase),
+        m * cos(uTime * 0.37 + aPhase * 1.27),
+        m * sin(uTime * 0.48 + aPhase * 0.73)
+      );
+
+      vec3 pos = position + orbit + drift;
+
+      vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
+      gl_Position  = projectionMatrix * mvPos;
+      gl_PointSize = max(2.0, 6.0 * uPixel * (16.0 / max(8.0, -mvPos.z)));
+
+      // North=warm amber-white, south=cool stellar blue
+      vColor = aCluster > 0.5 ? vec3(1.0, 0.95, 0.88) : vec3(0.80, 0.90, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+
+    void main() {
+      vec2 uv = 2.0 * (gl_PointCoord - 0.5);
+      float r  = length(uv);
+      float a  = 1.0 - smoothstep(0.38, 0.52, r);
+      if (a < 0.01) discard;
+      gl_FragColor = vec4(vColor, a * 0.7);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const t0 = performance.now();
+(function loop() {
+  const t = (performance.now() - t0) / 1000;
+  mat.uniforms.uTime.value = t;
+
+  // Slow camera arc — stays centered on the void between the two bodies
+  camera.position.x = Math.sin(t * 0.05) * 1.2;
+  camera.position.y = Math.sin(t * 0.07) * 0.6;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+})();
+</script>
+<!-- MOTION: orbit, intensity: gentle -->
+</body>
+</html>

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>55g · polar halos · breathing void</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0d1a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">55g</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0d1a, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 28);
+camera.lookAt(0, 0, 0);
+
+const N = 102400;
+const positions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+
+// Distribute particles between north and south poles
+for (let i = 0; i < N; i++) {
+  const isNorth = i < N / 2;
+  const pole = isNorth ? 1 : -1;
+  
+  // Spherical cap around each pole
+  const u = Math.random();
+  const v = Math.random();
+  
+  // Concentrate near pole using power distribution
+  const theta = Math.acos(1 - 2 * Math.pow(u, 3.0)) * pole;
+  const phi = 2 * Math.PI * v;
+  
+  const r = 8.0 + Math.random() * 1.5;
+  
+  positions[i * 3] = r * Math.sin(theta) * Math.cos(phi);
+  positions[i * 3 + 1] = r * Math.cos(theta);
+  positions[i * 3 + 2] = r * Math.sin(theta) * Math.sin(phi);
+  
+  seeds[i] = Math.random();
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vIntensity;
+    varying float vDepth;
+    
+    void main() {
+      vec3 pos = position;
+      
+      // Breathing: poles move toward/apart every 8 seconds
+      float breathe = sin(uTime * 0.785398) * 0.5 + 0.5; // 0-1 over 8 sec
+      float breatheScale = 0.85 + breathe * 0.30;
+      
+      // Apply breathing to radial distance from origin
+      vec3 direction = normalize(pos);
+      float radius = length(pos);
+      pos = direction * radius * breatheScale;
+      
+      // Slight orbital motion within each cap
+      float orbit = uTime * 0.15 + seed * 6.28;
+      float wobble = 0.3;
+      pos.x += cos(orbit) * wobble;
+      pos.z += sin(orbit) * wobble;
+      
+      // Distance from nearest pole determines brightness
+      float northDist = distance(pos, vec3(0, 8.5 * breatheScale, 0));
+      float southDist = distance(pos, vec3(0, -8.5 * breatheScale, 0));
+      float minDist = min(northDist, southDist);
+      
+      // Core particles are brightest
+      vIntensity = 1.0 - smoothstep(0.0, 4.0, minDist);
+      vIntensity = pow(vIntensity, 1.5);
+      
+      vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+      gl_Position = projectionMatrix * mvPosition;
+      
+      vDepth = -mvPosition.z;
+      
+      // Larger points at core
+      float baseSize = 2.5 + vIntensity * 3.0;
+      gl_PointSize = baseSize * uPixel * (12.0 / vDepth);
+    }
+  `,
+  fragmentShader: `
+    varying float vIntensity;
+    varying float vDepth;
+    
+    void main() {
+      vec2 center = gl_PointCoord - 0.5;
+      float dist = length(center);
+      if (dist > 0.5) discard;
+      
+      // Soft glow
+      float alpha = 1.0 - smoothstep(0.0, 0.5, dist);
+      alpha = pow(alpha, 1.2);
+      
+      // Pure cream-white, no color variation
+      vec3 cream = vec3(1.0, 0.98, 0.94);
+      
+      // Core bloom
+      float bloom = pow(1.0 - dist * 2.0, 3.0) * vIntensity;
+      
+      float finalIntensity = (0.3 + 0.7 * vIntensity) * alpha;
+      finalIntensity += bloom * 0.8;
+      
+      gl_FragColor = vec4(cream * finalIntensity, alpha * finalIntensity * 0.9);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Add faint indigo fog in the void
+scene.fog = new THREE.Fog(0x1a1d32, 12, 40);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let startTime = performance.now();
+function loop() {
+  const elapsed = (performance.now() - startTime) / 1000;
+  mat.uniforms.uTime.value = elapsed;
+  
+  // Slow camera orbit to reveal void
+  const angle = elapsed * 0.08;
+  camera.position.x = Math.sin(angle) * 12;
+  camera.position.y = Math.sin(elapsed * 0.05) * 4;
+  camera.position.z = Math.cos(angle) * 28;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<!-- MOTION: breathe, intensity: gentle -->
+</body>
+</html>

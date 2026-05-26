@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0p9 · differential-growth calligraphy · ink brush</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0b09; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">0p9</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Differential-growth 3D calligraphic ink strokes
+// Skeleton grown via repulsion + edge-splitting, rendered as TubeGeometry for crisp legibility
+// Palette: sumi ink (black) on aged paper, touches of iron-oxide red, burnt sienna
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0b09);
+scene.fog = new THREE.FogExp2(0x0d0b09, 0.012);
+
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 8, 32);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ─────────── Differential growth node system
+class Node {
+  constructor(x, y, z) {
+    this.pos = new THREE.Vector3(x, y, z);
+    this.vel = new THREE.Vector3();
+    this.connections = [];
+  }
+}
+
+const nodes = [];
+const maxDist = 0.8;
+const minDist = 0.35;
+const repelRadius = 1.2;
+const repelStrength = 0.08;
+
+// Initialize circular ring
+const initCount = 32;
+for (let i = 0; i < initCount; i++) {
+  const angle = (i / initCount) * Math.PI * 2;
+  const r = 5;
+  const x = Math.cos(angle) * r;
+  const z = Math.sin(angle) * r;
+  const y = (Math.random() - 0.5) * 0.4;
+  nodes.push(new Node(x, y, z));
+}
+for (let i = 0; i < nodes.length; i++) {
+  const next = (i + 1) % nodes.length;
+  nodes[i].connections.push(nodes[next]);
+  nodes[next].connections.push(nodes[i]);
+}
+
+function growStep() {
+  // Reset velocities
+  nodes.forEach(n => n.vel.set(0, 0, 0));
+
+  // Repulsion between all nodes
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i], b = nodes[j];
+      const diff = new THREE.Vector3().subVectors(a.pos, b.pos);
+      const dist = diff.length();
+      if (dist < repelRadius && dist > 0.001) {
+        const force = repelStrength * (1 - dist / repelRadius);
+        diff.normalize().multiplyScalar(force);
+        a.vel.add(diff);
+        b.vel.sub(diff);
+      }
+    }
+  }
+
+  // Apply velocities
+  nodes.forEach(n => {
+    n.pos.add(n.vel);
+    // Gentle containment sphere
+    const d = n.pos.length();
+    if (d > 14) {
+      n.pos.normalize().multiplyScalar(14);
+    }
+  });
+
+  // Edge splitting: if connected nodes too far, insert midpoint
+  const toAdd = [];
+  nodes.forEach(n => {
+    n.connections.forEach(conn => {
+      const dist = n.pos.distanceTo(conn.pos);
+      if (dist > maxDist) {
+        const mid = new THREE.Vector3().addVectors(n.pos, conn.pos).multiplyScalar(0.5);
+        // Perturb slightly for organic growth
+        mid.x += (Math.random() - 0.5) * 0.2;
+        mid.y += (Math.random() - 0.5) * 0.2;
+        mid.z += (Math.random() - 0.5) * 0.2;
+        const newNode = new Node(mid.x, mid.y, mid.z);
+        toAdd.push({ parent: n, conn: conn, newNode: newNode });
+      }
+    });
+  });
+
+  toAdd.forEach(({ parent, conn, newNode }) => {
+    // Remove old connection
+    parent.connections = parent.connections.filter(c => c !== conn);
+    conn.connections = conn.connections.filter(c => c !== parent);
+    // Add new connections
+    parent.connections.push(newNode);
+    newNode.connections.push(parent);
+    conn.connections.push(newNode);
+    newNode.connections.push(conn);
+    nodes.push(newNode);
+  });
+}
+
+// ─────────── Render skeleton as tubes
+const tubeGroup = new THREE.Group();
+scene.add(tubeGroup);
+
+function buildTubes() {
+  // Clear old tubes
+  while (tubeGroup.children.length) {
+    const child = tubeGroup.children[0];
+    child.geometry.dispose();
+    child.material.dispose();
+    tubeGroup.remove(child);
+  }
+
+  // Build connected paths
+  const visited = new Set();
+  const paths = [];
+
+  function tracePath(start, exclude) {
+    const path = [start];
+    visited.add(start);
+    let current = start;
+    let prev = exclude;
+    while (true) {
+      const next = current.connections.find(c => c !== prev && !visited.has(c));
+      if (!next) break;
+      path.push(next);
+      visited.add(next);
+      prev = current;
+      current = next;
+    }
+    return path;
+  }
+
+  nodes.forEach(n => {
+    if (!visited.has(n)) {
+      const path = tracePath(n, null);
+      if (path.length >= 2) paths.push(path);
+    }
+  });
+
+  // For each path, create TubeGeometry
+  paths.forEach((path, pathIdx) => {
+    if (path.length < 2) return;
+    const points = path.map(n => n.pos.clone());
+    
+    if (points.length === 2) {
+      // Simple line segment
+      const curve = new THREE.LineCurve3(points[0], points[1]);
+      const tubeRadius = 0.08 + Math.random() * 0.04;
+      const geometry = new THREE.TubeGeometry(curve, 2, tubeRadius, 6, false);
+      
+      // Color variation: mostly black ink, some iron-red
+      const hue = Math.random() < 0.15 ? 0.03 : 0;
+      const sat = hue > 0 ? 0.4 : 0;
+      const light = 0.08 + Math.random() * 0.05;
+      const color = new THREE.Color().setHSL(hue, sat, light);
+      
+      const material = new THREE.MeshStandardMaterial({
+        color: color,
+        roughness: 0.8,
+        metalness: 0.1,
+        emissive: color,
+        emissiveIntensity: 0.2,
+      });
+      
+      const mesh = new THREE.Mesh(geometry, material);
+      tubeGroup.add(mesh);
+    } else {
+      // CatmullRom curve
+      const curve = new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.3);
+      const tubeRadius = 0.08 + Math.random() * 0.04;
+      const segments = Math.max(Math.floor(points.length * 3), 8);
+      const geometry = new THREE.TubeGeometry(curve, segments, tubeRadius, 6, false);
+      
+      const hue = Math.random() < 0.15 ? 0.03 : 0;
+      const sat = hue > 0 ? 0.4 : 0;
+      const light = 0.08 + Math.random() * 0.05;
+      const color = new THREE.Color().setHSL(hue, sat, light);
+      
+      const material = new THREE.MeshStandardMaterial({
+        color: color,
+        roughness: 0.8,
+        metalness: 0.1,
+        emissive: color,
+        emissiveIntensity: 0.2,
+      });
+      
+      const mesh = new THREE.Mesh(geometry, material);
+      tubeGroup.add(mesh);
+    }
+  });
+}
+
+// ─────────── Lighting for dimensional form
+const ambientLight = new THREE.AmbientLight(0x4a4845, 0.3);
+scene.add(ambientLight);
+
+const keyLight = new THREE.DirectionalLight(0xfff5e8, 1.2);
+keyLight.position.set(10, 15, 8);
+scene.add(keyLight);
+
+const rimLight = new THREE.DirectionalLight(0xd4a574, 0.6);
+rimLight.position.set(-8, 4, -10);
+scene.add(rimLight);
+
+const fillLight = new THREE.DirectionalLight(0x6a5d54, 0.4);
+fillLight.position.set(0, -5, 12);
+scene.add(fillLight);
+
+// ─────────── Animation
+let growthStep = 0;
+const maxSteps = 140;
+let lastGrowth = 0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(now) {
+  const time = now * 0.001;
+
+  // Grow system in early frames
+  if (growthStep < maxSteps && time - lastGrowth > 0.08) {
+    growStep();
+    growthStep++;
+    lastGrowth = time;
+    
+    // Rebuild tubes every few steps for performance
+    if (growthStep % 3 === 0) {
+      buildTubes();
+    }
+  }
+
+  // Slow contemplative rotation
+  tubeGroup.rotation.y = time * 0.06;
+
+  // Camera gentle drift
+  camera.position.y = 8 + Math.sin(time * 0.15) * 2;
+  camera.position.z = 32 + Math.sin(time * 0.08) * 3;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+// Initial build
+buildTubes();
+loop(performance.now());
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.borderColor='rgba(215,107,90,0.5)';this.style.color='#d76b5a';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  var _pcc=document.getElementById('pc-close');if(_pcc)_pcc.onclick=function(){window.parent!==window?window.parent.postMessage({type:"dismiss-and-next"},"*"):history.back();};
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>

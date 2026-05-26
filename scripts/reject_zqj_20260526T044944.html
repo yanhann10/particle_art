@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zqj · geyser chalice</title>
+<!-- MOTION: burst, intensity: vigorous -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#0a0805; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+</style>
+</head>
+<body>
+<div class="id">zqj</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  INTENTION: particles erupt from the calyx bowl in bright gold/white geyser columns
+             at staggered intervals — each jet arcs upward, hangs momentarily, falls
+             back into the bowl. High contrast against deep black. No camera rotation.
+  PARENT: 9p0 (filament chalice)
+  DIRECTION: geyser burst — vertical jets replace helical lines
+*/
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+scene.background = new THREE.Color(0x0a0805);
+
+// ── constants ────────────────────────────────────────────────────────────────
+const N        = 60000;
+const PETALS   = 5;
+const CUP_DEPTH = 4.2;
+const MAX_R    = 12.0;
+const GEYSER_COUNT = 8;
+const GEYSER_DURATION = 1.8;
+const GEYSER_INTERVAL = 2.5;
+
+// ── seeded RNG ────────────────────────────────────────────────────────────────
+let rngState = 0xDECADE;
+function rng() {
+  rngState = (rngState + 0x6D2B79F5) | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// ── build particle arrays ─────────────────────────────────────────────────────
+const gridPos    = new Float32Array(N * 2);
+const calyxPos   = new Float32Array(N * 3);
+const geyserIdx  = new Float32Array(N);
+const seeds      = new Float32Array(N);
+
+// grid sample
+{
+  const W = 24, rows = 100, cols = 100;
+  const cW = W / cols, cH = W / rows;
+  let idx = 0;
+  const ppc = Math.floor(N / (rows * cols));
+  for (let i = 0; i < rows && idx < N; i++) {
+    for (let j = 0; j < cols && idx < N; j++) {
+      for (let k = 0; k < ppc && idx < N; k++) {
+        gridPos[idx * 2]     = (j + rng() - 0.5) * cW - W * 0.5;
+        gridPos[idx * 2 + 1] = (i + rng() - 0.5) * cH - W * 0.5;
+        idx++;
+      }
+    }
+  }
+  while (idx < N) {
+    gridPos[idx * 2]     = (rng() - 0.5) * W;
+    gridPos[idx * 2 + 1] = (rng() - 0.5) * W;
+    idx++;
+  }
+}
+
+// Assign each particle to a geyser source (0..GEYSER_COUNT-1)
+for (let i = 0; i < N; i++) {
+  geyserIdx[i] = Math.floor(rng() * GEYSER_COUNT);
+  seeds[i] = rng();
+}
+
+// Build calyx bowl positions
+for (let i = 0; i < N; i++) {
+  const gx = gridPos[i * 2], gy = gridPos[i * 2 + 1];
+  const r  = Math.sqrt(gx * gx + gy * gy);
+  const nr = Math.min(r / MAX_R, 1.0);
+  const th = Math.atan2(gy, gx);
+  const petal = 0.5 + 0.5 * Math.cos(th * PETALS);
+  const flare = 1.0 + 0.15 * nr * nr;
+  calyxPos[i * 3]     = gx * flare;
+  calyxPos[i * 3 + 1] = gy * flare;
+  calyxPos[i * 3 + 2] = CUP_DEPTH * nr * nr * (0.6 + 0.4 * petal);
+}
+
+// Pre-compute geyser source positions (distributed around bowl base)
+const geyserSources = [];
+for (let g = 0; g < GEYSER_COUNT; g++) {
+  const angle = (g / GEYSER_COUNT) * Math.PI * 2.0;
+  const radius = 4.0 + rng() * 3.0;
+  geyserSources.push({
+    x: Math.cos(angle) * radius,
+    y: Math.sin(angle) * radius,
+    z: 0.8 + rng() * 0.6,
+    phase: rng() * Math.PI * 2.0,
+    strength: 0.8 + rng() * 0.4
+  });
+}
+
+// ── uniforms ─────────────────────────────────────────────────────────────────
+const uniforms = {
+  uTime:    { value: 0.0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+};
+
+// Pass geyser source data to shader
+const geyserData = new Float32Array(GEYSER_COUNT * 4);
+for (let g = 0; g < GEYSER_COUNT; g++) {
+  const src = geyserSources[g];
+  geyserData[g * 4 + 0] = src.x;
+  geyserData[g * 4 + 1] = src.y;
+  geyserData[g * 4 + 2] = src.z;
+  geyserData[g * 4 + 3] = src.phase;
+}
+
+// ── shader ─────────────────────────────────────────────────────────────────
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite:  false,
+  blending:    THREE.AdditiveBlending,
+
+  vertexShader: `
+    precision highp float;
+    uniform float uTime, uPixel;
+
+    attribute vec3  calyxPos;
+    attribute vec2  gridPos;
+    attribute float geyserIdx;
+    attribute float seed;
+
+    varying vec3  vColor;
+    varying float vAlpha;
+
+    const int GEYSER_COUNT = ${GEYSER_COUNT};
+    const float GEYSER_DURATION = ${GEYSER_DURATION.toFixed(2)};
+    const float GEYSER_INTERVAL = ${GEYSER_INTERVAL.toFixed(2)};
+
+    vec3 geyserSources[GEYSER_COUNT];
+
+    void main(){
+      float t = uTime;
+
+      // Reconstruct geyser sources (same distribution as JS)
+      for (int g = 0; g < GEYSER_COUNT; g++) {
+        float gf = float(g);
+        float angle = (gf / float(GEYSER_COUNT)) * 6.28318530718;
+        float radius = 4.0 + fract(sin(gf * 12.9898) * 43758.5453) * 3.0;
+        float phase = fract(sin(gf * 78.233) * 43758.5453) * 6.28318530718;
+        float z = 0.8 + fract(sin(gf * 54.321) * 43758.5453) * 0.6;
+        geyserSources[g] = vec3(cos(angle) * radius, sin(angle) * radius, z);
+      }
+
+      int gIdx = int(geyserIdx);
+      vec3 source = geyserSources[gIdx];
+      float gPhase = fract(sin(float(gIdx) * 78.233) * 43758.5453) * 6.28318530718;
+
+      // Each geyser fires at offset times
+      float geyserTime = t + gPhase * GEYSER_INTERVAL / 6.28318530718;
+      float cyclePhase = mod(geyserTime, GEYSER_INTERVAL);
+
+      vec3 p = calyxPos;
+
+      if (cyclePhase < GEYSER_DURATION) {
+        // Geyser active — particle erupts upward
+        float burstPhase = cyclePhase / GEYSER_DURATION;
+        
+        // Arc trajectory: parabolic rise and fall
+        float strength = fract(sin(float(gIdx) * 54.321) * 43758.5453) * 0.4 + 0.8;
+        float height = 18.0 * strength * (burstPhase - burstPhase * burstPhase * 0.8);
+        
+        // Lateral spread from source
+        float spreadFactor = burstPhase * 0.6;
+        vec2 toSource = vec2(p.x - source.x, p.y - source.y);
+        float dist = length(toSource);
+        vec2 direction = dist > 0.01 ? toSource / dist : vec2(seed - 0.5, fract(seed * 7.89) - 0.5);
+        
+        // Position during burst
+        p.x = source.x + direction.x * spreadFactor * 2.5;
+        p.y = source.y + direction.y * spreadFactor * 2.5;
+        p.z = source.z + height;
+        
+        // Brightness peaks mid-burst
+        float brightness = 1.0 - abs(burstPhase - 0.5) * 2.0;
+        brightness = pow(brightness, 0.6);
+        
+        // Color: bright gold to white at peak
+        vec3 gold = vec3(1.0, 0.85, 0.25);
+        vec3 white = vec3(1.0, 0.98, 0.92);
+        vColor = mix(gold, white, brightness * 0.7);
+        vAlpha = 0.85 * brightness;
+        
+      } else {
+        // Geyser dormant — particle rests in bowl
+        vColor = vec3(0.4, 0.35, 0.20);
+        vAlpha = 0.15;
+      }
+
+      vec4 mv   = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 1.0);
+      gl_PointSize = uPixel * max(2.0, 4.5 - dist * 0.05);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+
+  fragmentShader: `
+    precision highp float;
+    varying vec3  vColor;
+    varying float vAlpha;
+
+    void main(){
+      vec2  dc = gl_PointCoord - 0.5;
+      float rr = dot(dc, dc);
+
+      if (rr > 0.25) discard;
+
+      float edge = 1.0 - smoothstep(0.18, 0.25, rr);
+      float core = 1.0 - smoothstep(0.0, 0.12, rr);
+
+      vec3 col = vColor * (0.8 + core * 0.4);
+      float alpha = vAlpha * edge;
+      
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+// ── geometry ─────────────────────────────────────────────────────────────────
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position',   new THREE.BufferAttribute(calyxPos.slice(), 3));
+geom.setAttribute('calyxPos',   new THREE.BufferAttribute(calyxPos, 3));
+geom.setAttribute('gridPos',    new THREE.BufferAttribute(gridPos, 2));
+geom.setAttribute('geyserIdx',  new THREE.BufferAttribute(geyserIdx, 1));
+geom.setAttribute('seed',       new THREE.BufferAttribute(seeds, 1));
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ── camera (FIXED — no rotation) ──────────────────────────────────────────────
+camera.position.set(0, -28, 14);
+camera.lookAt(0, 0, 6);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const t0 = performance.now();
+
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+  uniforms.uTime.value = t;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(201,168,106,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){var jobId=d.job_id||'';var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);location.href='/compare'+qs;})
+    .catch(function(){location.href='/compare?a='+pid+'&directive='+encodeURIComponent(txt);});
+  };
+})();
+</script>
+</body>
+</html>

@@ -162,6 +162,12 @@ bash scripts/drain_queue.sh --status     # show claimed vs free, don't run
 Each worker gets a dedicated `--parent <piece>` so there are no collisions.
 Logs go to `.logs/mutate-<piece>-<time>.log` and `.logs/critic-<time>.log`.
 
+**Progress reporting:** While workers run, shows every 30s:
+- Done / total worker count
+- In-flight worker count
+- Estimated time remaining (based on average completion time)
+- Pieces yet to queue in `iterate_when_chosen`
+
 ### `wait_and_drain` — auto-resume after Claude Code hourly limit
 
 When you hit the hourly limit, this waits N minutes then resumes the drain loop

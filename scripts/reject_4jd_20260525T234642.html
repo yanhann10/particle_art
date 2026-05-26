@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4jd · hexagonal frost crystal automaton</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background: radial-gradient(ellipse at 50% 30%, #0d1118 0%, #050508 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">4jd · hexagonal frost crystal automaton</div>
+<div class="hint">no input — watch crystal nucleate and propagate via reaction-diffusion logic</div>
+<div class="src">descended from sav · cellular automaton on hexagonal lattice · mineral formation</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Narrative: cold mineral formation from a seed crystal via reaction-diffusion.
+// Unlike biological boids, this is purely deterministic — a Gray-Scott-like
+// cellular automaton on a hexagonal lattice. Particles snap to hex grid nodes,
+// propagate according to local rules (feed + kill rates), no hand-placement.
+//
+// The lattice is oriented with pointy-top hexagons. Each cell has 6 neighbors.
+// State per cell: (u, v) chemical concentrations. When v exceeds threshold,
+// the cell becomes 'active' (crystallized) and appears as a visible particle.
+//
+// Visual: monocrhome ice-blue palette (#b8d4e8 core, #6a8ca0 edges), near-black
+// background with subtle radial gradient suggesting cold void. Camera slowly
+// pulls back as the crystal grows to keep it framed.
+//
+// Motion: growth (the defining motion word — crystal expands radially from seed).
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x050508, 0.012);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 0, 45);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── hexagonal lattice setup
+const HEX_RADIUS = 0.48;
+const SQRT3 = Math.sqrt(3);
+const COLS = 72;
+const ROWS = 52;
+
+function hexToWorld(col, row){
+  const x = col * HEX_RADIUS * 1.5;
+  const y = row * HEX_RADIUS * SQRT3 + (col % 2) * (HEX_RADIUS * SQRT3 * 0.5);
+  return { x, y };
+}
+
+function getNeighbors(col, row){
+  const evenCol = (col % 2 === 0);
+  if (evenCol){
+    return [
+      {col: col+1, row: row-1},
+      {col: col+1, row: row},
+      {col: col,   row: row+1},
+      {col: col-1, row: row},
+      {col: col-1, row: row-1},
+      {col: col,   row: row-1}
+    ];
+  } else {
+    return [
+      {col: col+1, row: row},
+      {col: col+1, row: row+1},
+      {col: col,   row: row+1},
+      {col: col-1, row: row+1},
+      {col: col-1, row: row},
+      {col: col,   row: row-1}
+    ];
+  }
+}
+
+const cells = [];
+for (let c = 0; c < COLS; c++){
+  cells[c] = [];
+  for (let r = 0; r < ROWS; r++){
+    cells[c][r] = { u: 1.0, v: 0.0, active: false, age: 0 };
+  }
+}
+
+// seed crystal at center
+const seedCol = Math.floor(COLS / 2);
+const seedRow = Math.floor(ROWS / 2);
+cells[seedCol][seedRow].u = 0.5;
+cells[seedCol][seedRow].v = 0.25;
+cells[seedCol][seedRow].active = true;
+
+// Gray-Scott-like reaction-diffusion parameters tuned for dendritic crystal growth
+const Du = 0.16;
+const Dv = 0.08;
+const feed = 0.055;
+const kill = 0.062;
+const threshold = 0.25;
+const dt = 0.8;
+
+let stepCount = 0;
+
+function stepAutomaton(){
+  const nextU = [];
+  const nextV = [];
+  for (let c = 0; c < COLS; c++){
+    nextU[c] = [];
+    nextV[c] = [];
+    for (let r = 0; r < ROWS; r++){
+      nextU[c][r] = cells[c][r].u;
+      nextV[c][r] = cells[c][r].v;
+    }
+  }
+
+  for (let c = 1; c < COLS - 1; c++){
+    for (let r = 1; r < ROWS - 1; r++){
+      const u = cells[c][r].u;
+      const v = cells[c][r].v;
+      const neighbors = getNeighbors(c, r);
+      let laplaceU = 0, laplaceV = 0;
+      let validN = 0;
+      for (const nb of neighbors){
+        if (nb.col >= 0 && nb.col < COLS && nb.row >= 0 && nb.row < ROWS){
+          laplaceU += cells[nb.col][nb.row].u;
+          laplaceV += cells[nb.col][nb.row].v;
+          validN++;
+        }
+      }
+      if (validN > 0){
+        laplaceU = (laplaceU / validN) - u;
+        laplaceV = (laplaceV / validN) - v;
+      }
+
+      const uvv = u * v * v;
+      nextU[c][r] = u + dt * (Du * laplaceU - uvv + feed * (1.0 - u));
+      nextV[c][r] = v + dt * (Dv * laplaceV + uvv - (feed + kill) * v);
+
+      nextU[c][r] = Math.max(0, Math.min(1, nextU[c][r]));
+      nextV[c][r] = Math.max(0, Math.min(1, nextV[c][r]));
+
+      if (!cells[c][r].active && nextV[c][r] > threshold){
+        cells[c][r].active = true;
+        cells[c][r].age = stepCount;
+      }
+    }
+  }
+
+  for (let c = 0; c < COLS; c++){
+    for (let r = 0; r < ROWS; r++){
+      cells[c][r].u = nextU[c][r];
+      cells[c][r].v = nextV[c][r];
+      if (cells[c][r].active) cells[c][r].age++;
+    }
+  }
+  stepCount++;
+}
+
+// ────────────── render particles from active cells
+function buildGeometry(){
+  const positions = [];
+  const ages = [];
+  const seeds = [];
+  let activeCentroidX = 0, activeCentroidY = 0, activeCount = 0;
+
+  for (let c = 0; c < COLS; c++){
+    for (let r = 0; r < ROWS; r++){
+      if (cells[c][r].active){
+        const wPos = hexToWorld(c, r);
+        positions.push(wPos.x, wPos.y, 0);
+        ages.push(cells[c][r].age);
+        seeds.push(Math.random());
+        activeCentroidX += wPos.x;
+        activeCentroidY += wPos.y;
+        activeCount++;
+      }
+    }
+  }
+
+  const geom = new THREE.BufferGeometry();
+  if (positions.length > 0){
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geom.setAttribute('age', new THREE.Float32BufferAttribute(ages, 1));
+    geom.setAttribute('seed', new THREE.Float32BufferAttribute(seeds, 1));
+  }
+
+  const centroid = activeCount > 0 ? 
+    { x: activeCentroidX / activeCount, y: activeCentroidY / activeCount } :
+    { x: 0, y: 0 };
+
+  return { geom, centroid, count: activeCount };
+}
+
+let { geom, centroid, count } = buildGeometry();
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uSteps: { value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uSteps;
+    attribute float age;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = position;
+      
+      // subtle flicker as crystal bonds form
+      float flicker = 0.85 + 0.15 * sin(uTime * 3.0 + seed * 6.28 + age * 0.1);
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      
+      // size: young crystals slightly larger (just nucleated), then settle
+      float ageNorm = clamp(age / 60.0, 0.0, 1.0);
+      float baseSize = 2.2 - ageNorm * 0.4;
+      gl_PointSize = baseSize * uPixel * (22.0 / dist) * flicker;
+      
+      // monorhome ice-blue palette: bright core #b8d4e8, cooler edges #6a8ca0
+      vec3 core = vec3(0.72, 0.83, 0.91);
+      vec3 edge = vec3(0.42, 0.55, 0.63);
+      vCol = mix(edge, core, smoothstep(0.0, 0.3, 1.0 - ageNorm));
+      
+      // fade based on distance from camera
+      vAlpha = clamp(1.0 - (dist - 40.0) / 60.0, 0.0, 1.0);
+      
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      
+      // hexagonal hint: sample 6 radial lines
+      float angle = atan(d.y, d.x);
+      float hexFactor = abs(cos(angle * 3.0)) * 0.15 + 0.85;
+      
+      float a = exp(-r * 12.0) * vAlpha * hexFactor;
+      gl_FragColor = vec4(vCol * a * 0.88, a);
+    }
+  `
+});
+
+let points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm: run automaton for initial crystallization
+for (let s = 0; s < 150; s++) stepAutomaton();
+
+let lastT = performance.now();
+let lastRebuild = 0;
+
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  
+  uniforms.uTime.value = now / 1000;
+  uniforms.uSteps.value = stepCount;
+  
+  // run automaton every ~80ms for smooth growth
+  if (now - lastRebuild > 80){
+    stepAutomaton();
+    stepAutomaton();
+    const rebuild = buildGeometry();
+    
+    if (rebuild.count !== count){
+      scene.remove(points);
+      points.geometry.dispose();
+      geom = rebuild.geom;
+      centroid = rebuild.centroid;
+      count = rebuild.count;
+      points = new THREE.Points(geom, mat);
+      scene.add(points);
+    }
+    lastRebuild = now;
+    
+    // camera tracks centroid and pulls back as crystal grows
+    const targetZ = 45 + Math.sqrt(count) * 0.15;
+    camera.position.z += (targetZ - camera.position.z) * 0.015;
+    camera.position.x += (centroid.x - camera.position.x) * 0.008;
+    camera.position.y += (centroid.y - camera.position.y) * 0.008;
+    camera.lookAt(centroid.x, centroid.y, 0);
+  }
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>

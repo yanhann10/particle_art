@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>49p · folded leaves curl-field</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0e0b08; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">49p</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Curl noise field for organic path generation ── */
+function curl3D(x, y, z, t, scale = 1.0) {
+  const eps = 0.1;
+  const noise = (px, py, pz) => {
+    return Math.sin(px * 1.3 + py * 0.7 + pz * 0.9 + t * 0.2) * 
+           Math.cos(py * 1.7 - pz * 1.1 + px * 0.5) * 
+           Math.sin(pz * 2.1 + px * 0.4 - py * 0.8);
+  };
+  const dx = (noise(x+eps, y, z) - noise(x-eps, y, z)) / (2*eps);
+  const dy = (noise(x, y+eps, z) - noise(x, y-eps, z)) / (2*eps);
+  const dz = (noise(x, y, z+eps) - noise(x, y, z-eps)) / (2*eps);
+  return new THREE.Vector3(-dy, dz, -dx).multiplyScalar(scale);
+}
+
+/* ── Generate a single folded leaf from curl-field integration ── */
+function generateLeafPath(origin, tangent, steps, stepSize, curlScale, twist) {
+  const points = [];
+  let pos = origin.clone();
+  let dir = tangent.clone().normalize();
+  
+  for (let i = 0; i < steps; i++) {
+    points.push(pos.clone());
+    const t = i / steps;
+    const curl = curl3D(pos.x * 0.3, pos.y * 0.3, pos.z * 0.3, t * 3.0 + twist, curlScale);
+    dir.add(curl).normalize();
+    pos.add(dir.clone().multiplyScalar(stepSize));
+  }
+  
+  return points;
+}
+
+/* ── Build ribbon geometry from path centerline ── */
+function createLeafRibbon(centerline, width, segments) {
+  const positions = [];
+  const normals = [];
+  
+  for (let i = 0; i < centerline.length; i++) {
+    const t = i / (centerline.length - 1);
+    const p = centerline[i];
+    
+    // Compute local frame
+    let tangent;
+    if (i < centerline.length - 1) {
+      tangent = new THREE.Vector3().subVectors(centerline[i + 1], p).normalize();
+    } else {
+      tangent = new THREE.Vector3().subVectors(p, centerline[i - 1]).normalize();
+    }
+    
+    const up = new THREE.Vector3(0, 1, 0);
+    const right = new THREE.Vector3().crossVectors(tangent, up).normalize();
+    
+    // Width taper: wide at base, narrow at tip
+    const w = width * (1.0 - t * 0.8) * (0.5 + 0.5 * Math.sin(t * Math.PI));
+    
+    // Create cross-section vertices
+    for (let j = 0; j <= segments; j++) {
+      const s = (j / segments - 0.5) * 2; // -1 to 1
+      const offset = right.clone().multiplyScalar(s * w);
+      
+      // Curl the edges upward
+      const curlLift = Math.pow(Math.abs(s), 1.5) * 0.3 * (1.0 - t * 0.6);
+      offset.y += curlLift;
+      
+      const vert = p.clone().add(offset);
+      positions.push(vert.x, vert.y, vert.z);
+      
+      // Normal points outward from curl
+      const n = new THREE.Vector3(0, 1, 0).add(right.clone().multiplyScalar(s * 0.5)).normalize();
+      normals.push(n.x, n.y, n.z);
+    }
+  }
+  
+  const indices = [];
+  for (let i = 0; i < centerline.length - 1; i++) {
+    for (let j = 0; j < segments; j++) {
+      const a = i * (segments + 1) + j;
+      const b = a + 1;
+      const c = (i + 1) * (segments + 1) + j;
+      const d = c + 1;
+      
+      indices.push(a, c, b);
+      indices.push(b, c, d);
+    }
+  }
+  
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  
+  return geom;
+}
+
+/* ── Particle scattering along leaf surface ── */
+function scatterParticlesOnLeaf(geometry, count, seed) {
+  const positions = new Float32Array(count * 3);
+  const seeds = new Float32Array(count);
+  const phases = new Float32Array(count);
+  
+  const pos = geometry.attributes.position.array;
+  const numVerts = pos.length / 3;
+  
+  for (let i = 0; i < count; i++) {
+    const idx = Math.floor((seed + i * 0.618033988749895) % 1.0 * numVerts) * 3;
+    const jitter = 0.08;
+    positions[i * 3 + 0] = pos[idx + 0] + (Math.random() - 0.5) * jitter;
+    positions[i * 3 + 1] = pos[idx + 1] + (Math.random() - 0.5) * jitter;
+    positions[i * 3 + 2] = pos[idx + 2] + (Math.random() - 0.5) * jitter;
+    seeds[i] = (seed + i * 0.1) % 1.0;
+    phases[i] = Math.random();
+  }
+  
+  return { positions, seeds, phases };
+}
+
+/* ── Scene setup ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(8, 6, 12);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0e0b08, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, 2, 0);
+
+/* ── Generate 7 folded leaves in a bouquet arrangement ── */
+const leafConfigs = [
+  { origin: new THREE.Vector3(-1.2, 0, 0), tangent: new THREE.Vector3(0.3, 1, 0.2), twist: 0, scale: 1.1 },
+  { origin: new THREE.Vector3(0.8, 0, -0.5), tangent: new THREE.Vector3(-0.2, 1, 0.4), twist: 1.5, scale: 0.95 },
+  { origin: new THREE.Vector3(0, 0, 0.9), tangent: new THREE.Vector3(0, 1, -0.3), twist: 3, scale: 1.0 },
+  { origin: new THREE.Vector3(-0.5, 0.5, -0.8), tangent: new THREE.Vector3(0.4, 0.9, 0.3), twist: 4.5, scale: 0.85 },
+  { origin: new THREE.Vector3(1.3, 0.3, 0.6), tangent: new THREE.Vector3(-0.4, 1, -0.2), twist: 6, scale: 0.9 },
+  { origin: new THREE.Vector3(-0.9, 1, 0.4), tangent: new THREE.Vector3(0.2, 0.8, -0.3), twist: 2.2, scale: 0.8 },
+  { origin: new THREE.Vector3(0.3, 0.8, -0.3), tangent: new THREE.Vector3(-0.1, 0.9, 0.5), twist: 3.8, scale: 0.75 },
+];
+
+const particlesPerLeaf = Math.floor(80000 / leafConfigs.length);
+const allPositions = [];
+const allSeeds = [];
+const allPhases = [];
+const allLeafIndices = [];
+
+leafConfigs.forEach((config, leafIdx) => {
+  const centerline = generateLeafPath(
+    config.origin,
+    config.tangent,
+    48,
+    0.14 * config.scale,
+    0.6,
+    config.twist
+  );
+  
+  const ribbonGeom = createLeafRibbon(centerline, 0.9 * config.scale, 6);
+  const particles = scatterParticlesOnLeaf(ribbonGeom, particlesPerLeaf, leafIdx * 0.123);
+  
+  for (let i = 0; i < particlesPerLeaf; i++) {
+    allPositions.push(
+      particles.positions[i * 3 + 0],
+      particles.positions[i * 3 + 1],
+      particles.positions[i * 3 + 2]
+    );
+    allSeeds.push(particles.seeds[i]);
+    allPhases.push(particles.phases[i]);
+    allLeafIndices.push(leafIdx);
+  }
+});
+
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position', new THREE.Float32BufferAttribute(allPositions, 3));
+geometry.setAttribute('seed', new THREE.Float32BufferAttribute(allSeeds, 1));
+geometry.setAttribute('phase', new THREE.Float32BufferAttribute(allPhases, 1));
+geometry.setAttribute('leafIndex', new THREE.Float32BufferAttribute(allLeafIndices, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+};
+
+const material = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float phase;
+    attribute float leafIndex;
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    vec3 curl(vec3 p, float t) {
+      float eps = 0.08;
+      float n(vec3 q) {
+        return sin(q.x * 1.2 + q.y * 0.8 + t * 0.3) * cos(q.y * 1.5 - q.z * 0.9);
+      }
+      float dx = (n(p + vec3(eps,0,0)) - n(p - vec3(eps,0,0))) / (2.0*eps);
+      float dy = (n(p + vec3(0,eps,0)) - n(p - vec3(0,eps,0))) / (2.0*eps);
+      float dz = (n(p + vec3(0,0,eps)) - n(p - vec3(0,0,eps))) / (2.0*eps);
+      return vec3(-dy, dz, -dx) * 0.3;
+    }
+    
+    void main() {
+      vec3 p = position;
+      float t = uTime * 0.4 + seed * 6.28;
+      
+      // Gentle drift via curl field
+      vec3 drift = curl(p * 0.5, t) * 0.18;
+      p += drift * (0.7 + 0.3 * sin(t * 0.6));
+      
+      // Subtle breathing sway
+      float sway = 0.04 * sin(t * 0.8 + leafIndex * 1.2);
+      p.x += sway;
+      p.z += sway * 0.7;
+      
+      // Reveal animation
+      float reveal = smoothstep(0.0, 2.5, uTime);
+      vec3 entry = vec3(p.x, p.y + 8.0 + seed * 4.0, p.z);
+      p = mix(entry, p, reveal);
+      
+      // Palette: warm amber on near-black (El Anatsui metal warmth, subdued)
+      vec3 ochre = vec3(0.78, 0.58, 0.30);
+      vec3 amber = vec3(0.92, 0.68, 0.38);
+      vec3 sienna = vec3(0.52, 0.34, 0.22);
+      vec3 dust = vec3(0.88, 0.80, 0.62);
+      
+      float leafT = leafIndex / 7.0;
+      vec3 baseCol = mix(sienna, ochre, leafT);
+      baseCol = mix(baseCol, amber, phase * 0.4);
+      
+      float shimmer = 0.5 + 0.5 * sin(t * 1.2 + phase * 6.28);
+      vCol = mix(baseCol, dust, shimmer * 0.2);
+      
+      float energy = 0.6 + 0.4 * sin(t * 0.7);
+      vAlpha = (0.5 + 0.3 * energy) * reveal;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.2 + 0.5 * energy) * uPixel * (35.0 / dist) * reveal;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geometry, material);
+scene.add(points);
+
+// Compute bounding box for camera framing
+geometry.computeBoundingSphere();
+const center = geometry.boundingSphere.center;
+controls.target.copy(center);
+camera.position.set(center.x + 8, center.y + 6, center.z + 12);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop() {
+  const elapsed = (performance.now() - start) / 1000;
+  uniforms.uTime.value = elapsed;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

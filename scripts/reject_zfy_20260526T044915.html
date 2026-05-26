@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zfy · courier heatmap depth</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1d22; overflow:hidden;
+               color:#d0f0d5; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">zfy</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x1a1d22, 40, 180);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 60, 80);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1d22, 1);
+document.body.appendChild(renderer.domElement);
+
+// Generate Voronoi-like city grid as graph, now distributed in 3D depth
+const SITES = 60;
+const GRID_SIZE = 40;
+const DEPTH_RANGE = 100; // z spans from -50 to +50
+const sites = [];
+for (let i = 0; i < SITES; i++){
+  sites.push({
+    x: (Math.random()-0.5) * GRID_SIZE,
+    z: (Math.random()-0.5) * DEPTH_RANGE,
+    h: 2 + Math.random() * 8
+  });
+}
+
+sites.forEach(s => { s.elev = s.h * 3.0 + 0.15; });
+
+// Build street graph: connect each site to 2-4 nearest neighbors in 3D
+const graph = sites.map(() => []);
+for (let i = 0; i < SITES; i++){
+  const dists = [];
+  for (let j = 0; j < SITES; j++){
+    if (i === j) continue;
+    const dx = sites[i].x - sites[j].x;
+    const dz = sites[i].z - sites[j].z;
+    dists.push({ idx: j, d: Math.sqrt(dx*dx + dz*dz) });
+  }
+  dists.sort((a,b) => a.d - b.d);
+  const n = 2 + Math.floor(Math.random()*3);
+  for (let k = 0; k < Math.min(n, dists.length); k++){
+    const target = dists[k].idx;
+    if (!graph[i].includes(target)) graph[i].push(target);
+    if (!graph[target].includes(i)) graph[target].push(i);
+  }
+}
+
+// Render buildings as wireframe boxes distributed in depth
+const buildingGroup = new THREE.Group();
+sites.forEach(s => {
+  const geom = new THREE.BoxGeometry(1.2, s.h, 1.2);
+  const edges = new THREE.EdgesGeometry(geom);
+  const mat = new THREE.LineBasicMaterial({ color: 0x3a4a52, transparent: true, opacity: 0.4 });
+  const wire = new THREE.LineSegments(edges, mat);
+  wire.position.set(s.x, s.h * 0.5, s.z);
+  buildingGroup.add(wire);
+});
+scene.add(buildingGroup);
+
+// Render street graph using Line2 for depth-aware fat lines
+const streetLines = [];
+for (let i = 0; i < SITES; i++){
+  for (const j of graph[i]){
+    if (j > i){
+      const positions = [
+        sites[i].x, 0.05, sites[i].z,
+        sites[j].x, 0.05, sites[j].z
+      ];
+      const geometry = new LineGeometry();
+      geometry.setPositions(positions);
+      const material = new LineMaterial({
+        color: 0x4a5560,
+        linewidth: 0.0015,
+        transparent: true,
+        opacity: 0.35,
+        resolution: new THREE.Vector2(innerWidth, innerHeight)
+      });
+      const line = new Line2(geometry, material);
+      scene.add(line);
+      streetLines.push({ line, material });
+    }
+  }
+}
+
+// Ground plane at z=0
+const planeGeom = new THREE.PlaneGeometry(GRID_SIZE*1.4, DEPTH_RANGE*1.2);
+const planeMat = new THREE.MeshBasicMaterial({ color: 0x0f1215, side: THREE.DoubleSide });
+const plane = new THREE.Mesh(planeGeom, planeMat);
+plane.rotation.x = -Math.PI / 2;
+plane.position.y = -0.1;
+scene.add(plane);
+
+// Courier particles: each has a path (sequence of site indices)
+const COURIERS = 120;
+const couriers = [];
+for (let i = 0; i < COURIERS; i++){
+  const start = Math.floor(Math.random() * SITES);
+  let path = [start];
+  let current = start;
+  const hops = 8 + Math.floor(Math.random() * 12);
+  for (let h = 0; h < hops; h++){
+    const neighbors = graph[current];
+    if (!neighbors.length) break;
+    const next = neighbors[Math.floor(Math.random() * neighbors.length)];
+    path.push(next);
+    current = next;
+  }
+  couriers.push({
+    path,
+    segmentIdx: 0,
+    t: 0,
+    speed: 0.3 + Math.random() * 0.5,
+    trail: [],
+    color: Math.random() > 0.5 ? new THREE.Color(0xa0ff5a) : new THREE.Color(0xff4a9a)
+  });
+}
+
+// Trail rendering: each courier uses Line2 for depth-aware trails
+const trailMeshes = couriers.map(c => {
+  const geometry = new LineGeometry();
+  const material = new LineMaterial({
+    vertexColors: true,
+    linewidth: 0.002,
+    transparent: true,
+    opacity: 0.8,
+    blending: THREE.AdditiveBlending,
+    resolution: new THREE.Vector2(innerWidth, innerHeight)
+  });
+  const line = new Line2(geometry, material);
+  scene.add(line);
+  return { geometry, material, line };
+});
+
+function updateCourier(c, dt){
+  if (c.segmentIdx >= c.path.length - 1) {
+    c.segmentIdx = 0;
+    c.t = 0;
+    c.trail = [];
+    return;
+  }
+  c.t += c.speed * dt;
+  if (c.t >= 1){
+    c.segmentIdx++;
+    c.t = 0;
+  }
+  const i0 = c.path[c.segmentIdx];
+  const i1 = c.path[Math.min(c.segmentIdx + 1, c.path.length - 1)];
+  const s0 = sites[i0];
+  const s1 = sites[i1];
+  const x = THREE.MathUtils.lerp(s0.x, s1.x, c.t);
+  const z = THREE.MathUtils.lerp(s0.z, s1.z, c.t);
+  const h0 = s0.elev, h1 = s1.elev;
+  const baseY = THREE.MathUtils.lerp(h0, h1, c.t);
+  const arcY = 4.0 * Math.sin(Math.PI * c.t);
+  const y = baseY + arcY;
+  c.trail.push({ x, y, z, age: 0 });
+  if (c.trail.length > 400) c.trail.shift();
+}
+
+function renderTrail(c, idx){
+  const trail = c.trail;
+  if (trail.length < 2) {
+    trailMeshes[idx].line.visible = false;
+    return;
+  }
+  trailMeshes[idx].line.visible = true;
+  const positions = new Float32Array(trail.length * 3);
+  const colors = new Float32Array(trail.length * 3);
+  for (let i = 0; i < trail.length; i++){
+    positions[i*3]   = trail[i].x;
+    positions[i*3+1] = trail[i].y;
+    positions[i*3+2] = trail[i].z;
+    const fade = (i / trail.length) * 0.7;
+    colors[i*3]   = c.color.r * fade;
+    colors[i*3+1] = c.color.g * fade;
+    colors[i*3+2] = c.color.b * fade;
+  }
+  const { geometry } = trailMeshes[idx];
+  geometry.setPositions(positions);
+  geometry.setColors(colors);
+}
+
+// Ambient light
+const ambient = new THREE.AmbientLight(0x505a66, 0.6);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.4);
+dirLight.position.set(10, 30, 20);
+scene.add(dirLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  // Update Line2 resolution
+  streetLines.forEach(({material}) => {
+    material.resolution.set(innerWidth, innerHeight);
+  });
+  trailMeshes.forEach(({material}) => {
+    material.resolution.set(innerWidth, innerHeight);
+  });
+});
+
+const start = performance.now();
+let lastT = start;
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  const dt = (now - lastT) / 1000;
+  lastT = now;
+
+  // Single slow lateral drift through depth field
+  const driftProgress = (t / 90) % 1;
+  camera.position.x = Math.sin(driftProgress * Math.PI * 2) * 35;
+  camera.position.z = 80 + Math.cos(driftProgress * Math.PI * 2) * 25;
+  camera.position.y = 60 + Math.sin(t * 0.15) * 8;
+  camera.lookAt(0, 0, 0);
+
+  // Update couriers
+  couriers.forEach((c, i) => {
+    updateCourier(c, dt);
+    renderTrail(c, i);
+  });
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  var _pcc=document.getElementById('pc-close');if(_pcc)_pcc.onclick=function(){window.parent!==window?window.parent.postMessage({type:"dismiss-and-next"},"*"):history.back();};
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>

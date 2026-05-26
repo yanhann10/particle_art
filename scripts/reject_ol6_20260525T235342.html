@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ol6 · teardrop / ascent</title>
+<!-- MOTION: drift, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#0a0e1a; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+</style>
+</head>
+<body>
+<div class="id">ol6</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  INTENTION: each teardrop is one breath held — the ascent is collective exhale
+  ARC: sparse teardrops drift upward through navy void; no solid forms, only fine traced arcs
+       that catch light on edges; silhouettes emerge from line alone
+  HOOK: the delicate arcs define shape without filling space — silver whispers on midnight
+  After: h80 crystal calyx → teardrop outline silhouettes (2024)
+         Agnes Martin fine-line grids (1960s) · subtle hand variation over repetition
+*/
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 300);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0e1a, 1);
+document.body.appendChild(renderer.domElement);
+
+// seeded RNG
+let rngState = 0xTEAR;
+function rng() {
+  rngState = (rngState + 0x6D2B79F5) | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// teardrop outline geometry: parametric arc segments
+// teardrop formula: x(t) = sin(t), y(t) = (1 + cos(t)) * (1 - 0.3*cos(t/2))
+// t ∈ [0, 2π] traces full teardrop silhouette
+function createTeardropOutline(segments = 48) {
+  const points = [];
+  for (let i = 0; i <= segments; i++) {
+    const t = (i / segments) * Math.PI * 2;
+    const x = Math.sin(t);
+    const y = (1 + Math.cos(t)) * (1 - 0.3 * Math.cos(t / 2));
+    points.push(new THREE.Vector3(x, y - 1, 0));
+  }
+  return new THREE.BufferGeometry().setFromPoints(points);
+}
+
+const teardropGeom = createTeardropOutline(64);
+
+// material: fine silver-white line, depth-fade
+const lineMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform vec3 uDrift;
+    uniform float uScale;
+    varying float vDepth;
+    void main() {
+      vec3 p = position * uScale;
+      p += uDrift;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uAlpha;
+    varying float vDepth;
+    void main() {
+      float depthFade = smoothstep(100.0, 20.0, vDepth);
+      vec3 col = vec3(0.82, 0.88, 0.95);
+      float alpha = uAlpha * depthFade;
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+// spawn 120 teardrops
+const teardrops = [];
+for (let i = 0; i < 120; i++) {
+  const mat = lineMat.clone();
+  mat.uniforms = {
+    uTime:  { value: 0 },
+    uDrift: { value: new THREE.Vector3(0, 0, 0) },
+    uScale: { value: 1 },
+    uAlpha: { value: 1 }
+  };
+  const line = new THREE.Line(teardropGeom, mat);
+  
+  const scale = 0.3 + rng() * 1.7;
+  const x = (rng() - 0.5) * 60;
+  const y = (rng() - 0.5) * 80 - 20;
+  const z = (rng() - 0.5) * 120;
+  const rotX = (rng() - 0.5) * 0.6;
+  const rotY = (rng() - 0.5) * 1.2;
+  const rotZ = (rng() - 0.5) * 0.8;
+  const driftSpeed = 0.4 + rng() * 0.8;
+  const alpha = 0.35 + rng() * 0.45;
+  
+  line.position.set(x, y, z);
+  line.rotation.set(rotX, rotY, rotZ);
+  mat.uniforms.uScale.value = scale;
+  mat.uniforms.uAlpha.value = alpha;
+  
+  scene.add(line);
+  teardrops.push({ line, mat, startY: y, driftSpeed });
+}
+
+camera.position.set(0, 0, 48);
+camera.lookAt(0, 0, 0);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const t0 = performance.now();
+
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+  
+  // drift teardrops upward
+  teardrops.forEach(td => {
+    td.mat.uniforms.uTime.value = t;
+    const drift = td.driftSpeed * t;
+    td.line.position.y = td.startY + drift;
+    
+    // wrap around when too high
+    if (td.line.position.y > 60) {
+      td.line.position.y = td.startY - 100;
+    }
+  });
+  
+  // subtle camera drift
+  camera.position.x = Math.sin(t * 0.08) * 3;
+  camera.position.y = Math.cos(t * 0.05) * 2;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){location.href='/compare?a='+pid+'&directive='+encodeURIComponent(txt);});
+  };
+})();
+</script>
+</body>
+</html>

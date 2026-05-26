@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>z2r · polar halos · breathing void</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0e1a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">z2r</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0e1a, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0a0e1a, 10, 40);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+camera.lookAt(0, 0, 0);
+
+const N = 102400;
+const positions = new Float32Array(N * 3);
+const velocities = new Float32Array(N * 3);
+const phases = new Float32Array(N);
+
+// Distribute particles at two poles: north (+Y) and south (-Y)
+const POLE_RADIUS = 1.8;
+const POLE_Y = 7.0;
+
+for (let i = 0; i < N; i++) {
+  const isPolar = Math.random() < 0.95; // 95% at poles, 5% in void for depth
+  
+  if (isPolar) {
+    const isNorth = Math.random() < 0.5;
+    const ySign = isNorth ? 1 : -1;
+    
+    // Spherical cap distribution around pole
+    const u = Math.random();
+    const v = Math.random();
+    const theta = 2.0 * Math.PI * u;
+    const phi = Math.acos(1.0 - 2.0 * v * 0.3); // concentrate near pole
+    
+    const r = POLE_RADIUS * (0.3 + Math.random() * 0.7);
+    const x = r * Math.sin(phi) * Math.cos(theta);
+    const z = r * Math.sin(phi) * Math.sin(theta);
+    const y = POLE_Y * ySign + r * Math.cos(phi) * ySign * 0.5;
+    
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+    
+    // Orbital velocities around pole axis
+    const speed = 0.08 + Math.random() * 0.04;
+    velocities[i * 3] = -z * speed;
+    velocities[i * 3 + 1] = 0;
+    velocities[i * 3 + 2] = x * speed;
+  } else {
+    // Void particles for depth cues
+    positions[i * 3] = (Math.random() - 0.5) * 4.0;
+    positions[i * 3 + 1] = (Math.random() - 0.5) * 12.0;
+    positions[i * 3 + 2] = (Math.random() - 0.5) * 4.0;
+    
+    velocities[i * 3] = (Math.random() - 0.5) * 0.02;
+    velocities[i * 3 + 1] = (Math.random() - 0.5) * 0.02;
+    velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.02;
+  }
+  
+  phases[i] = Math.random() * Math.PI * 2.0;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('velocity', new THREE.BufferAttribute(velocities, 3));
+geom.setAttribute('phase', new THREE.BufferAttribute(phases, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() },
+    uBreathPhase: { value: 0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uBreathPhase;
+    attribute vec3 velocity;
+    attribute float phase;
+    varying float vIntensity;
+    varying float vDepth;
+    
+    void main() {
+      // Orbital motion
+      vec3 pos = position + velocity * uTime * 2.0;
+      
+      // Breathing: poles move toward/apart
+      float breathCycle = sin(uBreathPhase) * 0.5 + 0.5; // 0..1
+      float breathAmount = mix(0.85, 1.15, breathCycle);
+      float ySign = sign(pos.y);
+      pos.y *= breathAmount;
+      
+      // Distance from pole center
+      float poleDist = length(vec3(pos.x, abs(pos.y) - 7.0, pos.z));
+      
+      // Brightness: bright at pole core, dim at edges
+      vIntensity = 1.0 - smoothstep(0.0, 3.5, poleDist);
+      vIntensity = pow(vIntensity, 2.0); // sharper falloff
+      
+      vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+      gl_Position = projectionMatrix * mvPosition;
+      
+      vDepth = -mvPosition.z;
+      
+      // Point size: larger near core
+      float coreSize = 2.0 + vIntensity * 3.0;
+      gl_PointSize = coreSize * uPixel * (15.0 / vDepth);
+    }
+  `,
+  fragmentShader: `
+    varying float vIntensity;
+    varying float vDepth;
+    
+    void main() {
+      // Circular sprite
+      vec2 center = gl_PointCoord - 0.5;
+      float dist = length(center);
+      if (dist > 0.5) discard;
+      
+      // Soft glow at core, sharp at edge
+      float alpha = 1.0 - smoothstep(0.25, 0.50, dist);
+      alpha = pow(alpha, 1.5);
+      
+      // Pure cream-white glow
+      vec3 cream = vec3(1.0, 0.98, 0.94);
+      
+      // Intensity based on distance from pole
+      float brightness = vIntensity * 0.85;
+      
+      // Depth fog for void particles
+      float fogFactor = smoothstep(15.0, 30.0, vDepth);
+      brightness *= (1.0 - fogFactor);
+      
+      gl_FragColor = vec4(cream * brightness, alpha * brightness);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Add ambient point lights at poles for atmospheric glow
+const northLight = new THREE.PointLight(0xfff8f0, 0.3, 20);
+northLight.position.set(0, 7, 0);
+scene.add(northLight);
+
+const southLight = new THREE.PointLight(0xfff8f0, 0.3, 20);
+southLight.position.set(0, -7, 0);
+scene.add(southLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let startTime = performance.now();
+
+function loop() {
+  const elapsed = (performance.now() - startTime) / 1000;
+  mat.uniforms.uTime.value = elapsed;
+  
+  // 8-second breath cycle
+  const breathPhase = (elapsed / 8.0) * Math.PI * 2.0;
+  mat.uniforms.uBreathPhase.value = breathPhase;
+  
+  // Camera slow orbit to reveal the void
+  const orbitSpeed = 0.06;
+  camera.position.x = Math.sin(elapsed * orbitSpeed) * 18;
+  camera.position.z = Math.cos(elapsed * orbitSpeed) * 18;
+  camera.position.y = Math.sin(elapsed * orbitSpeed * 0.3) * 3.0;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<!-- MOTION: pulse, intensity: gentle -->
+</body>
+</html>

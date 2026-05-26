@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>a7t · twin sphere clusters · orbit</title>
+<!-- MOTION: orbit, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#050818; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">a7t</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050818, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 20);
+camera.lookAt(0, 0, 0);
+
+const N_PER = 3200;
+const N     = N_PER * 2;
+
+function randn() {
+  return Math.sqrt(-2.0 * Math.log(Math.max(Math.random(), 1e-7))) *
+         Math.cos(2.0 * Math.PI * Math.random());
+}
+
+const pos  = new Float32Array(N * 3);
+const seed = new Float32Array(N);     // per-particle phase seed for shimmer
+
+let k = 0;
+for (let c = 0; c < 2; c++) {
+  const cy = c === 0 ? -6.0 : 6.0;
+  for (let i = 0; i < N_PER; i++) {
+    const x = randn(), y = randn(), z = randn();
+    const r = Math.max(Math.sqrt(x*x + y*y + z*z), 1e-7);
+    const rDist = Math.max(0.15, 2.5 + randn() * 0.8);
+    pos[k * 3]     = (x / r) * rDist;
+    pos[k * 3 + 1] = cy + (y / r) * rDist;
+    pos[k * 3 + 2] = (z / r) * rDist;
+    seed[k] = Math.random() * 6.2831853;
+    k++;
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos,  3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seed, 1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime:  { value: 0.0 },
+    uPixel: { value: Math.min(devicePixelRatio, 2) }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vAlphaScale;
+
+    void main() {
+      // Cluster membership — safe because top cluster min-y ≈ +1.1
+      float cy  = position.y >= 0.0 ? 6.0 : -6.0;
+      float dir = cy > 0.0 ? 1.0 : -1.0;
+
+      vec3 loc = vec3(position.x, position.y - cy, position.z);
+
+      // Primary y-axis orbit at 0.4 rad/s; clusters counter-rotate
+      float angle = dir * uTime * 0.4;
+      float cosA = cos(angle), sinA = sin(angle);
+      vec3 orb = vec3(
+        loc.x * cosA - loc.z * sinA,
+        loc.y,
+        loc.x * sinA + loc.z * cosA
+      );
+
+      // Slow polar precession so spin axis tilts like a gyroscope
+      float prec  = uTime * 0.055;
+      float tilt  = 0.18 * sin(prec + seed);
+      float cosT  = cos(tilt), sinT = sin(tilt);
+      vec3 world  = vec3(
+        orb.x * cosT + orb.y * sinT,
+        -orb.x * sinT + orb.y * cosT,
+        orb.z
+      ) + vec3(0.0, cy, 0.0);
+
+      vec4  mv  = modelViewMatrix * vec4(world, 1.0);
+      float dep = max(4.0, -mv.z);
+      gl_PointSize = max(1.5, 4.0 * uPixel * (18.0 / dep));
+      gl_Position  = projectionMatrix * mv;
+
+      // Gentle shimmer: each particle breathes at its own rate
+      vAlphaScale = 0.75 + 0.25 * sin(uTime * 1.3 + seed);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlphaScale;
+
+    void main() {
+      vec2  uv    = gl_PointCoord - 0.5;
+      float alpha = exp(-dot(uv, uv) * 18.0) * 0.9 * vAlphaScale;
+      if (alpha < 0.005) discard;
+      vec3  col   = vec3(1.0, 0.95, 0.88);
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+scene.add(new THREE.Points(geom, mat));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const t0 = performance.now();
+(function loop() {
+  mat.uniforms.uTime.value = (performance.now() - t0) * 0.001;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

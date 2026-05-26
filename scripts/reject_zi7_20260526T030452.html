@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zi7 · leaf-descent</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0d12; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">zi7 · leaf-descent</div>
+<div class="hint">autumn leaves settling into stillness · hold to observe</div>
+<div class="src">Ryōan-ji garden × biomimetic drift · 100k particles</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0d12, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  const angle = (i * 2.399963) % (Math.PI * 2);
+  const radius = Math.pow(Math.random(), 0.7) * 18.0;
+  init[i*4]   = Math.cos(angle) * radius;
+  init[i*4+1] = Math.sin(angle) * radius;
+  init[i*4+2] = Math.random() * 12.0 + 25.0;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// ---- simulation: soft spiral drift with gentle settling ----
+const simUniforms = {
+  prev:      { value: rtA.texture },
+  uDt:       { value: 0.008 },
+  uTime:     { value: 0.0 },
+  uReveal:   { value: 0.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uTime;
+    uniform float uReveal;
+    varying vec2 vUv;
+    
+    float hash(float n) { return fract(sin(n) * 43758.5453123); }
+    
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      
+      // Individual leaf wobble — each particle has unique phase
+      float leafId = uv.x * 512.0 + uv.y * 512.0 * 320.0;
+      float phase = hash(leafId) * 6.28318;
+      
+      // Gentle spiral current — leaves drift in lazy arcs
+      float spiralAngle = atan(p.y, p.x);
+      float spiralRadius = length(p.xy);
+      float tangentAngle = spiralAngle + 0.3 + sin(uTime * 0.4 + phase) * 0.15;
+      
+      vec2 tangent = vec2(cos(tangentAngle), sin(tangentAngle));
+      vec2 drift = tangent * (0.08 + sin(uTime * 0.6 + phase) * 0.03);
+      
+      // Soft inward pull toward center as leaves settle
+      vec2 toCenter = -normalize(p.xy) * spiralRadius * 0.006;
+      
+      // Vertical descent — gentle downward float
+      float descendSpeed = 0.12 * (1.0 - uReveal * 0.7);
+      
+      // Wobble — leaves tumble slightly as they fall
+      float wobbleX = sin(uTime * 1.3 + phase) * 0.05 * (1.0 - uReveal);
+      float wobbleY = cos(uTime * 1.7 + phase * 1.4) * 0.04 * (1.0 - uReveal);
+      
+      p.xy += (drift + toCenter) * uDt * 2.0;
+      p.x += wobbleX * uDt;
+      p.y += wobbleY * uDt;
+      p.z -= descendSpeed * uDt;
+      
+      // Keep leaves in bounds with soft reflection
+      if (spiralRadius > 22.0) {
+        vec2 norm = normalize(p.xy);
+        p.xy = norm * 22.0;
+      }
+      
+      // Floor at z=0 — leaves settle
+      if (p.z < 0.0) {
+        p.z = 0.0;
+      }
+      
+      age = mod(age + uDt * 0.02, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// ---- render: leaf-shaped particles ----
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, -35, 45);
+camera.lookAt(0, 0, 8);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+const leafIds = new Float32Array(N);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+  leafIds[i] = Math.sin(i * 127.1) * 43758.5453;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+pointsGeom.setAttribute('leafId',   new THREE.BufferAttribute(leafIds, 1));
+
+// Palette: autumn oak — burnt umber, rust ochre, dried maple, paper-white accent
+// #6b3d1f (umber), #b8653e (rust), #d49852 (ochre), #a8916a (khaki), #e8e2d5 (paper)
+const leafColors = [
+  new THREE.Color(0x6b3d1f),
+  new THREE.Color(0xb8653e),
+  new THREE.Color(0xd49852),
+  new THREE.Color(0xa8916a),
+  new THREE.Color(0xe8e2d5)
+];
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:      { value: rtB.texture },
+    uPixel:     { value: renderer.getPixelRatio() },
+    uTime:      { value: 0 },
+    uReveal:    { value: 0.0 },
+    uColors:    { value: leafColors }
+  },
+  transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uTime;
+    uniform float uReveal;
+    attribute vec2 uvIdx;
+    attribute float leafId;
+    varying float vAge;
+    varying float vDepth;
+    varying float vLeafId;
+    varying float vReveal;
+    varying vec3 vWorldPos;
+    
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      vLeafId = leafId;
+      vReveal = uReveal;
+      
+      // Entry transformation: particles start compressed and elevated
+      // then expand and descend into final positions
+      vec3 compressedPos = vec3(p.x * 0.2, p.y + 8.0, p.z * 0.2 + 20.0);
+      vec3 finalPos = p;
+      vec3 pos = mix(compressedPos, finalPos, uReveal);
+      
+      vWorldPos = pos;
+      
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      vDepth = -mv.z;
+      
+      // Leaf size variation — smaller leaves at distance
+      float leafSize = 0.8 + fract(sin(leafId * 78.233)) * 0.6;
+      // Leaves grow into view during reveal
+      float revealScale = mix(0.3, 1.0, smoothstep(0.0, 0.4, uReveal));
+      gl_PointSize = leafSize * uPixel * (50.0 / vDepth) * revealScale * 1.4;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform vec3 uColors[5];
+    varying float vAge;
+    varying float vDepth;
+    varying float vLeafId;
+    varying float vReveal;
+    varying vec3 vWorldPos;
+    
+    float hash(float n) { return fract(sin(n) * 43758.5453123); }
+    
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      
+      // Leaf shape — pointed oval with slight asymmetry
+      float angle = atan(uv.y, uv.x);
+      float radius = length(uv);
+      
+      // Leaf profile — tapered at tip and base
+      float leafProfile = 1.0 - abs(uv.x) * 2.2 - abs(uv.y * 1.1);
+      leafProfile = smoothstep(0.0, 0.3, leafProfile);
+      
+      if (leafProfile < 0.01) discard;
+      
+      // Each leaf gets a color from palette
+      int colorIdx = int(mod(vLeafId * 5.0, 5.0));
+      vec3 leafColor = uColors[colorIdx];
+      
+      // Subtle venation pattern — darker veins
+      float vein = abs(uv.x) * 6.0;
+      vein = smoothstep(0.8, 1.0, fract(vein + vAge * 0.3));
+      leafColor *= mix(0.75, 1.0, vein);
+      
+      // Center spine
+      float spine = smoothstep(0.06, 0.0, abs(uv.x));
+      leafColor = mix(leafColor, leafColor * 0.6, spine * 0.5);
+      
+      // Edge darkening — organic curl
+      float edge = smoothstep(0.5, 0.2, leafProfile);
+      leafColor *= mix(0.7, 1.0, edge);
+      
+      // Depth fade — distant leaves dim into atmosphere
+      float depthFade = smoothstep(60.0, 20.0, vDepth);
+      
+      // Settling opacity — leaves become solid as they land
+      float settleAlpha = smoothstep(-2.0, 8.0, vWorldPos.z);
+      float alpha = leafProfile * depthFade * settleAlpha;
+      
+      // Reveal fade-in
+      alpha *= smoothstep(0.0, 0.35, vReveal);
+      
+      gl_FragColor = vec4(leafColor, alpha * 0.92);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// Ambient fill light — soft overhead illumination like filtered daylight
+const ambient = new THREE.AmbientLight(0xffffff, 0.15);
+scene.add(ambient);
+
+// Directional key light — low autumn sun from side
+const dirLight = new THREE.DirectionalLight(0xffd9b3, 0.25);
+dirLight.position.set(-30, 20, 30);
+scene.add(dirLight);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Reveal timing: 6s ease-in, hold settled state
+function revealCurve(t) {
+  const revealDuration = 6.0;
+  if (t < revealDuration) {
+    const f = t / revealDuration;
+    // Cubic ease-out for smooth deceleration
+    return 1.0 - Math.pow(1.0 - f, 3.0);
+  }
+  return 1.0;
+}
+
+let startTime = performance.now();
+function loop(){
+  const now = performance.now();
+  const tSec = (now - startTime) / 1000;
+
+  const reveal = revealCurve(tSec);
+  simUniforms.uTime.value = tSec;
+  simUniforms.uReveal.value = reveal;
+
+  for (let i = 0; i < 3; i++){
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+
+  pointsMat.uniforms.state.value = rtA.texture;
+  pointsMat.uniforms.uTime.value = tSec;
+  pointsMat.uniforms.uReveal.value = reveal;
+
+  // Camera: gentle descent following the leaves
+  // Starts high, lowers and tilts forward as leaves settle
+  const camHeight = 45.0 - reveal * 15.0;
+  const camY = -35.0 + reveal * 8.0;
+  const lookZ = 8.0 - reveal * 3.0;
+  
+  camera.position.set(0, camY, camHeight);
+  camera.lookAt(0, 0, lookZ);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

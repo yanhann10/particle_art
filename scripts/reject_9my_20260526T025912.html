@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9my · leaf-vein trajectories from curl-field integration</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background: radial-gradient(ellipse at 50% 35%, #1a1612 0%, #0e0c0a 72%, #060504 100%);
+  }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">9my · leaf-vein trajectories from curl-field integration</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Each leaf is a curl-field trajectory traced from a midrib start-point.
+// The curl-field produces genuine physical vein paths, not Perlin-noise fakes.
+// Leaves accumulate in a gentle spiral, each one a true integration.
+// Palette: museum amber paper (#e8dcc8), sepia ink (#4a3828), warm ochre accent (#c8a070).
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0e0c0a, 18, 48);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 12, 28);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// curl-field: div-free vector field for incompressible flow
+function curl(x, y, z, t){
+  const s1 = Math.sin(x * 0.42 + t * 0.18);
+  const c1 = Math.cos(y * 0.38 - t * 0.15);
+  const s2 = Math.sin(z * 0.44 + t * 0.12);
+  const c2 = Math.cos(x * 0.36 - y * 0.40);
+  return {
+    x: s1 * c2 * 0.85 + s2 * 0.25,
+    y: c1 * s2 * 0.70 - s1 * 0.30,
+    z: c2 * s1 * 0.60 + c1 * 0.35
+  };
+}
+
+// leaf class: one midrib trajectory + bilateral secondary veins
+class Leaf {
+  constructor(startPos, birthTime, index){
+    this.birthTime = birthTime;
+    this.index = index;
+    this.midrib = [startPos];     // central vein
+    this.leftVeins = [];          // secondary veins branching left
+    this.rightVeins = [];         // secondary veins branching right
+    this.age = 0;
+    this.complete = false;
+  }
+  grow(t, dt){
+    if (this.complete) return;
+    this.age += dt;
+    const steps = Math.floor(this.age / 0.018);
+    while (this.midrib.length < steps && this.midrib.length < 85){
+      const last = this.midrib[this.midrib.length - 1];
+      const field = curl(last.x, last.y, last.z, t);
+      const next = {
+        x: last.x + field.x * 0.045,
+        y: last.y + field.y * 0.045,
+        z: last.z + field.z * 0.045
+      };
+      this.midrib.push(next);
+      // secondary veins spawn every ~8 steps
+      if (this.midrib.length % 8 === 3){
+        const perpX = -field.y;
+        const perpY =  field.x;
+        const leftStart = {
+          x: last.x + perpX * 0.08,
+          y: last.y + perpY * 0.08,
+          z: last.z
+        };
+        const rightStart = {
+          x: last.x - perpX * 0.08,
+          y: last.y - perpY * 0.08,
+          z: last.z
+        };
+        this.leftVeins.push(this.traceSecondary(leftStart, t, 12));
+        this.rightVeins.push(this.traceSecondary(rightStart, t, 12));
+      }
+    }
+    if (this.midrib.length >= 85) this.complete = true;
+  }
+  traceSecondary(start, t, steps){
+    const vein = [start];
+    for (let i = 0; i < steps; i++){
+      const last = vein[vein.length - 1];
+      const field = curl(last.x, last.y, last.z, t + i * 0.02);
+      vein.push({
+        x: last.x + field.x * 0.032,
+        y: last.y + field.y * 0.032,
+        z: last.z + field.z * 0.032
+      });
+    }
+    return vein;
+  }
+}
+
+const leaves = [];
+const MAX_LEAVES = 32;
+let globalTime = 0;
+
+// spawn leaves in a gentle golden-ratio spiral
+function spawnLeaf(index){
+  const PHI = 2.399963;  // golden angle
+  const angle = index * PHI;
+  const r = Math.sqrt(index) * 0.65;
+  const startPos = {
+    x: Math.cos(angle) * r,
+    y: Math.sin(angle) * r - 2.0,
+    z: index * 0.15 - 2.0
+  };
+  leaves.push(new Leaf(startPos, globalTime, index));
+}
+
+// rendering: custom line geometry with fade
+const lineMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uFogColor: { value: new THREE.Color(0x0e0c0a) },
+    uFogNear: { value: 18 },
+    uFogFar: { value: 48 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    attribute float alpha;
+    attribute vec3 color;
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying float vDepth;
+    void main(){
+      vColor = color;
+      vAlpha = alpha;
+      vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+      vDepth = -mvPos.z;
+      gl_Position = projectionMatrix * mvPos;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uFogColor;
+    uniform float uFogNear;
+    uniform float uFogFar;
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying float vDepth;
+    void main(){
+      float fogFactor = smoothstep(uFogNear, uFogFar, vDepth);
+      vec3 col = mix(vColor, uFogColor, fogFactor);
+      gl_FragColor = vec4(col, vAlpha * (1.0 - fogFactor));
+    }
+  `
+});
+
+function buildLineGeometry(veins, baseColor, alphaMul){
+  const positions = [];
+  const colors = [];
+  const alphas = [];
+  for (const vein of veins){
+    for (let i = 0; i < vein.length - 1; i++){
+      const a = vein[i];
+      const b = vein[i + 1];
+      positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+      const fade = 1.0 - (i / vein.length) * 0.4;
+      for (let j = 0; j < 2; j++){
+        colors.push(baseColor.r, baseColor.g, baseColor.b);
+        alphas.push(fade * alphaMul);
+      }
+    }
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geom.setAttribute('alpha', new THREE.Float32BufferAttribute(alphas, 1));
+  return geom;
+}
+
+const lineObjects = [];
+function rebuildLines(){
+  for (const obj of lineObjects) scene.remove(obj);
+  lineObjects.length = 0;
+
+  for (const leaf of leaves){
+    if (leaf.midrib.length < 2) continue;
+    // midrib: sepia ink
+    const midColor = new THREE.Color(0x4a3828);
+    const midGeom = buildLineGeometry([leaf.midrib], midColor, 0.85);
+    const midLine = new THREE.LineSegments(midGeom, lineMaterial);
+    scene.add(midLine);
+    lineObjects.push(midLine);
+
+    // secondary veins: warm ochre, lighter alpha
+    if (leaf.leftVeins.length > 0 || leaf.rightVeins.length > 0){
+      const secColor = new THREE.Color(0xc8a070);
+      const allSec = [...leaf.leftVeins, ...leaf.rightVeins];
+      const secGeom = buildLineGeometry(allSec, secColor, 0.50);
+      const secLine = new THREE.LineSegments(secGeom, lineMaterial);
+      scene.add(secLine);
+      lineObjects.push(secLine);
+    }
+  }
+}
+
+// paper-grain background dust
+const dustGeom = new THREE.BufferGeometry();
+const dustCount = 800;
+const dustPos = new Float32Array(dustCount * 3);
+for (let i = 0; i < dustCount; i++){
+  dustPos[i*3]   = (Math.random() - 0.5) * 60;
+  dustPos[i*3+1] = (Math.random() - 0.5) * 60;
+  dustPos[i*3+2] = (Math.random() - 0.5) * 60;
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dustMat = new THREE.PointsMaterial({ color: 0xe8dcc8, size: 0.08, transparent: true, opacity: 0.12, fog: true });
+const dust = new THREE.Points(dustGeom, dustMat);
+scene.add(dust);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+let nextSpawn = 0;
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  globalTime = now / 1000;
+  lineMaterial.uniforms.uTime.value = globalTime;
+
+  // spawn leaves gradually
+  if (leaves.length < MAX_LEAVES && globalTime > nextSpawn){
+    spawnLeaf(leaves.length);
+    nextSpawn = globalTime + 0.45;
+  }
+
+  // grow existing leaves
+  for (const leaf of leaves) leaf.grow(globalTime, dt);
+
+  // rebuild line geometry every 4 frames
+  if (Math.floor(now / 16) % 4 === 0) rebuildLines();
+
+  // camera slow orbit
+  const ang = globalTime * 0.08;
+  camera.position.x = Math.sin(ang) * 28;
+  camera.position.z = Math.cos(ang) * 28;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

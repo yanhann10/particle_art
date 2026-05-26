@@ -61,16 +61,16 @@ W, H = 800, 500
 def _warmup_for(piece_id: str) -> int:
     meta_path = PIECES / piece_id / "meta.json"
     if not meta_path.exists():
-        return 2500
+        return 5000
     try:
         m = json.loads(meta_path.read_text())
     except Exception:
-        return 2500
+        return 5000
     if isinstance(m.get("warmup_ms"), (int, float)):
         return int(m["warmup_ms"])
     if m.get("model_source") or any("Loader" in s for s in m.get("stack", [])):
         return 9000
-    return 2500
+    return 5000
 
 
 def validate(piece_ids: list[str], record_clip: bool = False,

@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>py9 · dipole field lines</title>
+<!-- MOTION: flow, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0b; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">py9</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Dipole magnetic field: B = (m/r³)[3(m̂·r̂)r̂ - m̂]
+// Two poles at ±Y, field lines converge/diverge with extreme density falloff.
+// 120k particles trace field vectors, cream on near-black, standard alpha.
+
+const W = 400, H = 300;
+const N = W * H; // 120k
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0b, 1);
+document.body.appendChild(renderer.domElement);
+
+// ---- ping-pong state RTs ----
+const rtParams = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+                   wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// init: seed particles in a sphere around origin, most near poles
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  // bias toward poles: cluster more particles near Y axis
+  const theta = Math.acos(1.0 - 2.0 * Math.random()); // uniform sphere
+  const phi = Math.random() * Math.PI * 2;
+  const r = 5.0 + Math.random() * 15.0;
+  const x = r * Math.sin(theta) * Math.cos(phi);
+  const y = r * Math.cos(theta);
+  const z = r * Math.sin(theta) * Math.sin(phi);
+  // bias: push 70% toward poles
+  const bias = Math.random();
+  init[i*4]   = bias < 0.7 ? x * 0.5 : x;
+  init[i*4+1] = bias < 0.7 ? (y > 0 ? 18 : -18) + y * 0.3 : y;
+  init[i*4+2] = bias < 0.7 ? z * 0.5 : z;
+  init[i*4+3] = Math.random(); // phase
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+// ---- simulation pass: integrate dipole field ----
+const simUniforms = {
+  prev: { value: rtA.texture },
+  uDt:  { value: 0.08 },
+  uPoleY: { value: 20.0 }
+};
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt;
+    uniform float uPoleY;
+    varying vec2 vUv;
+    
+    vec3 dipoleField(vec3 p, vec3 polePos, float polarity){
+      vec3 r = p - polePos;
+      float rLen = length(r);
+      if (rLen < 0.5) return vec3(0.0); // avoid singularity
+      vec3 rHat = r / rLen;
+      vec3 m = vec3(0.0, polarity, 0.0); // magnetic moment along Y
+      float mDotR = dot(m, rHat);
+      float r3 = rLen * rLen * rLen;
+      return (3.0 * mDotR * rHat - m) / r3;
+    }
+    
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+      
+      // two poles: north at +Y, south at -Y
+      vec3 poleN = vec3(0.0, uPoleY, 0.0);
+      vec3 poleS = vec3(0.0, -uPoleY, 0.0);
+      vec3 B = dipoleField(p, poleN, 100.0) + dipoleField(p, poleS, -100.0);
+      
+      // normalize and step
+      float bLen = length(B);
+      if (bLen > 0.01){
+        B = normalize(B) * 2.5;
+      } else {
+        B = vec3(0.0);
+      }
+      
+      p += B * uDt;
+      
+      // boundary: reset if too far
+      float dist = length(p);
+      if (dist > 60.0){
+        // respawn near poles
+        float side = fract(age * 137.5) > 0.5 ? 1.0 : -1.0;
+        p = vec3(
+          (fract(age * 47.3) - 0.5) * 4.0,
+          side * (uPoleY + (fract(age * 23.7) - 0.5) * 2.0),
+          (fract(age * 67.9) - 0.5) * 4.0
+        );
+      }
+      
+      age = mod(age + uDt * 0.01, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+// ---- render pass: draw lines ----
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(45, 30, 45);
+camera.lookAt(0, 0, 0);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pointsGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uPoleY: { value: 20.0 }
+  },
+  transparent: true, depthWrite: false, 
+  blending: THREE.NormalBlending, // standard alpha, not additive
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    uniform float uPoleY;
+    attribute vec2 uvIdx;
+    varying float vDensity;
+    varying float vAge;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      
+      // density: distance to nearest pole
+      float distN = length(p - vec3(0.0, uPoleY, 0.0));
+      float distS = length(p - vec3(0.0, -uPoleY, 0.0));
+      float minDist = min(distN, distS);
+      vDensity = 1.0 / (1.0 + minDist * 0.3); // extreme falloff
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (0.8 + vDensity * 1.0) * uPixel * (80.0 / max(dist, 10.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDensity;
+    varying float vAge;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      
+      // cream on near-black: #f2ebe0 at full density, fade to transparent in void
+      vec3 cream = vec3(0.95, 0.92, 0.88);
+      float alpha = vDensity * 0.65 * (1.0 - smoothstep(0.0, 0.25, r));
+      gl_FragColor = vec4(cream, alpha);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastTime = performance.now();
+function loop(){
+  const now = performance.now();
+  lastTime = now;
+  
+  // step sim
+  simUniforms.prev.value = rtA.texture;
+  renderer.setRenderTarget(rtB);
+  renderer.render(simScene, camOrtho);
+  const tmp = rtA; rtA = rtB; rtB = tmp;
+  
+  renderer.setRenderTarget(null);
+  pointsMat.uniforms.state.value = rtA.texture;
+  
+  // slow camera orbit
+  const ang = now * 0.00008;
+  camera.position.x = Math.cos(ang) * 50;
+  camera.position.z = Math.sin(ang) * 50;
+  camera.position.y = 30 + Math.sin(ang * 0.7) * 8;
+  camera.lookAt(0, 0, 0);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

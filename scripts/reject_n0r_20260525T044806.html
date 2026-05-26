@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>n0r · recursive skeleton descent</title>
+<!-- MOTION: zoom, intensity: vigorous -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background: radial-gradient(circle at 50% 30%, #1a1520 0%, #0e0a12 60%, #050308 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">n0r · recursive skeleton descent</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Camera dolly-in loop over self-similar recursive skeleton — each depth level
+// mutates particle density and hue ±12% creating infinite zoom with variation.
+//
+// Infinite zoom is achieved via nested branching: at each scale, branches split
+// and self-similar sub-branches spawn. As camera dives toward the center, we
+// regenerate geometry at higher detail levels and discard far layers, creating
+// seamless descent. Hue rotates ±12% per recursion depth so viewer perceives
+// depth layers through color, not just scale. Particle density oscillates ±12%
+// per level to create visual texture gradient.
+//
+// Inspired by: recursive L-systems (Aristid Lindenmayer), fractal zoom art
+// (Mandelbrot set zoom aesthetics), and spinal-column metaphor from parent sav.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x050308, 8, 48);
+const camera = new THREE.PerspectiveCamera(65, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050308, 1);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── recursive skeleton generator
+// Each branch: { pos: [x,y,z], dir: [dx,dy,dz], scale, depth, hueShift, densityMod }
+function generateSkeleton(origin, direction, scale, depth, maxDepth, hueShift, densityMod){
+  if (depth > maxDepth) return [];
+  const branches = [];
+  const len = scale * 2.2;
+  const end = [
+    origin[0] + direction[0] * len,
+    origin[1] + direction[1] * len,
+    origin[2] + direction[2] * len
+  ];
+  // main segment particles
+  const segmentParticles = Math.floor(28 * densityMod * scale);
+  for (let i = 0; i < segmentParticles; i++){
+    const t = i / segmentParticles;
+    branches.push({
+      pos: [
+        origin[0] + direction[0] * len * t,
+        origin[1] + direction[1] * len * t,
+        origin[2] + direction[2] * len * t
+      ],
+      scale: scale * (1.0 - t * 0.15),
+      depth,
+      hueShift,
+      densityMod
+    });
+  }
+  // spawn 3 child branches with rotation + scale decay
+  const childScale = scale * 0.68;
+  const childHue = hueShift + (Math.random() - 0.5) * 0.24; // ±12% hue shift per level
+  const childDensity = densityMod * (0.88 + Math.random() * 0.24); // ±12% density
+  if (childScale > 0.08){
+    const angles = [
+      { pitch: 0.55, yaw: 0 },
+      { pitch: 0.48, yaw: 2.094 },
+      { pitch: 0.52, yaw: -2.094 }
+    ];
+    for (let a of angles){
+      // rotate direction vector
+      const cosP = Math.cos(a.pitch), sinP = Math.sin(a.pitch);
+      const cosY = Math.cos(a.yaw), sinY = Math.sin(a.yaw);
+      const d = [...direction];
+      // pitch rotation around perpendicular axis
+      const perp = [d[1], -d[0], 0];
+      const plen = Math.sqrt(perp[0]*perp[0] + perp[1]*perp[1] + perp[2]*perp[2]) || 1;
+      perp[0] /= plen; perp[1] /= plen; perp[2] /= plen;
+      const rotP = [
+        d[0]*cosP + (perp[1]*d[2] - perp[2]*d[1])*sinP,
+        d[1]*cosP + (perp[2]*d[0] - perp[0]*d[2])*sinP,
+        d[2]*cosP + (perp[0]*d[1] - perp[1]*d[0])*sinP
+      ];
+      // yaw rotation around original direction
+      const rotY = [
+        rotP[0]*Math.cos(a.yaw) - rotP[1]*Math.sin(a.yaw),
+        rotP[0]*Math.sin(a.yaw) + rotP[1]*Math.cos(a.yaw),
+        rotP[2]
+      ];
+      const child = generateSkeleton(end, rotY, childScale, depth + 1, maxDepth, childHue, childDensity);
+      branches.push(...child);
+    }
+  }
+  return branches;
+}
+
+// ────────────── infinite zoom state
+let zoomPhase = 0.0; // 0..1 within current scale level
+let currentDepth = 3; // we'll regenerate geometry when camera crosses thresholds
+let skeleton = generateSkeleton([0, 0, 0], [0, 1, 0], 1.0, 0, currentDepth, 0.0, 1.0);
+
+function rebuildGeometry(){
+  skeleton = generateSkeleton([0, 0, 0], [0, 1, 0], 1.0, 0, currentDepth, 0.0, 1.0);
+  const pos = new Float32Array(skeleton.length * 3);
+  const scl = new Float32Array(skeleton.length);
+  const hue = new Float32Array(skeleton.length);
+  const dep = new Float32Array(skeleton.length);
+  for (let i = 0; i < skeleton.length; i++){
+    pos[i*3]     = skeleton[i].pos[0];
+    pos[i*3 + 1] = skeleton[i].pos[1];
+    pos[i*3 + 2] = skeleton[i].pos[2];
+    scl[i] = skeleton[i].scale;
+    hue[i] = skeleton[i].hueShift;
+    dep[i] = skeleton[i].depth;
+  }
+  geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geom.setAttribute('aScale', new THREE.BufferAttribute(scl, 1));
+  geom.setAttribute('aHue', new THREE.BufferAttribute(hue, 1));
+  geom.setAttribute('aDepth', new THREE.BufferAttribute(dep, 1));
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.aScale.needsUpdate = true;
+  geom.attributes.aHue.needsUpdate = true;
+  geom.attributes.aDepth.needsUpdate = true;
+}
+
+const geom = new THREE.BufferGeometry();
+rebuildGeometry();
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uZoom:  { value: 0 }
+};
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uZoom;
+    attribute float aScale;
+    attribute float aHue;
+    attribute float aDepth;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      // oscillate particles radially per depth layer (breathing skeleton)
+      float breathe = sin(uTime * 0.6 + aDepth * 1.2) * 0.08 * aScale;
+      vec3 radial = normalize(p + vec3(0.001, 0.001, 0.001));
+      p += radial * breathe;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = aScale * 18.0 * uPixel * (20.0 / dist);
+      vAlpha = smoothstep(45.0, 12.0, dist) * smoothstep(0.2, 2.0, dist);
+      // hue-based color: base cyan-violet spine, shifts ±12% per recursion depth
+      float h = 0.58 + aHue; // base hue in cyan-violet range
+      h = fract(h); // wrap
+      vec3 base = vec3(0.42, 0.55, 0.78); // steel blue
+      vec3 warm = vec3(0.78, 0.52, 0.68); // warm violet
+      vec3 cold = vec3(0.32, 0.72, 0.82); // cyan
+      vCol = mix(mix(cold, base, smoothstep(0.3, 0.6, h)), warm, smoothstep(0.6, 0.9, h));
+      // depth fade — deeper layers glow cooler
+      vCol = mix(vCol, cold * 0.7, aDepth / 8.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = now / 1000;
+  
+  // infinite zoom: camera dives toward origin along +Y, looping every 12 units
+  const zoomSpeed = 0.35;
+  zoomPhase += dt * zoomSpeed;
+  const zoomCycle = Math.floor(zoomPhase / 12.0);
+  const zoomLocal = (zoomPhase % 12.0);
+  
+  // camera position: start at z=22, dive to z=10 over 12 seconds, then reset + increase depth
+  const zStart = 22;
+  const zEnd = 10;
+  const z = zStart - (zStart - zEnd) * (zoomLocal / 12.0);
+  camera.position.set(0, 0, z);
+  camera.lookAt(0, 2, 0);
+  
+  // when zoom completes a cycle, increase recursion depth and regenerate
+  const targetDepth = 3 + zoomCycle;
+  if (currentDepth < targetDepth){
+    currentDepth = targetDepth;
+    rebuildGeometry();
+  }
+  
+  uniforms.uZoom.value = zoomPhase;
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

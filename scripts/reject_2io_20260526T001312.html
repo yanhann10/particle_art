@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2io · folded leaves · textile</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0e0b08; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">2io</div>
+<div class="hint">drag to orbit · scroll to zoom · click to regenerate</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(12, 8, 16);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0e0b08, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 2, 0);
+
+const N = 80000;
+let geom, points;
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0 },
+};
+
+/* ── Folded leaf geometry builder ── 
+   Each leaf is a curved strip (like a fern frond mid-uncurl or palm blade).
+   We build 7 distinct leaf-twirl elements at varying scale/rotation. */
+
+function buildLeafStrip(seed, scale, rotation, tilt, curlFactor){
+  /* strip: 40 segments along length, 8 across width */
+  const segsL = 40, segsW = 8;
+  const positions = [];
+  const uvs = [];
+  const seeds = [];
+  
+  const rng = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+
+  const len = 5.0 * scale;
+  const wid = 1.2 * scale;
+  
+  for (let i = 0; i <= segsL; i++){
+    const u = i / segsL;
+    const x = (u - 0.5) * len;
+    /* curl: the strip twists along its length */
+    const curlAngle = u * Math.PI * curlFactor;
+    const midVein = new THREE.Vector3(x, 0, 0);
+    
+    for (let j = 0; j <= segsW; j++){
+      const v = j / segsW;
+      const y = (v - 0.5) * wid;
+      /* leaf bends upward and curls */
+      const lift = u * u * 2.0 * scale;
+      const localY = y * Math.cos(curlAngle);
+      const localZ = y * Math.sin(curlAngle);
+      
+      const p = new THREE.Vector3(x, localY + lift, localZ);
+      
+      /* apply rotation and tilt */
+      p.applyAxisAngle(new THREE.Vector3(0,1,0), rotation);
+      p.applyAxisAngle(new THREE.Vector3(1,0,0), tilt);
+      
+      positions.push(p.x, p.y, p.z);
+      uvs.push(u, v);
+      seeds.push(rng());
+    }
+  }
+  
+  return { positions, uvs, seeds };
+}
+
+function buildLeafBouquet(){
+  /* 7 leaf elements arranged in a loose spiral bouquet */
+  const leaves = [
+    { seed:1001, scale:1.0, rotation:0.0,       tilt:-0.3, curl:1.2 },
+    { seed:2003, scale:0.85, rotation:0.9,      tilt:-0.5, curl:1.5 },
+    { seed:3007, scale:1.1, rotation:1.8,       tilt:-0.2, curl:0.9 },
+    { seed:4013, scale:0.75, rotation:2.7,      tilt:-0.6, curl:1.8 },
+    { seed:5021, scale:0.95, rotation:3.6,      tilt:-0.4, curl:1.0 },
+    { seed:6029, scale:1.05, rotation:4.5,      tilt:-0.3, curl:1.3 },
+    { seed:7039, scale:0.80, rotation:5.4,      tilt:-0.5, curl:1.6 },
+  ];
+  
+  const allPos = [];
+  const allUV = [];
+  const allSeeds = [];
+  
+  for (const leaf of leaves){
+    const strip = buildLeafStrip(leaf.seed, leaf.scale, leaf.rotation, leaf.tilt, leaf.curl);
+    allPos.push(...strip.positions);
+    allUV.push(...strip.uvs);
+    allSeeds.push(...strip.seeds);
+  }
+  
+  /* now scatter N particles across these strips */
+  const totalVerts = allPos.length / 3;
+  const positions = new Float32Array(N * 3);
+  const uvCoords = new Float32Array(N * 2);
+  const particleSeeds = new Float32Array(N);
+  
+  for (let i = 0; i < N; i++){
+    const idx = Math.floor(Math.random() * totalVerts);
+    positions[i*3]   = allPos[idx*3]   + (Math.random()-0.5)*0.12;
+    positions[i*3+1] = allPos[idx*3+1] + (Math.random()-0.5)*0.12;
+    positions[i*3+2] = allPos[idx*3+2] + (Math.random()-0.5)*0.12;
+    uvCoords[i*2]    = allUV[idx*2];
+    uvCoords[i*2+1]  = allUV[idx*2+1];
+    particleSeeds[i] = allSeeds[idx];
+  }
+  
+  return { positions, uvCoords, particleSeeds };
+}
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  alphaTest: 0.5,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    attribute vec2 uvCoord;
+    attribute float seed;
+    varying vec2 vUV;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = position;
+      float t = uTime * 0.4 + seed * 6.28;
+
+      /* gentle drift — leaves settling */
+      p.y += 0.08 * sin(t * 0.5 + p.x * 0.4) * (1.0 - uReady * 0.7);
+      p.x += 0.05 * cos(t * 0.6 + p.z * 0.3);
+      
+      /* reveal: leaves fall into place from above */
+      vec3 entry = vec3(p.x * 0.3, 15.0 + seed * 10.0, p.z * 0.3);
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      /* ── El Anatsui textile palette: ochre, copper, rust, dust ── */
+      float uVal = uvCoord.x;
+      float vVal = uvCoord.y;
+      
+      vec3 ochre  = vec3(0.82, 0.62, 0.35);
+      vec3 copper = vec3(0.70, 0.44, 0.26);
+      vec3 rust   = vec3(0.56, 0.36, 0.24);
+      vec3 dust   = vec3(0.90, 0.82, 0.64);
+      
+      /* warp: ochre to copper along length */
+      vec3 warp = mix(ochre, copper, uVal);
+      /* weft: rust to dust across width */
+      vec3 weft = mix(rust, dust, vVal);
+      
+      /* textile weave: checkerboard mix */
+      float weaveU = fract(uVal * 18.0);
+      float weaveV = fract(vVal * 12.0);
+      float weavePattern = step(0.5, weaveU) == step(0.5, weaveV) ? 0.0 : 1.0;
+      
+      vec3 col = mix(warp, weft, weavePattern * 0.6);
+      
+      /* edge darkening for depth */
+      float edgeDist = min(vVal, 1.0 - vVal) * 2.0;
+      col *= 0.7 + 0.3 * edgeDist;
+      
+      /* shimmer */
+      float shimmer = 0.5 + 0.5 * sin(t * 1.2 + uVal * 8.0);
+      col += vec3(0.08, 0.05, 0.02) * shimmer * edgeDist;
+      
+      vCol = col;
+      vUV = uvCoord;
+      vAlpha = 0.85;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * (50.0/dist) * (0.3 + 0.7*uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUV;
+    varying vec3 vCol;
+    varying float vAlpha;
+    
+    void main(){
+      /* hard-edged sprite: square textile threads */
+      vec2 d = abs(gl_PointCoord - 0.5);
+      float edge = max(d.x, d.y);
+      
+      /* alphaTest will discard if alpha < 0.5 */
+      float alpha = step(edge, 0.42) * vAlpha;
+      
+      gl_FragColor = vec4(vCol, alpha);
+    }
+  `
+});
+
+let revealStart = 0;
+
+function regrow(){
+  const data = buildLeafBouquet();
+  
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    geom.setAttribute('uvCoord', new THREE.BufferAttribute(data.uvCoords, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(data.particleSeeds, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(data.positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.uvCoord.array.set(data.uvCoords);
+    geom.attributes.uvCoord.needsUpdate = true;
+    geom.attributes.seed.array.set(data.particleSeeds);
+    geom.attributes.seed.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+  revealStart = performance.now();
+}
+
+regrow();
+addEventListener('click', regrow);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  if (revealStart > 0){
+    uniforms.uReady.value = Math.min(1.0, (now - revealStart) / 2500);
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>

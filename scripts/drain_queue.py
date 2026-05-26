@@ -195,14 +195,41 @@ def main() -> None:
         )
         log(f"  ▶ critic/evaluator  PID {critic_proc.pid}  → .logs/{log_path.name}")
 
-    log("Waiting for all workers…")
+    log(f"Waiting for {len(pieces)} worker(s)…")
     done: set[str] = set()
+    start_time = time.time()
+    completion_times: list[float] = []
+    last_progress_log = start_time
+
     while len(done) < len(procs):
         for piece, p in procs:
             if piece not in done and p.poll() is not None:
                 rc = p.returncode
-                log(f"  {'✓' if rc == 0 else '✗'} {piece} done (rc={rc})")
+                elapsed = time.time() - start_time
+                completion_times.append(elapsed)
+                log(f"  {'✓' if rc == 0 else '✗'} {piece} done in {elapsed:.0f}s (rc={rc})")
                 done.add(piece)
+
+        # Progress update every 30s
+        now = time.time()
+        if now - last_progress_log >= 30 and len(done) > 0 and len(done) < len(procs):
+            elapsed = now - start_time
+            avg_per_piece = elapsed / len(done) if done else 0
+            remaining = len(procs) - len(done)
+
+            # Count how many pieces in queue are not yet started
+            taste = json.loads(TASTE.read_text())
+            all_in_queue = list(taste.get("iterate_when_chosen", {}).keys())
+            claimed = _clean_stale(_load_claims())
+            yet_to_start = len([p for p in all_in_queue if p not in claimed])
+
+            if avg_per_piece > 0:
+                eta_sec = remaining * avg_per_piece
+                eta_min = int(eta_sec // 60)
+                log(f"  {len(done)}/{len(procs)} done · {remaining} in-flight · ~{eta_min}m remaining · {yet_to_start} pieces yet to queue")
+
+            last_progress_log = now
+
         time.sleep(5)
 
     if critic_proc:

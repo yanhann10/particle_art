@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cpi · folded leaves (textile density)</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0e0b08; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">cpi</div>
+<div class="hint">drag to orbit · scroll to zoom · click to regrow</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── folded leaf geometry builder ── */
+function makeLeafStrip(seed, scale, curlStrength, segments = 32){
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+  
+  // leaf profile: wide in middle, tapered ends
+  const widthProfile = t => {
+    const s = Math.sin(t * Math.PI);
+    return s * s * 0.5 * scale;
+  };
+  
+  // curl curve: parametric spine
+  const rng = (s) => {
+    s = s ^ (s << 13);
+    s = s ^ (s >> 17);
+    s = s ^ (s << 5);
+    return ((s >>> 0) / 4294967296);
+  };
+  
+  let seedInt = Math.floor(seed * 1e9) >>> 0;
+  const twist = rng(seedInt++) * Math.PI * 2;
+  const curlDir = rng(seedInt++) > 0.5 ? 1 : -1;
+  const lean = (rng(seedInt++) - 0.5) * 0.4;
+  
+  // spine curve with curl
+  const spine = (t) => {
+    const x = Math.sin(t * curlStrength * curlDir + twist) * t * scale * 2;
+    const y = t * scale * 3;
+    const z = Math.cos(t * curlStrength * curlDir * 0.7 + twist) * t * scale * 1.2 + lean * t * scale * 2;
+    return new THREE.Vector3(x, y, z);
+  };
+  
+  // build strip geometry
+  for (let i = 0; i <= segments; i++){
+    const t = i / segments;
+    const center = spine(t);
+    const width = widthProfile(t);
+    
+    // tangent for perpendicular
+    const epsilon = 0.01;
+    const tang = spine(Math.min(1, t + epsilon)).sub(center).normalize();
+    const perp = new THREE.Vector3(-tang.z, 0, tang.x).normalize();
+    
+    // left and right edge vertices
+    const left = center.clone().addScaledVector(perp, width);
+    const right = center.clone().addScaledVector(perp, -width);
+    
+    positions.push(left.x, left.y, left.z);
+    positions.push(right.x, right.y, right.z);
+    
+    uvs.push(0, t);
+    uvs.push(1, t);
+  }
+  
+  // triangle strip indices
+  for (let i = 0; i < segments; i++){
+    const base = i * 2;
+    indices.push(base, base + 1, base + 2);
+    indices.push(base + 1, base + 3, base + 2);
+  }
+  
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  
+  return geom;
+}
+
+/* ── procedural leaf texture via point sprites ── */
+function makeLeafParticles(leafGeom, density, seed){
+  const posAttr = leafGeom.attributes.position;
+  const uvAttr = leafGeom.attributes.uv;
+  const indexArr = leafGeom.index.array;
+  
+  const triangleCount = indexArr.length / 3;
+  const particleCount = Math.floor(triangleCount * density);
+  
+  const positions = new Float32Array(particleCount * 3);
+  const seeds = new Float32Array(particleCount);
+  const normals = new Float32Array(particleCount * 3);
+  
+  let seedInt = Math.floor(seed * 1e9) >>> 0;
+  const rng = () => {
+    seedInt = seedInt ^ (seedInt << 13);
+    seedInt = seedInt ^ (seedInt >> 17);
+    seedInt = seedInt ^ (seedInt << 5);
+    return ((seedInt >>> 0) / 4294967296);
+  };
+  
+  for (let i = 0; i < particleCount; i++){
+    const triIdx = Math.floor(rng() * triangleCount) * 3;
+    const i0 = indexArr[triIdx];
+    const i1 = indexArr[triIdx + 1];
+    const i2 = indexArr[triIdx + 2];
+    
+    const a = new THREE.Vector3(
+      posAttr.getX(i0),
+      posAttr.getY(i0),
+      posAttr.getZ(i0)
+    );
+    const b = new THREE.Vector3(
+      posAttr.getX(i1),
+      posAttr.getY(i1),
+      posAttr.getZ(i1)
+    );
+    const c = new THREE.Vector3(
+      posAttr.getX(i2),
+      posAttr.getY(i2),
+      posAttr.getZ(i2)
+    );
+    
+    // barycentric sample
+    let r1 = rng();
+    let r2 = rng();
+    if (r1 + r2 > 1) {
+      r1 = 1 - r1;
+      r2 = 1 - r2;
+    }
+    const r3 = 1 - r1 - r2;
+    
+    const p = new THREE.Vector3();
+    p.addScaledVector(a, r1);
+    p.addScaledVector(b, r2);
+    p.addScaledVector(c, r3);
+    
+    positions[i * 3] = p.x;
+    positions[i * 3 + 1] = p.y;
+    positions[i * 3 + 2] = p.z;
+    
+    seeds[i] = rng();
+    
+    // compute face normal
+    const ab = b.clone().sub(a);
+    const ac = c.clone().sub(a);
+    const n = ab.cross(ac).normalize();
+    normals[i * 3] = n.x;
+    normals[i * 3 + 1] = n.y;
+    normals[i * 3 + 2] = n.z;
+  }
+  
+  return { positions, seeds, normals };
+}
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 8, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0e0b08, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 3, 0);
+
+const group = new THREE.Group();
+scene.add(group);
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReveal: { value: 0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  alphaTest: 0.55,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReveal;
+    attribute float seed;
+    attribute vec3 normal;
+    varying vec3 vCol;
+    varying float vBright;
+    
+    vec3 hsv2rgb(vec3 c){
+      vec4 K=vec4(1.,2./3.,1./3.,3.);
+      vec3 p=abs(fract(c.xxx+K.xyz)*6.-K.www);
+      return c.z*mix(K.xxx,clamp(p-K.xxx,0.,1.),c.y);
+    }
+    
+    void main(){
+      vec3 p = position;
+      
+      // reveal animation: leaves unfurl from center
+      vec3 center = vec3(0., 3., 0.);
+      vec3 entry = center + normalize(p - center) * 0.2;
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReveal));
+      
+      // gentle drift
+      float t = uTime * 0.4 + seed * 6.28;
+      p.x += sin(t * 0.5 + p.y * 0.3) * 0.15 * uReveal;
+      p.z += cos(t * 0.4 + p.y * 0.25) * 0.12 * uReveal;
+      
+      // palette: warm ochre to deep sienna (El Anatsui textile)
+      float hue = 0.09 + seed * 0.04;
+      float sat = 0.55 + seed * 0.15;
+      float val = 0.62 + seed * 0.20;
+      vCol = hsv2rgb(vec3(hue, sat, val));
+      
+      // lighting from normal
+      vec3 lightDir = normalize(vec3(0.5, 0.8, 0.3));
+      float ndl = dot(normalize(normal), lightDir);
+      vBright = 0.5 + 0.5 * ndl;
+      
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * (28.0 / dist) * (0.8 + seed * 0.4) * uReveal;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vBright;
+    
+    void main(){
+      vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+      float r = dot(cxy, cxy);
+      if (r > 1.0) discard;
+      
+      // hard alpha test creates textile-weave density
+      float a = 1.0 - smoothstep(0.4, 1.0, r);
+      if (a < 0.55) discard;
+      
+      vec3 col = vCol * vBright;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+
+let revealStart = 0;
+
+function regrow(masterSeed){
+  group.clear();
+  
+  // 7 distinct folded-leaf elements arranged in a loose bouquet
+  const leafCount = 7;
+  const arrangements = [
+    { pos: [0, 0, 0], scale: 1.2, curl: 2.8, rot: 0.0 },
+    { pos: [-2.5, -0.5, -1.2], scale: 0.9, curl: 3.2, rot: 0.8 },
+    { pos: [2.8, 0.2, -0.8], scale: 1.0, curl: 2.5, rot: -0.6 },
+    { pos: [-1.5, 1.8, 1.5], scale: 0.85, curl: 3.5, rot: 1.2 },
+    { pos: [1.8, 1.2, 1.8], scale: 0.95, curl: 2.9, rot: -1.0 },
+    { pos: [0.5, -1.5, 2.2], scale: 0.8, curl: 3.0, rot: 0.5 },
+    { pos: [-0.8, 2.5, -1.5], scale: 0.75, curl: 3.3, rot: -1.4 },
+  ];
+  
+  for (let i = 0; i < leafCount; i++){
+    const cfg = arrangements[i];
+    const leafSeed = (masterSeed + i * 0.13579) % 1.0;
+    const leafGeom = makeLeafStrip(leafSeed, cfg.scale, cfg.curl, 40);
+    
+    const { positions, seeds, normals } = makeLeafParticles(leafGeom, 12, leafSeed);
+    
+    const particleGeom = new THREE.BufferGeometry();
+    particleGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    particleGeom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    particleGeom.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    
+    const points = new THREE.Points(particleGeom, mat);
+    points.position.set(cfg.pos[0], cfg.pos[1], cfg.pos[2]);
+    points.rotation.y = cfg.rot;
+    points.rotation.x = (leafSeed - 0.5) * 0.4;
+    
+    group.add(points);
+  }
+  
+  revealStart = performance.now();
+}
+
+regrow(Math.random());
+addEventListener('click', () => regrow(Math.random()));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  uniforms.uTime.value = elapsed;
+  
+  if (revealStart > 0){
+    uniforms.uReveal.value = Math.min(1.0, (now - revealStart) / 2000);
+  }
+  
+  // slow bouquet rotation
+  group.rotation.y = elapsed * 0.08;
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mwf · calyx (Riley → chromatopetal)</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1814; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#8a8a7f; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#8a8a7f; }
+</style>
+</head>
+<body>
+<div class="id">mwf</div>
+<div class="hint">click to regenerate · orbit drag</div>
+<div class="src">Riley · chromatopetal calyx · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x1a1814, 20, 60);
+
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 12, 18);
+camera.lookAt(0, 2, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1814, 1);
+document.body.appendChild(renderer.domElement);
+
+// Warm side-light
+const sideLight = new THREE.DirectionalLight(0xffb380, 0.6);
+sideLight.position.set(-8, 6, 4);
+scene.add(sideLight);
+
+const rimLight = new THREE.DirectionalLight(0x6688cc, 0.3);
+rimLight.position.set(10, 3, -6);
+scene.add(rimLight);
+
+const ambient = new THREE.AmbientLight(0x2a2622, 0.5);
+scene.add(ambient);
+
+const N = 80000;
+let geom, points;
+
+const uniforms = {
+  uTime:    { value: 0 },
+  uPhase:   { value: 0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+  uRowFreq: { value: 1.2 },
+  uColFreq: { value: 1.0 },
+  uWaveAmp: { value: 0.5 },
+  uTwist:   { value: 0.0 },
+  uMorph:   { value: 0.0 },
+  uPetals:  { value: 5.0 },
+  uCupDepth:{ value: 4.0 },
+  uLightPos: { value: new THREE.Vector3(-8, 6, 4) },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uPhase;
+    uniform float uRowFreq;
+    uniform float uColFreq;
+    uniform float uWaveAmp;
+    uniform float uTwist;
+    uniform float uMorph;
+    uniform float uPetals;
+    uniform float uCupDepth;
+    uniform vec3 uLightPos;
+
+    attribute vec2 gridPos;
+    attribute float seed;
+    attribute float birthAngle;
+
+    varying float vDensity;
+    varying float vHeight;
+    varying float vBirthAngle;
+    varying vec3 vNormal;
+    varying vec3 vWorldPos;
+    varying vec3 vLightDir;
+
+    void main(){
+      vec2 gp = gridPos;
+
+      // Riley wave interference - speed 2x per user directive
+      float rowWave = sin(gp.y * uRowFreq + uTime * 1.2 + uPhase) * uWaveAmp;
+      float colWave = sin(gp.x * uColFreq + uTime * 0.7) * uWaveAmp;
+
+      float twist = uTwist * length(gp) * 0.04;
+      float ct = cos(twist); float st = sin(twist);
+      vec2 twisted = vec2(gp.x * ct - gp.y * st, gp.x * st + gp.y * ct);
+
+      float r = length(gp);
+      float maxR = 12.0;
+      float nr = clamp(r / maxR, 0.0, 1.0);
+      float theta = atan(gp.y, gp.x);
+
+      // Petal lobes
+      float petalShape = 0.5 + 0.5 * cos(theta * uPetals);
+      // Cup profile
+      float cupProfile = uCupDepth * nr * nr * (0.6 + 0.4 * petalShape);
+      float flare = 1.0 + 0.15 * nr * nr * uMorph;
+
+      float m = uMorph;
+      vec3 flatPos = vec3(twisted.x + rowWave, twisted.y + colWave, 0.0);
+
+      float cx = twisted.x * flare + rowWave * (1.0 - 0.5 * m);
+      float cy = twisted.y * flare + colWave * (1.0 - 0.5 * m);
+      float cz = cupProfile * m;
+
+      vec3 p = mix(flatPos, vec3(cx, cy, cz), m);
+
+      // Compute approximate normal for lighting
+      float epsilon = 0.1;
+      float dzdr = (2.0 * uCupDepth * nr / maxR) * (0.6 + 0.4 * petalShape) * m;
+      vec3 tangent = normalize(vec3(cos(theta), sin(theta), dzdr));
+      vec3 radial = normalize(vec3(-sin(theta), cos(theta), 0.0));
+      vNormal = normalize(cross(radial, tangent));
+
+      // Interference pattern
+      float interference = sin(gp.y * uRowFreq * 2.0 + uTime * 1.2)
+                         * sin(gp.x * uColFreq * 2.0 + uTime * 0.7);
+      float vein = sin(theta * uPetals * 3.0 + r * 1.5 + uTime * 0.4);
+      vDensity = mix(interference, interference * 0.6 + vein * 0.4, m);
+      vHeight = cz;
+      vBirthAngle = birthAngle;
+
+      vec4 worldPos = modelMatrix * vec4(p, 1.0);
+      vWorldPos = worldPos.xyz;
+      vLightDir = normalize(uLightPos - vWorldPos);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = uPixel * max(1.5, 3.5 - dist * 0.06);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    varying float vDensity;
+    varying float vHeight;
+    varying float vBirthAngle;
+    varying vec3 vNormal;
+    varying vec3 vWorldPos;
+    varying vec3 vLightDir;
+
+    vec3 hsv2rgb(vec3 c) {
+      vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+      vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+      return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+    }
+
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // Birth-position to hue mapping: acid green 120deg → cobalt 210deg → magenta 300deg
+      // birthAngle is in [0, 2π]
+      float t = vBirthAngle / 6.283185;
+      float hue = mix(120.0, 300.0, t) / 360.0; // map 0→1 to green→magenta via blue
+      
+      // Density modulation: interference pattern determines brightness
+      float val = vDensity;
+      float brightness = 0.4 + 0.6 * smoothstep(-0.5, 0.5, val);
+
+      // Turrell-style soft diffuse lighting
+      float ndotl = max(0.0, dot(vNormal, vLightDir));
+      float diffuse = 0.3 + 0.7 * ndotl;
+
+      // Height-based luminance boost (interior of calyx catches light)
+      float heightGlow = smoothstep(0.0, 4.0, vHeight) * 0.2;
+
+      vec3 baseColor = hsv2rgb(vec3(hue, 0.7, brightness));
+      vec3 lit = baseColor * (diffuse + heightGlow);
+
+      float alpha = (1.0 - smoothstep(0.18, 0.25, r)) * 0.9;
+      gl_FragColor = vec4(lit, alpha);
+    }
+  `
+});
+
+function buildGrid(rows, cols, seed){
+  const positions = new Float32Array(N * 3);
+  const gridPositions = new Float32Array(N * 2);
+  const seeds = new Float32Array(N);
+  const birthAngles = new Float32Array(N);
+
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const width = 24, height = 24;
+  const cellW = width / cols, cellH = height / rows;
+
+  let idx = 0;
+  for (let i = 0; i < rows && idx < N; i++){
+    for (let j = 0; j < cols && idx < N; j++){
+      const pointsPerCell = Math.floor(N / (rows * cols));
+      for (let k = 0; k < pointsPerCell && idx < N; k++){
+        const x = (j + rng() - 0.5) * cellW - width * 0.5;
+        const y = (i + rng() - 0.5) * cellH - height * 0.5;
+        positions[idx * 3] = x;
+        positions[idx * 3 + 1] = y;
+        positions[idx * 3 + 2] = 0;
+        gridPositions[idx * 2] = x;
+        gridPositions[idx * 2 + 1] = y;
+        seeds[idx] = rng();
+        birthAngles[idx] = Math.atan2(y, x) + Math.PI; // [0, 2π]
+        idx++;
+      }
+    }
+  }
+  while (idx < N){
+    const x = (rng() - 0.5) * width;
+    const y = (rng() - 0.5) * height;
+    positions[idx * 3] = x;
+    positions[idx * 3 + 1] = y;
+    positions[idx * 3 + 2] = 0;
+    gridPositions[idx * 2] = x;
+    gridPositions[idx * 2 + 1] = y;
+    seeds[idx] = rng();
+    birthAngles[idx] = Math.atan2(y, x) + Math.PI;
+    idx++;
+  }
+  return { positions, gridPositions, seeds, birthAngles };
+}
+
+function regenerate(){
+  const seed = Math.floor(Math.random() * 1e9);
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  const rows = 80 + Math.floor(rng() * 60);
+  const cols = 80 + Math.floor(rng() * 60);
+
+  uniforms.uRowFreq.value = 0.8 + rng() * 1.0;
+  uniforms.uColFreq.value = 0.8 + rng() * 1.0;
+  uniforms.uWaveAmp.value = 0.3 + rng() * 0.5;
+  uniforms.uTwist.value = rng() * 4.0;
+  uniforms.uPhase.value = rng() * 6.28;
+  uniforms.uPetals.value = 4 + Math.floor(rng() * 4);
+  uniforms.uCupDepth.value = 3.0 + rng() * 3.0;
+
+  const { positions, gridPositions, seeds, birthAngles } = buildGrid(rows, cols, seed);
+
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('gridPos', new THREE.BufferAttribute(gridPositions, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('birthAngle', new THREE.BufferAttribute(birthAngles, 1));
+    points = new THREE.Points(geom, mat);
+    scene.add(points);
+  } else {
+    geom.attributes.position.array.set(positions);
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.gridPos.array.set(gridPositions);
+    geom.attributes.gridPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds);
+    geom.attributes.seed.needsUpdate = true;
+    geom.attributes.birthAngle.array.set(birthAngles);
+    geom.attributes.birthAngle.needsUpdate = true;
+  }
+  geom.computeBoundingSphere();
+  uniforms.uMorph.value = 0.0;
+}
+
+regenerate();
+addEventListener('click', (e) => {
+  if (e.target.tagName === 'CANVAS') regenerate();
+});
+
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 0.55;
+const canvas = renderer.domElement;
+
+canvas.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi = Math.max(0.1, Math.min(1.4, orbitPhi - (e.clientY - prevY) * 0.005));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+function loop(){
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  uniforms.uTime.value = t;
+
+  const morphTarget = 1.0;
+  uniforms.uMorph.value += (morphTarget - uniforms.uMorph.value) * 0.015;
+
+  // Light slowly drifts in a circle to reveal curvature
+  const lightAngle = t * 0.15;
+  const lightRadius = 10;
+  uniforms.uLightPos.value.set(
+    lightRadius * Math.cos(lightAngle),
+    6 + 2 * Math.sin(t * 0.1),
+    lightRadius * Math.sin(lightAngle)
+  );
+  sideLight.position.copy(uniforms.uLightPos.value);
+
+  const autoTheta = t * 0.08;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 22;
+
+  const centroidY = 1.5 * uniforms.uMorph.value;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    centroidY + radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, centroidY, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mkg · kirigami</title>
+<!-- MOTION: unfold, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0e0b08; overflow:hidden;
+               color:#cad6c0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">mkg</div>
+<div class="hint">drag to orbit · scroll to zoom</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── Kirigami geometry builder ── */
+function buildKirigami() {
+  const group = new THREE.Group();
+  
+  // Base square sheet size
+  const SIZE = 14;
+  const DEPTH_MAX = 3.5;
+  
+  // Fibonacci spiral cut pattern
+  const PHI = 1.618033988749895;
+  const SPIRALS = 8;
+  const CUTS_PER_SPIRAL = 12;
+  
+  const cuts = [];
+  
+  for (let s = 0; s < SPIRALS; s++) {
+    const angleOffset = (s / SPIRALS) * Math.PI * 2;
+    for (let i = 0; i < CUTS_PER_SPIRAL; i++) {
+      const t = i / CUTS_PER_SPIRAL;
+      const angle = angleOffset + t * Math.PI * 4;
+      const radius = t * SIZE * 0.45;
+      
+      const x = Math.cos(angle) * radius;
+      const y = Math.sin(angle) * radius;
+      
+      // Cut length proportional to radius
+      const cutLen = 0.8 + t * 1.2;
+      const cutAngle = angle + Math.PI / 2;
+      
+      cuts.push({
+        x, y,
+        angle: cutAngle,
+        length: cutLen,
+        radius: radius,
+        spiralIndex: s,
+        localIndex: i
+      });
+    }
+  }
+  
+  // Build flaps from cuts
+  cuts.forEach((cut, idx) => {
+    const flapW = cut.length;
+    const flapH = cut.length * 0.6;
+    const segments = 16;
+    
+    const geom = new THREE.PlaneGeometry(flapW, flapH, segments, 4);
+    const pos = geom.attributes.position;
+    
+    // Lift factor based on radius and spiral
+    const liftBase = Math.pow(cut.radius / (SIZE * 0.45), 0.7);
+    const spiralPhase = cut.spiralIndex / SPIRALS;
+    const localPhase = cut.localIndex / CUTS_PER_SPIRAL;
+    
+    // Curve the flap upward
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      
+      // Distance from hinge (left edge)
+      const hingeT = (x / flapW + 0.5);
+      const vertT = (y / flapH + 0.5);
+      
+      // Lift curve: starts flat at hinge, curves up
+      const lift = Math.pow(hingeT, 1.8) * liftBase * DEPTH_MAX;
+      const vertCurve = Math.sin(vertT * Math.PI) * 0.3;
+      
+      pos.setZ(i, lift * (1 + vertCurve * hingeT));
+      
+      // Subtle lateral curl
+      const curl = hingeT * hingeT * 0.2 * Math.sin(vertT * Math.PI);
+      pos.setX(i, x + curl * lift * 0.15);
+    }
+    
+    pos.needsUpdate = true;
+    geom.computeVertexNormals();
+    
+    // Material: warm paper tones, double-sided
+    const mat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color().setHSL(
+        0.08 + spiralPhase * 0.04,
+        0.28 + localPhase * 0.15,
+        0.72 + Math.sin(idx * 0.7) * 0.08
+      ),
+      side: THREE.DoubleSide,
+      roughness: 0.85,
+      metalness: 0.0,
+      flatShading: false
+    });
+    
+    const mesh = new THREE.Mesh(geom, mat);
+    
+    // Position at cut location
+    mesh.position.set(cut.x, cut.y, 0);
+    mesh.rotation.z = cut.angle;
+    
+    // Store animation phase data
+    mesh.userData = {
+      baseY: cut.y,
+      baseZ: 0,
+      liftPhase: spiralPhase + localPhase * 0.3,
+      originalPositions: new Float32Array(pos.array)
+    };
+    
+    group.add(mesh);
+  });
+  
+  // Base sheet with cut-out regions (wireframe representation)
+  const baseGeom = new THREE.PlaneGeometry(SIZE, SIZE, 40, 40);
+  const baseMat = new THREE.MeshStandardMaterial({
+    color: 0x2a2318,
+    side: THREE.DoubleSide,
+    roughness: 0.9,
+    metalness: 0.0,
+    opacity: 0.92,
+    transparent: true
+  });
+  const baseMesh = new THREE.Mesh(baseGeom, baseMat);
+  baseMesh.position.z = -0.05;
+  group.add(baseMesh);
+  
+  return group;
+}
+
+/* ── Scene setup ── */
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0e0b08, 20, 45);
+
+const camera = new THREE.PerspectiveCamera(35, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(12, 9, 22);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0e0b08, 1);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, 0, 1.5);
+controls.minDistance = 8;
+controls.maxDistance = 35;
+
+/* ── Lighting: raking directional for shadows ── */
+const ambient = new THREE.AmbientLight(0xfff5e8, 0.35);
+scene.add(ambient);
+
+const keyLight = new THREE.DirectionalLight(0xfff8f0, 1.2);
+keyLight.position.set(8, 12, 6);
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.width = 2048;
+keyLight.shadow.mapSize.height = 2048;
+keyLight.shadow.camera.near = 0.5;
+keyLight.shadow.camera.far = 50;
+keyLight.shadow.camera.left = -15;
+keyLight.shadow.camera.right = 15;
+keyLight.shadow.camera.top = 15;
+keyLight.shadow.camera.bottom = -15;
+scene.add(keyLight);
+
+const rimLight = new THREE.DirectionalLight(0xe8d4b8, 0.6);
+rimLight.position.set(-6, 4, -8);
+scene.add(rimLight);
+
+const fillLight = new THREE.PointLight(0xffeedd, 0.4, 30);
+fillLight.position.set(3, -2, 10);
+scene.add(fillLight);
+
+/* ── Build kirigami ── */
+const kirigami = buildKirigami();
+kirigami.traverse(child => {
+  if (child.isMesh && child.geometry.type !== 'PlaneGeometry' || child === kirigami.children[kirigami.children.length - 1]) {
+    // Base sheet receives shadows
+    child.receiveShadow = true;
+  } else if (child.isMesh) {
+    child.castShadow = true;
+    child.receiveShadow = true;
+  }
+});
+scene.add(kirigami);
+
+/* ── Resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── Animation loop ── */
+const start = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - start) / 1000;
+  
+  // Gentle breathing unfold animation
+  const unfoldProgress = Math.min(1, elapsed / 4);
+  const breathe = Math.sin(elapsed * 0.3) * 0.15 + 0.85;
+  
+  kirigami.children.forEach(child => {
+    if (!child.isMesh || !child.userData.liftPhase) return;
+    
+    const phase = child.userData.liftPhase;
+    const originalPos = child.userData.originalPositions;
+    const geom = child.geometry;
+    const pos = geom.attributes.position;
+    
+    // Ease-in unfold with per-flap phase offset
+    const flapUnfold = Math.pow(
+      Math.min(1, Math.max(0, (unfoldProgress - phase * 0.4) / 0.6)),
+      1.5
+    );
+    
+    // Apply breathing to z-lift
+    for (let i = 0; i < pos.count; i++) {
+      const origZ = originalPos[i * 3 + 2];
+      const targetZ = origZ * breathe * flapUnfold;
+      pos.setZ(i, targetZ);
+    }
+    
+    pos.needsUpdate = true;
+    geom.computeVertexNormals();
+    
+    // Rotate flaps slightly during unfold
+    const hingeRot = flapUnfold * Math.PI * 0.08 * Math.sin(phase * Math.PI * 2);
+    child.rotation.x = hingeRot;
+  });
+  
+  // Slowly rotate entire piece
+  kirigami.rotation.z = elapsed * 0.08;
+  
+  // Camera gentle drift
+  const drift = Math.sin(elapsed * 0.2) * 0.5;
+  controls.target.y = drift;
+  controls.target.z = 1.5 + Math.cos(elapsed * 0.15) * 0.3;
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
