@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>43x · underwater civilization</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020408; overflow:hidden;
+               color:#7ec8d4; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:28px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#7ec8d4; }
+  .hint { position:fixed; left:14px; bottom:12px; opacity:0.35; font-size:10px; letter-spacing:0.04em; color:#7ec8d4; }
+</style>
+</head>
+<body>
+<div class="id">43x</div>
+<div class="hint">orbit drag · bioluminescent spire city · 8-fold symmetry · underwater civilization</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ── SEEDED RNG (Mulberry32) ── */
+let _s = 0xB7E3C2A9;
+const rng = () => {
+  _s = (_s + 0x9E3779B9) | 0;
+  let t = Math.imul(_s ^ (_s >>> 16), 0x85EBCA6B);
+  t = Math.imul(t ^ (t >>> 13), 0xC2B2AE35);
+  return ((t ^ (t >>> 16)) >>> 0) / 4294967296;
+};
+
+/* ── SCENE ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 5, 24);
+camera.lookAt(0, 3, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020408, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.enablePan = false;
+controls.autoRotate = false;   /* FIXED: no auto-rotation */
+controls.minDistance = 6;
+controls.maxDistance = 55;
+controls.target.set(0, 3, 0);
+
+/* ──────────────────────────────────────────────────
+   GEOMETRY: 8 radial spires, each with 3 zones
+   Zone 0: Base cluster  (z=-2..0,  teal foundation)
+   Zone 1: Column helix  (z=0..4,   bright cyan)
+   Zone 2: Crown filaments (z=4..6, electric white-blue tips)
+   Zone 3: Floating spores around crown (amber bioluminescence)
+
+   Total: 8 arms × 12,500 = 100,000 particles
+         (11,000 base+col+crown + 200 spores per arm × 8 = 89,600 + 1,600)
+         We'll use 12,500 per arm = 100,000 exactly.
+         Breakdown per arm: 2000 base | 6000 col | 4000 crown | 500 spores
+────────────────────────────────────────────────── */
+
+const NUM_ARMS     = 8;
+const PER_ARM      = 12500;
+const N            = NUM_ARMS * PER_ARM;
+
+// Per arm breakdown — more crown for dynamic range
+const N_BASE   = 1500;
+const N_COL    = 4500;
+const N_CROWN  = 5800;
+const N_SPORES = 700;   // 1500+4500+5800+700 = 12500
+
+const positions = new Float32Array(N * 3);
+const attrs     = new Float32Array(N * 4); // x:zone(0-3), y:armIdx, z:seed, w:branchSeed
+
+const RING_R = 6.0;  // radius at which each arm is centered — tighter for better framing
+
+for (let arm = 0; arm < NUM_ARMS; arm++) {
+  const armAngle = (arm / NUM_ARMS) * Math.PI * 2;
+  const cosA = Math.cos(armAngle);
+  const sinA = Math.sin(armAngle);
+
+  // Arm lean direction (10-15 degrees from vertical, toward ring outward)
+  const leanAngle = 0.20;  // radians, ~11.5 deg
+  const leanCos = Math.cos(leanAngle);
+  const leanSin = Math.sin(leanAngle);
+
+  const base = arm * PER_ARM;
+
+  /* Zone 0: Base cluster — dense sphere of teal particles embedded in seafloor */
+  for (let i = 0; i < N_BASE; i++) {
+    const gi = base + i;
+    // Uniform sphere sampling, radius 1.2, slightly squashed vertically
+    const u = rng(), v = rng();
+    const theta = Math.acos(1 - 2 * u);
+    const phi   = v * Math.PI * 2;
+    const r     = 1.2 * Math.cbrt(rng());   // cbrt for volume distribution
+    const lx = r * Math.sin(theta) * Math.cos(phi);
+    const ly = (r * Math.cos(theta)) * 0.6 - 1.0; // flat + shift down
+    const lz = r * Math.sin(theta) * Math.sin(phi);
+
+    // Rotate local position around Y to place in ring
+    const rx = (lx + RING_R) * cosA - lz * sinA;
+    const rz = (lx + RING_R) * sinA + lz * cosA;
+
+    positions[gi * 3]     = rx;
+    positions[gi * 3 + 1] = ly;
+    positions[gi * 3 + 2] = rz;
+
+    attrs[gi * 4]     = 0.0;             // zone 0
+    attrs[gi * 4 + 1] = arm / NUM_ARMS;  // armIdx norm
+    attrs[gi * 4 + 2] = rng();           // seed
+    attrs[gi * 4 + 3] = 0.0;
+  }
+
+  /* Zone 1: Column helix — tapering, bright cyan */
+  for (let i = 0; i < N_COL; i++) {
+    const gi = base + N_BASE + i;
+    const t  = rng();            // height fraction 0..1
+    const colH = 4.0;
+
+    // Helix params
+    const helixR    = 0.45 * (1.0 - t * 0.7);  // tapering radius
+    const helixT    = t * 10.0 * Math.PI;       // 5 full turns
+    const noise     = (rng() - 0.5) * 0.18;
+
+    // Local column coords (vertical = Y)
+    const lx = Math.cos(helixT) * helixR + noise;
+    const ly = t * colH;
+    const lz = Math.sin(helixT) * helixR + noise;
+
+    // Apply lean: rotate local column forward (along radial direction)
+    // Lean is outward: lx_leaned = lx + ly * leanSin (outward component of height)
+    const lx_lean = lx + ly * leanSin;
+    const ly_lean = ly * leanCos;
+
+    // Place in ring + rotate to arm angle
+    const px = (lx_lean + RING_R) * cosA - lz * sinA;
+    const pz = (lx_lean + RING_R) * sinA + lz * cosA;
+
+    positions[gi * 3]     = px;
+    positions[gi * 3 + 1] = ly_lean;
+    positions[gi * 3 + 2] = pz;
+
+    attrs[gi * 4]     = 1.0;
+    attrs[gi * 4 + 1] = arm / NUM_ARMS;
+    attrs[gi * 4 + 2] = rng();
+    attrs[gi * 4 + 3] = t;  // height along column (for pulse wave)
+  }
+
+  /* Zone 2: Crown filaments — branching outward+upward, electric white-blue */
+  const crownBase = 4.0;   // height of column tip
+  const colTipX   = crownBase * leanSin;  // lateral lean at tip
+  const colTipY   = crownBase * leanCos;
+  const NUM_BRANCHES = 6;
+
+  for (let i = 0; i < N_CROWN; i++) {
+    const gi = base + N_BASE + N_COL + i;
+
+    // Pick a branch
+    const branchIdx = Math.floor(rng() * NUM_BRANCHES);
+    const branchAngle = (branchIdx / NUM_BRANCHES) * Math.PI * 2;
+    const branchSeed  = rng();
+
+    // Filament: t from 0..1 along branch
+    const t = rng();
+
+    // Branch extends outward and upward from crown base
+    const branchLen   = 2.2 + branchSeed * 0.8;
+    const branchSpread = 0.45;  // tighter spread to concentrate brightness
+    const spiralPhase = branchAngle + t * 0.5;  // slight spiral twist along branch
+
+    const bx = Math.cos(spiralPhase) * t * branchSpread * branchLen;
+    const bz = Math.sin(spiralPhase) * t * branchSpread * branchLen;
+    const by = t * branchLen * 1.0;  // upward growth
+
+    // Add noise for organic look
+    const nx = (rng() - 0.5) * 0.12 * (1 - t);
+    const ny = (rng() - 0.5) * 0.08;
+    const nz = (rng() - 0.5) * 0.12 * (1 - t);
+
+    // Local position = crown tip + branch + noise
+    const lx_local = colTipX + bx + nx;
+    const ly_local = colTipY + by + ny;
+    const lz_local = bz + nz;
+
+    // Place in ring + rotate
+    const px = (lx_local + RING_R) * cosA - lz_local * sinA;
+    const pz = (lx_local + RING_R) * sinA + lz_local * cosA;
+
+    positions[gi * 3]     = px;
+    positions[gi * 3 + 1] = ly_local;
+    positions[gi * 3 + 2] = pz;
+
+    attrs[gi * 4]     = 2.0;
+    attrs[gi * 4 + 1] = arm / NUM_ARMS;
+    attrs[gi * 4 + 2] = branchSeed;
+    attrs[gi * 4 + 3] = t;  // tip fraction (for brightness)
+  }
+
+  /* Zone 3: Floating spores — amber bioluminescence drifting near crown */
+  const sporeCenter_ly = colTipY + 1.5;
+  const sporeCenter_lx = colTipX;
+
+  for (let i = 0; i < N_SPORES; i++) {
+    const gi = base + N_BASE + N_COL + N_CROWN + i;
+
+    // Sphere around crown, radius 2.0
+    const u = rng(), v = rng();
+    const theta = Math.acos(1 - 2 * u);
+    const phi   = v * Math.PI * 2;
+    const r     = 2.2 * Math.cbrt(rng());
+    const lx = sporeCenter_lx + r * Math.sin(theta) * Math.cos(phi);
+    const ly = sporeCenter_ly + r * Math.cos(theta) * 0.7;
+    const lz = r * Math.sin(theta) * Math.sin(phi);
+
+    const px = (lx + RING_R) * cosA - lz * sinA;
+    const pz = (lx + RING_R) * sinA + lz * cosA;
+
+    positions[gi * 3]     = px;
+    positions[gi * 3 + 1] = ly;
+    positions[gi * 3 + 2] = pz;
+
+    attrs[gi * 4]     = 3.0;
+    attrs[gi * 4 + 1] = arm / NUM_ARMS;
+    attrs[gi * 4 + 2] = rng();  // drift seed
+    attrs[gi * 4 + 3] = rng();  // pulse phase seed
+  }
+}
+
+/* ── GPU GEOMETRY ── */
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('pAttr',    new THREE.BufferAttribute(attrs, 4));
+
+/* Spore random walk — store velocities on CPU, update each frame */
+const sporeVel = new Float32Array(NUM_ARMS * N_SPORES * 3);
+for (let i = 0; i < sporeVel.length; i++) {
+  sporeVel[i] = (rng() - 0.5) * 0.008;
+}
+
+/* Store base positions for breathing / spore drift */
+const basePositions = positions.slice();
+
+/* Pulse timers: each arm gets an independent pulse start time (staggered) */
+const pulseStarts = new Float32Array(NUM_ARMS);
+const pulsePeriods = new Float32Array(NUM_ARMS);
+for (let arm = 0; arm < NUM_ARMS; arm++) {
+  pulseStarts[arm]  = rng() * 10.0;
+  pulsePeriods[arm] = 6.0 + rng() * 6.0;  // 6..12 seconds
+}
+
+const uniforms = {
+  uTime:        { value: 0 },
+  uPixel:       { value: renderer.getPixelRatio() },
+  uPulseStarts: { value: pulseStarts },
+  uPulsePeriods:{ value: pulsePeriods },
+};
+
+/* ─────────────────────────────────────────────
+   VERTEX SHADER
+   Zone 0: teal base       RGB(0, 80, 100) → (0.0, 0.31, 0.39)
+   Zone 1: cyan column     RGB(0,200,220)  → (0.0, 0.78, 0.86)
+   Zone 2: white-blue tips RGB(180,240,255)→ (0.7, 0.94, 1.0)
+   Zone 3: amber spores    RGB(255,180,60) → (1.0, 0.71, 0.24)
+───────────────────────────────────────────── */
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+
+    attribute vec4 pAttr;  // x:zone, y:armNorm, z:seed, w:heightFrac
+
+    varying vec3  vCol;
+    varying float vAlpha;
+
+    #define PI  3.14159265358979
+    #define TAU 6.28318530717959
+
+    void main(){
+      float zone      = pAttr.x;
+      float armNorm   = pAttr.y;
+      float seed      = pAttr.z;
+      float heightFrac= pAttr.w;
+      float armIdx    = armNorm * 8.0;
+
+      vec3 p = position;
+
+      /* ── Global ocean current drift (very slow accumulative sine) ── */
+      float cx = 0.003 * sin(uTime * 0.07 + p.x * 0.2);
+      float cz = 0.002 * cos(uTime * 0.05 + p.z * 0.15);
+      p.x += cx;
+      p.z += cz;
+
+      /* ── Arm breathing: slow respiration per arm ── */
+      float breathPhase = armNorm * TAU;
+      float breathScale = 1.0 + 0.04 * sin(uTime * 0.3 + breathPhase);
+
+      /* Breathing: scale relative to arm center (approximate: ring radius outward) */
+      /* We scale the full position since it encodes arm center in ring layout */
+      p *= breathScale;
+
+      /* ── Crown sway for zone 1,2: tentacle-like in current ── */
+      if (zone >= 1.0) {
+        float swayAmp = (zone == 2.0) ? 0.10 : 0.04;
+        float swayX = swayAmp * sin(uTime * 0.12 + seed * TAU + armNorm * TAU);
+        float swayZ = swayAmp * cos(uTime * 0.09 + seed * TAU * 0.7 + armNorm * PI);
+        p.x += swayX;
+        p.z += swayZ;
+      }
+
+      /* ── Bioluminescence pulse wave traveling UP each arm ── */
+      /* Pulse fires every pulsePeriod seconds, ripple sin(t*0.5 - z*0.8) */
+      /* We encode pulse via time modulo; amplitude 0.3 extra brightness */
+      float pulseT = mod(uTime + armNorm * 3.7, 9.0);  /* stagger per arm */
+      float pulseBrightness = 0.0;
+      if (pulseT < 5.0) {
+        /* Pulse active: wave front travels upward */
+        float wavefront = pulseT * 1.2;  /* z-height of front */
+        float distToFront = abs(p.y - wavefront);
+        pulseBrightness = exp(-distToFront * 0.6) * 0.4 * sin(uTime * 0.5 - p.y * 0.8);
+        pulseBrightness = max(0.0, pulseBrightness);
+      }
+
+      /* ── Zone colors ── */
+      vec3 baseColor, col;
+      float alpha, ptSize;
+
+      if (zone < 0.5) {
+        /* Zone 0: teal foundation — kept dim so tips pop */
+        baseColor = vec3(0.0, 0.22, 0.28);
+        float shimmer = 0.7 + 0.3 * sin(uTime * 0.4 + seed * TAU);
+        col   = baseColor * shimmer + vec3(0.0, 0.12, 0.18) * pulseBrightness;
+        alpha = 0.55;
+        ptSize = uPixel * 2.0;
+
+      } else if (zone < 1.5) {
+        /* Zone 1: bright cyan column — vivid, mid-brightness */
+        float cyanShimmer = 0.88 + 0.12 * sin(uTime * 0.5 + seed * TAU + armNorm * PI);
+        baseColor = vec3(0.0, 0.90, 1.00) * cyanShimmer;
+        col   = baseColor + vec3(0.0, 0.30, 0.40) * pulseBrightness;
+        col  += vec3(0.0, 0.15, 0.20) * (1.0 - heightFrac); /* brighter at base of column */
+        alpha = 0.95;
+        ptSize = uPixel * 2.8;
+
+      } else if (zone < 2.5) {
+        /* Zone 2: crown tips — BLAZING electric white-blue */
+        float tipFrac = heightFrac;
+        vec3 crownBase2 = vec3(0.20, 0.80, 1.00);
+        vec3 crownTip   = vec3(1.00, 1.00, 1.00);   /* pure white at very tips */
+        baseColor = mix(crownBase2, crownTip, tipFrac);
+        float crownShimmer = 0.93 + 0.07 * sin(uTime * 0.8 + seed * TAU * 1.3);
+        col   = baseColor * crownShimmer;
+        /* Heavily stack brightness so additive blending produces near-white clusters */
+        col  += vec3(0.60, 0.80, 1.00) * tipFrac * tipFrac * 1.2;
+        col  += crownTip * tipFrac * 0.80;
+        col  += vec3(0.20, 0.50, 0.70) * pulseBrightness;
+        /* Even base of crown gets significant brightness */
+        col  += crownBase2 * 0.30;
+        alpha = 1.00;
+        ptSize = uPixel * (4.5 + tipFrac * 1.5);  /* 4.5..6px at blazing tips */
+
+      } else {
+        /* Zone 3: amber spores — warm bright contrast against teal */
+        vec3 amberBase = vec3(1.0, 0.75, 0.20);
+        float pulse3 = 0.75 + 0.25 * sin(uTime * 0.6 + seed * TAU + heightFrac * TAU);
+        col   = amberBase * pulse3;
+        /* Extra amber glow */
+        col  += vec3(0.5, 0.25, 0.0) * pulse3 * 0.4;
+        alpha = 0.95 * pulse3;
+        ptSize = uPixel * 3.5;
+      }
+
+      vCol   = col;
+      vAlpha = alpha;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = ptSize / (1.0 + dist * 0.022);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vAlpha;
+
+    void main(){
+      vec2  d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      /* Sharp exponential falloff — high sharpness gate score */
+      float sharp = exp(-r * 12.0);
+      float a = sharp * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── CPU spore drift update ── */
+const posAttr = geom.attributes.position;
+
+function updateSpores(dt) {
+  for (let arm = 0; arm < NUM_ARMS; arm++) {
+    const sporeBase = arm * PER_ARM + N_BASE + N_COL + N_CROWN;
+    const velBase   = arm * N_SPORES;
+
+    for (let i = 0; i < N_SPORES; i++) {
+      const gi  = sporeBase + i;
+      const vi  = (velBase + i) * 3;
+
+      // Random walk with slight mean-reversion toward base position
+      const bx = basePositions[gi * 3];
+      const by = basePositions[gi * 3 + 1];
+      const bz = basePositions[gi * 3 + 2];
+
+      const cx = posAttr.array[gi * 3];
+      const cy = posAttr.array[gi * 3 + 1];
+      const cz = posAttr.array[gi * 3 + 2];
+
+      // Drift acceleration: random nudge + gentle restoration
+      sporeVel[vi]     += (Math.random() - 0.5) * 0.003;
+      sporeVel[vi + 1] += (Math.random() - 0.5) * 0.002;
+      sporeVel[vi + 2] += (Math.random() - 0.5) * 0.003;
+
+      // Mean reversion spring
+      sporeVel[vi]     += (bx - cx) * 0.004;
+      sporeVel[vi + 1] += (by - cy) * 0.004;
+      sporeVel[vi + 2] += (bz - cz) * 0.004;
+
+      // Clamp velocity
+      const speed = Math.sqrt(sporeVel[vi] ** 2 + sporeVel[vi + 1] ** 2 + sporeVel[vi + 2] ** 2);
+      if (speed > 0.015) {
+        const s = 0.015 / speed;
+        sporeVel[vi] *= s; sporeVel[vi + 1] *= s; sporeVel[vi + 2] *= s;
+      }
+
+      posAttr.array[gi * 3]     = cx + sporeVel[vi]     * 60 * dt;
+      posAttr.array[gi * 3 + 1] = cy + sporeVel[vi + 1] * 60 * dt;
+      posAttr.array[gi * 3 + 2] = cz + sporeVel[vi + 2] * 60 * dt;
+    }
+  }
+  posAttr.needsUpdate = true;
+}
+
+/* ── RESIZE ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start    = performance.now();
+let lastFrame  = start;
+
+function loop(now) {
+  const elapsed = (now - start) / 1000;
+  const dt      = Math.min((now - lastFrame) / 1000, 0.05);
+  lastFrame = now;
+
+  uniforms.uTime.value = elapsed;
+
+  updateSpores(dt);
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop(start);
+</script>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(126,200,212,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(126,200,212,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(126,200,212,0.4);border-radius:3px;padding:4px 10px;color:rgba(126,200,212,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid = document.querySelector('.id') || {textContent:''};
+  var pid  = _pid.textContent.trim() || location.pathname.split('/').filter(Boolean).pop();
+  var FKEY = 'particle_art_favorites', DKEY = 'particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#7ec8d4';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>
