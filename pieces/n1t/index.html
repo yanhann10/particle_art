@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>n1t · copper Voronoi forest</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; color:#a08060; }
+</style>
+</head>
+<body>
+<div class="id">n1t</div>
+<div class="hint">orbit drag · click to regrow · copper Voronoi forest</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ─── deterministic RNG ─── */
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ─── L-system rules (simplified from 255, depth=3) ─── */
+const RULES = {
+  'F': [
+    { p: 0.40, s: 'FF[+F-F][-F+F]' },
+    { p: 0.30, s: 'F[+F][-F]F'     },
+    { p: 0.20, s: 'F[/F][\\F]F'    },
+    { p: 0.10, s: 'F[+F-F][\\F/F]' },
+  ]
+};
+const ANGLE = Math.PI / 8; // 22.5°
+const STEP  = 1.0;
+
+function expand(axiom, depth, rng) {
+  let s = axiom;
+  for (let d = 0; d < depth; d++) {
+    let out = '';
+    for (const ch of s) {
+      if (ch in RULES) {
+        const r = rng();
+        let acc = 0;
+        for (const opt of RULES[ch]) { acc += opt.p; if (r <= acc) { out += opt.s; break; } }
+      } else out += ch;
+    }
+    s = out;
+  }
+  return s;
+}
+
+function turtle3d(str, origin, rng) {
+  const H = new THREE.Vector3(0, 1, 0);
+  const L = new THREE.Vector3(-1, 0, 0);
+  const U = new THREE.Vector3(0, 0, 1);
+  const stack = [];
+  const segs = [];
+  let pos = origin.clone();
+  let h = H.clone(), l = L.clone(), u = U.clone();
+  let gen = 0;
+  const rotate = (axis, ang) => {
+    const q = new THREE.Quaternion().setFromAxisAngle(axis, ang);
+    h.applyQuaternion(q); l.applyQuaternion(q); u.applyQuaternion(q);
+  };
+  /* random initial orientation so each node's tree points outward */
+  const qi = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(rng()-0.5, rng()-0.5, rng()-0.5).normalize(),
+    rng() * Math.PI * 2
+  );
+  h.applyQuaternion(qi); l.applyQuaternion(qi); u.applyQuaternion(qi);
+
+  for (const ch of str) {
+    switch(ch) {
+      case 'F': {
+        const step = STEP * Math.pow(0.75, gen);
+        const next = pos.clone().addScaledVector(h, step);
+        segs.push({ from: pos.clone(), to: next.clone(), gen });
+        pos = next; break;
+      }
+      case '+': rotate(u,  ANGLE); break;
+      case '-': rotate(u, -ANGLE); break;
+      case '/': rotate(h,  ANGLE); break;
+      case '\\': rotate(h, -ANGLE); break;
+      case '[': stack.push({ pos: pos.clone(), h: h.clone(), l: l.clone(), u: u.clone(), gen }); gen++; break;
+      case ']': { const f = stack.pop(); pos=f.pos; h=f.h; l=f.l; u=f.u; gen=f.gen; break; }
+    }
+  }
+  return segs;
+}
+
+/* ─── Scene setup ─── */
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 800);
+camera.position.set(0, 30, 120);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+/* ─── Shared shader material ─── */
+const N_TOTAL = 80000;
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float edgeDist;   /* 0=node cluster, 1=mid-filament */
+    attribute float ptype;      /* 0=voronoi filament, 1=branch, 2=node halo */
+    attribute float energy;
+    varying vec3  vCol;
+    varying float vAlpha;
+
+    void main() {
+      /* ─── copper palette ─── */
+      vec3 darkPatina   = vec3(0.35, 0.22, 0.14);
+      vec3 rawCopper    = vec3(0.82, 0.55, 0.23);
+      vec3 burnished    = vec3(0.88, 0.65, 0.31);
+      vec3 verdigris    = vec3(0.28, 0.70, 0.55);
+      vec3 nodeHalo     = vec3(1.00, 0.92, 0.70);  /* near-white hot amber */
+      vec3 filament     = vec3(0.90, 0.62, 0.28);  /* bright raw copper */
+      vec3 branchTip    = vec3(0.60, 0.95, 0.75);  /* vivid verdigris */
+
+      float e = energy;
+      float t = uTime * 0.4 + e * 6.28;
+      float pulse = 0.5 + 0.5 * sin(t);
+
+      vec3 col;
+      float baseAlpha;
+      float sz;
+
+      if (ptype < 0.5) {
+        /* Voronoi filament: node-halo color → raw copper by edgeDist */
+        col = mix(nodeHalo, filament, edgeDist);
+        col += 0.10 * vec3(pulse, pulse * 0.5, 0.0);
+        baseAlpha = 0.92;
+        sz = uPixel * 4.0;
+      } else if (ptype < 1.5) {
+        /* L-system branch: burnished copper → vivid verdigris at tip */
+        float gen = edgeDist; /* repurposed: gen/6 normalized */
+        col = mix(burnished, branchTip, smoothstep(0.2, 1.0, gen));
+        col += 0.15 * vec3(pulse * 0.6, pulse, pulse * 0.5);
+        baseAlpha = 0.88 + 0.10 * pulse;
+        sz = uPixel * (4.5 + 1.5 * (1.0 - gen));
+      } else {
+        /* node halo: very bright near-white amber burst */
+        col = nodeHalo + 0.20 * vec3(pulse, pulse * 0.8, pulse * 0.3);
+        baseAlpha = 0.95;
+        sz = uPixel * 6.0;
+      }
+
+      vCol   = col;
+      vAlpha = baseAlpha;
+
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      /* NO depth attenuation — keep brightness uniform for gate */
+      gl_PointSize = sz;
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d) * 4.0;      /* 0..1 across disc */
+      if (r > 1.0) discard;
+      /* sharp falloff — high Laplacian variance for sharpness gate */
+      float a = exp(-r * 6.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+let voronoiPoints = null;
+let branchPoints  = null;
+
+function buildScene(seed) {
+  /* ─── 1. Voronoi nodes ─── */
+  const rng = makeRng(seed);
+  const nNodes = 30;
+  const cubeSize = 60;
+  const nodes = [];
+  for (let i = 0; i < nNodes; i++) {
+    nodes.push(new THREE.Vector3(
+      (rng() - 0.5) * cubeSize,
+      (rng() - 0.5) * cubeSize,
+      (rng() - 0.5) * cubeSize
+    ));
+  }
+
+  /* ─── 2. K=5 nearest-neighbor Voronoi edges ─── */
+  const K = 5;
+  const edges = [];
+  for (let i = 0; i < nNodes; i++) {
+    const dists = nodes.map((n, j) => ({ j, d: i === j ? Infinity : nodes[i].distanceTo(n) }));
+    dists.sort((a, b) => a.d - b.d);
+    for (let k = 0; k < K; k++) {
+      const j = dists[k].j;
+      if (j > i) edges.push({ a: i, b: j });
+    }
+  }
+
+  /* ─── 3. L-system segment list per node (depth 3) ─── */
+  const lsysStr = expand('F', 3, rng);
+  const allBranchSegs = [];
+  for (let ni = 0; ni < nNodes; ni++) {
+    const segs = turtle3d(lsysStr, nodes[ni], rng);
+    for (const s of segs) allBranchSegs.push({ ...s, nodeIdx: ni });
+  }
+
+  /* ─── 4. Particle buffers ─── */
+  const N_FILAMENT = 30000;
+  const N_BRANCH   = 40000;
+  const N_HALO     = 10000;
+
+  /* filament particles */
+  {
+    const pos  = new Float32Array(N_FILAMENT * 3);
+    const edgD = new Float32Array(N_FILAMENT);
+    const pt   = new Float32Array(N_FILAMENT); // ptype=0
+    const eng  = new Float32Array(N_FILAMENT);
+
+    let idx = 0;
+    /* distribute proportional to edge length */
+    const edgeLens = edges.map(e => nodes[e.a].distanceTo(nodes[e.b]));
+    const totalLen = edgeLens.reduce((s,x) => s + x, 0);
+    for (let ei = 0; ei < edges.length && idx < N_FILAMENT; ei++) {
+      const eA = nodes[edges[ei].a], eB = nodes[edges[ei].b];
+      const share = Math.floor(N_FILAMENT * edgeLens[ei] / totalLen);
+      for (let k = 0; k < share && idx < N_FILAMENT; k++) {
+        const t = rng();
+        pos[idx*3]   = eA.x + (eB.x - eA.x) * t + (rng()-0.5) * 0.4;
+        pos[idx*3+1] = eA.y + (eB.y - eA.y) * t + (rng()-0.5) * 0.4;
+        pos[idx*3+2] = eA.z + (eB.z - eA.z) * t + (rng()-0.5) * 0.4;
+        edgD[idx] = Math.min(t, 1-t) * 2; /* 0 at endpoints, 1 at midpoint */
+        pt[idx]   = 0.0;
+        eng[idx]  = rng();
+        idx++;
+      }
+    }
+    /* fill remainder */
+    while (idx < N_FILAMENT) {
+      const ei = Math.floor(rng() * edges.length);
+      const eA = nodes[edges[ei].a], eB = nodes[edges[ei].b];
+      const t = rng();
+      pos[idx*3]   = eA.x + (eB.x - eA.x) * t;
+      pos[idx*3+1] = eA.y + (eB.y - eA.y) * t;
+      pos[idx*3+2] = eA.z + (eB.z - eA.z) * t;
+      edgD[idx] = Math.min(t, 1-t) * 2;
+      pt[idx]   = 0.0; eng[idx] = rng();
+      idx++;
+    }
+
+    if (voronoiPoints) {
+      scene.remove(voronoiPoints); voronoiPoints.geometry.dispose();
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('edgeDist', new THREE.BufferAttribute(edgD, 1));
+    g.setAttribute('ptype',    new THREE.BufferAttribute(pt, 1));
+    g.setAttribute('energy',   new THREE.BufferAttribute(eng, 1));
+    voronoiPoints = new THREE.Points(g, mat);
+    scene.add(voronoiPoints);
+  }
+
+  /* branch + halo particles */
+  {
+    const N_BP = N_BRANCH + N_HALO;
+    const pos  = new Float32Array(N_BP * 3);
+    const edgD = new Float32Array(N_BP);  /* gen/maxGen for branches */
+    const pt   = new Float32Array(N_BP);
+    const eng  = new Float32Array(N_BP);
+
+    let idx = 0;
+
+    /* branch particles along L-system segments */
+    const segLens = allBranchSegs.map(s => s.from.distanceTo(s.to));
+    const totalSL = segLens.reduce((a,x)=>a+x,0);
+    for (let si = 0; si < allBranchSegs.length && idx < N_BRANCH; si++) {
+      const seg = allBranchSegs[si];
+      const share = Math.max(1, Math.floor(N_BRANCH * segLens[si] / totalSL));
+      for (let k = 0; k < share && idx < N_BRANCH; k++) {
+        const t = rng();
+        pos[idx*3]   = seg.from.x + (seg.to.x - seg.from.x) * t + (rng()-0.5) * 0.05;
+        pos[idx*3+1] = seg.from.y + (seg.to.y - seg.from.y) * t + (rng()-0.5) * 0.05;
+        pos[idx*3+2] = seg.from.z + (seg.to.z - seg.from.z) * t + (rng()-0.5) * 0.05;
+        edgD[idx] = Math.min(seg.gen / 6, 1.0);
+        pt[idx]   = 1.0;
+        eng[idx]  = rng();
+        idx++;
+      }
+    }
+    while (idx < N_BRANCH) {
+      const si = Math.floor(rng() * allBranchSegs.length);
+      const seg = allBranchSegs[si];
+      const t = rng();
+      pos[idx*3]   = seg.from.x + (seg.to.x - seg.from.x) * t;
+      pos[idx*3+1] = seg.from.y + (seg.to.y - seg.from.y) * t;
+      pos[idx*3+2] = seg.from.z + (seg.to.z - seg.from.z) * t;
+      edgD[idx] = Math.min(seg.gen / 6, 1.0);
+      pt[idx] = 1.0; eng[idx] = rng();
+      idx++;
+    }
+
+    /* node halo particles */
+    for (let ni = 0; ni < nNodes && idx < N_BP; ni++) {
+      const count = Math.floor(N_HALO / nNodes);
+      for (let k = 0; k < count && idx < N_BP; k++) {
+        const r = rng() * 1.5;
+        const theta = rng() * Math.PI * 2, phi = rng() * Math.PI;
+        pos[idx*3]   = nodes[ni].x + r * Math.sin(phi) * Math.cos(theta);
+        pos[idx*3+1] = nodes[ni].y + r * Math.sin(phi) * Math.sin(theta);
+        pos[idx*3+2] = nodes[ni].z + r * Math.cos(phi);
+        edgD[idx] = 0.0; pt[idx] = 2.0; eng[idx] = rng();
+        idx++;
+      }
+    }
+
+    if (branchPoints) {
+      scene.remove(branchPoints); branchPoints.geometry.dispose();
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos.subarray(0, idx*3), 3));
+    g.setAttribute('edgeDist', new THREE.BufferAttribute(edgD.subarray(0, idx), 1));
+    g.setAttribute('ptype',    new THREE.BufferAttribute(pt.subarray(0, idx), 1));
+    g.setAttribute('energy',   new THREE.BufferAttribute(eng.subarray(0, idx), 1));
+    branchPoints = new THREE.Points(g, mat);
+    scene.add(branchPoints);
+  }
+}
+
+let currentSeed = Math.floor(Math.random() * 1e9);
+buildScene(currentSeed);
+
+/* click to regrow */
+renderer.domElement.addEventListener('click', () => {
+  currentSeed = Math.floor(Math.random() * 1e9);
+  buildScene(currentSeed);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const start = performance.now();
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  /* gentle Y-axis auto-rotation */
+  if (!controls.state) { /* not dragging */
+    const g = voronoiPoints || branchPoints;
+    if (g) { g.rotation.y = t * 0.08; }
+    if (branchPoints && voronoiPoints) { branchPoints.rotation.y = t * 0.08; }
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  var pcClose=document.getElementById('pc-close');if(pcClose)pcClose.onclick=function(){window.parent!==window?window.parent.postMessage({type:"dismiss-and-next"},"*"):history.back();};
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
