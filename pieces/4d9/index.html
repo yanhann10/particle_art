@@ -3,21 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ribbon·depth · layered light ribbons</title>
-<!-- MOTION: drift, intensity: gentle -->
+<title>4d9 · The Vessel 2030</title>
+<!-- MOTION: orbit, intensity: architectural -->
 <style>
-  html, body { margin:0; padding:0; height:100%; background:#050505; overflow:hidden;
-               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  html, body { margin:0; padding:0; height:100%; background:#060402; overflow:hidden;
+               color:#c9a86a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   canvas { display:block; }
-  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
-  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
-  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#c9a86a; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px; letter-spacing:0.04em; }
 </style>
 </head>
 <body>
 <div class="id">4d9</div>
-<div class="hint">drag to orbit · parallax ribbons in depth</div>
-<div class="src">Anthony McCall (solid light) → extruded ribbon layers</div>
+<div class="hint">drag to orbit · click to toggle solid</div>
 
 <script type="importmap">
 { "imports": {
@@ -29,379 +27,352 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-const BG = 0x050505;
+const BG = 0x060402;
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(BG, 0.018);
+scene.background = new THREE.Color(BG);
+scene.fog = new THREE.FogExp2(BG, 0.012);
 
-const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 300);
-camera.position.set(0, 3, 22);
+const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.1, 400);
+camera.position.set(0, 10, 30);
+camera.lookAt(0, 8, 0);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.setClearColor(BG, 1);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-controls.target.set(0, 0, 0);
+controls.dampingFactor = 0.06;
+controls.target.set(0, 8, 0);
+controls.minDistance = 8;
+controls.maxDistance = 80;
 
-// Lighting
-const keyLight = new THREE.DirectionalLight(0xfff8ee, 1.2);
-keyLight.position.set(5, 12, 8);
-keyLight.castShadow = true;
-keyLight.shadow.mapSize.set(1024, 1024);
-keyLight.shadow.camera.near = 1;
-keyLight.shadow.camera.far = 40;
-keyLight.shadow.camera.left = -15;
-keyLight.shadow.camera.right = 15;
-keyLight.shadow.camera.top = 15;
-keyLight.shadow.camera.bottom = -15;
-scene.add(keyLight);
+// ── VESSEL GEOMETRY ──────────────────────────────────────────────────────────
+// Silhouette profile: 12 levels, radius by spline
+const LEVELS = 12;
+const SEG    = 24;  // cells per ring
+const HEIGHT = 20;
 
-const fillLight = new THREE.DirectionalLight(0xaab8ff, 0.3);
-fillLight.position.set(-4, 3, -6);
-scene.add(fillLight);
+// Radius at each level (0 = bottom, 11 = top)
+// tapered bottom, widest ~level 7, tapers toward top
+const radiiRaw = [2.5, 3.0, 3.7, 4.4, 5.0, 5.2, 5.5, 5.4, 5.1, 4.6, 4.0, 3.5];
 
-const ambient = new THREE.AmbientLight(0x111111, 0.5);
-scene.add(ambient);
+function vesselRadius(level) {
+  const t = level / (LEVELS - 1);
+  // Catmull-Rom-like smooth interpolation over radiiRaw
+  const i = Math.floor(t * (radiiRaw.length - 1));
+  const f = t * (radiiRaw.length - 1) - i;
+  const r0 = radiiRaw[Math.max(0, i - 1)];
+  const r1 = radiiRaw[i];
+  const r2 = radiiRaw[Math.min(radiiRaw.length - 1, i + 1)];
+  const r3 = radiiRaw[Math.min(radiiRaw.length - 1, i + 2)];
+  // Catmull-Rom
+  return 0.5 * ((2*r1) + (-r0+r2)*f + (2*r0-5*r1+4*r2-r3)*f*f + (-r0+3*r1-3*r2+r3)*f*f*f);
+}
 
-// Floor
-const floorGeo = new THREE.PlaneGeometry(60, 60);
-const floorMat = new THREE.MeshStandardMaterial({
-  color: 0x0a0a0a, roughness: 0.95, metalness: 0.0
+function levelY(level) {
+  return (level / (LEVELS - 1)) * HEIGHT;
+}
+
+// Ring positions: offset every other level by half cell (pi/SEG)
+function ringPoints(level) {
+  const pts = [];
+  const r   = vesselRadius(level);
+  const y   = levelY(level);
+  const off = (level % 2 === 0) ? 0 : Math.PI / SEG;
+  for (let i = 0; i < SEG; i++) {
+    const a = (i / SEG) * Math.PI * 2 + off;
+    pts.push(new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r));
+  }
+  return pts;
+}
+
+// Pre-compute all rings
+const rings = [];
+for (let lv = 0; lv <= LEVELS; lv++) rings.push(ringPoints(lv));
+
+// ── Build lattice edges ───────────────────────────────────────────────────────
+// Each diamond cell: top-left → bottom-center → bottom-right → top-center → X-brace
+// Between level lv and lv+1, connect:
+//   ring[lv][i] → ring[lv+1][i]   (right leg)
+//   ring[lv][i] → ring[lv+1][(i-1+SEG)%SEG]  (left leg)
+// Plus horizontal connections within each level
+
+const wireVerts   = [];
+const edgeIndices = []; // track which edge index each pair starts at
+
+let edgeCount = 0;
+
+function addEdge(a, b) {
+  const idx = edgeCount;
+  wireVerts.push(a.x, a.y, a.z, b.x, b.y, b.z);
+  edgeCount++;
+  return idx;
+}
+
+// diagonal legs connecting level to level+1
+const legEdgeStart = [];
+for (let lv = 0; lv < LEVELS; lv++) {
+  legEdgeStart.push(edgeCount);
+  const rA = rings[lv];
+  const rB = rings[lv + 1];
+  for (let i = 0; i < SEG; i++) {
+    addEdge(rA[i], rB[i]);
+    addEdge(rA[i], rB[(i + 1) % SEG]);
+  }
+}
+
+// horizontal rings at each level
+for (let lv = 0; lv <= LEVELS; lv++) {
+  const r = rings[lv];
+  for (let i = 0; i < SEG; i++) {
+    addEdge(r[i], r[(i + 1) % SEG]);
+  }
+}
+
+// X-brace: cross connects inside each diamond cell
+// cell (lv, i): corners are rA[i], rA[(i+1)%SEG], rB[i], rB[(i+1)%SEG]
+for (let lv = 0; lv < LEVELS; lv++) {
+  const rA = rings[lv];
+  const rB = rings[lv + 1];
+  for (let i = 0; i < SEG; i++) {
+    const i1 = (i + 1) % SEG;
+    // diagonals across the diamond face
+    addEdge(rA[i], rB[i1]);
+    addEdge(rA[i1], rB[i]);
+  }
+}
+
+const totalEdges = edgeCount;
+
+// ── Wire colours: bright white-gold primary, dim amber secondary ─────────────
+const wireColors = new Float32Array(wireVerts.length); // rgb per vertex
+for (let e = 0; e < totalEdges; e++) {
+  // every 6th edge: bright white-gold; others: copper-amber
+  const bright = (e % 6 === 0);
+  const r = bright ? 1.0 : 0.79;
+  const g = bright ? 0.88 : 0.47;
+  const b = bright ? 0.55 : 0.19;
+  wireColors[e * 6]     = r; wireColors[e * 6 + 1] = g; wireColors[e * 6 + 2] = b;
+  wireColors[e * 6 + 3] = r; wireColors[e * 6 + 4] = g; wireColors[e * 6 + 5] = b;
+}
+
+const wireGeo = new THREE.BufferGeometry();
+wireGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(wireVerts), 3));
+wireGeo.setAttribute('color',    new THREE.BufferAttribute(wireColors, 3));
+
+const wireMat = new THREE.LineBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.9,
+  depthWrite: false,
+});
+const wireframe = new THREE.LineSegments(wireGeo, wireMat);
+scene.add(wireframe);
+
+// ── Glow Points along edge paths ─────────────────────────────────────────────
+// Place glow spheres at edge midpoints for a neon glow look
+const GLOW_COUNT = totalEdges;
+const glowPos  = new Float32Array(GLOW_COUNT * 3);
+const glowSeed = new Float32Array(GLOW_COUNT);
+const glowBright = new Float32Array(GLOW_COUNT);
+
+for (let e = 0; e < totalEdges; e++) {
+  const ax = wireVerts[e * 6],     ay = wireVerts[e * 6 + 1], az = wireVerts[e * 6 + 2];
+  const bx = wireVerts[e * 6 + 3], by = wireVerts[e * 6 + 4], bz = wireVerts[e * 6 + 5];
+  glowPos[e * 3]     = (ax + bx) * 0.5;
+  glowPos[e * 3 + 1] = (ay + by) * 0.5;
+  glowPos[e * 3 + 2] = (az + bz) * 0.5;
+  glowSeed[e]   = (e % 6 === 0) ? 1.0 : 0.0; // bright every-6th flag
+  glowBright[e] = Math.random();
+}
+
+const glowGeo = new THREE.BufferGeometry();
+glowGeo.setAttribute('position', new THREE.BufferAttribute(glowPos, 3));
+glowGeo.setAttribute('bright',   new THREE.BufferAttribute(glowSeed, 1));
+glowGeo.setAttribute('seed',     new THREE.BufferAttribute(glowBright, 1));
+
+const glowMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPR: { value: renderer.getPixelRatio() } },
+  transparent: true,
+  depthWrite:  false,
+  blending:    THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPR;
+    attribute float bright;
+    attribute float seed;
+    varying float vAlpha;
+    varying vec3  vCol;
+    void main() {
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+      float pulse = 0.7 + 0.3 * sin(uTime * 2.1 + seed * 6.28);
+      float sz = (bright > 0.5) ? 5.0 : 3.0;
+      gl_PointSize = sz * uPR * pulse * clamp(40.0 / max(dist, 1.0), 0.5, 3.5);
+      gl_Position  = projectionMatrix * mv;
+      vAlpha = (bright > 0.5) ? pulse * 0.85 : 0.35 * pulse;
+      vCol   = (bright > 0.5)
+               ? vec3(1.0, 0.95, 0.65)   // white-gold
+               : vec3(0.85, 0.52, 0.22); // copper-amber
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying vec3  vCol;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float core = exp(-r * 14.0);
+      float halo = exp(-r * 5.0) * 0.3;
+      gl_FragColor = vec4(vCol * (core + halo) * vAlpha, (core + halo) * vAlpha);
+    }
+  `
+});
+const glowPoints = new THREE.Points(glowGeo, glowMat);
+scene.add(glowPoints);
+
+// ── Solid copper mesh (toggled) ───────────────────────────────────────────────
+// Lathe geometry using the vessel radius profile
+const lathePoints = [];
+for (let i = 0; i <= LEVELS * 4; i++) {
+  const t = i / (LEVELS * 4);
+  const r = vesselRadius(t * LEVELS);
+  const y = t * HEIGHT;
+  lathePoints.push(new THREE.Vector2(r, y));
+}
+const latheGeo = new THREE.LatheGeometry(lathePoints, 48);
+const latheMat = new THREE.MeshBasicMaterial({
+  color:       0xc97a30,
+  transparent: true,
+  opacity:     0.10,
+  side:        THREE.DoubleSide,
+  depthWrite:  false,
+});
+const solidMesh = new THREE.Mesh(latheGeo, latheMat);
+solidMesh.visible = false;
+scene.add(solidMesh);
+
+// ── Particle haze ─────────────────────────────────────────────────────────────
+const HAZE_N  = 10000;
+const hazePos = new Float32Array(HAZE_N * 3);
+const hazeSeed = new Float32Array(HAZE_N);
+
+for (let i = 0; i < HAZE_N; i++) {
+  // scatter in a cylinder around the structure
+  const ang   = Math.random() * Math.PI * 2;
+  const rad   = 2 + Math.random() * 8;
+  const y     = Math.random() * (HEIGHT + 4) - 2;
+  hazePos[i * 3]     = Math.cos(ang) * rad;
+  hazePos[i * 3 + 1] = y;
+  hazePos[i * 3 + 2] = Math.sin(ang) * rad;
+  hazeSeed[i] = Math.random();
+}
+
+const hazeGeo = new THREE.BufferGeometry();
+hazeGeo.setAttribute('position', new THREE.BufferAttribute(hazePos, 3));
+hazeGeo.setAttribute('seed',     new THREE.BufferAttribute(hazeSeed, 1));
+
+const hazeMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPR: { value: renderer.getPixelRatio() } },
+  transparent: true,
+  depthWrite:  false,
+  blending:    THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPR;
+    attribute float seed;
+    varying float vAlpha;
+    void main() {
+      vec3 p = position;
+      float t = uTime * 0.15 + seed * 6.28;
+      p.x += sin(t + seed * 3.0) * 0.08;
+      p.y += cos(t * 0.6) * 0.05;
+      p.z += sin(t * 0.8 + seed * 5.0) * 0.08;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (0.5 + seed * 0.8) * uPR * clamp(28.0 / max(dist, 1.0), 0.3, 2.5);
+      gl_Position  = projectionMatrix * mv;
+      vAlpha = (0.06 + 0.04 * sin(uTime * 1.2 + seed * 20.0)) * smoothstep(60.0, 4.0, dist);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float core = exp(-r * 12.0);
+      gl_FragColor = vec4(vec3(0.85, 0.52, 0.25) * core * vAlpha, core * vAlpha);
+    }
+  `
+});
+const hazePoints = new THREE.Points(hazeGeo, hazeMat);
+scene.add(hazePoints);
+
+// ── Floor reflection plane ─────────────────────────────────────────────────
+const floorGeo = new THREE.PlaneGeometry(80, 80);
+const floorMat = new THREE.MeshBasicMaterial({
+  color:       0x100804,
+  transparent: true,
+  opacity:     0.7,
 });
 const floor = new THREE.Mesh(floorGeo, floorMat);
 floor.rotation.x = -Math.PI / 2;
-floor.position.y = -6;
-floor.receiveShadow = true;
+floor.position.y = -1;
 scene.add(floor);
 
-// Differential growth for ribbon center-lines
-function createCurve(seed, startX, startY) {
-  const MAX_VERTS = 600;
-  const verts = [];
-  const NV0 = 24;
-  const rng = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
-
-  for (let i = 0; i < NV0; i++) {
-    const t = (i / (NV0 - 1)) * 2 - 1;
-    verts.push({
-      x: startX + t * 5,
-      y: startY + Math.sin(t * Math.PI * 1.5 + rng() * 2) * 1.2,
-      z: (rng() - 0.5) * 0.5,
-      pinned: i < 3 || i >= NV0 - 3
-    });
-  }
-
-  // grow
-  for (let iter = 0; iter < 300; iter++) {
-    const n = verts.length;
-    if (n >= MAX_VERTS) break;
-
-    for (let i = 0; i < n; i++) {
-      if (verts[i].pinned) continue;
-      let fx = 0, fy = 0, fz = 0;
-
-      // neighbor attraction
-      if (i > 0) {
-        fx += (verts[i-1].x - verts[i].x) * 0.06;
-        fy += (verts[i-1].y - verts[i].y) * 0.06;
-        fz += (verts[i-1].z - verts[i].z) * 0.06;
-      }
-      if (i < n-1) {
-        fx += (verts[i+1].x - verts[i].x) * 0.06;
-        fy += (verts[i+1].y - verts[i].y) * 0.06;
-        fz += (verts[i+1].z - verts[i].z) * 0.06;
-      }
-
-      // repulsion from nearby
-      for (let j = Math.max(0, i-15); j < Math.min(n, i+15); j++) {
-        if (Math.abs(j-i) < 3) continue;
-        const dx = verts[i].x - verts[j].x;
-        const dy = verts[i].y - verts[j].y;
-        const dz = verts[i].z - verts[j].z;
-        const d2 = dx*dx + dy*dy + dz*dz;
-        if (d2 < 1.0 && d2 > 0.001) {
-          const d = Math.sqrt(d2);
-          const f = 0.08 * (1 - d / 1.0) / d;
-          fx += dx * f; fy += dy * f; fz += dz * f;
-        }
-      }
-
-      // gravity
-      fy -= 0.004;
-
-      verts[i].x += fx + (rng()-0.5)*0.002;
-      verts[i].y += fy + (rng()-0.5)*0.002;
-      verts[i].z += fz + (rng()-0.5)*0.002;
-    }
-
-    // subdivide
-    const grown = [];
-    for (let i = 0; i < n-1; i++) {
-      grown.push(verts[i]);
-      const a = verts[i], b = verts[i+1];
-      const dx = b.x-a.x, dy = b.y-a.y, dz = b.z-a.z;
-      if (dx*dx+dy*dy+dz*dz > 0.25 && verts.length + grown.length < MAX_VERTS) {
-        grown.push({
-          x: (a.x+b.x)*0.5 + (rng()-0.5)*0.01,
-          y: (a.y+b.y)*0.5 + (rng()-0.5)*0.01,
-          z: (a.z+b.z)*0.5 + (rng()-0.5)*0.01,
-          pinned: false
-        });
-      }
-    }
-    grown.push(verts[n-1]);
-    verts.length = 0;
-    for (const v of grown) verts.push(v);
-  }
-
-  return verts;
-}
-
-// Create ribbon meshes from curves
-const RIBBON_COUNT = 7;
-const ribbonData = [];
-const zLayers = [-3, -2, -1, 0, 1, 2, 3];
-const palette = [
-  new THREE.Color(1.0, 0.95, 0.85),   // warm white
-  new THREE.Color(1.0, 0.82, 0.55),   // gold
-  new THREE.Color(0.95, 0.88, 0.78),  // cream
-  new THREE.Color(1.0, 0.75, 0.45),   // amber
-  new THREE.Color(0.98, 0.92, 0.80),  // pale gold
-  new THREE.Color(1.0, 0.85, 0.65),   // light amber
-  new THREE.Color(0.96, 0.90, 0.82),  // ivory
-];
-
-for (let r = 0; r < RIBBON_COUNT; r++) {
-  const seed = 12345 + r * 7919;
-  const yOffset = (r - 3) * 1.8;
-  const curve = createCurve(seed, (r % 2 === 0 ? -1 : 1) * 0.5, yOffset);
-  const zBase = zLayers[r];
-
-  // Build ribbon geometry using TubeGeometry from a CatmullRom
-  const pts = [];
-  const step = Math.max(1, Math.floor(curve.length / 120));
-  for (let i = 0; i < curve.length; i += step) {
-    pts.push(new THREE.Vector3(curve[i].x, curve[i].y, curve[i].z + zBase));
-  }
-
-  if (pts.length < 4) continue;
-
-  const spline = new THREE.CatmullRomCurve3(pts);
-
-  // Ribbon as flat extruded shape
-  const ribbonWidth = 0.12 + Math.random() * 0.08;
-  const ribbonDepth = 0.35 + Math.random() * 0.25;
-  const shape = new THREE.Shape();
-  shape.moveTo(-ribbonDepth, -ribbonWidth);
-  shape.lineTo(ribbonDepth, -ribbonWidth);
-  shape.lineTo(ribbonDepth, ribbonWidth);
-  shape.lineTo(-ribbonDepth, ribbonWidth);
-  shape.closePath();
-
-  const extrudeSettings = {
-    steps: Math.min(pts.length * 2, 200),
-    extrudePath: spline,
-  };
-
-  const geo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-
-  const col = palette[r];
-  const mat = new THREE.MeshStandardMaterial({
-    color: col,
-    emissive: col.clone().multiplyScalar(0.6),
-    emissiveIntensity: 0.8,
-    roughness: 0.3,
-    metalness: 0.1,
-  });
-
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-
-  // Per-ribbon rotation
-  const rotX = (Math.random() - 0.5) * 0.15;
-  const rotY = (Math.random() - 0.5) * 0.2;
-  const rotZ = (Math.random() - 0.5) * 0.08;
-  mesh.rotation.set(rotX, rotY, rotZ);
-
-  scene.add(mesh);
-  ribbonData.push({
-    mesh,
-    rotSpeed: (Math.random() - 0.5) * 0.003,
-    driftPhase: Math.random() * Math.PI * 2,
-    baseY: mesh.position.y,
-  });
-}
-
-// Particle atmosphere — sparse warm motes
-const MOTE_COUNT = 8000;
-const motePos = new Float32Array(MOTE_COUNT * 3);
-const moteSeed = new Float32Array(MOTE_COUNT);
-for (let i = 0; i < MOTE_COUNT; i++) {
-  motePos[i*3]   = (Math.random() - 0.5) * 20;
-  motePos[i*3+1] = (Math.random() - 0.5) * 16 - 1;
-  motePos[i*3+2] = (Math.random() - 0.5) * 12;
-  moteSeed[i] = Math.random();
-}
-
-const moteGeo = new THREE.BufferGeometry();
-moteGeo.setAttribute('position', new THREE.BufferAttribute(motePos, 3));
-moteGeo.setAttribute('seed', new THREE.BufferAttribute(moteSeed, 1));
-
-const moteMat = new THREE.ShaderMaterial({
-  uniforms: {
-    uTime: { value: 0 },
-    uPixel: { value: renderer.getPixelRatio() },
-  },
-  transparent: true,
-  depthWrite: false,
-  blending: THREE.AdditiveBlending,
-  vertexShader: `
-    uniform float uTime;
-    uniform float uPixel;
-    attribute float seed;
-    varying float vAlpha;
-    void main() {
-      vec3 p = position;
-      float t = uTime * 0.2 + seed * 6.28;
-      p.x += sin(t) * 0.03;
-      p.y += cos(t * 0.7) * 0.02 + sin(uTime * 0.1 + seed * 3.0) * 0.01;
-      vec4 mv = modelViewMatrix * vec4(p, 1.0);
-      float dist = -mv.z;
-      gl_PointSize = (0.8 + seed * 0.6) * uPixel * (30.0 / max(dist, 1.0));
-      gl_Position = projectionMatrix * mv;
-      vAlpha = (0.15 + 0.1 * sin(uTime * 1.5 + seed * 20.0)) * smoothstep(40.0, 5.0, dist);
-    }
-  `,
-  fragmentShader: `
-    varying float vAlpha;
-    void main() {
-      vec2 d = gl_PointCoord - 0.5;
-      float r = dot(d, d);
-      if (r > 0.25) discard;
-      float core = exp(-r * 18.0);
-      vec3 col = vec3(1.0, 0.9, 0.7);
-      float a = core * vAlpha;
-      gl_FragColor = vec4(col * a, a);
-    }
-  `
+// ── Toggle solid on click ──────────────────────────────────────────────────
+let solidMode = false;
+renderer.domElement.addEventListener('click', () => {
+  solidMode = !solidMode;
+  solidMesh.visible = solidMode;
 });
 
-const motes = new THREE.Points(moteGeo, moteMat);
-scene.add(motes);
-
-// Particle halo on ribbons — 30k particles tracing the ribbon forms
-const HALO_COUNT = 30000;
-const haloPos = new Float32Array(HALO_COUNT * 3);
-const haloSeed = new Float32Array(HALO_COUNT);
-
-// Scatter halo particles near ribbon vertices
-let hIdx = 0;
-for (let r = 0; r < ribbonData.length && hIdx < HALO_COUNT; r++) {
-  const geo = ribbonData[r].mesh.geometry;
-  const posAttr = geo.attributes.position;
-  const count = posAttr.count;
-  const perRibbon = Math.floor(HALO_COUNT / RIBBON_COUNT);
-
-  for (let i = 0; i < perRibbon && hIdx < HALO_COUNT; i++) {
-    const vi = Math.floor(Math.random() * count);
-    const x = posAttr.getX(vi) + (Math.random()-0.5)*0.15;
-    const y = posAttr.getY(vi) + (Math.random()-0.5)*0.15;
-    const z = posAttr.getZ(vi) + (Math.random()-0.5)*0.15;
-
-    // Apply mesh rotation
-    const v = new THREE.Vector3(x, y, z);
-    v.applyEuler(ribbonData[r].mesh.rotation);
-
-    haloPos[hIdx*3]   = v.x;
-    haloPos[hIdx*3+1] = v.y;
-    haloPos[hIdx*3+2] = v.z;
-    haloSeed[hIdx] = Math.random();
-    hIdx++;
-  }
-}
-
-const haloGeo = new THREE.BufferGeometry();
-haloGeo.setAttribute('position', new THREE.BufferAttribute(haloPos, 3));
-haloGeo.setAttribute('seed', new THREE.BufferAttribute(haloSeed, 1));
-
-const haloMat = new THREE.ShaderMaterial({
-  uniforms: {
-    uTime: { value: 0 },
-    uPixel: { value: renderer.getPixelRatio() },
-  },
-  transparent: true,
-  depthWrite: false,
-  blending: THREE.AdditiveBlending,
-  vertexShader: `
-    uniform float uTime;
-    uniform float uPixel;
-    attribute float seed;
-    varying float vAlpha;
-    varying vec3 vCol;
-    void main() {
-      vec3 p = position;
-      float t = uTime * 0.4 + seed * 6.28;
-      p.x += sin(t) * 0.02 * (0.5 + seed);
-      p.y += cos(t * 0.6 + seed * 3.0) * 0.015;
-      p.z += sin(t * 0.8 + seed * 5.0) * 0.01;
-
-      vec4 mv = modelViewMatrix * vec4(p, 1.0);
-      float dist = -mv.z;
-      gl_PointSize = (1.0 + seed * 0.8) * uPixel * (35.0 / max(dist, 1.0));
-      gl_Position = projectionMatrix * mv;
-
-      float pulse = 0.8 + 0.2 * sin(uTime * 1.8 + seed * 30.0);
-      vAlpha = (0.25 + 0.15 * pulse) * smoothstep(50.0, 3.0, dist);
-
-      vec3 warm = vec3(1.0, 0.88, 0.65);
-      vec3 hot  = vec3(1.0, 0.95, 0.85);
-      vCol = mix(warm, hot, seed);
-    }
-  `,
-  fragmentShader: `
-    varying float vAlpha;
-    varying vec3 vCol;
-    void main() {
-      vec2 d = gl_PointCoord - 0.5;
-      float r = dot(d, d);
-      if (r > 0.25) discard;
-      float core = exp(-r * 16.0);
-      float halo = exp(-r * 6.0) * 0.25;
-      float a = (core + halo) * vAlpha;
-      gl_FragColor = vec4(vCol * a, a);
-    }
-  `
-});
-
-const haloPoints = new THREE.Points(haloGeo, haloMat);
-scene.add(haloPoints);
-
+// ── Resize ────────────────────────────────────────────────────────────────
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
 
+// ── Animate ───────────────────────────────────────────────────────────────
+const orbitSpeed = 0.08; // radians/sec
 const start = performance.now();
+let baseAngle = 0;
 
 function loop() {
-  const t = (performance.now() - start) / 1000;
+  const t   = (performance.now() - start) / 1000;
+  const dt  = 1 / 60;
+  baseAngle += orbitSpeed * dt;
 
-  // Gentle independent drift per ribbon
-  for (let r = 0; r < ribbonData.length; r++) {
-    const rd = ribbonData[r];
-    rd.mesh.rotation.y += rd.rotSpeed * 0.3;
-    rd.mesh.position.y = rd.baseY + Math.sin(t * 0.3 + rd.driftPhase) * 0.15;
+  // Orbit camera around Y, slight tilt
+  const camR = 30;
+  const camY = 10 + Math.sin(t * 0.2) * 1.5;
+  camera.position.set(
+    Math.sin(baseAngle) * camR,
+    camY,
+    Math.cos(baseAngle) * camR
+  );
+  controls.target.set(0, 9, 0);
+
+  // Pulsing edge colours — update every-6th-edge brightness
+  const colorAttr = wireGeo.attributes.color;
+  for (let e = 0; e < totalEdges; e++) {
+    if (e % 6 === 0) {
+      const pulse = 0.65 + 0.35 * Math.sin(t * 1.8 + e * 0.3);
+      const r = 1.0 * pulse, g = 0.88 * pulse, b = 0.55 * pulse;
+      colorAttr.setXYZ(e * 2,     r, g, b);
+      colorAttr.setXYZ(e * 2 + 1, r, g, b);
+    }
   }
+  colorAttr.needsUpdate = true;
 
-  moteMat.uniforms.uTime.value = t;
-  haloMat.uniforms.uTime.value = t;
+  glowMat.uniforms.uTime.value = t;
+  hazeMat.uniforms.uTime.value = t;
 
   controls.update();
   renderer.render(scene, camera);
@@ -409,7 +380,8 @@ function loop() {
 }
 loop();
 </script>
-<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button><button id="pc-close" title="close / go back" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 10px;color:rgba(255,255,255,0.45);cursor:pointer;font-size:11px;line-height:1">×</button></div>
 <script>
 (function(){
   var _pid=document.querySelector('.id')||{textContent:''};
@@ -418,14 +390,14 @@ loop();
   function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
   function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
   document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
-  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
   document.getElementById('pc-close').onclick=function(){window.parent!==window?window.parent.postMessage({type:"dismiss-and-next"},"*"):history.back();};
   document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
   document.getElementById('pc-submit').onclick=function(){
     var txt=document.getElementById('pc-input').value.trim();
     if(!txt)return;
     var btn=this;btn.textContent='…';btn.disabled=true;
-    var since=new Date();
     fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({parent_id:pid,directive:txt})})
     .then(function(r){return r.json();})
