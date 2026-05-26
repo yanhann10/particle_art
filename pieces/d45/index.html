@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>d45 · flow field on hyperboloid</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020408; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#9a8f82; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#9a8f82; }
+</style>
+</head>
+<body>
+<div class="id">d45</div>
+<div class="hint">flow field · hyperboloid · spiral streamlines · orbit drag</div>
+<div class="src">d45 · iter.s4u · flow field on hyperboloid · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── scene setup ──────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 0, 18);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x020408, 1);
+document.body.appendChild(renderer.domElement);
+
+// ── hyperboloid surface parameters ───────────────────────────────────────────
+// x(u,v) = 3*cosh(v)*cos(u)
+// y(u,v) = 3*sinh(v)
+// z(u,v) = 3*cosh(v)*sin(u)
+// u ∈ [0, 2π], v ∈ [-2.5, 2.5]
+const SCALE = 3.0;
+const V_MIN = -2.5;
+const V_MAX =  2.5;
+
+function hyperboloidPos(u, v) {
+  const cv = Math.cosh(v);
+  const sv = Math.sinh(v);
+  return {
+    x: SCALE * cv * Math.cos(u),
+    y: SCALE * sv,
+    z: SCALE * cv * Math.sin(u)
+  };
+}
+
+// ── flow field ODE ────────────────────────────────────────────────────────────
+// du/dt = 0.3 + 0.15 * sin(3*v + t*0.08)   azimuthal flow
+// dv/dt = 0.08 * sin(2*u + t*0.06)          meridional oscillation
+const DT = 0.02;
+const STEPS_PER_FRAME = 1;
+
+function flowDeriv(u, v, t) {
+  const du = 0.3 + 0.15 * Math.sin(3.0 * v + t * 0.08);
+  const dv = 0.08 * Math.sin(2.0 * u + t * 0.06);
+  return { du, dv };
+}
+
+// ── particle state ────────────────────────────────────────────────────────────
+const ACTIVE = 4000;
+const TRAIL_FRAMES = 79;
+const TRAIL_SLOTS = ACTIVE * TRAIL_FRAMES;  // 316000
+const TOTAL = ACTIVE + TRAIL_SLOTS;
+
+// Surface coords for each active particle
+const pu = new Float32Array(ACTIVE);  // azimuthal angle u
+const pv = new Float32Array(ACTIVE);  // meridional coordinate v
+const phi = new Float32Array(ACTIVE); // per-particle phase offset
+
+// initialize uniformly on surface
+for (let i = 0; i < ACTIVE; i++) {
+  pu[i] = Math.random() * Math.PI * 2.0;
+  pv[i] = V_MIN + Math.random() * (V_MAX - V_MIN);
+  phi[i] = Math.random() * Math.PI * 2.0;
+}
+
+// ── geometry: one big Points object ──────────────────────────────────────────
+const positions = new Float32Array(TOTAL * 3);
+const colors    = new Float32Array(TOTAL * 3);
+const sizes     = new Float32Array(TOTAL);
+const ages      = new Float32Array(TOTAL);  // 0=active, 1=oldest trail
+
+// initialize trail buffer positions near hyperboloid surface
+for (let i = ACTIVE; i < TOTAL; i++) {
+  const u0 = Math.random() * Math.PI * 2.0;
+  const v0 = V_MIN + Math.random() * (V_MAX - V_MIN);
+  const p = hyperboloidPos(u0, v0);
+  positions[i * 3]     = p.x * 0.05;
+  positions[i * 3 + 1] = p.y * 0.05;
+  positions[i * 3 + 2] = p.z * 0.05;
+  ages[i] = 1.0;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('aColor',   new THREE.BufferAttribute(colors,    3));
+geom.setAttribute('aSize',    new THREE.BufferAttribute(sizes,     1));
+geom.setAttribute('aAge',     new THREE.BufferAttribute(ages,      1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: { uPixel: { value: renderer.getPixelRatio() } },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uPixel;
+    attribute vec3 aColor;
+    attribute float aSize;
+    attribute float aAge;
+    varying vec3 vColor;
+    varying float vAge;
+    varying float vSize;
+    void main(){
+      vColor = aColor;
+      vAge   = aAge;
+      vSize  = aSize;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = max(1.0, -mv.z);
+      gl_PointSize = aSize * uPixel * (18.0 / dist);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vAge;
+    varying float vSize;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      float edge = vSize > 3.0 ? 0.22 : 0.25;
+      if (r > edge) discard;
+      float soft = vSize > 3.0 ? 5.0 : 10.0;
+      float alpha = exp(-r * soft);
+      gl_FragColor = vec4(vColor * alpha, alpha);
+    }
+  `
+});
+
+const pointsMesh = new THREE.Points(geom, mat);
+scene.add(pointsMesh);
+
+// ── trail ring buffer ─────────────────────────────────────────────────────────
+let trailWritePtr = 0;
+
+// ── color by v (height on hyperboloid) ───────────────────────────────────────
+// waist (v≈0): electric cyan RGB(0, 210, 240)
+// upper flare (v>1.5): bright amber RGB(255, 160, 40)
+// lower flare (v<-1.5): warm rose RGB(255, 80, 120)
+// old trail: rust RGB(140, 60, 30)
+function headColor(v) {
+  // crown boost: overdrive by 1.4× near waist
+  const waistBlend = Math.exp(-v * v * 0.8);  // peaks at v=0
+
+  if (v > 1.5) {
+    // upper flare: amber
+    const t = Math.min(1.0, (v - 1.5) / 1.0);
+    return {
+      r: (200 + 55 * t) / 255,
+      g: (160 - 30 * t) / 255,
+      b: (40  - 10 * t) / 255,
+      boost: 1.0
+    };
+  } else if (v < -1.5) {
+    // lower flare: rose
+    const t = Math.min(1.0, (-v - 1.5) / 1.0);
+    return {
+      r: (220 + 35 * t) / 255,
+      g: (80  - 20 * t) / 255,
+      b: (120 - 30 * t) / 255,
+      boost: 1.0
+    };
+  } else {
+    // waist: cyan, with overdrive boost
+    const boost = 1.0 + 0.4 * waistBlend;
+    return {
+      r: Math.min(1.0,  0       * boost),
+      g: Math.min(1.0, (210/255)* boost),
+      b: Math.min(1.0, (240/255)* boost),
+      boost
+    };
+  }
+}
+
+function setColorWithAge(arr, base, v, age, isHead) {
+  if (isHead || age < 0.001) {
+    // active head: full color by v
+    const c = headColor(v);
+    arr[base]     = c.r;
+    arr[base + 1] = c.g;
+    arr[base + 2] = c.b;
+  } else if (age < 0.19) {
+    // fresh trail (< 15 frames): blend from head color to warm fade
+    const t = age / 0.19;
+    const c = headColor(v);
+    // fade toward amber-rust
+    arr[base]     = c.r * (1-t) + (180/255) * t;
+    arr[base + 1] = c.g * (1-t) + (80 /255) * t;
+    arr[base + 2] = c.b * (1-t) + (30 /255) * t;
+  } else {
+    // old trail: rust fade
+    const t = Math.min(1.0, (age - 0.19) / 0.81);
+    arr[base]     = (180 - 40 * t) / 255;
+    arr[base + 1] = (80  - 20 * t) / 255;
+    arr[base + 2] = (30  - 10 * t) / 255;
+  }
+}
+
+function setSize(arr, idx, age, v) {
+  if (age < 0.001) {
+    // active head: 5px, crown gets boosted appearance via color
+    arr[idx] = 5.0;
+  } else if (age < 0.19) {
+    // fresh trail: 3.5px fading
+    const t = age / 0.19;
+    arr[idx] = 3.5 - t * 2.0;
+  } else {
+    // old trail: 1.5px
+    arr[idx] = 1.5;
+  }
+}
+
+// ── orbit controls (manual drag) ─────────────────────────────────────────────
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 0.0;  // no auto-rotate
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi    = Math.max(-1.4, Math.min(1.4, orbitPhi - (e.clientY - prevY) * 0.005));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  mat.uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+// ── jitter helper (hand-tremor, inherited ikw→s4u→d45) ───────────────────────
+let _jitterSeed = 67890;
+function jitter() {
+  _jitterSeed = (_jitterSeed * 1664525 + 1013904223) >>> 0;
+  return (_jitterSeed / 4294967296) - 0.5;
+}
+
+// ── RK4 flow field step ───────────────────────────────────────────────────────
+function rk4Step(i, t) {
+  const u = pu[i], v = pv[i];
+  const ph = phi[i];
+  // incorporate per-particle phase offset into time argument
+  const tp = t + ph;
+
+  const k1 = flowDeriv(u, v, tp);
+
+  const u2 = u + k1.du * DT * 0.5;
+  const v2 = v + k1.dv * DT * 0.5;
+  const k2 = flowDeriv(u2, v2, tp);
+
+  const u3 = u + k2.du * DT * 0.5;
+  const v3 = v + k2.dv * DT * 0.5;
+  const k3 = flowDeriv(u3, v3, tp);
+
+  const u4 = u + k3.du * DT;
+  const v4 = v + k3.dv * DT;
+  const k4 = flowDeriv(u4, v4, tp);
+
+  pu[i] = (u + (DT / 6) * (k1.du + 2*k2.du + 2*k3.du + k4.du)) % (Math.PI * 2);
+  if (pu[i] < 0) pu[i] += Math.PI * 2;
+
+  // clamp v to range with soft bounce
+  let newV = v + (DT / 6) * (k1.dv + 2*k2.dv + 2*k3.dv + k4.dv);
+  if (newV > V_MAX) newV = V_MAX - (newV - V_MAX) * 0.5;
+  if (newV < V_MIN) newV = V_MIN + (V_MIN - newV) * 0.5;
+  pv[i] = newV;
+}
+
+// temp arrays for world positions of active particles each frame
+const tmpX = new Float32Array(ACTIVE);
+const tmpY = new Float32Array(ACTIVE);
+const tmpZ = new Float32Array(ACTIVE);
+const tmpV = new Float32Array(ACTIVE);  // store v for color mapping
+
+// ── main loop ─────────────────────────────────────────────────────────────────
+const start = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const t = (now - start) / 1000;
+
+  // ── step flow field ───────────────────────────────────────────────────────
+  for (let step = 0; step < STEPS_PER_FRAME; step++) {
+    for (let i = 0; i < ACTIVE; i++) rk4Step(i, t);
+  }
+
+  // ── map to world positions ────────────────────────────────────────────────
+  for (let i = 0; i < ACTIVE; i++) {
+    const p = hyperboloidPos(pu[i], pv[i]);
+    // tiny tremor in world space (±0.015)
+    tmpX[i] = p.x + jitter() * 0.03;
+    tmpY[i] = p.y + jitter() * 0.03;
+    tmpZ[i] = p.z + jitter() * 0.03;
+    tmpV[i] = pv[i];
+  }
+
+  // ── write current positions to trail buffer ───────────────────────────────
+  const trailBase = ACTIVE + trailWritePtr * ACTIVE;
+  for (let i = 0; i < ACTIVE; i++) {
+    const slotBase = (trailBase + i) * 3;
+    positions[slotBase]     = tmpX[i];
+    positions[slotBase + 1] = tmpY[i];
+    positions[slotBase + 2] = tmpZ[i];
+  }
+
+  // ── update age & color for all trail slots ────────────────────────────────
+  for (let frame = 0; frame < TRAIL_FRAMES; frame++) {
+    let frameDelta = (trailWritePtr - frame + TRAIL_FRAMES) % TRAIL_FRAMES;
+    const age = (frameDelta + 1) / TRAIL_FRAMES;  // freshest=1/TF, oldest=1.0
+
+    const base = ACTIVE + frame * ACTIVE;
+    for (let i = 0; i < ACTIVE; i++) {
+      const idx = base + i;
+      ages[idx] = age;
+      setColorWithAge(colors, idx * 3, tmpV[i], age, false);
+      setSize(sizes, idx, age, tmpV[i]);
+    }
+  }
+
+  // advance trail write pointer
+  trailWritePtr = (trailWritePtr + 1) % TRAIL_FRAMES;
+
+  // ── update active particle positions & appearance ─────────────────────────
+  for (let i = 0; i < ACTIVE; i++) {
+    positions[i * 3]     = tmpX[i];
+    positions[i * 3 + 1] = tmpY[i];
+    positions[i * 3 + 2] = tmpZ[i];
+    ages[i] = 0.0;
+    setColorWithAge(colors, i * 3, tmpV[i], 0.0, true);
+    sizes[i] = 5.0;
+  }
+
+  // ── mark GPU buffers dirty ────────────────────────────────────────────────
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.aColor.needsUpdate   = true;
+  geom.attributes.aSize.needsUpdate    = true;
+  geom.attributes.aAge.needsUpdate     = true;
+
+  // ── camera: fixed frontal view, manual drag offsets it ───────────────────
+  if (orbitTheta !== 0 || orbitPhi !== 0) {
+    const radius = 18;
+    const baseTheta = Math.PI * 0.5;  // frontal = looking from +Z
+    const theta = baseTheta + orbitTheta;
+    const phi_c = orbitPhi;
+    camera.position.set(
+      radius * Math.cos(phi_c) * Math.sin(theta),
+      radius * Math.sin(phi_c),
+      radius * Math.cos(phi_c) * Math.cos(theta)
+    );
+    camera.lookAt(0, 0, 0);
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
