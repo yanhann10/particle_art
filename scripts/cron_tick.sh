@@ -36,6 +36,11 @@ if [ ! -x "$VENV/bin/python3" ]; then
   exit 2
 fi
 
+# sync any new feedback.json entries → taste.json iterate_when_chosen
+if "$VENV/bin/python3" "$REPO/scripts/sync_taste.py" 2>>"$LOG"; then
+  log "sync_taste OK"
+fi
+
 # run mutation tick; capture output
 OUTPUT=$("$VENV/bin/python3" "$REPO/scripts/mutate.py" 2>&1) || RC=$?
 RC="${RC:-0}"
