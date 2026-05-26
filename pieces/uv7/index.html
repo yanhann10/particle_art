@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uv7 · rail bloom · Parallels×calyx botanical</title>
+<!-- MOTION: bloom, intensity: responsive -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; cursor:none; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">uv7 · rail bloom</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// uv7 — hybrid of as2 (Parallels) × kxu (botanical calyx trails)
+// Vertical amber rails at rest; mouse proximity blooms rails into calyx/petal
+// forms. Motion trails persist briefly as rails bloom and return.
+// Background: #0a0a0a. Color: amber #c9850a → peach #e8b882 at petal tips.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0a, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+camera.lookAt(0, 0, 0);
+
+// ── Rail system ────────────────────────────────────────────────────────────
+const RAIL_COUNT = 80;
+const PARTICLES_PER_RAIL = 120;
+const TOTAL = RAIL_COUNT * PARTICLES_PER_RAIL; // 9600
+
+// Rail base X: evenly spaced −10 to +10
+const railBaseX = [];
+for (let i = 0; i < RAIL_COUNT; i++) {
+  railBaseX.push(-10 + (i / (RAIL_COUNT - 1)) * 20);
+}
+
+// Particle state
+const particles = [];
+for (let r = 0; r < RAIL_COUNT; r++) {
+  for (let p = 0; p < PARTICLES_PER_RAIL; p++) {
+    particles.push({
+      rail: r,
+      y: -8 + (p / (PARTICLES_PER_RAIL - 1)) * 16,
+      vy: 0.25 + Math.random() * 0.45,
+      phase: Math.random() * Math.PI * 2,
+      // position history for trails (3 frames)
+      history: []
+    });
+  }
+}
+
+// Per-rail bloom blend (0=rail, 1=calyx)
+const railBloom = new Float32Array(RAIL_COUNT).fill(0);
+const railBloomVel = new Float32Array(RAIL_COUNT).fill(0);
+
+// Calyx parameters (from kxu)
+const PETALS = 5.0;
+const WAVE_AMP = 0.55;
+const ROW_FREQ = 1.2;
+const CUP_DEPTH = 3.5;
+
+// Compute calyx X displacement for a rail at index r and particle at world-y
+// θ = (r / RAIL_COUNT) * 2π  → petal angle
+// radial_t = |y| / 8.0 (0=center, 1=edge)
+// petalShape = 0.5 + 0.5 * cos(θ * PETALS)
+// displacement = WAVE_AMP * petalShape * sin(y * ROW_FREQ) * CUP_DEPTH * radial_t
+function calyxDX(r, y, time) {
+  const theta = (r / RAIL_COUNT) * Math.PI * 2;
+  const radialT = Math.abs(y) / 8.0;
+  const petalShape = 0.5 + 0.5 * Math.cos(theta * PETALS);
+  const wave = Math.sin(y * ROW_FREQ + time * 0.4);
+  return WAVE_AMP * petalShape * wave * CUP_DEPTH * radialT * 1.6;
+}
+
+// ── Particle geometry ──────────────────────────────────────────────────────
+// Each particle: short vertical segment (as2 style)
+const segmentGeom = new THREE.BufferGeometry();
+const segY = 0.20;
+segmentGeom.setAttribute('position', new THREE.Float32BufferAttribute([
+  0, -segY, 0,
+  0,  segY, 0
+], 3));
+
+const instancedGeom = new THREE.InstancedBufferGeometry();
+instancedGeom.index = segmentGeom.index;
+instancedGeom.attributes.position = segmentGeom.attributes.position;
+
+const offsets = new Float32Array(TOTAL * 3);
+const opacities = new Float32Array(TOTAL);
+const bloomFactors = new Float32Array(TOTAL); // per-particle bloom (for color)
+instancedGeom.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
+instancedGeom.setAttribute('opacity', new THREE.InstancedBufferAttribute(opacities, 1));
+instancedGeom.setAttribute('bloom', new THREE.InstancedBufferAttribute(bloomFactors, 1));
+instancedGeom.instanceCount = TOTAL;
+
+const lineMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uAmberColor:  { value: new THREE.Color(0.789, 0.522, 0.039) }, // #c9850a
+    uPeachColor:  { value: new THREE.Color(0.910, 0.722, 0.506) }, // #e8b882
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute vec3 offset;
+    attribute float opacity;
+    attribute float bloom;
+    varying float vOpacity;
+    varying float vBloom;
+    uniform float uTime;
+    void main(){
+      vOpacity = opacity;
+      vBloom = bloom;
+      vec3 pos = position + offset;
+      // slight sway, reduced when blooming (petal shape takes over)
+      float swayAmt = mix(0.035, 0.008, bloom);
+      float sway = sin(uTime * 0.6 + offset.y * 0.3 + offset.x * 0.2) * swayAmt;
+      pos.x += sway;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uAmberColor;
+    uniform vec3 uPeachColor;
+    varying float vOpacity;
+    varying float vBloom;
+    void main(){
+      // blend amber → peach based on bloom factor
+      vec3 col = mix(uAmberColor, uPeachColor, vBloom * vBloom);
+      gl_FragColor = vec4(col, vOpacity);
+    }
+  `
+});
+
+const lines = new THREE.LineSegments(instancedGeom, lineMat);
+scene.add(lines);
+
+// ── Trail system ────────────────────────────────────────────────────────────
+// Store last 4 positions per particle (sampled at 60ms intervals)
+const TRAIL_DEPTH = 4;
+const TRAIL_SAMPLE_EVERY = 60; // ms
+let lastTrailSample = 0;
+// Circular buffer: trailBuf[frame][particleIdx] = {x,y}
+const trailBuf = [];
+for (let t = 0; t < TRAIL_DEPTH; t++) {
+  trailBuf.push(new Float32Array(TOTAL * 2)); // x,y per particle
+}
+let trailHead = 0; // which slot is "current"
+
+// Trail geometry (updated periodically)
+let trailLines = null;
+let trailGeom = null;
+
+const trailMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float trailAge;
+    varying float vAge;
+    void main(){
+      vAge = trailAge;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    void main(){
+      // amber trail, fade with age
+      float alpha = (1.0 - vAge) * 0.55;
+      vec3 col = mix(vec3(0.910, 0.722, 0.506), vec3(0.789, 0.522, 0.039), vAge);
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+function rebuildTrails(currentX, currentY) {
+  // Only build trails when there's some bloom happening
+  if (trailLines) scene.remove(trailLines);
+  trailGeom = null;
+  trailLines = null;
+
+  const linePositions = [];
+  const ages = [];
+
+  // Sample every SAMPLE_STEP particles to keep geometry lean
+  const SAMPLE_STEP = 4;
+  for (let i = 0; i < TOTAL; i += SAMPLE_STEP) {
+    // Connect consecutive trail frames
+    for (let t = 0; t < TRAIL_DEPTH - 1; t++) {
+      const f0 = (trailHead - t + TRAIL_DEPTH) % TRAIL_DEPTH;
+      const f1 = (trailHead - t - 1 + TRAIL_DEPTH) % TRAIL_DEPTH;
+      const age = t / TRAIL_DEPTH;
+
+      const x0 = trailBuf[f0][i * 2];
+      const y0 = trailBuf[f0][i * 2 + 1];
+      const x1 = trailBuf[f1][i * 2];
+      const y1 = trailBuf[f1][i * 2 + 1];
+
+      // Skip if trail hasn't moved (zero-initialized frames)
+      const dx = x1 - x0;
+      const dy = y1 - y0;
+      if (dx * dx + dy * dy < 0.0001) continue;
+
+      linePositions.push(x0, y0, 0, x1, y1, 0);
+      ages.push(age, age + 1 / TRAIL_DEPTH);
+    }
+  }
+
+  if (linePositions.length === 0) return;
+
+  trailGeom = new THREE.BufferGeometry();
+  trailGeom.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
+  trailGeom.setAttribute('trailAge', new THREE.Float32BufferAttribute(ages, 1));
+  trailLines = new THREE.LineSegments(trailGeom, trailMat);
+  scene.add(trailLines);
+}
+
+// ── Mouse tracking ──────────────────────────────────────────────────────────
+let mouseNDC = new THREE.Vector2(9999, 9999); // far off-screen by default
+let mouseWorldX = 0, mouseWorldY = 0;
+let mousePresent = false;
+let lastMouseMove = 0;
+
+addEventListener('mousemove', (e) => {
+  const x = (e.clientX / innerWidth) * 2 - 1;
+  const y = -(e.clientY / innerHeight) * 2 + 1;
+  mouseNDC.set(x, y);
+  mousePresent = true;
+  lastMouseMove = performance.now();
+});
+
+// Cursor crosshair
+const cursorGeom = new THREE.BufferGeometry();
+cursorGeom.setAttribute('position', new THREE.Float32BufferAttribute([
+  -0.2, 0, 0,  0.2, 0, 0,
+   0, -0.2, 0,  0, 0.2, 0
+], 3));
+const cursorMat = new THREE.LineBasicMaterial({ color: 0xff9922, transparent: true, opacity: 0.35 });
+const cursor = new THREE.LineSegments(cursorGeom, cursorMat);
+scene.add(cursor);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Main loop ───────────────────────────────────────────────────────────────
+let lastT = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  const time = now / 1000;
+  lineMat.uniforms.uTime.value = time;
+  trailMat.uniforms.uTime.value = time;
+
+  // Mouse fade-out: if no move in 3s, treat as absent
+  if (now - lastMouseMove > 3000) mousePresent = false;
+
+  // Project mouse to world
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(mouseNDC, camera);
+  const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  const isect = new THREE.Vector3();
+  if (raycaster.ray.intersectPlane(plane, isect)) {
+    mouseWorldX = isect.x;
+    mouseWorldY = isect.y;
+  }
+  cursor.position.set(mouseWorldX, mouseWorldY, 0);
+  cursor.visible = mousePresent;
+
+  // Update bloom per rail: sigmoid based on mouse proximity
+  for (let r = 0; r < RAIL_COUNT; r++) {
+    const baseX = railBaseX[r];
+    const dx = mouseWorldX - baseX;
+    const distX = Math.abs(dx);
+
+    // Target bloom: Gaussian falloff, radius ~200px ≈ 3.5 world units
+    const sigma = 3.5;
+    let bloomTarget = mousePresent
+      ? Math.exp(-(distX * distX) / (2 * sigma * sigma))
+      : 0;
+
+    // Smooth spring toward target
+    const k = 5.0;
+    const damping = 0.85;
+    const force = (bloomTarget - railBloom[r]) * k;
+    railBloomVel[r] += force * dt;
+    railBloomVel[r] *= damping;
+    railBloom[r] = Math.max(0, Math.min(1, railBloom[r] + railBloomVel[r] * dt));
+
+    // Decay when mouse absent
+    if (!mousePresent) {
+      railBloom[r] *= 0.97;
+      railBloomVel[r] *= 0.9;
+    }
+  }
+
+  // Update particles
+  for (let i = 0; i < TOTAL; i++) {
+    const p = particles[i];
+    p.y += p.vy * dt;
+    if (p.y > 8) p.y -= 16;
+    if (p.y < -8) p.y += 16;
+
+    const bloom = railBloom[p.rail];
+
+    // Rail X with calyx displacement
+    const railX = railBaseX[p.rail];
+    const calyxOffset = calyxDX(p.rail, p.y, time);
+    const worldX = railX + calyxOffset * bloom;
+
+    // Opacity: base from vertical fade + mouse proximity boost
+    const edgeFade = 1.0 - Math.abs(p.y) / 8.5;
+    let opacity = Math.max(0.72, edgeFade); // bright minimum for headless
+    const dyMouse = Math.abs(p.y - mouseWorldY);
+    if (mousePresent && dyMouse < 3.0) {
+      opacity += (1.0 - dyMouse / 3.0) * 0.5;
+    }
+    // Bloom brightens tips
+    opacity += bloom * 0.3;
+    opacity = Math.min(1.0, opacity);
+    const pulse = 0.88 + 0.12 * Math.sin(time + p.phase);
+    opacity *= pulse;
+
+    offsets[i * 3]     = worldX;
+    offsets[i * 3 + 1] = p.y;
+    offsets[i * 3 + 2] = 0;
+    opacities[i] = opacity;
+    bloomFactors[i] = bloom;
+  }
+
+  instancedGeom.attributes.offset.needsUpdate = true;
+  instancedGeom.attributes.opacity.needsUpdate = true;
+  instancedGeom.attributes.bloom.needsUpdate = true;
+
+  // Trail sampling
+  if (now - lastTrailSample > TRAIL_SAMPLE_EVERY) {
+    lastTrailSample = now;
+    trailHead = (trailHead + 1) % TRAIL_DEPTH;
+    const slot = trailBuf[trailHead];
+    // Write current positions into trail slot
+    let anyBloom = false;
+    for (let i = 0; i < TOTAL; i++) {
+      const bloom = bloomFactors[i];
+      if (bloom > 0.05) anyBloom = true;
+      slot[i * 2]     = offsets[i * 3];
+      slot[i * 2 + 1] = offsets[i * 3 + 1];
+    }
+    if (anyBloom || mousePresent) {
+      rebuildTrails();
+    } else if (trailLines) {
+      scene.remove(trailLines);
+      trailLines = null;
+    }
+  }
+
+  // Slow camera drift
+  const ang = now * 0.00008;
+  camera.position.x = Math.sin(ang) * 1.5;
+  camera.position.y = Math.sin(ang * 0.7) * 1.0;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
