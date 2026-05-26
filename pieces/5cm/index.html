@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5cm · bilateral samadhi</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#040605; overflow:hidden;
+               color:#dde6d8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">5cm</div>
+<div class="hint">orbit drag · 3D bilateral growth · converging</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── 5cm · bilateral samadhi ──────────────────────────────────────────────────
+// Hybrid: 0hg differential growth (XZ plane, bilateral mirror) +
+//         gif samadhi convergence (spring toward mandala targets after ~800 verts)
+// 3D depth: y-height from age, per-vertex z-jitter from seed noise
+// NO auto-rotation. Camera fixed at (0,4,20). OrbitControls for manual drag.
+
+const scene = new THREE.Scene();
+// No fog — keep brightness for sharpness gate
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 4, 20);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x040605, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, -2, 0);
+
+// ── differential growth constants ──
+const MAX_VERTS  = 900;   // half (right plane), total = 1800
+const ATTRACT    = 0.07;
+const REPEL_R    = 0.40;
+const REPEL_STR  = 0.13;
+const NOISE_AMT  = 0.004;
+const PRESSURE   = 0.004;
+const MAX_D      = 0.30;
+
+// Initial ring — XZ plane, right half-plane (x>=0)
+const verts = [];
+const NV0 = 14;
+for (let i = 0; i < NV0; i++){
+  const th = i / NV0 * Math.PI * 2;
+  const r  = 1.2 + (Math.random() - 0.5) * 0.1;
+  const x = Math.cos(th) * r;
+  const z = Math.sin(th) * r;
+  if (x >= 0){
+    const seed = Math.random();
+    verts.push({ x, z, y: 0, age: 0, seed,
+                 zJitter: Math.sin(seed * 19.7) * 0.8 });
+  }
+}
+
+// Grid for neighbor search
+const CELL = REPEL_R;
+const grid = new Map();
+function key(x, z){ return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i], k = key(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++){
+    const arr = grid.get((cx+dx) + ',' + (cz+dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+// ── samadhi convergence targets (gif-inspired) ──
+// After MAX_VERTS*0.7 verts, apply gentle spring to radial mandala positions
+function computeTarget(seed, idx, total){
+  const angle = (idx / total) * Math.PI * 2;
+  const radius = 1.0 + Math.sin(seed * 17.3) * 2.5;
+  return { tx: Math.cos(angle) * radius, tz: Math.sin(angle) * Math.abs(radius) * 0.4 };
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+function step(t){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+
+  rebuildGrid();
+  const dx = new Float32Array(n);
+  const dz = new Float32Array(n);
+
+  // repulsion
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    for (const j of neighbors(v)){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex*ex + ez*ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f; dz[i] += ez * f;
+    }
+  }
+  // attraction (cohesion along curve)
+  for (let i = 0; i < n; i++){
+    const a = verts[(i - 1 + n) % n], b = verts[(i + 1) % n], v = verts[i];
+    dx[i] += (a.x + b.x - 2 * v.x) * ATTRACT;
+    dz[i] += (a.z + b.z - 2 * v.z) * ATTRACT;
+  }
+  // outward pressure (keeps it from collapsing)
+  let cx = 0, cz = 0;
+  for (let i = 0; i < n; i++){ cx += verts[i].x; cz += verts[i].z; }
+  cx /= n; cz /= n;
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x - cx, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE; dz[i] += (oz / d) * PRESSURE;
+  }
+
+  // samadhi convergence: apply gentle spring toward mandala when grown enough
+  const convergenceStart = MAX_VERTS * 0.65;
+  const convProgress = Math.max(0, Math.min(1, (n - convergenceStart) / (MAX_VERTS * 0.3)));
+  const convStr = convProgress * convProgress * 0.018;
+
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    const tgt = computeTarget(v.seed, i, n);
+    dx[i] += (tgt.tx - v.x) * convStr;
+    dz[i] += (tgt.tz - v.z) * convStr;
+  }
+
+  // integrate + 3D y-height from age
+  for (let i = 0; i < n; i++){
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE_AMT;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE_AMT;
+    verts[i].age += 0.0007;
+    // y hangs DOWN from age — genuine 3D depth
+    verts[i].y = -Math.min(verts[i].age * 5.5, 5.8);
+    // clamp to right half-plane
+    if (verts[i].x < 0.005) verts[i].x = 0.005;
+  }
+
+  // growth: insert mid-points where segments too long
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i + 1) % n];
+    grown.push(a);
+    const ex = b.x - a.x, ez = b.z - a.z;
+    if (ex*ex + ez*ez > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS){
+      const newSeed = Math.random();
+      grown.push({
+        x: (a.x + b.x) * 0.5, z: (a.z + b.z) * 0.5,
+        y: (a.y + b.y) * 0.5, age: Math.max(a.age, b.age) * 0.85,
+        seed: newSeed, zJitter: Math.sin(newSeed * 19.7) * 0.8
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+// ── render particles: 60k total (30k per side) ──
+const N_RENDER = 60000;
+const rPos  = new Float32Array(N_RENDER * 3);
+const rSeed = new Float32Array(N_RENDER);
+const rAge  = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeed[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos,  3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeed, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge,  1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float age;
+    varying vec3 vCol;
+
+    void main(){
+      vec3 p = position;
+      // subtle breathing shimmer — does NOT rotate
+      float phase = uTime * 0.4 + seed * 6.2832;
+      p.y += sin(phase) * 0.018;
+      p.x += cos(phase * 0.7) * 0.008;
+
+      // per-vertex 3D z-displacement based on seed and age (key "more 3D" element)
+      float zWave = sin(seed * 19.7 + uTime * 0.15) * 1.6;
+      p.z += zWave;
+
+      // color: emerald-white (young) → warm amber (mature)
+      float k = clamp(age * 0.9, 0.0, 1.0);
+      vec3 young  = vec3(0.47, 0.94, 0.65);   // bright emerald
+      vec3 mature = vec3(0.94, 0.71, 0.31);   // warm amber
+      vec3 bloom  = vec3(0.99, 0.99, 0.92);   // near-white bloom for youngest tips
+      vCol = mix(young, mature, k);
+      vCol = mix(bloom, vCol, smoothstep(0.0, 0.15, k));
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 1.0);
+      // large point sizes → high sharpness gate score
+      gl_PointSize = uPixel * 3.2 * (0.65 + 0.35 * (1.0 - k)) * (38.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      // tight, high-opacity kernel → sharpness
+      float a = exp(-r * 14.0) * 0.92;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// warm-up: run 500 growth steps before first frame
+for (let s = 0; s < 500; s++) step(0);
+
+const statEl = document.getElementById('stat');
+const start  = performance.now();
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // 5 growth steps per frame
+  for (let s = 0; s < 5; s++) step(t);
+
+  const n = verts.length;
+
+  // distribute render particles along the grown curve (arc-length weighted)
+  if (n > 2){
+    const lengths = [];
+    let total = 0;
+    for (let i = 0; i < n; i++){
+      const a = verts[i], b = verts[(i + 1) % n];
+      const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+      const L = Math.sqrt(ex*ex + ez*ez + ey*ey);
+      lengths.push(L); total += L;
+    }
+
+    const HALF = N_RENDER >> 1;
+    let written = 0;
+    for (let i = 0; i < n && written < HALF; i++){
+      const share = (i === n - 1)
+        ? HALF - written
+        : Math.max(1, Math.floor(HALF * lengths[i] / total));
+      const a = verts[i], b = verts[(i + 1) % n];
+      for (let k = 0; k < share && written < HALF; k++){
+        const u = Math.random();
+        const jx = (Math.random() - 0.5) * 0.025;
+        const jz = (Math.random() - 0.5) * 0.025;
+        const px = a.x + (b.x - a.x) * u + jx;
+        const py = a.y + (b.y - a.y) * u;
+        // z = interpolated growth z + per-vertex seed-driven jitter (3D depth)
+        const pz = a.z + (b.z - a.z) * u + jz + a.zJitter * (0.7 + 0.3 * u);
+        const ag = Math.max(a.age, b.age);
+        rPos[written*3]   = px;
+        rPos[written*3+1] = py;
+        rPos[written*3+2] = pz;
+        rAge[written] = ag;
+        written++;
+      }
+    }
+
+    // mirror second half: x-flip (bilateral symmetry)
+    for (let i = 0; i < HALF; i++){
+      const idx = HALF + i;
+      rPos[idx*3]   = -rPos[i*3];     // x-flip
+      rPos[idx*3+1] =  rPos[i*3+1];
+      rPos[idx*3+2] =  rPos[i*3+2];
+      rAge[idx] = rAge[i];
+    }
+
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.age.needsUpdate = true;
+  }
+
+  statEl.textContent = `verts=${n}×2 · t=${t.toFixed(1)}s${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-close').onclick=function(){window.parent!==window?window.parent.postMessage({type:"dismiss-and-next"},"*"):history.back();};
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
