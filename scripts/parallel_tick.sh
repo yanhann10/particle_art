@@ -27,8 +27,11 @@ ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { echo "[$(ts)] $*" >> "$LOG"; }
 
 # session-level lock so two parallel_tick.sh invocations don't pile on each other
-exec 9>"$LOCK"
-flock -n 9 || { log "parallel_tick: another instance running, skip"; exit 0; }
+# mkdir is atomic on macOS + Linux; avoids flock (Linux-only)
+if ! mkdir "${LOCK}.d" 2>/dev/null; then
+  log "parallel_tick: another instance running, skip"; exit 0
+fi
+trap "rmdir '${LOCK}.d' 2>/dev/null" EXIT
 
 log "── parallel_tick start (N=$N) ──"
 cd "$REPO" || { log "FATAL: cannot cd to $REPO"; exit 1; }
@@ -59,7 +62,7 @@ if [ -x "$THRUM" ] && "$THRUM" daemon status --quiet 2>/dev/null; then
 fi
 
 # Snapshot piece list before workers run (to detect new pieces after)
-PIECES_BEFORE=$(find "$REPO/pieces" -name 'meta.json' -printf '%h\n' 2>/dev/null | xargs -I{} basename {} | sort)
+PIECES_BEFORE=$(find "$REPO/pieces" -name 'meta.json' 2>/dev/null | sed 's|.*/pieces/||;s|/meta\.json||' | sort)
 
 PIDS=()
 for i in $(seq 1 "$N"); do
@@ -79,7 +82,7 @@ git push 2>>"$LOG" || git pull --rebase -X theirs --autostash --quiet 2>>"$LOG" 
 log "── parallel_tick end ──"
 
 # --- Detect new pieces and notify via Telegram ---
-PIECES_AFTER=$(find "$REPO/pieces" -name 'meta.json' -printf '%h\n' 2>/dev/null | xargs -I{} basename {} | sort)
+PIECES_AFTER=$(find "$REPO/pieces" -name 'meta.json' 2>/dev/null | sed 's|.*/pieces/||;s|/meta\.json||' | sort)
 NEW_PIECES=$(comm -13 <(echo "$PIECES_BEFORE") <(echo "$PIECES_AFTER") | tr '\n' ' ')
 log "new pieces: ${NEW_PIECES:-none}"
 
