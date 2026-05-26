@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>j4i · night forest (Voronoi grove)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; color:#a08040; }
+</style>
+</head>
+<body>
+<div class="id">j4i</div>
+<div class="hint">orbit drag · night forest Voronoi grove</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ─── deterministic RNG ─── */
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ─── Scene setup ─── */
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 800);
+camera.position.set(0, 10, 40);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+/* NO auto-rotate — manual drag only */
+
+/* ─── Uniforms for shaders ─── */
+const N_TOTAL = 80000;
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+};
+
+/* ─── Shared material: multiple ptypes ─────────────────────────────────
+   ptype:
+     0 = Voronoi filament (amber)
+     1 = trunk (brown)
+     2 = branch (warm brown)
+     3 = canopy inner (dark green)
+     4 = canopy tip (bright green, additive)
+   edgeDist: 0-1 repurposed per ptype:
+     filament: 0=endpoint, 1=midpoint
+     trunk: 0=base, 1=tip
+     branch: 0=thick, 1=thin
+     canopy: normalized canopy density
+   energy: per-particle random [0,1]
+   seed: per-particle tree seed (normalized node index)
+──────────────────────────────────────────────────────────────── */
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float edgeDist;
+    attribute float ptype;
+    attribute float energy;
+    attribute float seed;       /* 0..1 per-tree seed */
+    varying vec3  vCol;
+    varying float vAlpha;
+
+    /* simple hash for per-particle noise */
+    float hash(float n) { return fract(sin(n * 127.1) * 43758.5453); }
+
+    void main() {
+      float e  = energy;
+      float sd = seed;
+      float t  = uTime;
+
+      /* breathing oscillation per tree — gentle breeze */
+      float breathPeriod = 4.0 + sd * 4.0;           /* 4–8 s */
+      float breathPhase  = sd * 6.2832;
+      float breath       = 1.0 + 0.02 * sin(t * 6.2832 / breathPeriod + breathPhase);
+
+      /* canopy drift — slow noise */
+      float driftAmp   = 0.10;
+      float driftFreq  = 0.05;
+      vec3 drift = vec3(
+        sin(t * driftFreq + e * 12.3 + sd * 5.7) * driftAmp,
+        cos(t * driftFreq + e * 9.1  + sd * 3.2) * driftAmp * 0.5,
+        sin(t * driftFreq + e * 7.4  + sd * 8.1) * driftAmp
+      );
+
+      vec3 pos = position;
+
+      vec3  col;
+      float baseAlpha;
+      float sz;
+
+      if (ptype < 0.5) {
+        /* ── Voronoi filament: amber/gold ── */
+        vec3 amber = vec3(0.784, 0.549, 0.196);   /* RGB(200,140,50)/255 */
+        col = amber;
+        baseAlpha = 0.50;
+        sz = uPixel * 1.5;
+
+      } else if (ptype < 1.5) {
+        /* ── Trunk: dark brown, tapers ── */
+        /* edgeDist 0=base, 1=tip; tip is lighter/thinner */
+        vec3 trunkBase = vec3(0.314, 0.196, 0.078);  /* 80,50,20 */
+        vec3 trunkTip  = vec3(0.392, 0.255, 0.118);  /* 100,65,30 */
+        col = mix(trunkBase, trunkTip, edgeDist);
+        baseAlpha = 0.90;
+        sz = uPixel * (3.0 - 1.0 * edgeDist);   /* 3px base → 2px tip */
+        /* trunk breathes */
+        pos = pos * breath;
+
+      } else if (ptype < 2.5) {
+        /* ── Main / sub branch: warm brown ── */
+        vec3 branchCol = vec3(0.392, 0.255, 0.118);   /* 100,65,30 */
+        col = branchCol;
+        baseAlpha = 0.85;
+        sz = uPixel * 2.0;
+        pos = pos * breath;
+
+      } else if (ptype < 3.5) {
+        /* ── Canopy inner: deep/medium green ── */
+        vec3 deepGreen = vec3(0.10, 0.60, 0.20);   /* boosted for dynamic range */
+        vec3 midGreen  = vec3(0.15, 0.85, 0.35);
+        col = mix(deepGreen, midGreen, edgeDist);
+        baseAlpha = 0.90;
+        sz = uPixel * 3.0;
+        pos = pos + drift * breath;
+
+      } else {
+        /* ── Canopy tip: bright neon green, additive glow ── */
+        /* Boost luminance: pure vivid green pulls p95 up on black bg */
+        vec3 tipGreen  = vec3(0.10, 1.00, 0.30);   /* near-saturated green */
+        vec3 brightTip = vec3(0.30, 1.00, 0.50);   /* white-green */
+        float pulse = 0.5 + 0.5 * sin(t * 0.8 + sd * 6.28);
+        col = mix(tipGreen, brightTip, pulse);
+        baseAlpha = 1.0;
+        /* canopy tip size pulses gently */
+        sz = uPixel * 4.5 * (1.0 + 0.3 * sin(t * 0.8 + sd * 6.28));
+        pos = pos + drift * breath;
+      }
+
+      vCol   = col;
+      vAlpha = baseAlpha;
+
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      gl_PointSize = sz;
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d) * 4.0;
+      if (r > 1.0) discard;
+      /* falloff: exp(-r*7) keeps more brightness per sprite while staying sharp */
+      float a = exp(-r * 7.0) * 0.92 * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+/* ─── Tree geometry builder ────────────────────────────────────────────
+   Builds particle arrays for one tree rooted at `base` (x,z plane),
+   using a seeded rng for per-tree variation.
+   Returns arrays of {x,y,z, ptype, edgeDist, energy, seed} objects.
+─────────────────────────────────────────────────────────────── */
+
+function buildTree(base, treeIndex, treeRng) {
+  const tType = treeIndex % 4;
+  const particles = [];
+
+  /* tree-level params from type */
+  let trunkHeight, nMainBranches, branchAngleBase, branchAngleDelta,
+      subBranchCount, canopyRadius, canopyDensity;
+
+  if (tType === 0) {
+    /* POPLAR/CYPRESS — tall narrow */
+    trunkHeight     = 4.5 + treeRng() * 0.5;
+    nMainBranches   = 3 + Math.floor(treeRng() * 2);    /* 3-4 */
+    branchAngleBase = 20;   /* degrees from vertical */
+    branchAngleDelta = 15;
+    subBranchCount  = 2;
+    canopyRadius    = 0.7 + treeRng() * 0.5;
+    canopyDensity   = 160;
+  } else if (tType === 1) {
+    /* OAK — wide spreading */
+    trunkHeight     = 2.5 + treeRng() * 0.8;
+    nMainBranches   = 5 + Math.floor(treeRng() * 2);    /* 5-6 */
+    branchAngleBase = 55;
+    branchAngleDelta = 20;
+    subBranchCount  = 3;
+    canopyRadius    = 1.1 + treeRng() * 0.5;
+    canopyDensity   = 220;
+  } else if (tType === 2) {
+    /* WILLOW — drooping */
+    trunkHeight     = 3.5 + treeRng() * 0.8;
+    nMainBranches   = 4 + Math.floor(treeRng() * 2);    /* 4-5 */
+    branchAngleBase = 80;    /* drooping — near horizontal */
+    branchAngleDelta = 15;
+    subBranchCount  = 4;
+    canopyRadius    = 0.9 + treeRng() * 0.5;
+    canopyDensity   = 200;
+  } else {
+    /* PINE/FIR — conical */
+    trunkHeight     = 4.0 + treeRng() * 1.0;
+    nMainBranches   = 5 + Math.floor(treeRng() * 2);    /* 5-6 */
+    branchAngleBase = 40;
+    branchAngleDelta = 10;
+    subBranchCount  = 2;
+    canopyRadius    = 0.65 + treeRng() * 0.4;
+    canopyDensity   = 150;
+  }
+
+  const seedVal = (treeIndex + 1) / 35.0;  /* 0..1 seed per tree */
+
+  /* ── Trunk ── */
+  const trunkParticles = 200 + Math.floor(treeRng() * 100);
+  for (let k = 0; k < trunkParticles; k++) {
+    const frac = treeRng();
+    const y    = base.y + frac * trunkHeight;
+    /* trunk is circular, tapers from base to tip */
+    const radius = 0.12 * (1.0 - frac * 0.6);
+    const angle  = treeRng() * Math.PI * 2;
+    particles.push({
+      x: base.x + Math.cos(angle) * radius * (treeRng() * 0.5 + 0.5),
+      y,
+      z: base.z + Math.sin(angle) * radius * (treeRng() * 0.5 + 0.5),
+      ptype:    1.0,
+      edgeDist: frac,
+      energy:   treeRng(),
+      seed:     seedVal,
+    });
+  }
+
+  /* ── Main branches ── */
+  for (let bi = 0; bi < nMainBranches; bi++) {
+    /* azimuth uniformly distributed around trunk */
+    const azimuth = (bi / nMainBranches) * Math.PI * 2 + treeRng() * 0.4;
+    /* elevation: angle from vertical */
+    let elevDeg = branchAngleBase + (treeRng() - 0.5) * 2 * branchAngleDelta;
+    if (tType === 2) elevDeg = Math.min(elevDeg, 100); /* willow droop */
+    const elevRad = (elevDeg * Math.PI) / 180;
+
+    /* branch starts at a random height along upper trunk */
+    const startFrac = 0.4 + treeRng() * 0.5;
+    const branchStart = new THREE.Vector3(
+      base.x, base.y + startFrac * trunkHeight, base.z
+    );
+
+    /* branch direction: up+out */
+    const branchLen = 1.0 + treeRng() * 1.5;
+    const dx = Math.sin(elevRad) * Math.cos(azimuth) * branchLen;
+    const dy = (tType === 2 ? -1 : 1) * Math.cos(elevRad) * branchLen;
+    const dz = Math.sin(elevRad) * Math.sin(azimuth) * branchLen;
+    const branchEnd = new THREE.Vector3(
+      branchStart.x + dx, branchStart.y + dy, branchStart.z + dz
+    );
+
+    /* for pine, reduce branch length with height — conical silhouette */
+    let pineScale = 1.0;
+    if (tType === 3) {
+      pineScale = 1.0 - startFrac * 0.65;  /* longer at bottom */
+    }
+
+    const bParticles = 80 + Math.floor(treeRng() * 60);
+    for (let k = 0; k < bParticles; k++) {
+      const t = treeRng();
+      const jitter = 0.04;
+      particles.push({
+        x: branchStart.x + (branchEnd.x - branchStart.x) * t * pineScale + (treeRng()-0.5)*jitter,
+        y: branchStart.y + (branchEnd.y - branchStart.y) * t * pineScale + (treeRng()-0.5)*jitter,
+        z: branchStart.z + (branchEnd.z - branchStart.z) * t * pineScale + (treeRng()-0.5)*jitter,
+        ptype:    2.0,
+        edgeDist: t,
+        energy:   treeRng(),
+        seed:     seedVal,
+      });
+    }
+
+    /* ── Sub-branches ── */
+    for (let si = 0; si < subBranchCount; si++) {
+      const subT = 0.3 + treeRng() * 0.55;
+      const subStart = new THREE.Vector3(
+        branchStart.x + (branchEnd.x - branchStart.x) * subT * pineScale,
+        branchStart.y + (branchEnd.y - branchStart.y) * subT * pineScale,
+        branchStart.z + (branchEnd.z - branchStart.z) * subT * pineScale
+      );
+      /* sub-branch goes further out + up/down slightly */
+      const subAz  = azimuth + (treeRng() - 0.5) * 1.5;
+      const subEl  = elevRad + (treeRng() - 0.5) * 0.6;
+      const subLen = 0.4 + treeRng() * 0.8;
+      const sdx = Math.sin(subEl) * Math.cos(subAz) * subLen;
+      const sdy = (tType === 2 ? -1 : 1) * Math.cos(subEl) * subLen * (0.5 + treeRng() * 0.5);
+      const sdz = Math.sin(subEl) * Math.sin(subAz) * subLen;
+      const subEnd = new THREE.Vector3(
+        subStart.x + sdx, subStart.y + sdy, subStart.z + sdz
+      );
+
+      const sbParticles = 40 + Math.floor(treeRng() * 30);
+      for (let k = 0; k < sbParticles; k++) {
+        const t = treeRng();
+        particles.push({
+          x: subStart.x + (subEnd.x - subStart.x) * t + (treeRng()-0.5)*0.03,
+          y: subStart.y + (subEnd.y - subStart.y) * t + (treeRng()-0.5)*0.03,
+          z: subStart.z + (subEnd.z - subStart.z) * t + (treeRng()-0.5)*0.03,
+          ptype:    2.0,
+          edgeDist: t,
+          energy:   treeRng(),
+          seed:     seedVal,
+        });
+      }
+
+      /* ── Canopy at sub-branch tip ── */
+      const cnCount = Math.floor(canopyDensity * (0.7 + treeRng() * 0.6));
+      for (let k = 0; k < cnCount; k++) {
+        /* spherical cloud, radius varies */
+        const r      = canopyRadius * treeRng();
+        const theta  = treeRng() * Math.PI * 2;
+        const phi    = Math.acos(2 * treeRng() - 1);
+        const isTip  = r > canopyRadius * 0.55;
+        particles.push({
+          x: subEnd.x + r * Math.sin(phi) * Math.cos(theta),
+          y: subEnd.y + r * Math.cos(phi) * 0.7,
+          z: subEnd.z + r * Math.sin(phi) * Math.sin(theta),
+          ptype:    isTip ? 4.0 : 3.0,
+          edgeDist: r / canopyRadius,
+          energy:   treeRng(),
+          seed:     seedVal,
+        });
+      }
+    }
+
+    /* ── Canopy at main branch tip ── */
+    const mainTip = new THREE.Vector3(
+      branchStart.x + (branchEnd.x - branchStart.x) * pineScale,
+      branchStart.y + (branchEnd.y - branchStart.y) * pineScale,
+      branchStart.z + (branchEnd.z - branchStart.z) * pineScale
+    );
+    const cnMainCount = Math.floor(canopyDensity * 1.2 * (0.8 + treeRng() * 0.4));
+    for (let k = 0; k < cnMainCount; k++) {
+      const r      = canopyRadius * (0.5 + treeRng() * 0.5);
+      const theta  = treeRng() * Math.PI * 2;
+      const phi    = Math.acos(2 * treeRng() - 1);
+      const isTip  = r > canopyRadius * 0.45;
+      particles.push({
+        x: mainTip.x + r * Math.sin(phi) * Math.cos(theta),
+        y: mainTip.y + r * Math.cos(phi) * 0.7,
+        z: mainTip.z + r * Math.sin(phi) * Math.sin(theta),
+        ptype:    isTip ? 4.0 : 3.0,
+        edgeDist: r / canopyRadius,
+        energy:   treeRng(),
+        seed:     seedVal,
+      });
+    }
+  }
+
+  return particles;
+}
+
+/* ─── Build full scene ────────────────────────────────────────────────── */
+let voronoiPoints = null;
+let treePoints    = null;
+
+function buildScene(seed) {
+  const rng = makeRng(seed);
+
+  /* ── 1. Voronoi nodes (2D layout — trees grow upward from ground plane) */
+  const nNodes  = 30;
+  const spread  = 28;   /* scene radius */
+  const nodes   = [];
+  for (let i = 0; i < nNodes; i++) {
+    nodes.push(new THREE.Vector3(
+      (rng() - 0.5) * spread * 2,
+      0,                            /* ground level */
+      (rng() - 0.5) * spread * 2
+    ));
+  }
+
+  /* ── 2. K=4 nearest-neighbor edges (Voronoi filaments) */
+  const K = 4;
+  const edges = [];
+  for (let i = 0; i < nNodes; i++) {
+    const dists = nodes.map((n, j) => ({ j, d: i === j ? Infinity : nodes[i].distanceTo(n) }));
+    dists.sort((a, b) => a.d - b.d);
+    for (let k = 0; k < K; k++) {
+      const j = dists[k].j;
+      if (j > i) edges.push({ a: i, b: j });
+    }
+  }
+
+  /* ── 3. Filament particles (amber ground paths) */
+  const N_FILAMENT = 12000;
+  {
+    const pos  = new Float32Array(N_FILAMENT * 3);
+    const edgD = new Float32Array(N_FILAMENT);
+    const pt   = new Float32Array(N_FILAMENT);
+    const eng  = new Float32Array(N_FILAMENT);
+    const sd   = new Float32Array(N_FILAMENT);
+
+    const edgeLens = edges.map(e => nodes[e.a].distanceTo(nodes[e.b]));
+    const totalLen = edgeLens.reduce((s, x) => s + x, 0);
+
+    let idx = 0;
+    for (let ei = 0; ei < edges.length && idx < N_FILAMENT; ei++) {
+      const eA = nodes[edges[ei].a];
+      const eB = nodes[edges[ei].b];
+      const share = Math.max(1, Math.floor(N_FILAMENT * edgeLens[ei] / totalLen));
+      for (let k = 0; k < share && idx < N_FILAMENT; k++) {
+        const t = rng();
+        pos[idx*3]   = eA.x + (eB.x - eA.x) * t + (rng()-0.5) * 0.3;
+        pos[idx*3+1] = 0.05;   /* just above ground */
+        pos[idx*3+2] = eA.z + (eB.z - eA.z) * t + (rng()-0.5) * 0.3;
+        edgD[idx] = Math.min(t, 1-t) * 2;
+        pt[idx]   = 0.0;
+        eng[idx]  = rng();
+        sd[idx]   = 0.0;
+        idx++;
+      }
+    }
+    while (idx < N_FILAMENT) {
+      const ei = Math.floor(rng() * edges.length);
+      const eA = nodes[edges[ei].a], eB = nodes[edges[ei].b];
+      const t = rng();
+      pos[idx*3]   = eA.x + (eB.x - eA.x) * t;
+      pos[idx*3+1] = 0.05;
+      pos[idx*3+2] = eA.z + (eB.z - eA.z) * t;
+      edgD[idx] = Math.min(t, 1-t) * 2;
+      pt[idx]   = 0.0; eng[idx] = rng(); sd[idx] = 0.0;
+      idx++;
+    }
+
+    if (voronoiPoints) { scene.remove(voronoiPoints); voronoiPoints.geometry.dispose(); }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('edgeDist', new THREE.BufferAttribute(edgD, 1));
+    g.setAttribute('ptype',    new THREE.BufferAttribute(pt, 1));
+    g.setAttribute('energy',   new THREE.BufferAttribute(eng, 1));
+    g.setAttribute('seed',     new THREE.BufferAttribute(sd, 1));
+    voronoiPoints = new THREE.Points(g, mat);
+    scene.add(voronoiPoints);
+  }
+
+  /* ── 4. Tree particles ── */
+  const N_TREES = N_TOTAL - N_FILAMENT;  /* ~68000 */
+  {
+    /* gather all tree particles first */
+    const allParticles = [];
+    for (let ni = 0; ni < nNodes; ni++) {
+      const treeRng = makeRng(seed * 31 + ni * 7919);
+      const tp = buildTree(nodes[ni], ni, treeRng);
+      for (const p of tp) allParticles.push(p);
+    }
+
+    /* allocate buffers */
+    const count = Math.min(allParticles.length, N_TREES);
+    const pos  = new Float32Array(count * 3);
+    const edgD = new Float32Array(count);
+    const pt   = new Float32Array(count);
+    const eng  = new Float32Array(count);
+    const sd   = new Float32Array(count);
+
+    for (let i = 0; i < count; i++) {
+      const p = allParticles[i];
+      pos[i*3]   = p.x;
+      pos[i*3+1] = p.y;
+      pos[i*3+2] = p.z;
+      edgD[i]    = p.edgeDist;
+      pt[i]      = p.ptype;
+      eng[i]     = p.energy;
+      sd[i]      = p.seed;
+    }
+
+    if (treePoints) { scene.remove(treePoints); treePoints.geometry.dispose(); }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('edgeDist', new THREE.BufferAttribute(edgD, 1));
+    g.setAttribute('ptype',    new THREE.BufferAttribute(pt, 1));
+    g.setAttribute('energy',   new THREE.BufferAttribute(eng, 1));
+    g.setAttribute('seed',     new THREE.BufferAttribute(sd, 1));
+    treePoints = new THREE.Points(g, mat);
+    scene.add(treePoints);
+  }
+}
+
+const SEED = Math.floor(Math.random() * 1e9);
+buildScene(SEED);
+
+/* ── Resize handler */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+/* ── Animation loop */
+const start = performance.now();
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  var pcClose=document.getElementById('pc-close');if(pcClose)pcClose.onclick=function(){window.parent!==window?window.parent.postMessage({type:"dismiss-and-next"},"*"):history.back();};
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
