@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3cu · cosmic shell · Reas surface + Voronoi interior</title>
+<!-- MOTION: drift+trace, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000306; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#667; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#667; }
+</style>
+</head>
+<body>
+<div class="id">3cu</div>
+<div class="hint">orbit drag · cosmic shell · Reas arcs on surface · Voronoi web inside</div>
+<div class="src">z6t+k9s · dual orthogonal · 35k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ─── Scene setup ────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+// Very light fog — don't kill midground filaments with AdditiveBlending
+scene.fog = new THREE.FogExp2(0x000306, 0.004);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 2000);
+camera.position.set(100, 60, 140);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000306, 1);
+document.body.appendChild(renderer.domElement);
+
+// ─── Seeded PRNG ─────────────────────────────────────────────────────────────
+function rng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rand = rng(0xDEADC0DE);
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INNER SYSTEM — Voronoi cosmic web constrained to sphere R=32
+// ════════════════════════════════════════════════════════════════════════════
+
+const INNER_R = 32;          // sphere radius for inner web
+const N_CELLS = 150;         // cluster nodes
+const N_INNER = 35000;       // filament particles
+
+// Generate nodes distributed inside sphere (rejection sample)
+const nodePositions = [];
+const nodeVelocities = [];
+
+while (nodePositions.length < N_CELLS) {
+  const p = new THREE.Vector3(
+    (rand() - 0.5) * 2 * INNER_R,
+    (rand() - 0.5) * 2 * INNER_R,
+    (rand() - 0.5) * 2 * INNER_R
+  );
+  if (p.length() <= INNER_R) {
+    nodePositions.push(p);
+    nodeVelocities.push(new THREE.Vector3(
+      (rand() - 0.5) * 0.012,
+      (rand() - 0.5) * 0.012,
+      (rand() - 0.5) * 0.012
+    ));
+  }
+}
+
+// Build k-NN edges (K=6 nearest neighbours)
+function buildVoronoiEdges(nodes, K) {
+  const edges = [];
+  for (let i = 0; i < nodes.length; i++) {
+    const dists = nodes.map((n, j) => ({ idx: j, dist: i === j ? Infinity : nodes[i].distanceTo(n) }));
+    dists.sort((a, b) => a.dist - b.dist);
+    for (let k = 0; k < K && k < dists.length; k++) {
+      const j = dists[k].idx;
+      if (j > i) {
+        edges.push({ a: i, b: j });
+      }
+    }
+  }
+  return edges;
+}
+
+const edges = buildVoronoiEdges(nodePositions, 6);
+
+// Place particles along filament edges
+const innerPositions = new Float32Array(N_INNER * 3);
+const innerVelocities = new Float32Array(N_INNER * 3);
+const innerTargets = new Uint16Array(N_INNER);
+const edgeDists = new Float32Array(N_INNER);
+
+let idx = 0;
+for (const edge of edges) {
+  const pA = nodePositions[edge.a];
+  const pB = nodePositions[edge.b];
+  const len = pA.distanceTo(pB);
+  const nParts = Math.floor(len * 12);
+
+  for (let i = 0; i < nParts && idx < N_INNER; i++) {
+    const t = rand();
+    const pos = new THREE.Vector3().lerpVectors(pA, pB, t);
+
+    // very thin perpendicular scatter — tight filaments = sharper edges
+    const perp = new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5)
+      .normalize().multiplyScalar(rand() * 0.5);
+    pos.add(perp);
+
+    // clamp to sphere
+    if (pos.length() > INNER_R) pos.setLength(INNER_R * 0.98);
+
+    innerPositions[idx * 3]     = pos.x;
+    innerPositions[idx * 3 + 1] = pos.y;
+    innerPositions[idx * 3 + 2] = pos.z;
+
+    const nearestNode = t < 0.5 ? edge.a : edge.b;
+    innerTargets[idx] = nearestNode;
+    edgeDists[idx] = Math.min(t, 1 - t) * 2;
+
+    const dir = new THREE.Vector3().subVectors(nodePositions[nearestNode], pos).normalize();
+    innerVelocities[idx * 3]     = dir.x * 0.06;
+    innerVelocities[idx * 3 + 1] = dir.y * 0.06;
+    innerVelocities[idx * 3 + 2] = dir.z * 0.06;
+
+    idx++;
+  }
+}
+
+// fill remainder with cluster halo particles
+while (idx < N_INNER) {
+  const ni = Math.floor(rand() * N_CELLS);
+  const node = nodePositions[ni];
+  const offset = new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5)
+    .normalize().multiplyScalar(rand() * 2.5);
+  const pos = new THREE.Vector3().addVectors(node, offset);
+  if (pos.length() > INNER_R) pos.setLength(INNER_R * 0.98);
+
+  innerPositions[idx * 3]     = pos.x;
+  innerPositions[idx * 3 + 1] = pos.y;
+  innerPositions[idx * 3 + 2] = pos.z;
+  innerTargets[idx] = ni;
+  edgeDists[idx] = 0;
+  innerVelocities[idx * 3]     = (rand() - 0.5) * 0.015;
+  innerVelocities[idx * 3 + 1] = (rand() - 0.5) * 0.015;
+  innerVelocities[idx * 3 + 2] = (rand() - 0.5) * 0.015;
+  idx++;
+}
+
+const innerGeom = new THREE.BufferGeometry();
+innerGeom.setAttribute('position', new THREE.BufferAttribute(innerPositions, 3));
+innerGeom.setAttribute('edgeDist', new THREE.BufferAttribute(edgeDists, 1));
+
+const innerMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float edgeDist;
+    varying float vDist;
+    varying float vDepth;
+
+    void main() {
+      vDist = edgeDist;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vDepth = -mv.z;
+      // Micro hard-disc points — maximise Laplacian sharpness
+      float size = uPixel * (2.0 + 3.5 * (1.0 - edgeDist));
+      gl_PointSize = size / (1.0 + vDepth * 0.0015);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDist;
+    varying float vDepth;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+
+      // Hard disc — maximum sharpness, no feathering
+      float alpha = step(r, 0.42);
+
+      // Palette: hot magenta at cluster nodes → golden filaments
+      vec3 clusterColor = vec3(1.0, 0.30, 0.75);   // bright magenta
+      vec3 filamentColor = vec3(1.0, 0.65, 0.12);  // golden-orange #ff9922
+      vec3 col = mix(clusterColor, filamentColor, vDist);
+
+      // cluster nodes get extra brightness boost
+      float clusterBoost = 1.0 + 2.5 * (1.0 - vDist);
+      col = col * clusterBoost;
+
+      // mild depth fog
+      float fog = exp(-vDepth * 0.003);
+
+      gl_FragColor = vec4(col * fog, alpha * fog * 0.92);
+    }
+  `
+});
+
+const innerPoints = new THREE.Points(innerGeom, innerMat);
+scene.add(innerPoints);
+
+// ════════════════════════════════════════════════════════════════════════════
+//  OUTER SYSTEM — Process-18 orbital agents on sphere surface R=40
+// ════════════════════════════════════════════════════════════════════════════
+
+const OUTER_R = 40;      // shell radius
+const N_AGENTS = 200;    // elements
+const EPSILON = 2.2;     // contact threshold
+
+class Element {
+  constructor() {
+    // initial spherical position
+    this.phi   = Math.acos(2 * rand() - 1);
+    this.theta = rand() * Math.PI * 2;
+    this.speed = 0.003 + rand() * 0.005;
+    this.cw    = rand() > 0.5;
+    // orbital axis — not necessarily aligned with position (creates interesting precession)
+    this.axis  = new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize();
+    this.phase = rand() * Math.PI * 2;
+  }
+
+  getPosition(t) {
+    const angle = this.phase + t * this.speed * (this.cw ? 1 : -1);
+    // base position on sphere
+    const x = OUTER_R * Math.sin(this.phi) * Math.cos(this.theta + angle * 0.25);
+    const y = OUTER_R * Math.sin(this.phi) * Math.sin(this.theta + angle * 0.25);
+    const z = OUTER_R * Math.cos(this.phi);
+    const p = new THREE.Vector3(x, y, z);
+    // orbital rotation around axis (perturbation = slightly off great-circle)
+    const q = new THREE.Quaternion().setFromAxisAngle(this.axis, angle * 0.6);
+    p.applyQuaternion(q);
+    // keep on sphere surface
+    p.setLength(OUTER_R);
+    return p;
+  }
+}
+
+const agents = [];
+for (let i = 0; i < N_AGENTS; i++) agents.push(new Element());
+
+// Connection mark accumulation buffer
+const MAX_CONN = 600;
+const connPositions = new Float32Array(MAX_CONN * 4 * 3); // 4 verts per quad
+const connIndices   = [];
+for (let i = 0; i < MAX_CONN; i++) {
+  const b = i * 4;
+  connIndices.push(b, b+1, b+2, b, b+2, b+3);
+}
+const connGeom = new THREE.BufferGeometry();
+connGeom.setAttribute('position', new THREE.BufferAttribute(connPositions, 3));
+connGeom.setIndex(connIndices);
+connGeom.setDrawRange(0, 0);
+
+// Charcoal marks — carbon/sumi-ink style on the shell
+const connMat = new THREE.MeshBasicMaterial({
+  color: 0x1a1a22,
+  transparent: true,
+  opacity: 0.28,
+  side: THREE.DoubleSide,
+  blending: THREE.NormalBlending,
+  depthWrite: false
+});
+const connMesh = new THREE.Mesh(connGeom, connMat);
+scene.add(connMesh);
+
+// Agent marker dots (small, charcoal)
+const markerGeom = new THREE.BufferGeometry();
+const markerPos = new Float32Array(N_AGENTS * 3);
+markerGeom.setAttribute('position', new THREE.BufferAttribute(markerPos, 3));
+const markerMat = new THREE.PointsMaterial({
+  color: 0x2a2a35,
+  size: 0.35,
+  transparent: true,
+  opacity: 0.55,
+  sizeAttenuation: true,
+  depthWrite: false
+});
+const markerPoints = new THREE.Points(markerGeom, markerMat);
+scene.add(markerPoints);
+
+// Wire-frame sphere shell — faint reference surface
+const shellGeom = new THREE.SphereGeometry(OUTER_R, 36, 24);
+const shellMat = new THREE.MeshBasicMaterial({
+  color: 0x1a1f2a,
+  wireframe: true,
+  transparent: true,
+  opacity: 0.06,
+  depthWrite: false
+});
+const shell = new THREE.Mesh(shellGeom, shellMat);
+scene.add(shell);
+
+// Connection mark buffer (persistent accumulation ring-buffer)
+const connBuffer = [];
+const MAX_BUFFER = 6000;
+const contactMap = new Map();
+
+function hashPair(i, j) { return i < j ? (i << 12) | j : (j << 12) | i; }
+
+// ─── Orbit controls ─────────────────────────────────────────────────────────
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 1.1;
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY; e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.004;
+  orbitPhi = Math.max(0.2, Math.min(2.8, orbitPhi - (e.clientY - prevY) * 0.004));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  innerMat.uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+// ─── Fade plane — manual accumulation fade for outer marks ──────────────────
+// A fullscreen quad in front of camera, very low alpha per frame
+const fadePlaneGeom = new THREE.PlaneGeometry(2, 2);
+const fadePlaneMat = new THREE.MeshBasicMaterial({
+  color: 0x000306,
+  transparent: true,
+  opacity: 0.003,
+  depthTest: false,
+  depthWrite: false,
+  blending: THREE.NormalBlending
+});
+const fadePlane = new THREE.Mesh(fadePlaneGeom, fadePlaneMat);
+fadePlane.renderOrder = 999;
+fadePlane.frustumCulled = false;
+
+// Put fade plane in an overlay scene rendered after main
+const fadeScene = new THREE.Scene();
+const fadeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+fadeScene.add(fadePlane);
+
+// ─── Animation loop ──────────────────────────────────────────────────────────
+const start = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const t = (now - start) / 1000;
+  innerMat.uniforms.uTime.value = t;
+
+  // ── Inner system: particle infall ──────────────────────────────────────
+  for (let i = 0; i < N_INNER; i++) {
+    const ni = innerTargets[i];
+    const node = nodePositions[ni];
+
+    const px = innerPositions[i * 3];
+    const py = innerPositions[i * 3 + 1];
+    const pz = innerPositions[i * 3 + 2];
+
+    const dx = node.x - px, dy = node.y - py, dz = node.z - pz;
+    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+
+    if (dist > 1.5) {
+      innerPositions[i * 3]     += innerVelocities[i * 3];
+      innerPositions[i * 3 + 1] += innerVelocities[i * 3 + 1];
+      innerPositions[i * 3 + 2] += innerVelocities[i * 3 + 2];
+      edgeDists[i] *= 0.9985;
+    } else {
+      // respawn on a random filament edge
+      const edge = edges[Math.floor(Math.random() * edges.length)];
+      const tp = Math.random();
+      const newPos = new THREE.Vector3().lerpVectors(nodePositions[edge.a], nodePositions[edge.b], tp);
+      const perp = new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5)
+        .normalize().multiplyScalar(Math.random() * 1.2);
+      newPos.add(perp);
+      if (newPos.length() > INNER_R) newPos.setLength(INNER_R * 0.98);
+      innerPositions[i * 3]     = newPos.x;
+      innerPositions[i * 3 + 1] = newPos.y;
+      innerPositions[i * 3 + 2] = newPos.z;
+      const nearestNode = tp < 0.5 ? edge.a : edge.b;
+      innerTargets[i] = nearestNode;
+      edgeDists[i] = Math.min(tp, 1 - tp) * 2;
+      const dir = new THREE.Vector3().subVectors(nodePositions[nearestNode], newPos).normalize();
+      innerVelocities[i * 3]     = dir.x * 0.06;
+      innerVelocities[i * 3 + 1] = dir.y * 0.06;
+      innerVelocities[i * 3 + 2] = dir.z * 0.06;
+    }
+  }
+  innerGeom.attributes.position.needsUpdate = true;
+  innerGeom.attributes.edgeDist.needsUpdate = true;
+
+  // ── Outer system: Process-18 agents ────────────────────────────────────
+  const currentPos = [];
+  for (let i = 0; i < N_AGENTS; i++) {
+    const p = agents[i].getPosition(t);
+    currentPos.push(p);
+    markerPos[i*3]   = p.x;
+    markerPos[i*3+1] = p.y;
+    markerPos[i*3+2] = p.z;
+  }
+  markerGeom.attributes.position.needsUpdate = true;
+
+  // detect proximities and accumulate marks
+  for (let i = 0; i < N_AGENTS; i++) {
+    for (let j = i + 1; j < N_AGENTS; j++) {
+      const dist = currentPos[i].distanceTo(currentPos[j]);
+      const key = hashPair(i, j);
+      if (dist < EPSILON) {
+        let contact = contactMap.get(key);
+        if (!contact) { contact = { count: 0, lastT: t }; contactMap.set(key, contact); }
+        if (contact.count < 4 && Math.random() > 0.80) {
+          const p1 = currentPos[i];
+          const p2 = currentPos[j];
+          const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+          const dir = new THREE.Vector3().subVectors(p2, p1);
+          const perp = new THREE.Vector3().crossVectors(dir, mid).normalize().multiplyScalar(0.18);
+          connBuffer.push({
+            v0: p1.clone().add(perp),
+            v1: p1.clone().sub(perp),
+            v2: p2.clone().sub(perp),
+            v3: p2.clone().add(perp)
+          });
+          contact.count++;
+          contact.lastT = t;
+        }
+      }
+    }
+  }
+
+  // prune stale contacts
+  for (const [key, contact] of contactMap.entries()) {
+    if (t - contact.lastT > 10) contactMap.delete(key);
+  }
+
+  // trim buffer
+  if (connBuffer.length > MAX_BUFFER) {
+    connBuffer.splice(0, connBuffer.length - MAX_BUFFER);
+  }
+
+  // upload connection geometry
+  const drawCount = Math.min(connBuffer.length, MAX_CONN);
+  for (let i = 0; i < drawCount; i++) {
+    const conn = connBuffer[connBuffer.length - drawCount + i];
+    const b = i * 12;
+    connPositions[b]    = conn.v0.x; connPositions[b+1]  = conn.v0.y; connPositions[b+2]  = conn.v0.z;
+    connPositions[b+3]  = conn.v1.x; connPositions[b+4]  = conn.v1.y; connPositions[b+5]  = conn.v1.z;
+    connPositions[b+6]  = conn.v2.x; connPositions[b+7]  = conn.v2.y; connPositions[b+8]  = conn.v2.z;
+    connPositions[b+9]  = conn.v3.x; connPositions[b+10] = conn.v3.y; connPositions[b+11] = conn.v3.z;
+  }
+  connGeom.attributes.position.needsUpdate = true;
+  connGeom.setDrawRange(0, drawCount * 6);
+
+  // ── Camera slow orbit ───────────────────────────────────────────────────
+  const autoTheta = t * 0.025;
+  const theta = autoTheta + orbitTheta;
+  const phi = orbitPhi;
+  const radius = 160;
+
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, 0, 0);
+
+  // ── Render ──────────────────────────────────────────────────────────────
+  renderer.autoClearColor = true;
+  renderer.autoClearDepth = true;
+  renderer.render(scene, camera);
+
+  // overlay fade — dims the accumulated charcoal marks very slowly
+  renderer.autoClearColor = false;
+  renderer.autoClearDepth = false;
+  renderer.render(fadeScene, fadeCamera);
+
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
