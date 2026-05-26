@@ -14,6 +14,7 @@
 </head>
 <body>
 <div class="id">4hi</div>
+<div id="act-label" style="position:fixed;left:14px;bottom:26px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:9px;color:rgba(180,170,150,0.4);letter-spacing:0.1em;pointer-events:none;">click to shift form</div>
 <script type="importmap">
 { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
 </script>
@@ -63,6 +64,11 @@ for (let r = 0; r < AROWS; r++) for (let c = 0; c < ACOLS; c++) {
 const glyphTex = new THREE.CanvasTexture(aC);
 glyphTex.minFilter = THREE.LinearFilter;
 glyphTex.magFilter = THREE.LinearFilter;
+
+/* ── Act system ── */
+let actIdx = 0;
+let actProgress = 0.0;
+let actTransitioning = false;
 
 /* ── Renderer ── */
 const renderer = new THREE.WebGLRenderer({ antialias: false });
@@ -159,20 +165,24 @@ const IDX_ZERO = 48.0, IDX_ONE = 49.0;
 
 const pMat = new THREE.ShaderMaterial({
   uniforms: {
-    state:     { value: rtB.texture },
-    uGlyphs:   { value: glyphTex },
-    uTime:     { value: 0 },
-    uPx:       { value: renderer.getPixelRatio() },
-    uACols:    { value: ACOLS },
-    uARows:    { value: AROWS },
-    uIdxZero:  { value: IDX_ZERO },
-    uIdxOne:   { value: IDX_ONE }
+    state:        { value: rtB.texture },
+    uGlyphs:      { value: glyphTex },
+    uTime:        { value: 0 },
+    uPx:          { value: renderer.getPixelRatio() },
+    uACols:       { value: ACOLS },
+    uARows:       { value: AROWS },
+    uIdxZero:     { value: IDX_ZERO },
+    uIdxOne:      { value: IDX_ONE },
+    uActIdx:      { value: 0 },
+    uActProgress: { value: 0.0 }
   },
   transparent: true, depthWrite: false,
   blending: THREE.AdditiveBlending,
   vertexShader: `
     uniform sampler2D state;
     uniform float uPx, uTime;
+    uniform float uActIdx;
+    uniform float uActProgress;
     attribute vec2 uvIdx;
     attribute float aGlyph;
     varying float vAge;
@@ -191,6 +201,38 @@ const pMat = new THREE.ShaderMaterial({
       float breath  = sin(uTime * 0.18) * 0.5 + 0.5;
       float wave    = spatial * 0.5 + 0.5;
       vBinary = smoothstep(0.52, 0.58, wave * breath);
+
+      /* Act target positions */
+      float vertId = float(gl_VertexID);
+      float gridN = 8.0;
+      float col2 = mod(vertId, gridN * gridN / gridN);
+      float row2 = mod(floor(vertId / gridN), gridN);
+      vec3 gridPos = vec3(
+        (col2 / (gridN - 1.0) - 0.5) * 4.2,
+        (row2 / (gridN - 1.0) - 0.5) * 4.2,
+        0.0
+      );
+
+      /* Act 2: streaming binary rain */
+      float rainPhase = mod(vertId * 0.0137 + uTime * 0.8, 1.0);
+      vec3 rainPos = vec3(
+        -4.0 + rainPhase * 9.0 + (vertId * 0.0031 - 0.5) * 6.0,
+         4.0 - rainPhase * 9.0,
+        -1.5 + sin(vertId * 0.05) * 1.5
+      );
+
+      float eased = uActProgress * uActProgress * (3.0 - 2.0 * uActProgress);
+
+      if (uActIdx == 1.0) {
+        p = mix(p, gridPos, eased);
+      } else if (uActIdx == 2.0) {
+        p = mix(p, rainPos, eased);
+      }
+
+      /* Force binary-only glyphs in Act 2 rain */
+      if (uActIdx == 2.0 && eased > 0.5) {
+        vBinary = 1.0;
+      }
 
       vec4 mv = modelViewMatrix * vec4(p, 1.0);
       vDepth = -mv.z;
@@ -268,6 +310,16 @@ const bgMat = new THREE.ShaderMaterial({
 const bgScene = new THREE.Scene();
 bgScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat));
 
+/* ── click: cycle acts ── */
+addEventListener('click', () => {
+  actIdx = (actIdx + 1) % 3;
+  actProgress = 0.0;
+  actTransitioning = true;
+  const labels = ['attractor', 'grid', 'cascade'];
+  const el = document.getElementById('act-label');
+  if (el) el.textContent = labels[actIdx];
+});
+
 /* ── resize ── */
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -303,11 +355,26 @@ const t0 = performance.now();
   pMat.uniforms.uTime.value = t;
   bgMat.uniforms.uTime.value = t;
 
-  /* slow meditative orbit */
+  /* act progression */
+  if (actTransitioning) {
+    actProgress = Math.min(1.0, actProgress + 0.025);
+    if (actProgress >= 1.0) actTransitioning = false;
+  }
+  pMat.uniforms.uActIdx.value = actIdx;
+  pMat.uniforms.uActProgress.value = actProgress;
+
+  /* camera orbit with per-act radius and height */
   const ang = t * 0.065;
-  camera.position.x = Math.sin(ang) * 4.8;
-  camera.position.z = Math.cos(ang) * 4.8;
-  camera.position.y = Math.sin(ang * 0.55) * 0.7;
+  const actEased = pMat.uniforms.uActProgress.value;
+  const actEased2 = actEased * actEased * (3.0 - 2.0 * actEased);
+  // Act 0: close orbit; Act 1: step back for grid; Act 2: pull wide
+  const targetR = actIdx === 0 ? 4.8 : actIdx === 1 ? 7.5 : 9.0;
+  const targetY = actIdx === 0 ? Math.sin(ang * 0.55) * 0.7 : actIdx === 1 ? 0.0 : 1.5;
+  const curR = 4.8 + (targetR - 4.8) * actEased2;
+  const curY = Math.sin(ang * 0.55) * 0.7 * (1.0 - actEased2) + targetY * actEased2;
+  camera.position.x = Math.sin(ang) * curR;
+  camera.position.z = Math.cos(ang) * curR;
+  camera.position.y = curY;
   camera.lookAt(0, 0, 0.85);
 
   /* background atmosphere first (no depth) */
@@ -330,7 +397,7 @@ const t0 = performance.now();
   function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
   document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
   document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
-  document.getElementById('pc-close').onclick=function(){window.parent!==window?window.parent.postMessage({type:"dismiss-and-next"},"*"):history.back();};
+  var _pcc=document.getElementById('pc-close');if(_pcc)_pcc.onclick=function(){window.parent!==window?window.parent.postMessage({type:"dismiss-and-next"},"*"):history.back();};
   document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
   document.getElementById('pc-submit').onclick=function(){
     var txt=document.getElementById('pc-input').value.trim();
