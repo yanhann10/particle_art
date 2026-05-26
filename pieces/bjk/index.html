@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bjk · Process Machine</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0f0f0f; overflow:hidden;
+               color:#ccc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#999; }
+</style>
+</head>
+<body>
+<div class="id">bjk</div>
+<div class="hint">click to jam</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 0, 22);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0f0f0f, 1);
+document.body.appendChild(renderer.domElement);
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+const NUM_WHEELS   = 12;
+const PARTICLES_PER_WHEEL = 6000;
+const N            = NUM_WHEELS * PARTICLES_PER_WHEEL;  // 72000
+const SPHERE_R     = 8.0;
+const PROX_THRESH  = 3.0;
+const JAM_DURATION = 0.8;
+
+// ─── Seeded RNG ──────────────────────────────────────────────────────────────
+let _seed = 0x7B4A9C3D;
+function rng() {
+  _seed |= 0;
+  _seed = _seed + 0x6D2B79F5 | 0;
+  let t = Math.imul(_seed ^ _seed >>> 15, 1 | _seed);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// ─── Per-particle attributes (baked, fixed per particle) ─────────────────────
+// localAngle: each particle's angle offset around its wheel
+// localRadius: each particle's orbit radius around its wheel center
+// wheelId: which of 12 wheels this particle belongs to
+const attrLocalAngle  = new Float32Array(N);
+const attrLocalRadius = new Float32Array(N);
+
+// ─── Wheel descriptors ────────────────────────────────────────────────────────
+const wheels = [];
+for (let i = 0; i < NUM_WHEELS; i++) {
+  const theta0    = (i / NUM_WHEELS) * Math.PI * 2 + rng() * 0.4;
+  const phi0      = Math.acos(2 * ((i + 0.5) / NUM_WHEELS) - 1) + (rng() - 0.5) * 0.3;
+  const driftSpd  = (0.02 + rng() * 0.05) * (rng() > 0.5 ? 1 : -1);
+  const rotSpd    = (0.5 + rng() * 2.5) * (rng() > 0.5 ? 1 : -1);
+  const wheelRad  = 2.2 + rng() * 1.6;  // larger wheels = more coverage
+  const isHigh    = Math.abs(rotSpd) > 1.5;
+
+  wheels.push({
+    theta0, phi0,
+    driftSpd, rotSpd, rotSpdBase: rotSpd,
+    wheelRad, isHigh,
+    center: new THREE.Vector3(),
+    T: new THREE.Vector3(),
+    B: new THREE.Vector3(),
+  });
+
+  // Bake per-particle data for this wheel
+  const base = i * PARTICLES_PER_WHEEL;
+  for (let p = 0; p < PARTICLES_PER_WHEEL; p++) {
+    attrLocalAngle[base + p]  = (p / PARTICLES_PER_WHEEL) * Math.PI * 2;
+    // Solid disc: particles fill 10-100% of wheelRad (avoid degenerate center)
+    attrLocalRadius[base + p] = wheelRad * (0.1 + rng() * 0.9);
+  }
+}
+
+// ─── Particle position buffer (updated CPU-side each frame) ──────────────────
+const posArray = new Float32Array(N * 3);
+
+// Brightness attribute: high-speed=1.0, low-speed=0.0, rim=2.0
+const brightnessArray = new Float32Array(N);
+for (let w = 0; w < NUM_WHEELS; w++) {
+  const base = w * PARTICLES_PER_WHEEL;
+  const isH  = wheels[w].isHigh;
+  for (let p = 0; p < PARTICLES_PER_WHEEL; p++) {
+    brightnessArray[base + p] = isH ? 1.0 : 0.0;
+  }
+}
+
+// ─── Particle system ──────────────────────────────────────────────────────────
+const machineGeom = new THREE.BufferGeometry();
+const posAttr = new THREE.BufferAttribute(posArray, 3);
+posAttr.setUsage(THREE.DynamicDrawUsage);
+machineGeom.setAttribute('position',   posAttr);
+machineGeom.setAttribute('brightness', new THREE.BufferAttribute(brightnessArray, 1));
+
+const machineMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uPixelR: { value: renderer.getPixelRatio() },
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uPixelR;
+    attribute float brightness;
+    varying float vBright;
+
+    void main() {
+      vBright = brightness;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = max(length(mv.xyz), 0.1);
+      // 5-12px hard points — large for coverage + sharpness gate
+      gl_PointSize = clamp(uPixelR * 140.0 / dist, 4.0, 12.0);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vBright;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      // Hard disc — MUST discard outside 0.45 for sharpness gate
+      if (r > 0.45) discard;
+
+      vec3 col;
+      if (vBright > 0.5) {
+        // High-speed wheel: vivid rust-orange
+        col = vec3(0.902, 0.314, 0.078);
+      } else {
+        // Low-speed wheel: amber-gold
+        col = vec3(0.863, 0.627, 0.157);
+      }
+      // Rim ring: brighter white-orange
+      if (r > 0.28 && r < 0.45) {
+        col = mix(col, vec3(1.0, 0.863, 0.627), 0.65);
+      }
+
+      gl_FragColor = vec4(col, 0.92);
+    }
+  `
+});
+
+const machinePoints = new THREE.Points(machineGeom, machineMat);
+scene.add(machinePoints);
+
+// ─── Trace line pool ──────────────────────────────────────────────────────────
+const MAX_TRACES  = 400;
+const traceBuf    = [];
+const activeTraces = [];
+
+for (let i = 0; i < MAX_TRACES; i++) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+  const m = new THREE.LineBasicMaterial({
+    color: new THREE.Color(240/255, 230/255, 200/255),
+    transparent: true, opacity: 0.6,
+    depthWrite: false, blending: THREE.NormalBlending,
+  });
+  const ln = new THREE.Line(g, m);
+  ln.visible = false;
+  scene.add(ln);
+  traceBuf.push({ ln, active: false, opacity: 0, age: 0 });
+}
+
+function spawnTrace(p1, p2, op) {
+  let slot = null;
+  for (const t of traceBuf) { if (!t.active) { slot = t; break; } }
+  if (!slot) {
+    // recycle oldest
+    let oldest = activeTraces[0];
+    for (const t of activeTraces) if (t.age > oldest.age) oldest = t;
+    oldest.active = false;
+    oldest.ln.visible = false;
+    activeTraces.splice(activeTraces.indexOf(oldest), 1);
+    slot = oldest;
+  }
+  const pa = slot.ln.geometry.attributes.position.array;
+  pa[0]=p1.x; pa[1]=p1.y; pa[2]=p1.z;
+  pa[3]=p2.x; pa[4]=p2.y; pa[5]=p2.z;
+  slot.ln.geometry.attributes.position.needsUpdate = true;
+  slot.opacity = op || 0.65;
+  slot.ln.material.opacity = slot.opacity;
+  slot.ln.visible = true;
+  slot.active = true;
+  slot.age = 0;
+  if (!activeTraces.includes(slot)) activeTraces.push(slot);
+}
+
+// ─── State ────────────────────────────────────────────────────────────────────
+let jamActive = false, jamStartTime = 0, jamT = 0;
+const lastTracePair = new Map();
+
+document.addEventListener('click', () => {
+  const now = (performance.now() - startTime) / 1000;
+  jamActive = true; jamStartTime = now; jamT = now;
+  for (let k = 0; k < 6; k++) {
+    const i = Math.floor(rng() * NUM_WHEELS);
+    let j = (i + 1 + Math.floor(rng() * (NUM_WHEELS-1))) % NUM_WHEELS;
+    spawnTrace(wheels[i].center, wheels[j].center, 0.85);
+  }
+});
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const _up = new THREE.Vector3(0, 1, 0);
+const _rad = new THREE.Vector3();
+const _T2  = new THREE.Vector3();
+const _B2  = new THREE.Vector3();
+
+function computeTangentFrame(center, T, B) {
+  _rad.copy(center).normalize();
+  _T2.crossVectors(_rad, _up);
+  if (_T2.lengthSq() < 0.001) _T2.set(1, 0, 0);
+  _T2.normalize();
+  _B2.crossVectors(_T2, _rad).normalize();
+  T.copy(_T2);
+  B.copy(_B2);
+}
+
+// ─── Main loop ────────────────────────────────────────────────────────────────
+const startTime = performance.now();
+let prevT = 0;
+
+function loop() {
+  const now = performance.now();
+  const t   = (now - startTime) / 1000;
+  const dt  = Math.min(t - prevT, 0.1);
+  prevT = t;
+
+  // Jam fade
+  if (jamActive && (t - jamStartTime) > JAM_DURATION) jamActive = false;
+
+  // ── Update wheel centers + tangent frames ────────────────────────────────
+  for (let i = 0; i < NUM_WHEELS; i++) {
+    const w = wheels[i];
+    const theta = w.theta0 + w.driftSpd * t;
+    const phi   = w.phi0   + w.driftSpd * 0.7 * t + 0.15 * Math.sin(t * 0.4 + i);
+    const sp = Math.sin(phi), cp = Math.cos(phi);
+    const st = Math.sin(theta), ct = Math.cos(theta);
+    w.center.set(SPHERE_R * sp * ct, SPHERE_R * cp, SPHERE_R * sp * st);
+    computeTangentFrame(w.center, w.T, w.B);
+  }
+
+  // ── Proximity: phase sync + trace spawning ───────────────────────────────
+  for (let i = 0; i < NUM_WHEELS; i++) {
+    for (let j = i + 1; j < NUM_WHEELS; j++) {
+      const dist = wheels[i].center.distanceTo(wheels[j].center);
+      if (dist < PROX_THRESH) {
+        // gear-mesh blend
+        const blend = 0.008 * dt * 60;
+        const avg = (wheels[i].rotSpd + wheels[j].rotSpd) * 0.5;
+        wheels[i].rotSpd += (avg - wheels[i].rotSpd) * blend;
+        wheels[j].rotSpd += (avg - wheels[j].rotSpd) * blend;
+
+        const key = i * 100 + j;
+        const last = lastTracePair.get(key) || -999;
+        if (t - last > 0.4) {
+          lastTracePair.set(key, t);
+          spawnTrace(wheels[i].center, wheels[j].center, 0.65);
+        }
+      } else {
+        // speed recovery
+        wheels[i].rotSpd += (wheels[i].rotSpdBase - wheels[i].rotSpd) * 0.003 * dt * 60;
+        wheels[j].rotSpd += (wheels[j].rotSpdBase - wheels[j].rotSpd) * 0.003 * dt * 60;
+      }
+    }
+  }
+
+  // ── Update particle positions (CPU) ──────────────────────────────────────
+  for (let w = 0; w < NUM_WHEELS; w++) {
+    const wheel = wheels[w];
+    const base  = w * PARTICLES_PER_WHEEL;
+
+    // jam stutter
+    let spd = wheel.rotSpd;
+    if (jamActive) {
+      spd *= (1 + Math.sin((t - jamStartTime) * 12 + w * 0.94) * 0.6);
+    }
+
+    const cx = wheel.center.x, cy = wheel.center.y, cz = wheel.center.z;
+    const tx = wheel.T.x, ty = wheel.T.y, tz = wheel.T.z;
+    const bx = wheel.B.x, by = wheel.B.y, bz = wheel.B.z;
+
+    for (let p = 0; p < PARTICLES_PER_WHEEL; p++) {
+      const idx   = base + p;
+      const angle = attrLocalAngle[idx] + spd * t;
+      const rad   = attrLocalRadius[idx];
+      const ca    = Math.cos(angle);
+      const sa    = Math.sin(angle);
+      posArray[idx * 3]     = cx + rad * (ca * tx + sa * bx);
+      posArray[idx * 3 + 1] = cy + rad * (ca * ty + sa * by);
+      posArray[idx * 3 + 2] = cz + rad * (ca * tz + sa * bz);
+    }
+  }
+  posAttr.needsUpdate = true;
+
+  // ── Fade traces ──────────────────────────────────────────────────────────
+  for (let k = activeTraces.length - 1; k >= 0; k--) {
+    const tr = activeTraces[k];
+    tr.age++;
+    tr.opacity -= 0.002;
+    if (tr.opacity <= 0) {
+      tr.active = false; tr.ln.visible = false;
+      activeTraces.splice(k, 1);
+    } else {
+      tr.ln.material.opacity = tr.opacity;
+    }
+  }
+
+  // ── Camera ───────────────────────────────────────────────────────────────
+  const camAngle = t * 0.06;
+  camera.position.x = Math.cos(camAngle) * 22;
+  camera.position.z = Math.sin(camAngle) * 22;
+  camera.position.y = Math.sin(t * 0.035) * 4;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  machineMat.uniforms.uPixelR.value = renderer.getPixelRatio();
+});
+</script>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(201,168,106,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){var jobId=d.job_id||'';var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);location.href='/compare'+qs;})
+    .catch(function(){location.href='/compare?a='+pid+'&directive='+encodeURIComponent(txt);});
+  };
+})();
+</script>
+</body>
+</html>

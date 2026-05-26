@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>15g · kith and kin · ancestral web</title>
+<!-- MOTION: pulse-propagation, intensity: contemplative -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#050507; overflow:hidden;
+               color:#d8d4cc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#d8d4cc; }
+</style>
+</head>
+<body>
+<div class="id">15g</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+// No fog — AdditiveBlending + chalk-white on charcoal needs clean depth
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.5, 600);
+camera.position.set(0, 0, 120);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050507, 1);
+document.body.appendChild(renderer.domElement);
+
+// ─── Voronoi seed points (genealogical nodes) — 200 in [-50,50]^3 ───
+const N_CELLS = 200;
+const CUBE_SIZE = 100;
+const seeds = [];
+for (let i = 0; i < N_CELLS; i++){
+  seeds.push(new THREE.Vector3(
+    (Math.random()-0.5)*CUBE_SIZE,
+    (Math.random()-0.5)*CUBE_SIZE,
+    (Math.random()-0.5)*CUBE_SIZE
+  ));
+}
+
+// ─── K=4 nearest-neighbor filament skeleton ───
+function findNearestK(idx, k){
+  const p = seeds[idx];
+  const dists = seeds.map((s,i) => ({ i, d: p.distanceTo(s) }));
+  dists.sort((a,b) => a.d - b.d);
+  return dists.slice(1, k+1).map(x => x.i);
+}
+const edges = [];
+const edgeSet = new Set();
+for (let i = 0; i < N_CELLS; i++){
+  const neighbors = findNearestK(i, 4);
+  for (const j of neighbors){
+    const key = i < j ? `${i}-${j}` : `${j}-${i}`;
+    if (!edgeSet.has(key)){
+      edgeSet.add(key);
+      edges.push({ a: seeds[i], b: seeds[j], nodeA: i, nodeB: j });
+    }
+  }
+}
+
+// ─── Adjacency: which edges touch which node ───
+const nodeEdges = new Array(N_CELLS).fill(null).map(() => []);
+for (let e = 0; e < edges.length; e++){
+  nodeEdges[edges[e].nodeA].push(e);
+  nodeEdges[edges[e].nodeB].push(e);
+}
+
+// ─── Pulse state — autonomous + mic-triggered ───
+// Each active pulse: { sourceNode, progress 0→1, strength }
+const MAX_PULSES = 6;
+const activePulses = [];
+// per-particle pulse brightness (updated each frame from CPU)
+const pulseBrightness = new Float32Array(20000 + 200 + 2000); // size = total particle count
+
+// ─── Particle distribution along filaments ───
+// 20k filament particles + 200 node markers + 2k chalk-text marks
+const N_FILAMENT = 20000;
+const N_NODES    = 200;
+const N_CHALK    = 2000;
+const N_TOTAL    = N_FILAMENT + N_NODES + N_CHALK;
+
+const positions   = new Float32Array(N_TOTAL * 3);
+const pEdgeIdx    = new Float32Array(N_TOTAL);    // -1 = node, -2 = chalk mark, ≥0 = edge idx
+const pTParam     = new Float32Array(N_TOTAL);    // t along filament
+const pNodeNearest= new Float32Array(N_TOTAL);    // nearest node index (for pulse proximity)
+const pType       = new Float32Array(N_TOTAL);    // 0=filament, 1=node, 2=chalk
+
+const PER_EDGE = Math.ceil(N_FILAMENT / edges.length);
+let ptr = 0;
+
+for (let e = 0; e < edges.length && ptr < N_FILAMENT; e++){
+  const edge = edges[e];
+  const dir = new THREE.Vector3().subVectors(edge.b, edge.a);
+  const len = dir.length();
+  dir.normalize();
+  // build a stable perpendicular frame
+  const up = Math.abs(dir.y) < 0.9 ? new THREE.Vector3(0,1,0) : new THREE.Vector3(1,0,0);
+  const perp1 = new THREE.Vector3().crossVectors(dir, up).normalize();
+  const perp2 = new THREE.Vector3().crossVectors(dir, perp1).normalize();
+  const count = Math.min(PER_EDGE, N_FILAMENT - ptr);
+  for (let i = 0; i < count; i++){
+    const t = Math.random();
+    const sigma = 0.35;
+    const r = Math.abs((Math.random()*2-1 + Math.random()*2-1) * 0.5) * sigma;
+    const theta = Math.random() * Math.PI * 2;
+    const ox = r * Math.cos(theta);
+    const oy = r * Math.sin(theta);
+    const p = edge.a.clone()
+      .add(dir.clone().multiplyScalar(t * len))
+      .add(perp1.clone().multiplyScalar(ox))
+      .add(perp2.clone().multiplyScalar(oy));
+    positions[ptr*3]   = p.x;
+    positions[ptr*3+1] = p.y;
+    positions[ptr*3+2] = p.z;
+    pEdgeIdx[ptr]     = e;
+    pTParam[ptr]      = t;
+    pNodeNearest[ptr] = (t < 0.5) ? edge.nodeA : edge.nodeB;
+    pType[ptr]        = 0;
+    ptr++;
+  }
+}
+
+// ─── Node markers (genealogical ancestors — warm amber clusters) ───
+const nodeStart = ptr;
+for (let i = 0; i < N_NODES; i++){
+  const s = seeds[i];
+  positions[ptr*3]   = s.x;
+  positions[ptr*3+1] = s.y;
+  positions[ptr*3+2] = s.z;
+  pEdgeIdx[ptr]     = -1;
+  pTParam[ptr]      = 0;
+  pNodeNearest[ptr] = i;
+  pType[ptr]        = 1;
+  ptr++;
+}
+
+// ─── Chalk-text marks (name marks — tiny dot clusters on filaments) ───
+// These are jittered along filaments at sparse intervals, very small
+const chalkEdges = edges.filter((_, i) => i % 3 === 0); // every 3rd edge
+const CHALK_PER_EDGE = Math.ceil(N_CHALK / chalkEdges.length);
+for (let ci = 0; ci < chalkEdges.length && ptr < N_TOTAL; ci++){
+  const edge = chalkEdges[ci];
+  const dir = new THREE.Vector3().subVectors(edge.b, edge.a);
+  const len = dir.length();
+  dir.normalize();
+  const up = Math.abs(dir.y) < 0.9 ? new THREE.Vector3(0,1,0) : new THREE.Vector3(1,0,0);
+  const perp1 = new THREE.Vector3().crossVectors(dir, up).normalize();
+  const perp2 = new THREE.Vector3().crossVectors(dir, perp1).normalize();
+  const n = Math.min(CHALK_PER_EDGE, N_TOTAL - ptr);
+  for (let i = 0; i < n; i++){
+    // cluster near t = 0.2, 0.5, 0.8 → name-mark positions
+    const anchorT = [0.2, 0.5, 0.8][i % 3];
+    const t = anchorT + (Math.random()-0.5) * 0.04;
+    const r = (Math.random() * 0.3) * 0.5; // very tight perpendicular spread
+    const theta = Math.random() * Math.PI * 2;
+    const p = edge.a.clone()
+      .add(dir.clone().multiplyScalar(t * len))
+      .add(perp1.clone().multiplyScalar(r * Math.cos(theta)))
+      .add(perp2.clone().multiplyScalar(r * Math.sin(theta)));
+    positions[ptr*3]   = p.x;
+    positions[ptr*3+1] = p.y;
+    positions[ptr*3+2] = p.z;
+    pEdgeIdx[ptr]     = -2;
+    pTParam[ptr]      = t;
+    pNodeNearest[ptr] = edge.nodeA;
+    pType[ptr]        = 2;
+    ptr++;
+  }
+}
+
+// ─── Geometry ───
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position',   new THREE.Float32BufferAttribute(positions, 3));
+geom.setAttribute('edgeIdx',    new THREE.Float32BufferAttribute(pEdgeIdx, 1));
+geom.setAttribute('tParam',     new THREE.Float32BufferAttribute(pTParam, 1));
+geom.setAttribute('pType',      new THREE.Float32BufferAttribute(pType, 1));
+// dynamic pulse brightness — updated each frame
+const pulseAttr = new THREE.Float32BufferAttribute(pulseBrightness, 1);
+pulseAttr.usage = THREE.DynamicDrawUsage;
+geom.setAttribute('pulseBright', pulseAttr);
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float edgeIdx;
+    attribute float tParam;
+    attribute float pType;
+    attribute float pulseBright;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      // subtle autonomous drift along filament
+      if (edgeIdx >= 0.0){
+        float drift = sin(uTime * 0.06 + tParam * 6.28) * 0.035;
+        p.x += drift;
+        p.y += drift * 0.6;
+      }
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 1.0);
+
+      // ── Colour by particle type ──
+      // Chalk-white filament palette (#e8e4dc → #c8c4bc)
+      // Warm amber nodes (#c87820)
+      // Chalk-text marks: slightly brighter white
+      vec3 chalkWhite  = vec3(0.910, 0.894, 0.863); // #e8e4dc
+      vec3 chalkDim    = vec3(0.784, 0.769, 0.737); // #c8c4bc
+      vec3 warmAmber   = vec3(0.784, 0.471, 0.125); // #c87820
+      vec3 paleBlueWhite = vec3(0.82, 0.86, 0.95);  // void-adjacent particles
+
+      vec3 col;
+      float baseAlpha;
+      float size;
+
+      if (pType < 0.5){
+        // filament particle — chalk-white to pale blue-white based on perp falloff
+        float heat = clamp(1.0 - tParam * 0.2, 0.7, 1.0);
+        // endpoints slightly warmer (closer to amber)
+        float endDist = min(tParam, 1.0 - tParam);
+        float endHeat = 1.0 - clamp(endDist * 3.0, 0.0, 1.0);
+        col = mix(paleBlueWhite, chalkWhite, heat);
+        col = mix(col, warmAmber * 0.7 + chalkWhite * 0.3, endHeat * 0.35);
+        col = col * 1.4; // boost chalk brightness on dark charcoal
+        baseAlpha = 0.88;
+        size = 2.2;
+      } else if (pType < 1.5){
+        // genealogical node — warm amber glow, very bright ancestor markers
+        col = warmAmber * 2.2;
+        baseAlpha = 1.0;
+        size = 7.0;
+      } else {
+        // chalk-text mark — brightest white, small
+        col = chalkWhite * 1.3;
+        baseAlpha = 0.88;
+        size = 1.4;
+      }
+
+      // pulse modulation — adds brightness when a pulse wave passes through
+      float pulseBoost = pulseBright * 0.9;
+      col = col + vec3(1.0, 0.96, 0.85) * pulseBoost;
+      baseAlpha = clamp(baseAlpha + pulseBoost * 0.5, 0.0, 1.0);
+
+      vCol   = col;
+      vAlpha = baseAlpha;
+
+      gl_PointSize = size * uPixel * (160.0 / dist);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d  = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      // exp falloff N=28 → sharp sprites
+      float a = exp(-r * 22.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ─── Audio / microphone setup ───
+let analyser = null;
+let fftData   = null;
+(async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const ctx = new AudioContext();
+    const src = ctx.createMediaStreamSource(stream);
+    const an  = ctx.createAnalyser();
+    an.fftSize = 64;
+    src.connect(an);
+    analyser = an;
+    fftData  = new Uint8Array(an.frequencyBinCount);
+  } catch(_){ /* autonomous fallback */ }
+})();
+
+// ─── Pulse helpers ───
+function spawnPulse(sourceNode){
+  if (activePulses.length >= MAX_PULSES) activePulses.shift();
+  activePulses.push({ sourceNode, progress: 0, strength: 1.0 });
+}
+
+// Seed initial pulses so headless capture sees content immediately
+spawnPulse(0);
+spawnPulse(Math.floor(N_CELLS * 0.25));
+spawnPulse(Math.floor(N_CELLS * 0.5));
+spawnPulse(Math.floor(N_CELLS * 0.75));
+
+// Autonomous pulse timer
+let lastAutoPulse = 0;
+
+// BFS edge-distance from source node (gives "hop distance" 0..N for each edge)
+// We pre-compute hop-distance maps lazily per spawnPulse (cheap at 200 nodes)
+function bfsEdgeHops(sourceNode){
+  const visited = new Set([sourceNode]);
+  const queue   = [{ node: sourceNode, hops: 0 }];
+  const edgeHopDist = new Float32Array(edges.length).fill(99);
+  while (queue.length){
+    const { node, hops } = queue.shift();
+    for (const ei of nodeEdges[node]){
+      if (edgeHopDist[ei] > hops){
+        edgeHopDist[ei] = hops;
+      }
+      const other = edges[ei].nodeA === node ? edges[ei].nodeB : edges[ei].nodeA;
+      if (!visited.has(other)){
+        visited.add(other);
+        queue.push({ node: other, hops: hops + 1 });
+      }
+    }
+  }
+  return edgeHopDist;
+}
+
+// Cache BFS maps per pulse source node
+const bfsCache = new Map();
+function getBFS(sourceNode){
+  if (!bfsCache.has(sourceNode)){
+    bfsCache.set(sourceNode, bfsEdgeHops(sourceNode));
+  }
+  return bfsCache.get(sourceNode);
+}
+
+// ─── Pulse brightness update (CPU, per frame) ───
+function updatePulseAttr(t){
+  pulseBrightness.fill(0);
+  for (const pulse of activePulses){
+    const hops = getBFS(pulse.sourceNode);
+    // pulse wavefront at hop = progress * MAX_HOP_DIST
+    const MAX_HOPS = 8;
+    const wavefront = pulse.progress * MAX_HOPS;
+    const width = 1.2; // hops wide
+    for (let i = 0; i < N_FILAMENT; i++){
+      const e = pEdgeIdx[i];
+      if (e < 0) continue;
+      const d = hops[e];
+      const delta = Math.abs(d - wavefront);
+      if (delta < width){
+        const bright = (1.0 - delta / width) * pulse.strength;
+        pulseBrightness[i] = Math.max(pulseBrightness[i], bright);
+      }
+    }
+    // node markers
+    for (let i = 0; i < N_NODES; i++){
+      const ni = i; // pNodeNearest for nodes = themselves
+      // compute node hop distance
+      const minHop = nodeEdges[ni].length > 0
+        ? Math.min(...nodeEdges[ni].map(e => hops[e]))
+        : 99;
+      const delta = Math.abs(minHop - wavefront);
+      if (delta < width){
+        const bright = (1.0 - delta / width) * pulse.strength;
+        pulseBrightness[nodeStart + i] = Math.max(pulseBrightness[nodeStart + i], bright);
+      }
+    }
+  }
+  pulseAttr.needsUpdate = true;
+}
+
+// ─── Camera orbit ───
+function updateCamera(t){
+  const angle  = t * 0.025;
+  const radius = 120 + Math.sin(t * 0.04) * 18;
+  camera.position.x = Math.cos(angle) * radius;
+  camera.position.z = Math.sin(angle) * radius;
+  camera.position.y = Math.sin(t * 0.018) * 28;
+  camera.lookAt(0, 0, 0);
+}
+
+// ─── Resize ───
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─── Render loop ───
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Advance pulses
+  for (let i = activePulses.length - 1; i >= 0; i--){
+    activePulses[i].progress += 0.008;
+    activePulses[i].strength *= 0.994;
+    if (activePulses[i].progress > 1.1) activePulses.splice(i, 1);
+  }
+
+  // Autonomous pulse: every ~3.5s spawn from a random node
+  if (t - lastAutoPulse > 3.5){
+    lastAutoPulse = t;
+    spawnPulse(Math.floor(Math.random() * N_CELLS));
+  }
+
+  // Audio-triggered pulse
+  if (analyser && fftData){
+    analyser.getByteFrequencyData(fftData);
+    const bass = (fftData[0] + fftData[1]) / 2;
+    if (bass > 140){
+      // find closest seed to "camera forward" — spawns near the center of attention
+      spawnPulse(Math.floor(Math.random() * N_CELLS));
+    }
+  }
+
+  updatePulseAttr(t);
+  updateCamera(t);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9p0 · filament chalice</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#1a1411; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#c9a86a; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+  .form { position:fixed; right:14px; bottom:12px; opacity:0.6; font-size:10px;
+          letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+</style>
+</head>
+<body>
+<div class="id">9p0</div>
+<div class="form" id="formLabel">organic</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/*
+  INTENTION: the chalice holds a double helix — two filament species (amber-gold
+             and ice-cyan) orbit the 5-petal calyx bowl in spiraling rings.
+             The morph shifts from loose open coils (organic warmth) to tight
+             regular coils (crystal precision) over 32 seconds.
+  PARENTS: sf0 (solar filament double-helix glow) × h80 (5-petal calyx/crystal morph)
+*/
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+// ── background: warm gallery wall ───────────────────────────────────────────
+const bgScene = new THREE.Scene();
+const bgCam   = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const bgMat   = new THREE.ShaderMaterial({
+  depthWrite: false,
+  vertexShader:   `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.0,1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      vec3 top = vec3(0.18, 0.14, 0.11);
+      vec3 mid = vec3(0.14, 0.11, 0.09);
+      vec3 bot = vec3(0.09, 0.07, 0.06);
+      vec3 col = mix(bot, mid, smoothstep(0.0, 0.5, vUv.y));
+      col = mix(col, top, smoothstep(0.5, 1.0, vUv.y));
+      float vig = 1.0 - 0.40 * pow(length((vUv - 0.5) * vec2(1.0, 0.8)), 2.0);
+      col *= vig;
+      float grain = fract(sin(dot(vUv * 512.0, vec2(12.9898, 78.233))) * 43758.5453);
+      col += (grain - 0.5) * 0.010;
+      gl_FragColor = vec4(col, 1.0);
+    }`
+});
+bgScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat));
+
+// ── constants ────────────────────────────────────────────────────────────────
+const N        = 80000;
+const N_A      = 35000;   // helix-A gold
+const N_B      = 35000;   // helix-B cyan
+const N_AMB    = 10000;   // ambient bowl surface
+const PETALS   = 5;
+const CUP_DEPTH = 4.2;
+const MAX_R    = 12.0;
+
+// ── seeded RNG ────────────────────────────────────────────────────────────────
+let rngState = 0xDECADE;
+function rng() {
+  rngState = (rngState + 0x6D2B79F5) | 0;
+  let t = Math.imul(rngState ^ rngState >>> 15, 1 | rngState);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+// ── build particle arrays ─────────────────────────────────────────────────────
+// Each particle gets: gridPos (2D source), calyxPos (3D organic), crystalPos (3D crystal),
+// species (0=goldA, 1=cyanB, 2=ambient), helixPhaseOffset
+
+const gridPos    = new Float32Array(N * 2);
+const calyxPos   = new Float32Array(N * 3);
+const crystalPos = new Float32Array(N * 3);
+const species    = new Float32Array(N);      // 0, 1, 2
+const seeds      = new Float32Array(N);
+
+// grid sample — same pattern as h80 for matching bowl density
+{
+  const W = 24, rows = 100, cols = 100;
+  const cW = W / cols, cH = W / rows;
+  let idx = 0;
+  const ppc = Math.floor(N / (rows * cols));
+  for (let i = 0; i < rows && idx < N; i++) {
+    for (let j = 0; j < cols && idx < N; j++) {
+      for (let k = 0; k < ppc && idx < N; k++) {
+        gridPos[idx * 2]     = (j + rng() - 0.5) * cW - W * 0.5;
+        gridPos[idx * 2 + 1] = (i + rng() - 0.5) * cH - W * 0.5;
+        idx++;
+      }
+    }
+  }
+  while (idx < N) {
+    gridPos[idx * 2]     = (rng() - 0.5) * W;
+    gridPos[idx * 2 + 1] = (rng() - 0.5) * W;
+    idx++;
+  }
+}
+
+// Assign species: first N_A=gold, next N_B=cyan, last N_AMB=ambient
+// But interleave so they distribute across the bowl naturally
+// Use a simple modulo assignment per particle
+for (let i = 0; i < N; i++) {
+  if (i < N_A)               species[i] = 0.0; // gold helix A
+  else if (i < N_A + N_B)    species[i] = 1.0; // cyan helix B
+  else                        species[i] = 2.0; // ambient
+  seeds[i] = rng();
+}
+
+// Build organic calyx (h80 calyxPos formula)
+for (let i = 0; i < N; i++) {
+  const gx = gridPos[i * 2], gy = gridPos[i * 2 + 1];
+  const r  = Math.sqrt(gx * gx + gy * gy);
+  const nr = Math.min(r / MAX_R, 1.0);
+  const th = Math.atan2(gy, gx);
+  const petal = 0.5 + 0.5 * Math.cos(th * PETALS);
+  const flare = 1.0 + 0.15 * nr * nr;
+  calyxPos[i * 3]     = gx * flare;
+  calyxPos[i * 3 + 1] = gy * flare;
+  calyxPos[i * 3 + 2] = CUP_DEPTH * nr * nr * (0.6 + 0.4 * petal);
+}
+
+// Build crystal chalice (h80 crystalPos formula)
+{
+  const TIERS = 5;
+  for (let i = 0; i < N; i++) {
+    const gx = gridPos[i * 2], gy = gridPos[i * 2 + 1];
+    const r  = Math.sqrt(gx * gx + gy * gy);
+    const nr = Math.min(r / MAX_R, 1.0);
+    const th = Math.atan2(gy, gx);
+    const tierIdx = Math.min(Math.floor(nr * TIERS), TIERS - 1);
+    const tierNr  = (tierIdx + 0.5) / TIERS;
+    const petal   = 0.5 + 0.5 * Math.cos(th * PETALS);
+    const crystalHeight = CUP_DEPTH * tierNr * tierNr * (0.6 + 0.4 * petal);
+    const ridges        = 10 + tierIdx * 2;
+    const corrugation   = 0.035 * Math.cos(th * ridges);
+    const tierR         = tierNr * MAX_R * (1.0 + corrugation);
+    crystalPos[i * 3]     = Math.cos(th) * tierR;
+    crystalPos[i * 3 + 1] = Math.sin(th) * tierR;
+    crystalPos[i * 3 + 2] = crystalHeight;
+  }
+}
+
+// ── uniforms ─────────────────────────────────────────────────────────────────
+const uniforms = {
+  uTime:    { value: 0.0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+  uMix:     { value: 0.0 },
+  uPetals:  { value: parseFloat(PETALS.toFixed(1)) },
+  uCupDepth:{ value: CUP_DEPTH },
+  uMaxR:    { value: MAX_R },
+  // Turrell drifting lights
+  uLight1:  { value: new THREE.Vector3(0.8, 0.9, 0.6) },
+  uLight2:  { value: new THREE.Vector3(-0.6, 0.4, 0.9) },
+  uLight3:  { value: new THREE.Vector3(0.3, -0.5, 1.0) },
+};
+
+// ── shader ─────────────────────────────────────────────────────────────────
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite:  false,
+  blending:    THREE.AdditiveBlending,
+
+  vertexShader: `
+    precision highp float;
+    uniform float uTime, uPixel, uMix;
+    uniform float uPetals, uCupDepth, uMaxR;
+    uniform vec3  uLight1, uLight2, uLight3;
+
+    attribute vec3  calyxPos;
+    attribute vec3  crystalPos;
+    attribute vec2  gridPos;
+    attribute float species;   // 0=gold, 1=cyan, 2=ambient
+    attribute float seed;
+
+    varying vec3  vColor;
+    varying float vAlpha;
+    varying vec3  vNorm;
+
+    void main(){
+      float t = uTime;
+      float m = smoothstep(0.0, 1.0, uMix);
+
+      // lerp bowl shape
+      vec3 p = mix(calyxPos, crystalPos, m);
+
+      // ── helical offset (sf0 technique wrapped on bowl surface) ──────────
+      float r2  = length(gridPos);
+      float nr2 = clamp(r2 / uMaxR, 0.001, 1.0);
+      float th2 = atan(gridPos.y, gridPos.x);
+
+      // helix phase
+      float phaseA = p.z * 0.8 + t * 0.4;
+      float phaseB = -p.z * 0.6 + t * 0.3 + 3.14159265;
+
+      // amplitude: large in organic (0.8), tight in crystal (0.3)
+      float helixAmp = mix(0.80, 0.30, m);
+
+      // radial unit vector in XY plane
+      float rSafe = max(r2, 0.01);
+      vec2  radDir = vec2(gridPos.x, gridPos.y) / rSafe;
+      // tangential direction (perp to radial)
+      vec2  tanDir = vec2(-radDir.y, radDir.x);
+
+      if (species < 0.5) {
+        // Helix A: gold — radial wobble + tangential twist
+        float wobble = sin(phaseA + th2) * helixAmp;
+        float twist  = cos(phaseA * 0.7 + seed * 6.28318) * helixAmp * 0.4;
+        p.x += radDir.x * wobble + tanDir.x * twist;
+        p.y += radDir.y * wobble + tanDir.y * twist;
+      } else if (species < 1.5) {
+        // Helix B: cyan — opposite phase, counter-rotation
+        float wobble = sin(phaseB + th2) * helixAmp;
+        float twist  = cos(phaseB * 0.7 + seed * 6.28318) * helixAmp * 0.4;
+        p.x += radDir.x * wobble + tanDir.x * twist;
+        p.y += radDir.y * wobble + tanDir.y * twist;
+      }
+      // ambient: no helical offset — sits on pure bowl surface
+
+      // ── surface normal ───────────────────────────────────────────────────
+      float petal  = 0.5 + 0.5 * cos(th2 * uPetals);
+      float dzdr   = uCupDepth * 2.0 * nr2 / uMaxR * (0.6 + 0.4 * petal);
+      float dzdt   = uCupDepth * nr2 * nr2 * 0.4 * (-sin(th2 * uPetals) * uPetals);
+      vec3 normOrganic = normalize(vec3(
+        -dzdr * cos(th2) + dzdt * sin(th2) / rSafe,
+        -dzdr * sin(th2) - dzdt * cos(th2) / rSafe,
+        1.0));
+      // crystal: faceted snapped normals
+      float ridges = 10.0;
+      float snappedTh = round(th2 / (6.28318 / ridges)) * (6.28318 / ridges);
+      vec3 normCrystal = normalize(vec3(
+        cos(snappedTh) * 0.38,
+        sin(snappedTh) * 0.38,
+        0.92));
+      vNorm = normalize(mix(normOrganic, normCrystal, m));
+
+      // ── Lambertian lighting (HIGH contrast for sharpness gate) ──────────
+      vec3 n  = vNorm;
+      vec3 L1 = normalize(uLight1);
+      vec3 L2 = normalize(uLight2);
+      vec3 L3 = normalize(uLight3);
+      float d1 = max(0.0, dot(n, L1));
+      float d2 = max(0.0, dot(n, L2));
+      float d3 = max(0.0, dot(n, L3));
+
+      // ── color by species with morph palette ─────────────────────────────
+      vec3 col;
+      float alpha;
+
+      if (species < 0.5) {
+        // Gold helix A — amber in organic, brighter gold in crystal
+        vec3 goldOrg = vec3(0.96, 0.745, 0.235);
+        vec3 goldCry = vec3(1.00, 0.85,  0.30);
+        vec3 baseCol = mix(goldOrg, goldCry, m);
+        // ambient component keeps shadowed side visible but dark
+        vec3 ambient = vec3(0.08, 0.055, 0.02) * mix(1.0, 0.4, m);
+        // lit component: strong contribution from 3 lights
+        col  = ambient
+             + baseCol * d1 * 0.85
+             + baseCol * vec3(1.0, 0.7, 0.2) * d2 * 0.45
+             + baseCol * d3 * 0.25;
+        // specular glint on crystal
+        float spec = pow(max(0.0, dot(n, normalize(L1 + vec3(0.0,0.0,1.0)))), 8.0) * m * 0.6;
+        col += vec3(1.0, 0.95, 0.7) * spec;
+        alpha = 0.85;
+      } else if (species < 1.5) {
+        // Cyan helix B — ice cyan, brightens in crystal phase
+        vec3 cyanOrg = vec3(0.157, 0.784, 0.941);
+        vec3 cyanCry = vec3(0.30,  0.92,  1.00);
+        vec3 baseCol = mix(cyanOrg, cyanCry, m);
+        vec3 ambient = vec3(0.02, 0.06, 0.09) * mix(1.0, 0.4, m);
+        col  = ambient
+             + baseCol * d1 * 0.70
+             + baseCol * vec3(0.5, 0.85, 1.0) * d2 * 0.55
+             + baseCol * d3 * 0.30;
+        float spec = pow(max(0.0, dot(n, normalize(L2 + vec3(0.0,0.0,1.0)))), 8.0) * m * 0.65;
+        col += vec3(0.7, 0.95, 1.0) * spec;
+        alpha = 0.70;
+      } else {
+        // Ambient bowl — warm cream, lower alpha
+        vec3 creamOrg = vec3(0.78, 0.627, 0.353);
+        vec3 creamCry = vec3(0.70, 0.73,  0.80);
+        vec3 baseCol = mix(creamOrg, creamCry, m);
+        vec3 ambient = vec3(0.06, 0.05, 0.04);
+        col  = ambient
+             + baseCol * d1 * 0.60
+             + baseCol * d2 * 0.30;
+        alpha = 0.40;
+      }
+
+      vColor = col;
+      vAlpha = alpha;
+
+      // ── point size: gold/cyan larger, ambient smaller ────────────────────
+      vec4 mv   = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 1.0);
+      float pSize = (species < 1.5) ? 3.5 : 2.0;
+      gl_PointSize = uPixel * max(1.5, pSize - dist * 0.04);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+
+  fragmentShader: `
+    precision highp float;
+    varying vec3  vColor;
+    varying float vAlpha;
+    varying vec3  vNorm;
+
+    void main(){
+      vec2  dc = gl_PointCoord - 0.5;
+      float rr = dot(dc, dc);
+
+      // hard circle discard (no gaussian fade → sharp Laplacian edges)
+      if (rr > 0.25) discard;
+
+      // very thin soft edge at perimeter only — preserves sharpness measurement
+      float edge = 1.0 - smoothstep(0.20, 0.25, rr);
+
+      // bright disc center
+      float core = 1.0 - smoothstep(0.0, 0.15, rr);
+
+      vec3 col = vColor * (0.85 + core * 0.35);
+
+      float alpha = vAlpha * edge;
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+// ── geometry ─────────────────────────────────────────────────────────────────
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position',   new THREE.BufferAttribute(calyxPos.slice(), 3));
+geom.setAttribute('calyxPos',   new THREE.BufferAttribute(calyxPos, 3));
+geom.setAttribute('crystalPos', new THREE.BufferAttribute(crystalPos, 3));
+geom.setAttribute('gridPos',    new THREE.BufferAttribute(gridPos, 2));
+geom.setAttribute('species',    new THREE.BufferAttribute(species, 1));
+geom.setAttribute('seed',       new THREE.BufferAttribute(seeds, 1));
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ── orbit ─────────────────────────────────────────────────────────────────────
+let isDrag = false, pX = 0, pY = 0;
+let orbTh = 0, orbPh = 0.55;
+const cv = renderer.domElement;
+cv.addEventListener('pointerdown', e => { isDrag = true; pX = e.clientX; pY = e.clientY; e.preventDefault(); });
+addEventListener('pointermove', e => {
+  if (!isDrag) return;
+  orbTh -= (e.clientX - pX) * 0.005;
+  orbPh  = Math.max(0.1, Math.min(1.4, orbPh - (e.clientY - pY) * 0.005));
+  pX = e.clientX; pY = e.clientY;
+});
+addEventListener('pointerup', () => { isDrag = false; });
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+const formEl = document.getElementById('formLabel');
+const t0 = performance.now();
+
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+  uniforms.uTime.value = t;
+
+  // 32s morph cycle (same as h80)
+  const rawMix = Math.sin(t * 0.196) * 0.5 + 0.5;
+  uniforms.uMix.value = rawMix;
+
+  if      (rawMix < 0.15) formEl.textContent = 'organic';
+  else if (rawMix > 0.85) formEl.textContent = 'crystal';
+  else                    formEl.textContent = rawMix < 0.5 ? 'crystallizing' : 'softening';
+
+  // Turrell drifting lights
+  const la1 = t * 0.13, la2 = t * 0.09 + 2.1, la3 = t * 0.11 + 4.3;
+  uniforms.uLight1.value.set(
+    Math.sin(la1) * 0.8,
+    0.5 + 0.3 * Math.sin(la1 * 0.7),
+    Math.cos(la1) * 0.6 + 0.4);
+  uniforms.uLight2.value.set(
+    Math.cos(la2) * 0.7,
+    0.3 + 0.25 * Math.cos(la2 * 0.5),
+    Math.sin(la2) * 0.8 + 0.3);
+  uniforms.uLight3.value.set(
+    Math.sin(la3 + 1.0) * 0.5,
+    -0.3 + 0.2 * Math.sin(la3 * 0.6),
+    Math.cos(la3) * 0.7 + 0.5);
+
+  // camera
+  const autoTh = t * 0.07;
+  const theta  = autoTh + orbTh;
+  const phi    = orbPh;
+  const radius = 22;
+  const cY     = 1.5;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    cY + radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi));
+  camera.lookAt(0, cY, 0);
+
+  renderer.clear();
+  renderer.render(bgScene, bgCam);
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(201,168,106,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){var jobId=d.job_id||'';var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);location.href='/compare'+qs;})
+    .catch(function(){location.href='/compare?a='+pid+'&directive='+encodeURIComponent(txt);});
+  };
+})();
+</script>
+</body>
+</html>
