@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>a1u · kirigami-unfold</title>
+<!-- MOTION: unfold, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0e; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">a1u · kirigami-unfold</div>
+<div class="hint">paper relief · incised cuts · watch the lift</div>
+<div class="src">Demaine × hanji paper-cutting × Fibonacci spiral incisions</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0e, 1);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 18, 32);
+camera.lookAt(0, 0, 0);
+
+// Directional light for raking shadows — key to kirigami depth
+const dirLight = new THREE.DirectionalLight(0xfff8e8, 1.8);
+dirLight.position.set(12, 18, 8);
+dirLight.castShadow = true;
+dirLight.shadow.camera.left = -20;
+dirLight.shadow.camera.right = 20;
+dirLight.shadow.camera.top = 20;
+dirLight.shadow.camera.bottom = -20;
+dirLight.shadow.camera.near = 1;
+dirLight.shadow.camera.far = 60;
+dirLight.shadow.mapSize.set(2048, 2048);
+dirLight.shadow.bias = -0.0005;
+scene.add(dirLight);
+
+// Soft ambient for paper interior
+const ambient = new THREE.AmbientLight(0x3a4a5e, 0.35);
+scene.add(ambient);
+
+// Rim light from behind to catch lifted edges
+const rimLight = new THREE.DirectionalLight(0x7a92b8, 0.6);
+rimLight.position.set(-8, 2, -10);
+scene.add(rimLight);
+
+// Paper material: off-white with subtle warm tone
+const paperMat = new THREE.MeshStandardMaterial({
+  color: 0xf4f1ea,
+  roughness: 0.88,
+  metalness: 0.0,
+  side: THREE.DoubleSide
+});
+
+// Base flat surface — the uncut paper
+const baseGeo = new THREE.PlaneGeometry(24, 24, 1, 1);
+const baseMesh = new THREE.Mesh(baseGeo, paperMat);
+baseMesh.rotation.x = -Math.PI / 2;
+baseMesh.position.y = 0;
+baseMesh.receiveShadow = true;
+scene.add(baseMesh);
+
+// Fibonacci spiral cut pattern: golden angle spacing with radial incisions
+// Each "flap" is a quad strip that lifts along one edge
+const PHI = (1 + Math.sqrt(5)) / 2;
+const GOLDEN_ANGLE = Math.PI * 2 / (PHI * PHI);
+
+function createKirigamiFlaps() {
+  const flaps = [];
+  const group = new THREE.Group();
+  
+  // Spiral pattern: 89 flaps (Fibonacci number)
+  const N = 89;
+  for (let i = 0; i < N; i++) {
+    const t = i / N;
+    const angle = i * GOLDEN_ANGLE;
+    const radius = 0.8 + t * 10.5; // spiral outward
+    
+    const cx = Math.cos(angle) * radius;
+    const cy = Math.sin(angle) * radius;
+    
+    // Each flap: elongated petal shape, attached along one radial edge
+    const flapLen = 1.2 + t * 1.8;
+    const flapWid = 0.45 + t * 0.35;
+    
+    // Build a quad strip: attached edge at (cx,cy), free edge extends outward
+    const segments = 6;
+    const geo = new THREE.PlaneGeometry(flapLen, flapWid, segments, 1);
+    const pos = geo.attributes.position;
+    
+    // Rotate geometry so length axis points radially outward from center
+    for (let j = 0; j < pos.count; j++) {
+      const lx = pos.getX(j); // local x is length direction
+      const ly = pos.getY(j); // local y is width direction
+      
+      // Rotate by spiral angle
+      const rx = Math.cos(angle) * lx - Math.sin(angle) * ly;
+      const ry = Math.sin(angle) * lx + Math.cos(angle) * ly;
+      
+      pos.setXY(j, cx + rx, cy + ry);
+    }
+    pos.needsUpdate = true;
+    
+    const mesh = new THREE.Mesh(geo, paperMat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    
+    // Store metadata for animation
+    flaps.push({
+      mesh,
+      center: new THREE.Vector2(cx, cy),
+      angle,
+      radius,
+      phase: t,
+      targetLift: 0
+    });
+    
+    group.add(mesh);
+  }
+  
+  return { group, flaps };
+}
+
+const { group: flapGroup, flaps } = createKirigamiFlaps();
+scene.add(flapGroup);
+
+// Animation: flaps lift in sequential wave, starting from center spiraling outward
+// Each flap bends upward along its attached edge (hinge rotation)
+function updateFlaps(t) {
+  const unfoldSpeed = 0.00028;
+  const wavePhase = (t * unfoldSpeed) % 2.0;
+  
+  flaps.forEach((flap, idx) => {
+    const { mesh, center, angle, phase } = flap;
+    
+    // Wave travels outward: inner flaps lift first
+    const delay = phase * 1.2;
+    let lift = Math.max(0, wavePhase - delay);
+    lift = Math.min(lift, 1.0);
+    
+    // Ease lift with cubic in-out
+    lift = lift < 0.5 
+      ? 4 * lift * lift * lift 
+      : 1 - Math.pow(-2 * lift + 2, 3) / 2;
+    
+    // Target lift angle: up to ~68 degrees
+    const maxAngle = 1.19;
+    const liftAngle = lift * maxAngle;
+    
+    // Each flap rotates around its hinge (the attached edge)
+    // Hinge is at the base of the flap, perpendicular to radial direction
+    mesh.rotation.set(0, 0, 0);
+    mesh.position.set(center.x, 0, center.y);
+    
+    // Apply rotation: lift upward
+    // Axis of rotation is perpendicular to radial (tangent to spiral)
+    const tangentAngle = angle + Math.PI / 2;
+    mesh.rotation.set(
+      -Math.sin(tangentAngle) * liftAngle,
+      0,
+      Math.cos(tangentAngle) * liftAngle
+    );
+    
+    // Slight vertical displacement as flap lifts
+    mesh.position.y = lift * 0.15;
+  });
+}
+
+// Camera: gentle orbit to reveal the 3D relief
+let cameraAngle = 0;
+function updateCamera(t) {
+  cameraAngle = t * 0.00008;
+  const dist = 32;
+  camera.position.x = Math.sin(cameraAngle) * dist * 0.7;
+  camera.position.z = Math.cos(cameraAngle) * dist;
+  camera.position.y = 18 + Math.sin(cameraAngle * 1.7) * 3;
+  camera.lookAt(0, 2, 0);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let startTime = performance.now();
+function loop() {
+  const now = performance.now();
+  const elapsed = now - startTime;
+  
+  updateFlaps(elapsed);
+  updateCamera(elapsed);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
