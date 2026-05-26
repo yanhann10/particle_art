@@ -144,6 +144,56 @@ Calls `scripts/mutate.py` directly. Uses `.venv/bin/python3` if the venv exists.
 
 ---
 
+## Queue drain (parallel mutations)
+
+### `drain` — run N parallel mutations from the feedback queue
+
+Drains `iterate_when_chosen` with N mutation workers + 1 evaluator critic. Uses a
+claim file (`.drain_claims.json`) for cross-session coordination — running the
+command again in a new tab automatically picks the **next unclaimed** batch.
+
+```bash
+bash scripts/drain_queue.sh              # 4 mutators + 1 critic (default)
+bash scripts/drain_queue.sh -n 3         # 3 mutators + 1 critic
+bash scripts/drain_queue.sh -n 4 -c 0   # 4 mutators, skip critic
+bash scripts/drain_queue.sh --status     # show claimed vs free, don't run
+```
+
+Each worker gets a dedicated `--parent <piece>` so there are no collisions.
+Logs go to `.logs/mutate-<piece>-<time>.log` and `.logs/critic-<time>.log`.
+
+### `wait_and_drain` — auto-resume after Claude Code hourly limit
+
+When you hit the hourly limit, this waits N minutes then resumes the drain loop
+automatically — no Claude Code session needed (Python workers are independent).
+
+```bash
+bash scripts/wait_and_drain.sh           # wait 60 min then resume (default)
+bash scripts/wait_and_drain.sh 45        # wait 45 min
+bash scripts/wait_and_drain.sh 0         # skip wait, drain now and loop
+DRAIN_N=3 bash scripts/wait_and_drain.sh # use 3 workers instead of 4
+```
+
+The Stop hook (`on_stop_drain.sh`) fires automatically when a Claude session ends
+and launches `wait_and_drain.sh` in the background if free pieces remain.
+
+### Typical multi-tab workflow
+
+```bash
+# Tab 1 — first batch
+bash scripts/drain_queue.sh -n 4
+# → claims sav uag mi2 llr, spawns workers
+
+# Tab 2 — second batch (while tab 1 is still running)
+bash scripts/drain_queue.sh -n 4
+# → claims td1 lk6 8i3 a2p (skips already-claimed ones)
+
+# Tab 3 — check state at any time
+bash scripts/drain_queue.sh --status
+```
+
+---
+
 ## Bulk drop workflow
 
 ```bash
