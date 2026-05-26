@@ -69,6 +69,116 @@ for (let e = 0; e < edges.length; e++){
   nodeEdges[edges[e].nodeB].push(e);
 }
 
+// ─── Acrylic stained-glass triangular panes ───
+// Compute average edge length for threshold
+let totalEdgeLen = 0;
+for (const ed of edges) totalEdgeLen += ed.a.distanceTo(ed.b);
+const avgEdgeLen = totalEdgeLen / edges.length;
+
+// Build triangles from K=4 neighbor pairs (i, j, k) where dist(j,k) < 1.8 * avgEdgeLen
+const triangles = [];    // each: [i, j, k] node indices
+const triSet = new Set();
+for (let i = 0; i < N_CELLS; i++){
+  const nbrs = findNearestK(i, 4);
+  for (let a = 0; a < nbrs.length; a++){
+    for (let b = a+1; b < nbrs.length; b++){
+      const j = nbrs[a], k = nbrs[b];
+      if (seeds[j].distanceTo(seeds[k]) < avgEdgeLen * 1.8){
+        const key = [i,j,k].sort((x,y)=>x-y).join('-');
+        if (!triSet.has(key)){
+          triSet.add(key);
+          triangles.push([i, j, k]);
+        }
+      }
+    }
+  }
+}
+
+// 8-color acrylic palette (vibrant, like Richter / stained glass)
+const acrylicColors = [
+  new THREE.Color(0.9, 0.15, 0.1),    // crimson
+  new THREE.Color(0.1, 0.3, 0.85),    // cobalt
+  new THREE.Color(0.95, 0.65, 0.05),  // amber
+  new THREE.Color(0.05, 0.55, 0.25),  // viridian
+  new THREE.Color(0.7, 0.1, 0.75),    // violet
+  new THREE.Color(0.0, 0.65, 0.7),    // teal
+  new THREE.Color(0.95, 0.35, 0.05),  // orange
+  new THREE.Color(0.55, 0.85, 0.1),   // lime
+];
+
+// Shuffle color assignment so adjacent triangles vary
+const triColorIdx = triangles.map((_, ti) => (ti * 3 + Math.floor(ti / 8)) % 8);
+
+// Per-triangle opacity state for audio pulse effect
+const BASE_TRI_OPACITY  = 0.18;
+const PULSE_TRI_OPACITY = 0.45;
+const TRI_DECAY_RATE    = (PULSE_TRI_OPACITY - BASE_TRI_OPACITY) / 0.8; // per second
+const triOpacity = new Float32Array(triangles.length).fill(BASE_TRI_OPACITY);
+// which nodes each triangle touches (for pulse lookup)
+const triNodes = triangles.map(tri => tri); // same as triangles
+
+// Build BufferGeometry — 3 verts per triangle, vertex colors
+const nTri = triangles.length;
+const triPositions = new Float32Array(nTri * 3 * 3);
+const triColors    = new Float32Array(nTri * 3 * 3);
+const triAlphas    = new Float32Array(nTri * 3);      // per-vert alpha
+
+for (let ti = 0; ti < nTri; ti++){
+  const [ia, ib, ic] = triangles[ti];
+  const col = acrylicColors[triColorIdx[ti]];
+  for (let vi = 0; vi < 3; vi++){
+    const ni = [ia, ib, ic][vi];
+    const s  = seeds[ni];
+    const base = ti * 9 + vi * 3;
+    triPositions[base]   = s.x;
+    triPositions[base+1] = s.y;
+    triPositions[base+2] = s.z;
+    triColors[base]   = col.r;
+    triColors[base+1] = col.g;
+    triColors[base+2] = col.b;
+    triAlphas[ti*3 + vi] = BASE_TRI_OPACITY;
+  }
+}
+
+const triGeom = new THREE.BufferGeometry();
+triGeom.setAttribute('position', new THREE.Float32BufferAttribute(triPositions, 3));
+triGeom.setAttribute('color',    new THREE.Float32BufferAttribute(triColors, 3));
+const triAlphaAttr = new THREE.Float32BufferAttribute(triAlphas, 1);
+triAlphaAttr.usage = THREE.DynamicDrawUsage;
+triGeom.setAttribute('aOpacity', triAlphaAttr);
+
+const triMat = new THREE.ShaderMaterial({
+  vertexColors: true,
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  blending: THREE.NormalBlending,
+  uniforms: {},
+  vertexShader: `
+    attribute float aOpacity;
+    varying vec3 vColor;
+    varying float vOpacity;
+    void main(){
+      vColor   = color;
+      vOpacity = aOpacity;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vOpacity;
+    void main(){
+      gl_FragColor = vec4(vColor, vOpacity);
+    }
+  `
+});
+
+const triMesh = new THREE.Mesh(triGeom, triMat);
+scene.add(triMesh);   // added BEFORE point system so it renders behind filaments
+
+// Per-node pulse brightness for triangle opacity update
+const nodePulseBright = new Float32Array(N_CELLS);
+
 // ─── Pulse state — autonomous + mic-triggered ───
 // Each active pulse: { sourceNode, progress 0→1, strength }
 const MAX_PULSES = 6;
@@ -276,7 +386,7 @@ const mat = new THREE.ShaderMaterial({
 });
 
 const points = new THREE.Points(geom, mat);
-scene.add(points);
+scene.add(points);   // added AFTER triMesh so it renders in front of panes
 
 // ─── Audio / microphone setup ───
 let analyser = null;
@@ -376,6 +486,51 @@ function updatePulseAttr(t){
   pulseAttr.needsUpdate = true;
 }
 
+// ─── Triangle pane opacity update (audio pulse flash) ───
+let lastTriUpdate = 0;
+function updateTriOpacity(t, dt){
+  // Build per-node pulse brightness from active pulses
+  nodePulseBright.fill(0);
+  for (const pulse of activePulses){
+    const hops = getBFS(pulse.sourceNode);
+    const MAX_HOPS = 8;
+    const wavefront = pulse.progress * MAX_HOPS;
+    const width = 1.2;
+    for (let ni = 0; ni < N_CELLS; ni++){
+      const minHop = nodeEdges[ni].length > 0
+        ? Math.min(...nodeEdges[ni].map(e => hops[e]))
+        : 99;
+      const delta = Math.abs(minHop - wavefront);
+      if (delta < width){
+        const bright = (1.0 - delta / width) * pulse.strength;
+        nodePulseBright[ni] = Math.max(nodePulseBright[ni], bright);
+      }
+    }
+  }
+
+  // Update per-triangle opacity: flash on pulse, decay back to base
+  let changed = false;
+  for (let ti = 0; ti < nTri; ti++){
+    const [ia, ib, ic] = triangles[ti];
+    const maxPulse = Math.max(nodePulseBright[ia], nodePulseBright[ib], nodePulseBright[ic]);
+    const target = BASE_TRI_OPACITY + maxPulse * (PULSE_TRI_OPACITY - BASE_TRI_OPACITY);
+    let op = triOpacity[ti];
+    if (target > op){
+      op = target;
+    } else {
+      op = Math.max(BASE_TRI_OPACITY, op - TRI_DECAY_RATE * dt);
+    }
+    if (Math.abs(op - triOpacity[ti]) > 0.0005){
+      triOpacity[ti] = op;
+      triAlphas[ti*3]   = op;
+      triAlphas[ti*3+1] = op;
+      triAlphas[ti*3+2] = op;
+      changed = true;
+    }
+  }
+  if (changed) triAlphaAttr.needsUpdate = true;
+}
+
 // ─── Camera orbit ───
 function updateCamera(t){
   const angle  = t * 0.025;
@@ -395,8 +550,11 @@ addEventListener('resize', () => {
 
 // ─── Render loop ───
 const start = performance.now();
+let prevT = 0;
 function loop(){
   const t = (performance.now() - start) / 1000;
+  const dt = Math.min(t - prevT, 0.1); // clamp dt to avoid large jumps
+  prevT = t;
   uniforms.uTime.value = t;
 
   // Advance pulses
@@ -423,6 +581,7 @@ function loop(){
   }
 
   updatePulseAttr(t);
+  updateTriOpacity(t, dt);
   updateCamera(t);
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
