@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>skg · differential calyx rising from nodes</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background: #1a1822;
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">skg · differential calyx rising from nodes</div>
+<div class="hint">botanical growth algorithm · nodes age and lift into a cup</div>
+<div class="src">andy goldsworthy leaf-bowl erosion · differential growth from 2D</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Differential growth builds a 2D network via edge-splitting and repulsion, then
+// lifts older nodes upward — the result is an organic cup/calyx form that reads
+// as a recognizable vessel. Inspired by Goldsworthy's leaf bowls where each leaf
+// ages and curls into a container shape.
+//
+// Algorithm:
+//  1. Start with a triangle of nodes
+//  2. Each frame: split long edges, push overlapping nodes apart
+//  3. Track node 'age' — older nodes have been in the system longer
+//  4. Apply vertical drift: Y = age^1.4 × lift_scale
+//  5. Color by age: young nodes earthy ochre, old nodes ash-white
+//  6. Background: de-saturated dusk gradient + subtle starfield texture
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1822);
+
+// subtle atmospheric fog
+scene.fog = new THREE.FogExp2(0x1a1822, 0.012);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 8, 28);
+camera.lookAt(0, 5, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// starfield background plane — subtle specks
+const starGeom = new THREE.BufferGeometry();
+const starCount = 800;
+const starPos = new Float32Array(starCount * 3);
+const starSize = new Float32Array(starCount);
+for (let i = 0; i < starCount; i++){
+  starPos[i*3]     = (Math.random() - 0.5) * 120;
+  starPos[i*3 + 1] = (Math.random() - 0.5) * 80;
+  starPos[i*3 + 2] = -50 - Math.random() * 20;
+  starSize[i] = Math.random() < 0.85 ? 1.0 : 2.0;
+}
+starGeom.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+starGeom.setAttribute('size', new THREE.BufferAttribute(starSize, 1));
+const starMat = new THREE.ShaderMaterial({
+  uniforms: { uPixel: { value: renderer.getPixelRatio() } },
+  transparent: true, depthWrite: false, fog: false,
+  vertexShader: `
+    attribute float size;
+    uniform float uPixel;
+    void main(){
+      gl_PointSize = size * uPixel;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    void main(){
+      float d = length(gl_PointCoord - 0.5);
+      if (d > 0.5) discard;
+      gl_FragColor = vec4(vec3(0.62, 0.58, 0.54), 0.25);
+    }
+  `
+});
+const stars = new THREE.Points(starGeom, starMat);
+scene.add(stars);
+
+// ground horizon line — thin stripe
+const horizonGeom = new THREE.PlaneGeometry(140, 0.4);
+const horizonMat = new THREE.MeshBasicMaterial({ color: 0x2a2532, transparent: true, opacity: 0.35, fog: false });
+const horizon = new THREE.Mesh(horizonGeom, horizonMat);
+horizon.position.set(0, -8, -48);
+scene.add(horizon);
+
+// ────────────── differential growth state
+class Node {
+  constructor(x, y, z, age = 0){
+    this.x = x; this.y = y; this.z = z;
+    this.age = age;
+    this.vx = 0; this.vy = 0; this.vz = 0;
+  }
+}
+class Edge {
+  constructor(a, b){
+    this.a = a; this.b = b;
+  }
+}
+
+const nodes = [];
+const edges = [];
+const MAX_NODES = 4800;
+const SPLIT_LEN = 0.42;
+const REPEL_R = 0.35;
+const REPEL_FORCE = 0.012;
+const AGE_LIFT = 0.65;   // vertical drift per age unit
+
+// init: triangle
+nodes.push(new Node(0, 0, 0, 0));
+nodes.push(new Node(1.2, 0, 0, 0));
+nodes.push(new Node(0.6, 0, 1.0, 0));
+edges.push(new Edge(0, 1));
+edges.push(new Edge(1, 2));
+edges.push(new Edge(2, 0));
+
+function step(dt){
+  // 1. split long edges
+  const toAdd = [];
+  for (let i = edges.length - 1; i >= 0; i--){
+    const e = edges[i];
+    const na = nodes[e.a], nb = nodes[e.b];
+    const dx = nb.x - na.x, dy = nb.y - na.y, dz = nb.z - na.z;
+    const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (len > SPLIT_LEN && nodes.length < MAX_NODES){
+      const mid = new Node(
+        (na.x + nb.x) * 0.5,
+        (na.y + nb.y) * 0.5,
+        (na.z + nb.z) * 0.5,
+        (na.age + nb.age) * 0.5
+      );
+      const midIdx = nodes.length;
+      nodes.push(mid);
+      edges.splice(i, 1);
+      toAdd.push(new Edge(e.a, midIdx));
+      toAdd.push(new Edge(midIdx, e.b));
+    }
+  }
+  edges.push(...toAdd);
+
+  // 2. repulsion (XZ plane only — Y is lifted by age)
+  for (let i = 0; i < nodes.length; i++){
+    nodes[i].vx = 0; nodes[i].vz = 0;
+  }
+  for (let i = 0; i < nodes.length; i++){
+    const ni = nodes[i];
+    for (let j = i + 1; j < nodes.length; j++){
+      const nj = nodes[j];
+      const dx = nj.x - ni.x;
+      const dz = nj.z - ni.z;
+      const d2 = dx*dx + dz*dz;
+      if (d2 < REPEL_R * REPEL_R && d2 > 1e-6){
+        const d = Math.sqrt(d2);
+        const force = REPEL_FORCE * (REPEL_R - d) / d;
+        ni.vx -= dx * force;
+        ni.vz -= dz * force;
+        nj.vx += dx * force;
+        nj.vz += dz * force;
+      }
+    }
+  }
+
+  // 3. apply velocity + age lift
+  for (let i = 0; i < nodes.length; i++){
+    const n = nodes[i];
+    n.x += n.vx;
+    n.z += n.vz;
+    n.age += dt * 0.4;
+    // vertical lift = age^1.4 — older nodes rise into cup walls
+    n.y = Math.pow(n.age, 1.4) * AGE_LIFT;
+  }
+
+  // 4. edge cohesion — pull connected nodes slightly closer in XZ
+  for (let e of edges){
+    const na = nodes[e.a], nb = nodes[e.b];
+    const dx = nb.x - na.x, dz = nb.z - na.z;
+    const pull = 0.008;
+    na.x += dx * pull; na.z += dz * pull;
+    nb.x -= dx * pull; nb.z -= dz * pull;
+  }
+}
+
+// ────────────── render nodes as sharp points
+const nodeGeom = new THREE.BufferGeometry();
+const posArr = new Float32Array(MAX_NODES * 3);
+const ageArr = new Float32Array(MAX_NODES);
+nodeGeom.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+nodeGeom.setAttribute('age', new THREE.BufferAttribute(ageArr, 1));
+nodeGeom.setDrawRange(0, nodes.length);
+
+const nodeUniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+const nodeMat = new THREE.ShaderMaterial({
+  uniforms: nodeUniforms,
+  transparent: true, depthWrite: false, fog: true,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float age;
+    varying vec3 vCol;
+    void main(){
+      vec3 p = position;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // size: older = larger (they've been in system longer, more visible)
+      float sz = 2.8 + age * 0.3;
+      gl_PointSize = sz * uPixel * (18.0 / dist);
+
+      // color by age: young = earthy ochre, old = ash-white
+      vec3 young = vec3(0.68, 0.52, 0.38);  // ochre
+      vec3 old   = vec3(0.88, 0.86, 0.82);  // ash
+      float t = smoothstep(0.0, 8.0, age);
+      vCol = mix(young, old, t);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      // sharp falloff — no soft halo
+      float a = smoothstep(0.5, 0.35, r);
+      gl_FragColor = vec4(vCol, a * 0.92);
+    }
+  `
+});
+const nodePoints = new THREE.Points(nodeGeom, nodeMat);
+scene.add(nodePoints);
+
+// render edges as thin lines
+const edgeGeom = new THREE.BufferGeometry();
+const edgePos = new Float32Array(MAX_NODES * 2 * 3);
+edgeGeom.setAttribute('position', new THREE.BufferAttribute(edgePos, 3));
+const edgeMat = new THREE.LineBasicMaterial({ color: 0x4a3e38, transparent: true, opacity: 0.28, fog: true });
+const edgeLines = new THREE.LineSegments(edgeGeom, edgeMat);
+scene.add(edgeLines);
+
+function syncGeometry(){
+  for (let i = 0; i < nodes.length; i++){
+    const n = nodes[i];
+    posArr[i*3]     = n.x;
+    posArr[i*3 + 1] = n.y;
+    posArr[i*3 + 2] = n.z;
+    ageArr[i] = n.age;
+  }
+  nodeGeom.setDrawRange(0, nodes.length);
+  nodeGeom.attributes.position.needsUpdate = true;
+  nodeGeom.attributes.age.needsUpdate = true;
+
+  let idx = 0;
+  for (let e of edges){
+    const na = nodes[e.a], nb = nodes[e.b];
+    edgePos[idx++] = na.x; edgePos[idx++] = na.y; edgePos[idx++] = na.z;
+    edgePos[idx++] = nb.x; edgePos[idx++] = nb.y; edgePos[idx++] = nb.z;
+  }
+  edgeGeom.setDrawRange(0, edges.length * 2);
+  edgeGeom.attributes.position.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm: grow the form before first render so thumbnail catches a recognizable calyx
+for (let i = 0; i < 420; i++) step(0.04);
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  nodeUniforms.uTime.value = now / 1000;
+
+  // growth slows as we approach max nodes
+  if (nodes.length < MAX_NODES * 0.92){
+    step(dt);
+  } else {
+    // gentle continued aging even after growth stops
+    for (let n of nodes) n.age += dt * 0.15;
+  }
+  syncGeometry();
+
+  // camera: slow single drift to the right — one contemplative pass
+  const t = now * 0.00008;
+  camera.position.x = Math.sin(t) * 12;
+  camera.position.z = 28 + Math.cos(t) * 6;
+  camera.lookAt(0, 5, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

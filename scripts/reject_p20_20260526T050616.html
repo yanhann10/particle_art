@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>p20 · physarum vascular growth</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#FFF8F0; overflow:hidden;
+               color:#E8927C; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#E8927C; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px; letter-spacing:0.04em; color:#D4A574; }
+</style>
+</head>
+<body>
+<div class="id">p20</div>
+<div class="hint">continuous physarum · vascular network</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─────────── Joy palette — warm, sunrise colors
+const PALETTE = [
+  new THREE.Color(0xFFD166), // gold
+  new THREE.Color(0xFF8C94), // coral pink
+  new THREE.Color(0xFFB38A), // peach
+  new THREE.Color(0xFFF4E6), // cream
+];
+const BG = 0xFFF8F0;
+
+// ─────────── Scene
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(BG, 0.015);
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 8, 28);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.target.set(0, 5, 0);
+controls.enableRotate = false;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─────────── Physarum agent structure
+const NUM_AGENTS = 220;
+const SENSE_DIST = 0.9;
+const SENSE_ANGLE = 0.48;
+const STEP_SIZE = 0.15;
+const DEPOSIT_AMOUNT = 1.2;
+const DECAY = 0.985;
+const TURN_SPEED = 0.08;
+
+// Grid for trail field
+const GRID_SIZE = 120;
+const GRID_BOUNDS = 16;
+const CELL_SIZE = GRID_BOUNDS * 2 / GRID_SIZE;
+const trail = new Float32Array(GRID_SIZE * GRID_SIZE * GRID_SIZE);
+
+// Agents: position (x,y,z), direction (dx,dy,dz), color index, trail accumulator
+const agents = [];
+for (let i = 0; i < NUM_AGENTS; i++) {
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const r = 0.8 + Math.random() * 1.2;
+  const x = r * Math.sin(phi) * Math.cos(theta);
+  const y = 4 + r * Math.sin(phi) * Math.sin(theta);
+  const z = r * Math.cos(phi);
+  
+  const dir = new THREE.Vector3(x, y - 4, z).normalize();
+  
+  agents.push({
+    x, y, z,
+    dx: dir.x, dy: dir.y, dz: dir.z,
+    colorIdx: i % 4,
+    trail: [],  // stored positions for line rendering
+  });
+}
+
+// Grid helpers
+function gridIdx(x, y, z) {
+  const gx = Math.floor((x + GRID_BOUNDS) / CELL_SIZE);
+  const gy = Math.floor((y + GRID_BOUNDS) / CELL_SIZE);
+  const gz = Math.floor((z + GRID_BOUNDS) / CELL_SIZE);
+  if (gx < 0 || gx >= GRID_SIZE || gy < 0 || gy >= GRID_SIZE || gz < 0 || gz >= GRID_SIZE) return -1;
+  return gx + gy * GRID_SIZE + gz * GRID_SIZE * GRID_SIZE;
+}
+
+function sampleTrail(x, y, z) {
+  const idx = gridIdx(x, y, z);
+  return idx >= 0 ? trail[idx] : 0;
+}
+
+function depositTrail(x, y, z, amount) {
+  const idx = gridIdx(x, y, z);
+  if (idx >= 0) trail[idx] += amount;
+}
+
+// ─────────── Sense front-left-right
+function sense(agent, angleOffset) {
+  const cos = Math.cos(angleOffset);
+  const sin = Math.sin(angleOffset);
+  
+  // Rotate direction around up axis (Y)
+  const up = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3().crossVectors(new THREE.Vector3(agent.dx, agent.dy, agent.dz), up).normalize();
+  const forward = new THREE.Vector3(agent.dx, agent.dy, agent.dz);
+  
+  const senseDirX = forward.x * cos + right.x * sin;
+  const senseDirY = forward.y * cos + right.y * sin;
+  const senseDirZ = forward.z * cos + right.z * sin;
+  
+  const len = Math.sqrt(senseDirX * senseDirX + senseDirY * senseDirY + senseDirZ * senseDirZ) + 1e-9;
+  
+  const sx = agent.x + (senseDirX / len) * SENSE_DIST;
+  const sy = agent.y + (senseDirY / len) * SENSE_DIST;
+  const sz = agent.z + (senseDirZ / len) * SENSE_DIST;
+  
+  return sampleTrail(sx, sy, sz);
+}
+
+// ─────────── Update agents
+function updateAgents(dt) {
+  for (const a of agents) {
+    // Sense
+    const front = sense(a, 0);
+    const left = sense(a, SENSE_ANGLE);
+    const right = sense(a, -SENSE_ANGLE);
+    
+    // Steer toward highest concentration
+    let turn = 0;
+    if (front > left && front > right) {
+      turn = 0;
+    } else if (front < left && front < right) {
+      turn = (Math.random() - 0.5) * TURN_SPEED * 2;
+    } else if (left > right) {
+      turn = TURN_SPEED;
+    } else if (right > left) {
+      turn = -TURN_SPEED;
+    }
+    
+    // Rotate direction smoothly
+    const up = new THREE.Vector3(0, 1, 0);
+    const right = new THREE.Vector3().crossVectors(new THREE.Vector3(a.dx, a.dy, a.dz), up).normalize();
+    const rotated = new THREE.Vector3(a.dx, a.dy, a.dz)
+      .addScaledVector(right, turn)
+      .normalize();
+    
+    // LERP direction
+    a.dx += (rotated.x - a.dx) * 0.04;
+    a.dy += (rotated.y - a.dy) * 0.04;
+    a.dz += (rotated.z - a.dz) * 0.04;
+    const dlen = Math.sqrt(a.dx * a.dx + a.dy * a.dy + a.dz * a.dz) + 1e-9;
+    a.dx /= dlen;
+    a.dy /= dlen;
+    a.dz /= dlen;
+    
+    // Move
+    const nx = a.x + a.dx * STEP_SIZE * dt * 60;
+    const ny = a.y + a.dy * STEP_SIZE * dt * 60;
+    const nz = a.z + a.dz * STEP_SIZE * dt * 60;
+    
+    // Bounce at bounds
+    const bounds = GRID_BOUNDS * 0.92;
+    let bounced = false;
+    if (Math.abs(nx) > bounds) { a.dx *= -0.8; bounced = true; }
+    if (Math.abs(ny - 5) > bounds) { a.dy *= -0.8; bounced = true; }
+    if (Math.abs(nz) > bounds) { a.dz *= -0.8; bounced = true; }
+    
+    if (!bounced) {
+      a.x = nx;
+      a.y = ny;
+      a.z = nz;
+    }
+    
+    // Deposit trail
+    depositTrail(a.x, a.y, a.z, DEPOSIT_AMOUNT);
+    
+    // Store position for rendering
+    if (a.trail.length === 0 || 
+        Math.hypot(a.x - a.trail[a.trail.length - 3], a.y - a.trail[a.trail.length - 2], a.z - a.trail[a.trail.length - 1]) > 0.2) {
+      a.trail.push(a.x, a.y, a.z);
+      // Cap trail length to prevent memory growth
+      if (a.trail.length > 900) a.trail.splice(0, 3);
+    }
+  }
+  
+  // Decay trails
+  for (let i = 0; i < trail.length; i++) {
+    trail[i] *= DECAY;
+  }
+}
+
+// ─────────── Rendering: straight line segments per agent
+const lineMaterials = PALETTE.map(c => new THREE.LineBasicMaterial({ color: c, transparent: true, opacity: 0.7, fog: true }));
+const lineGroups = [null, null, null, null];
+
+for (let i = 0; i < 4; i++) {
+  lineGroups[i] = new THREE.Group();
+  scene.add(lineGroups[i]);
+}
+
+function rebuildLines() {
+  for (let i = 0; i < 4; i++) {
+    // Clear old lines
+    while (lineGroups[i].children.length) {
+      lineGroups[i].remove(lineGroups[i].children[0]);
+    }
+  }
+  
+  for (const a of agents) {
+    if (a.trail.length < 6) continue;
+    
+    const positions = new Float32Array(a.trail);
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    
+    const line = new THREE.Line(geom, lineMaterials[a.colorIdx]);
+    lineGroups[a.colorIdx].add(line);
+  }
+}
+
+// ─────────── Ambient light particles — rising gently
+const AMBIENT_COUNT = 120;
+const ambientGeom = new THREE.BufferGeometry();
+const ambientPos = new Float32Array(AMBIENT_COUNT * 3);
+const ambientVel = new Float32Array(AMBIENT_COUNT * 3);
+
+for (let i = 0; i < AMBIENT_COUNT; i++) {
+  ambientPos[i * 3] = (Math.random() - 0.5) * 20;
+  ambientPos[i * 3 + 1] = Math.random() * 15 - 2;
+  ambientPos[i * 3 + 2] = (Math.random() - 0.5) * 20;
+  ambientVel[i * 3] = (Math.random() - 0.5) * 0.02;
+  ambientVel[i * 3 + 1] = 0.04 + Math.random() * 0.06; // upward drift
+  ambientVel[i * 3 + 2] = (Math.random() - 0.5) * 0.02;
+}
+
+ambientGeom.setAttribute('position', new THREE.BufferAttribute(ambientPos, 3));
+const ambientMat = new THREE.PointsMaterial({ color: 0xFFD166, size: 0.08, transparent: true, opacity: 0.3, fog: true });
+const ambientPoints = new THREE.Points(ambientGeom, ambientMat);
+scene.add(ambientPoints);
+
+function updateAmbient(dt) {
+  for (let i = 0; i < AMBIENT_COUNT; i++) {
+    ambientPos[i * 3] += ambientVel[i * 3] * dt * 60;
+    ambientPos[i * 3 + 1] += ambientVel[i * 3 + 1] * dt * 60;
+    ambientPos[i * 3 + 2] += ambientVel[i * 3 + 2] * dt * 60;
+    
+    // Wrap Y
+    if (ambientPos[i * 3 + 1] > 18) {
+      ambientPos[i * 3 + 1] = -2;
+      ambientPos[i * 3] = (Math.random() - 0.5) * 20;
+      ambientPos[i * 3 + 2] = (Math.random() - 0.5) * 20;
+    }
+  }
+  ambientGeom.attributes.position.needsUpdate = true;
+}
+
+// ─────────── Animation
+const startT = performance.now();
+let prevT = startT;
+let frameCount = 0;
+
+function loop() {
+  const nowMs = performance.now();
+  const t = (nowMs - startT) / 1000;
+  const dt = Math.min((nowMs - prevT) / 1000, 0.05);
+  prevT = nowMs;
+  
+  updateAgents(dt);
+  updateAmbient(dt);
+  
+  // Rebuild lines every 3 frames (performance)
+  if (frameCount % 3 === 0) {
+    rebuildLines();
+  }
+  frameCount++;
+  
+  // Camera slowly rises with the form
+  const targetY = 5 + Math.sin(t * 0.15) * 1.5;
+  controls.target.y += (targetY - controls.target.y) * 0.01;
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>

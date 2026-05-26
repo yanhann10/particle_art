@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>edm · physarum network growth</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0e0b08; overflow:hidden;
+               font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,monospace; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">edm</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const W = 512, H = 512, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0e0b08, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = { type: THREE.FloatType, format: THREE.RGBAFormat,
+                   minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+                   depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtTrail = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+// Initialize agents in center cluster
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  const angle = Math.random() * Math.PI * 2;
+  const rad = Math.random() * 0.08;
+  init[i*4]   = Math.cos(angle) * rad;
+  init[i*4+1] = Math.sin(angle) * rad;
+  init[i*4+2] = Math.random() * Math.PI * 2;
+  init[i*4+3] = 1.0;
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(rtTrail); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+const simUniforms = {
+  prev: { value: rtA.texture },
+  trail: { value: rtTrail.texture },
+  uDt: { value: 0.008 },
+  uSensorAngle: { value: 0.35 },
+  uSensorDist: { value: 0.012 },
+  uTurnSpeed: { value: 0.6 },
+  uMoveSpeed: { value: 0.004 },
+  uDepositRate: { value: 0.08 },
+  uDecayRate: { value: 0.004 }
+};
+
+const agentMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform sampler2D trail;
+    uniform float uDt, uSensorAngle, uSensorDist, uTurnSpeed, uMoveSpeed, uDepositRate, uDecayRate;
+    varying vec2 vUv;
+    
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    
+    float sampleTrail(vec2 pos) {
+      if (pos.x < -1.0 || pos.x > 1.0 || pos.y < -1.0 || pos.y > 1.0) return 0.0;
+      vec2 uv = pos * 0.5 + 0.5;
+      return texture2D(trail, uv).r;
+    }
+    
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec2 pos = s.xy;
+      float angle = s.z;
+      float active = s.w;
+      
+      if (active < 0.5) {
+        gl_FragColor = s;
+        return;
+      }
+      
+      // Sensor offsets
+      float fwd = sampleTrail(pos + vec2(cos(angle), sin(angle)) * uSensorDist);
+      float left = sampleTrail(pos + vec2(cos(angle + uSensorAngle), sin(angle + uSensorAngle)) * uSensorDist);
+      float right = sampleTrail(pos + vec2(cos(angle - uSensorAngle), sin(angle - uSensorAngle)) * uSensorDist);
+      
+      // Steering
+      float rand = hash(vUv + angle) - 0.5;
+      if (fwd > left && fwd > right) {
+        // continue forward
+      } else if (fwd < left && fwd < right) {
+        angle += (rand > 0.0 ? 1.0 : -1.0) * uTurnSpeed;
+      } else if (left > right) {
+        angle += uTurnSpeed;
+      } else if (right > left) {
+        angle -= uTurnSpeed;
+      }
+      
+      // Move
+      vec2 dir = vec2(cos(angle), sin(angle));
+      vec2 newPos = pos + dir * uMoveSpeed;
+      
+      // Boundary handling - reflect
+      if (newPos.x < -0.95 || newPos.x > 0.95) {
+        newPos.x = clamp(newPos.x, -0.95, 0.95);
+        angle = 3.14159 - angle;
+      }
+      if (newPos.y < -0.95 || newPos.y > 0.95) {
+        newPos.y = clamp(newPos.y, -0.95, 0.95);
+        angle = -angle;
+      }
+      
+      gl_FragColor = vec4(newPos, angle, active);
+    }
+  `
+});
+
+const trailMat = new THREE.ShaderMaterial({
+  uniforms: {
+    prev: { value: rtTrail.texture },
+    agents: { value: rtA.texture },
+    uDecay: { value: 0.996 },
+    uDeposit: { value: 0.15 }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform sampler2D agents;
+    uniform float uDecay, uDeposit;
+    varying vec2 vUv;
+    
+    void main(){
+      float trail = texture2D(prev, vUv).r;
+      vec4 agent = texture2D(agents, vUv);
+      vec2 pos = agent.xy;
+      float active = agent.w;
+      
+      // Diffuse blur
+      vec2 px = 1.0 / vec2(512.0);
+      float sum = 0.0;
+      sum += texture2D(prev, vUv + vec2(-px.x, 0.0)).r * 0.2;
+      sum += texture2D(prev, vUv + vec2(px.x, 0.0)).r * 0.2;
+      sum += texture2D(prev, vUv + vec2(0.0, -px.y)).r * 0.2;
+      sum += texture2D(prev, vUv + vec2(0.0, px.y)).r * 0.2;
+      sum += trail * 0.2;
+      
+      trail = sum * uDecay;
+      
+      // Check if agent is at this location
+      vec2 worldUV = vUv * 2.0 - 1.0;
+      float dist = length(worldUV - pos);
+      if (dist < 0.008 && active > 0.5) {
+        trail += uDeposit;
+      }
+      
+      trail = clamp(trail, 0.0, 1.0);
+      gl_FragColor = vec4(trail, trail, trail, 1.0);
+    }
+  `
+});
+
+const agentScene = new THREE.Scene();
+agentScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), agentMat));
+
+const trailScene = new THREE.Scene();
+trailScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), trailMat));
+
+// Display scene
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 2.4);
+camera.lookAt(0, 0, 0);
+
+const displayMat = new THREE.ShaderMaterial({
+  uniforms: {
+    trail: { value: rtTrail.texture },
+    uTime: { value: 0 }
+  },
+  transparent: false,
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D trail;
+    uniform float uTime;
+    varying vec2 vUv;
+    
+    void main(){
+      float density = texture2D(trail, vUv).r;
+      
+      // Restrained earth-tone palette
+      vec3 col1 = vec3(0.12, 0.10, 0.08); // deep brown shadow
+      vec3 col2 = vec3(0.28, 0.24, 0.20); // warm ash
+      vec3 col3 = vec3(0.42, 0.38, 0.32); // dry earth
+      vec3 col4 = vec3(0.52, 0.48, 0.40); // weathered bone
+      
+      vec3 col;
+      if (density < 0.15) {
+        col = mix(col1, col2, density / 0.15);
+      } else if (density < 0.5) {
+        col = mix(col2, col3, (density - 0.15) / 0.35);
+      } else {
+        col = mix(col3, col4, (density - 0.5) / 0.5);
+      }
+      
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+
+const displayPlane = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), displayMat);
+scene.add(displayPlane);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let t0 = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+  
+  // Update agents
+  simUniforms.prev.value = rtA.texture;
+  simUniforms.trail.value = rtTrail.texture;
+  renderer.setRenderTarget(rtB);
+  renderer.render(agentScene, camOrtho);
+  let tmp = rtA; rtA = rtB; rtB = tmp;
+  
+  // Update trail
+  trailMat.uniforms.prev.value = rtTrail.texture;
+  trailMat.uniforms.agents.value = rtA.texture;
+  renderer.setRenderTarget(rtB);
+  renderer.render(trailScene, camOrtho);
+  tmp = rtTrail; rtTrail = rtB; rtB = tmp;
+  
+  // Display
+  displayMat.uniforms.trail.value = rtTrail.texture;
+  displayMat.uniforms.uTime.value = elapsed;
+  
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

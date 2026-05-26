@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>z8u · calyx grown from differential silhouette</title>
+<!-- MOTION: growth, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a14; overflow:hidden;
+               color:#a8b8d0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background:
+      linear-gradient(to bottom,
+        #1a1a28 0%,
+        #2a1f34 25%,
+        #3a2a38 50%,
+        #5a3838 75%,
+        #7a4840 100%);
+  }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">z8u · calyx grown from differential silhouette</div>
+<div class="hint">no input — watch the vessel emerge from seed points via differential growth</div>
+<div class="src">differential growth algorithm · age-driven vertical drift · botanical calyx form</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Differential growth algorithm producing a recognizable botanical calyx.
+// Nodes start on a 2D circle, grow via repulsion + constrained edge-length,
+// older nodes drift upward forming a cup/flower vessel shape.
+//
+// Jake Beal "Organic Computing" differential growth: nodes on a closed loop
+// try to expand (repulsion) while maintaining edge connectivity; produces
+// coral-like organic forms. We add AGE → Y-DRIFT to make it vertical.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x1a1a28, 0.012);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 3, 18);
+camera.lookAt(0, 2, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── differential growth data
+class Node {
+  constructor(x, y, z){
+    this.x = x; this.y = y; this.z = z;
+    this.vx = 0; this.vy = 0; this.vz = 0;
+    this.age = 0;
+    this.connections = [];
+  }
+}
+
+const nodes = [];
+const INIT_N = 80;
+const INIT_R = 3.2;
+for (let i = 0; i < INIT_N; i++){
+  const th = (i / INIT_N) * Math.PI * 2;
+  nodes.push(new Node(
+    Math.cos(th) * INIT_R,
+    0,
+    Math.sin(th) * INIT_R
+  ));
+}
+// connect neighbors in a ring
+for (let i = 0; i < nodes.length; i++){
+  nodes[i].connections.push((i + 1) % nodes.length);
+}
+
+const MAX_EDGE_LEN = 0.45;
+const MIN_EDGE_LEN = 0.20;
+const REPULSION_R  = 0.65;
+const REPULSION_F  = 0.035;
+const EDGE_STIFF   = 0.22;
+const DAMPING      = 0.88;
+const AGE_LIFT     = 0.0012;   // older nodes rise
+const MAX_NODES    = 12000;
+
+function stepGrowth(dt){
+  // age all nodes
+  for (let n of nodes) n.age += dt;
+
+  // repulsion
+  for (let i = 0; i < nodes.length; i++){
+    for (let j = i + 1; j < nodes.length; j++){
+      const dx = nodes[j].x - nodes[i].x;
+      const dy = nodes[j].y - nodes[i].y;
+      const dz = nodes[j].z - nodes[i].z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 > REPULSION_R * REPULSION_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPULSION_F * (1.0 - d / REPULSION_R);
+      const fx = (dx / d) * f;
+      const fy = (dy / d) * f;
+      const fz = (dz / d) * f;
+      nodes[i].vx -= fx; nodes[i].vy -= fy; nodes[i].vz -= fz;
+      nodes[j].vx += fx; nodes[j].vy += fy; nodes[j].vz += fz;
+    }
+  }
+
+  // edge constraints + splitting
+  const toInsert = [];
+  for (let i = 0; i < nodes.length; i++){
+    const n = nodes[i];
+    for (let ci = 0; ci < n.connections.length; ci++){
+      const j = n.connections[ci];
+      if (j <= i) continue; // avoid double-processing
+      const dx = nodes[j].x - n.x;
+      const dy = nodes[j].y - n.y;
+      const dz = nodes[j].z - n.z;
+      const d = Math.sqrt(dx*dx + dy*dy + dz*dz + 1e-9);
+      const target = (MAX_EDGE_LEN + MIN_EDGE_LEN) * 0.5;
+      const delta = d - target;
+      const force = delta * EDGE_STIFF;
+      const fx = (dx / d) * force;
+      const fy = (dy / d) * force;
+      const fz = (dz / d) * force;
+      n.vx += fx; n.vy += fy; n.vz += fz;
+      nodes[j].vx -= fx; nodes[j].vy -= fy; nodes[j].vz -= fz;
+
+      // if edge too long, split
+      if (d > MAX_EDGE_LEN && nodes.length < MAX_NODES){
+        const mx = (n.x + nodes[j].x) * 0.5;
+        const my = (n.y + nodes[j].y) * 0.5;
+        const mz = (n.z + nodes[j].z) * 0.5;
+        const mid = new Node(mx, my, mz);
+        mid.age = (n.age + nodes[j].age) * 0.5;
+        toInsert.push({ node: mid, a: i, b: j });
+      }
+    }
+  }
+
+  // insert new nodes
+  for (let ins of toInsert){
+    const idx = nodes.length;
+    nodes.push(ins.node);
+    // reconnect: a-mid, mid-b
+    const a = nodes[ins.a], b = nodes[ins.b];
+    a.connections = a.connections.filter(c => c !== ins.b);
+    b.connections = b.connections.filter(c => c !== ins.a);
+    a.connections.push(idx);
+    b.connections.push(idx);
+    ins.node.connections.push(ins.a, ins.b);
+  }
+
+  // age-driven upward drift — older nodes rise forming the calyx cup
+  for (let n of nodes){
+    n.vy += n.age * AGE_LIFT;
+  }
+
+  // integrate
+  for (let n of nodes){
+    n.x += n.vx * dt;
+    n.y += n.vy * dt;
+    n.z += n.vz * dt;
+    n.vx *= DAMPING;
+    n.vy *= DAMPING;
+    n.vz *= DAMPING;
+  }
+}
+
+// ────────────── render edges + nodes
+const lineMat = new THREE.LineBasicMaterial({ color: 0x9a7a5a, transparent: true, opacity: 0.35 });
+const lineGeom = new THREE.BufferGeometry();
+const lineGroup = new THREE.Group();
+scene.add(loineGroup);
+
+function updateRender(){
+  // edges
+  const positions = [];
+  for (let n of nodes){
+    for (let ci of n.connections){
+      if (ci <= nodes.indexOf(n)) continue;
+      const m = nodes[ci];
+      positions.push(n.x, n.y, n.z);
+      positions.push(m.x, m.y, m.z);
+    }
+  }
+  lineGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  if (!lineGroup.children.length){
+    const lines = new THREE.LineSegments(lineGeom, lineMat);
+    lineGroup.add(lines);
+  } else {
+    lineGroup.children[0].geometry = lineGeom;
+  }
+
+  // node points
+  const nodePos = [];
+  const nodeAge = [];
+  for (let n of nodes){
+    nodePos.push(n.x, n.y, n.z);
+    nodeAge.push(n.age);
+  }
+  if (!pointsMesh){
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(nodePos, 3));
+    geom.setAttribute('age', new THREE.Float32BufferAttribute(nodeAge, 1));
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 }, uPixel: { value: renderer.getPixelRatio() } },
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      vertexShader: `
+        uniform float uTime;
+        uniform float uPixel;
+        attribute float age;
+        varying vec3 vCol;
+        varying float vAlpha;
+        void main(){
+          vec3 p = position;
+          vec4 mv = modelViewMatrix * vec4(p, 1.0);
+          float dist = -mv.z;
+          float sizeMul = 1.0 + age * 0.08;
+          gl_PointSize = 2.8 * sizeMul * uPixel * (18.0 / dist);
+          float ageNorm = clamp(age / 8.0, 0.0, 1.0);
+          vec3 young = vec3(0.72, 0.58, 0.42);   // seed tan
+          vec3 old   = vec3(0.88, 0.76, 0.62);   // petal cream
+          vCol = mix(young, old, ageNorm);
+          vAlpha = 0.75 + ageNorm * 0.25;
+          gl_Position = projectionMatrix * mv;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vCol;
+        varying float vAlpha;
+        void main(){
+          vec2 d = gl_PointCoord - 0.5;
+          float r = dot(d, d);
+          if (r > 0.25) discard;
+          float a = exp(-r * 12.0) * vAlpha;
+          gl_FragColor = vec4(vCol * a, a);
+        }
+      `
+    });
+    pointsMesh = new THREE.Points(geom, mat);
+    scene.add(pointsMesh);
+  } else {
+    pointsMesh.geometry.setAttribute('position', new THREE.Float32BufferAttribute(nodePos, 3));
+    pointsMesh.geometry.setAttribute('age', new THREE.Float32BufferAttribute(nodeAge, 1));
+  }
+}
+let pointsMesh = null;
+
+// pre-grow so thumbnail catches a recognizable calyx silhouette
+for (let s = 0; s < 800; s++) stepGrowth(0.02);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.04, (now - lastT) / 1000);
+  lastT = now;
+  stepGrowth(dt);
+  updateRender();
+  if (pointsMesh) pointsMesh.material.uniforms.uTime.value = now / 1000;
+
+  // slow camera drift upward to follow the growing form
+  const targetY = 1.5 + (nodes.length / MAX_NODES) * 3.5;
+  camera.position.y += (targetY - camera.position.y) * 0.02;
+  camera.lookAt(0, targetY * 0.6, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>

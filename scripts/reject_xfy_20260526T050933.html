@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xfy · vascular tower ascent</title>
+<!-- MOTION: ascent, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1208; overflow:hidden;
+               color:#FFD166; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; color:#FFD166; }
+</style>
+</head>
+<body>
+<div class="id">xfy</div>
+<div class="hint">organic membrane tower · rising with age</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const LERP_ALPHA = 0.035;
+const JOY_PALETTE = [
+  new THREE.Color(0xFFD166), // gold
+  new THREE.Color(0xFF6B9D), // pink
+  new THREE.Color(0xFF8C69), // coral
+  new THREE.Color(0xFFF4E6), // cream
+];
+const BG = 0x1a1208;
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(BG, 0.015);
+const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(12, 14, 22);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, 8, 0);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─────────── Differential growth membrane structure
+// Start as horizontal disc, vertices climb upward based on age/radial distance
+const RINGS = 24;
+const SEGMENTS = 32;
+const INITIAL_RADIUS = 8.0;
+const vertices = [];
+const edges = [];
+const vertexData = []; // { x, y, z, tx, ty, tz, age, radialDist, anchorWeight, colorIdx }
+
+function initMembrane() {
+  let vIdx = 0;
+  // Center vertex
+  vertices.push(new THREE.Vector3(0, 0, 0));
+  vertexData.push({
+    x: 0, y: 0, z: 0,
+    tx: 0, ty: 0, tz: 0,
+    age: 0,
+    radialDist: 0,
+    anchorWeight: 1.0, // center anchored
+    colorIdx: 0
+  });
+  vIdx++;
+
+  for (let r = 1; r <= RINGS; r++) {
+    const radius = (r / RINGS) * INITIAL_RADIUS;
+    const radialDist = r / RINGS;
+    const segCount = SEGMENTS;
+    
+    for (let s = 0; s < segCount; s++) {
+      const theta = (s / segCount) * Math.PI * 2;
+      const x = Math.cos(theta) * radius;
+      const z = Math.sin(theta) * radius;
+      const y = 0;
+      
+      vertices.push(new THREE.Vector3(x, y, z));
+      
+      // Anchor weight: inner rings stay grounded, outer rings free to rise
+      const anchorWeight = Math.max(0, 1.0 - radialDist * 1.2);
+      
+      vertexData.push({
+        x, y, z,
+        tx: x, ty: y, tz: z,
+        age: 0,
+        radialDist,
+        anchorWeight,
+        colorIdx: Math.floor(radialDist * 3) % 4
+      });
+      vIdx++;
+    }
+  }
+
+  // Build edges — radial spokes and circumference rings
+  const centerIdx = 0;
+  let ringStartIdx = 1;
+  
+  for (let r = 1; r <= RINGS; r++) {
+    const segCount = SEGMENTS;
+    const nextRingStartIdx = ringStartIdx + segCount;
+    
+    for (let s = 0; s < segCount; s++) {
+      const currIdx = ringStartIdx + s;
+      const nextSegIdx = ringStartIdx + ((s + 1) % segCount);
+      
+      // Circumference edge
+      edges.push([currIdx, nextSegIdx]);
+      
+      if (r === 1) {
+        // Spoke from center
+        edges.push([centerIdx, currIdx]);
+      } else {
+        // Spoke from previous ring
+        const prevRingIdx = currIdx - segCount;
+        edges.push([prevRingIdx, currIdx]);
+      }
+      
+      // Diagonal cross-bracing for structural integrity
+      if (r < RINGS) {
+        const nextRingCurrIdx = nextRingStartIdx + s;
+        const nextRingNextIdx = nextRingStartIdx + ((s + 1) % segCount);
+        edges.push([currIdx, nextRingNextIdx]);
+      }
+    }
+    
+    ringStartIdx = nextRingStartIdx;
+  }
+}
+
+initMembrane();
+
+// ─────────── LineSegments per color group
+const lineGeoms = [null, null, null, null];
+const lineMeshes = [null, null, null, null];
+
+function updateLineBuffers() {
+  const posByColor = [[], [], [], []];
+  
+  for (const [ai, bi] of edges) {
+    const a = vertexData[ai];
+    const b = vertexData[bi];
+    const cIdx = Math.max(a.colorIdx, b.colorIdx) % 4;
+    posByColor[cIdx].push(a.x, a.y, a.z, b.x, b.y, b.z);
+  }
+  
+  for (let c = 0; c < 4; c++) {
+    const arr = new Float32Array(posByColor[c]);
+    if (!lineGeoms[c]) {
+      lineGeoms[c] = new THREE.BufferGeometry();
+      lineGeoms[c].setAttribute('position', new THREE.BufferAttribute(arr.slice(), 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: JOY_PALETTE[c].clone(),
+        linewidth: 1,
+        transparent: true,
+        opacity: 0.85,
+        fog: true
+      });
+      lineMeshes[c] = new THREE.LineSegments(lineGeoms[c], mat);
+      scene.add(lineMeshes[c]);
+    } else {
+      const buf = lineGeoms[c].getAttribute('position');
+      if (buf.array.length === arr.length) {
+        buf.array.set(arr);
+        buf.needsUpdate = true;
+      } else {
+        lineGeoms[c].setAttribute('position', new THREE.BufferAttribute(arr, 3));
+      }
+    }
+  }
+}
+
+updateLineBuffers();
+
+// ─────────── Small vertex spheres
+const vertexGeom = new THREE.SphereGeometry(0.08, 6, 4);
+const vertexMats = JOY_PALETTE.map(c => new THREE.MeshBasicMaterial({ color: c, fog: true }));
+const vertexMeshes = vertexData.map((v, i) => {
+  const m = new THREE.Mesh(vertexGeom, vertexMats[v.colorIdx % 4]);
+  m.position.set(v.x, v.y, v.z);
+  scene.add(m);
+  return m;
+});
+
+// ─────────── Growth physics
+function growthStep(dt) {
+  const REPULSION_RADIUS = 0.6;
+  const REPULSION_FORCE = 0.15;
+  const EDGE_TARGET_LEN = 0.55;
+  const EDGE_SPRING = 0.25;
+  const RISE_SPEED_BASE = 0.8; // units/sec for outer vertices
+  
+  // Apply repulsion between nearby vertices
+  for (let i = 0; i < vertexData.length; i++) {
+    const vi = vertexData[i];
+    for (let j = i + 1; j < vertexData.length; j++) {
+      const vj = vertexData[j];
+      const dx = vj.x - vi.x;
+      const dy = vj.y - vi.y;
+      const dz = vj.z - vi.z;
+      const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) + 1e-6;
+      
+      if (dist < REPULSION_RADIUS) {
+        const force = REPULSION_FORCE * (1 - dist / REPULSION_RADIUS);
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        const fz = (dz / dist) * force;
+        
+        vi.tx -= fx * (1 - vi.anchorWeight);
+        vi.ty -= fy * (1 - vi.anchorWeight);
+        vi.tz -= fz * (1 - vi.anchorWeight);
+        
+        vj.tx += fx * (1 - vj.anchorWeight);
+        vj.ty += fy * (1 - vj.anchorWeight);
+        vj.tz += fz * (1 - vj.anchorWeight);
+      }
+    }
+  }
+  
+  // Apply edge spring forces
+  for (const [ai, bi] of edges) {
+    const a = vertexData[ai];
+    const b = vertexData[bi];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dz = b.z - a.z;
+    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) + 1e-6;
+    const diff = dist - EDGE_TARGET_LEN;
+    const force = diff * EDGE_SPRING;
+    const fx = (dx / dist) * force;
+    const fy = (dy / dist) * force;
+    const fz = (dz / dist) * force;
+    
+    a.tx += fx * (1 - a.anchorWeight) * 0.5;
+    a.ty += fy * (1 - a.anchorWeight) * 0.5;
+    a.tz += fz * (1 - a.anchorWeight) * 0.5;
+    
+    b.tx -= fx * (1 - b.anchorWeight) * 0.5;
+    b.ty -= fy * (1 - b.anchorWeight) * 0.5;
+    b.tz -= fz * (1 - b.anchorWeight) * 0.5;
+  }
+  
+  // Apply upward drift based on age and radial distance
+  for (let i = 0; i < vertexData.length; i++) {
+    const v = vertexData[i];
+    v.age += dt;
+    
+    // Rise velocity increases with radial distance (outer vertices climb faster)
+    const riseVel = RISE_SPEED_BASE * v.radialDist * (1 - v.anchorWeight);
+    v.ty += riseVel * dt;
+    
+    // Gentle outward expansion as structure rises
+    const expansionRate = 0.12 * v.radialDist * (1 - v.anchorWeight);
+    const centerDist = Math.sqrt(v.x*v.x + v.z*v.z) + 1e-6;
+    v.tx += (v.x / centerDist) * expansionRate * dt;
+    v.tz += (v.z / centerDist) * expansionRate * dt;
+  }
+  
+  // LERP current positions toward targets
+  for (let i = 0; i < vertexData.length; i++) {
+    const v = vertexData[i];
+    v.x += (v.tx - v.x) * LERP_ALPHA;
+    v.y += (v.ty - v.y) * LERP_ALPHA;
+    v.z += (v.tz - v.z) * LERP_ALPHA;
+  }
+}
+
+// ─────────── Animation loop
+const startT = performance.now();
+let prevT = startT;
+
+function loop() {
+  const nowMs = performance.now();
+  const t = (nowMs - startT) / 1000;
+  const dt = Math.min((nowMs - prevT) / 1000, 0.033);
+  prevT = nowMs;
+  
+  // Growth simulation
+  growthStep(dt);
+  
+  // Update vertex mesh positions
+  for (let i = 0; i < vertexData.length; i++) {
+    const v = vertexData[i];
+    vertexMeshes[i].position.set(v.x, v.y, v.z);
+  }
+  
+  // Rebuild line buffers
+  updateLineBuffers();
+  
+  // Camera tracks centroid height
+  let sumY = 0;
+  for (const v of vertexData) sumY += v.y;
+  const avgY = sumY / vertexData.length;
+  controls.target.y += (avgY - controls.target.y) * LERP_ALPHA * 0.5;
+  
+  // Gentle camera rise
+  const targetCamY = 8 + avgY * 0.6;
+  camera.position.y += (targetCamY - camera.position.y) * LERP_ALPHA * 0.3;
+  
+  // Ambient light pulse
+  const pulse = Math.sin(t * 0.4) * 0.5 + 0.5;
+  for (let c = 0; c < 4; c++) {
+    const baseColor = JOY_PALETTE[c].clone();
+    const brightColor = baseColor.clone().lerp(new THREE.Color(0xFFFFFF), 0.15);
+    lineMeshes[c].material.color.copy(baseColor).lerp(brightColor, pulse * 0.2);
+  }
+  
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

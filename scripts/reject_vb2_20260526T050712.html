@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vb2 · physarum vascular</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0b0f; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">vb2</div>
+<div class="hint">drag to orbit</div>
+<div class="src">Physarum polycephalum · continuous growth · chemotaxis drift</div>
+<div class="stat" id="stat">agents=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Physarum vascular — slime-mold agents deposit chemo-trail, sense ahead for food
+   gradient, turn toward stronger signal. Drift law: unidirectional wind from +X
+   pushes the network gently rightward as it grows, creating asymmetric branching
+   that reads as flow-sculpted mycelium.
+   
+   PHYSICAL LAW: Chemotaxis drift = agents follow gradient of deposited trail + external
+   wind bias (constant +X force). Trail diffuses and decays slowly; network stabilizes
+   into branched vascular form occupying >15% of frame, never resets.
+*/
+
+const BG = 0x0d0b0f;
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(BG, 0.012);
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(18, 6, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+// --- Physarum parameters ---
+const AGENT_COUNT = 800;
+const SENSOR_ANGLE = 0.48;   // radians (how wide the sensor cone)
+const SENSOR_DIST  = 2.2;    // how far ahead to sample
+const ROTATION_ANGLE = 0.25; // how much to turn toward signal
+const STEP_SIZE    = 0.16;
+const DEPOSIT_RATE = 4.0;
+const DECAY_RATE   = 0.991;  // trail fades slowly
+const DIFFUSE_RATE = 0.08;
+const WIND_FORCE   = 0.014;  // constant +X drift
+
+// 3D trail grid — 80×80×80
+const GRID_RES = 80;
+const GRID_SCALE = 0.45;
+const trail = new Float32Array(GRID_RES * GRID_RES * GRID_RES);
+const trailNext = new Float32Array(GRID_RES * GRID_RES * GRID_RES);
+
+function trailIdx(x, y, z) {
+  const ix = Math.floor(x / GRID_SCALE + GRID_RES / 2);
+  const iy = Math.floor(y / GRID_SCALE + GRID_RES / 2);
+  const iz = Math.floor(z / GRID_SCALE + GRID_RES / 2);
+  if (ix < 0 || ix >= GRID_RES || iy < 0 || iy >= GRID_RES || iz < 0 || iz >= GRID_RES) return -1;
+  return ix + iy * GRID_RES + iz * GRID_RES * GRID_RES;
+}
+
+function sampleTrail(x, y, z) {
+  const idx = trailIdx(x, y, z);
+  return idx < 0 ? 0 : trail[idx];
+}
+
+function depositTrail(x, y, z, amount) {
+  const idx = trailIdx(x, y, z);
+  if (idx >= 0) trail[idx] = Math.min(255, trail[idx] + amount);
+}
+
+// Agents: position + heading (3D unit vector)
+const agents = [];
+for (let i = 0; i < AGENT_COUNT; i++) {
+  // Start in a small sphere at origin
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+  const r = Math.random() * 1.5;
+  agents.push({
+    x: Math.sin(phi) * Math.cos(theta) * r,
+    y: Math.sin(phi) * Math.sin(theta) * r,
+    z: Math.cos(phi) * r,
+    // heading points outward
+    dx: Math.sin(phi) * Math.cos(theta),
+    dy: Math.sin(phi) * Math.sin(theta),
+    dz: Math.cos(phi)
+  });
+}
+
+// Rotation helpers
+function rotateVec(vx, vy, vz, axis_x, axis_y, axis_z, angle) {
+  // Rodrigues' rotation formula
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const t = 1 - c;
+  const dot = vx * axis_x + vy * axis_y + vz * axis_z;
+  const crossX = axis_y * vz - axis_z * vy;
+  const crossY = axis_z * vx - axis_x * vz;
+  const crossZ = axis_x * vy - axis_y * vx;
+  return {
+    x: vx * c + crossX * s + axis_x * dot * t,
+    y: vy * c + crossY * s + axis_y * dot * t,
+    z: vz * c + crossZ * s + axis_z * dot * t
+  };
+}
+
+function perpendicular(dx, dy, dz) {
+  // Return arbitrary perpendicular vector
+  if (Math.abs(dx) < 0.9) return { x: 0, y: dz, z: -dy };
+  return { x: -dz, y: 0, z: dx };
+}
+
+function stepAgents() {
+  for (const a of agents) {
+    // Sense three directions: forward, left, right
+    const perp = perpendicular(a.dx, a.dy, a.dz);
+    const px = perp.x, py = perp.y, pz = perp.z;
+    const norm = Math.hypot(px, py, pz);
+    const ux = px / norm, uy = py / norm, uz = pz / norm;
+
+    const fwd = sampleTrail(
+      a.x + a.dx * SENSOR_DIST,
+      a.y + a.dy * SENSOR_DIST,
+      a.z + a.dz * SENSOR_DIST
+    );
+    const left = rotateVec(a.dx, a.dy, a.dz, ux, uy, uz, SENSOR_ANGLE);
+    const leftVal = sampleTrail(
+      a.x + left.x * SENSOR_DIST,
+      a.y + left.y * SENSOR_DIST,
+      a.z + left.z * SENSOR_DIST
+    );
+    const right = rotateVec(a.dx, a.dy, a.dz, ux, uy, uz, -SENSOR_ANGLE);
+    const rightVal = sampleTrail(
+      a.x + right.x * SENSOR_DIST,
+      a.y + right.y * SENSOR_DIST,
+      a.z + right.z * SENSOR_DIST
+    );
+
+    // Steer toward strongest signal
+    if (fwd > leftVal && fwd > rightVal) {
+      // continue forward
+    } else if (leftVal > rightVal) {
+      const rot = rotateVec(a.dx, a.dy, a.dz, ux, uy, uz, ROTATION_ANGLE);
+      a.dx = rot.x; a.dy = rot.y; a.dz = rot.z;
+    } else if (rightVal > leftVal) {
+      const rot = rotateVec(a.dx, a.dy, a.dz, ux, uy, uz, -ROTATION_ANGLE);
+      a.dx = rot.x; a.dy = rot.y; a.dz = rot.z;
+    } else {
+      // random turn
+      const angle = (Math.random() - 0.5) * ROTATION_ANGLE * 2;
+      const rot = rotateVec(a.dx, a.dy, a.dz, ux, uy, uz, angle);
+      a.dx = rot.x; a.dy = rot.y; a.dz = rot.z;
+    }
+
+    // Normalize heading
+    const len = Math.hypot(a.dx, a.dy, a.dz);
+    a.dx /= len; a.dy /= len; a.dz /= len;
+
+    // Apply wind drift (constant +X force)
+    a.dx += WIND_FORCE;
+    const newLen = Math.hypot(a.dx, a.dy, a.dz);
+    a.dx /= newLen; a.dy /= newLen; a.dz /= newLen;
+
+    // Move
+    a.x += a.dx * STEP_SIZE;
+    a.y += a.dy * STEP_SIZE;
+    a.z += a.dz * STEP_SIZE;
+
+    // Boundary bounce (soft sphere)
+    const distFromOrigin = Math.hypot(a.x, a.y, a.z);
+    if (distFromOrigin > 16) {
+      // reflect heading
+      const nx = -a.x / distFromOrigin;
+      const ny = -a.y / distFromOrigin;
+      const nz = -a.z / distFromOrigin;
+      const dot = 2 * (a.dx * nx + a.dy * ny + a.dz * nz);
+      a.dx -= dot * nx;
+      a.dy -= dot * ny;
+      a.dz -= dot * nz;
+      // push back
+      a.x = nx * 15.8;
+      a.y = ny * 15.8;
+      a.z = nz * 15.8;
+    }
+
+    // Deposit
+    depositTrail(a.x, a.y, a.z, DEPOSIT_RATE);
+  }
+}
+
+function diffuseDecay() {
+  // Copy to next
+  for (let i = 0; i < trail.length; i++) trailNext[i] = trail[i] * DECAY_RATE;
+
+  // 3D diffusion (6-neighbor average)
+  for (let z = 1; z < GRID_RES - 1; z++) {
+    for (let y = 1; y < GRID_RES - 1; y++) {
+      for (let x = 1; x < GRID_RES - 1; x++) {
+        const idx = x + y * GRID_RES + z * GRID_RES * GRID_RES;
+        const sum = trail[idx - 1] + trail[idx + 1] +
+                    trail[idx - GRID_RES] + trail[idx + GRID_RES] +
+                    trail[idx - GRID_RES * GRID_RES] + trail[idx + GRID_RES * GRID_RES];
+        trailNext[idx] = trailNext[idx] * (1 - DIFFUSE_RATE) + (sum / 6) * DIFFUSE_RATE;
+      }
+    }
+  }
+  trail.set(trailNext);
+}
+
+// Render: 40k particles at trail hotspots
+const N_RENDER = 40000;
+const rPos = new Float32Array(N_RENDER * 3);
+const rSeeds = new Float32Array(N_RENDER);
+const rIntensity = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('intensity', new THREE.BufferAttribute(rIntensity, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float intensity;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec3 p = position;
+
+      // Palette: mycelium ivory → rust → ash
+      vec3 ivory = vec3(0.92, 0.88, 0.82);
+      vec3 rust  = vec3(0.68, 0.45, 0.32);
+      vec3 ash   = vec3(0.52, 0.48, 0.46);
+      
+      float k = clamp(intensity * 1.2, 0.0, 1.0);
+      vec3 baseCol = mix(rust, ivory, k);
+      baseCol = mix(baseCol, ash, seed * 0.3);
+
+      float pulse = 0.88 + 0.12 * sin(uTime * 0.8 + seed * 20.0);
+      vCol = baseCol * pulse;
+      vAlpha = (0.3 + intensity * 0.5) * pulse;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 1.4 * uPixel * (38.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      float core = exp(-r * 18.0);
+      float halo = exp(-r * 6.0) * 0.25;
+      float a = (core + halo) * vAlpha;
+
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+const startT = performance.now();
+
+function loop() {
+  const t = (performance.now() - startT) / 1000;
+  uniforms.uTime.value = t;
+
+  // Physics
+  stepAgents();
+  if (Math.random() < 0.3) diffuseDecay();
+
+  // Sample trail grid to place particles
+  const samples = [];
+  const stride = 2;
+  for (let z = 0; z < GRID_RES; z += stride) {
+    for (let y = 0; y < GRID_RES; y += stride) {
+      for (let x = 0; x < GRID_RES; x += stride) {
+        const idx = x + y * GRID_RES + z * GRID_RES * GRID_RES;
+        const val = trail[idx];
+        if (val > 0.5) {
+          const wx = (x - GRID_RES / 2) * GRID_SCALE;
+          const wy = (y - GRID_RES / 2) * GRID_SCALE;
+          const wz = (z - GRID_RES / 2) * GRID_SCALE;
+          samples.push({ x: wx, y: wy, z: wz, val });
+        }
+      }
+    }
+  }
+
+  // Track centroid
+  let cx = 0, cy = 0, cz = 0, cn = 0;
+  for (const a of agents) { cx += a.x; cy += a.y; cz += a.z; cn++; }
+  if (cn > 0) {
+    cx /= cn; cy /= cn; cz /= cn;
+    controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.015);
+  }
+
+  // Distribute particles
+  if (samples.length > 0) {
+    const spread = 0.12;
+    for (let i = 0; i < N_RENDER; i++) {
+      const s = samples[Math.floor(Math.random() * samples.length)];
+      rPos[i * 3]     = s.x + (Math.random() - 0.5) * spread;
+      rPos[i * 3 + 1] = s.y + (Math.random() - 0.5) * spread;
+      rPos[i * 3 + 2] = s.z + (Math.random() - 0.5) * spread;
+      rIntensity[i] = Math.min(1.0, s.val / 80.0);
+    }
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.intensity.needsUpdate = true;
+  }
+
+  statEl.textContent = `agents=${AGENT_COUNT} · trail=${samples.length}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

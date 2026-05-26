@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eur · differential calyx</title>
+<!-- MOTION: growth, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0b09; overflow:hidden;
+               font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,monospace; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">eur</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// differential growth on a 2D calyx that rises into 3D via age
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0d0b09, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0d0b09, 0.028);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 50);
+camera.position.set(0, 1.8, 5.2);
+camera.lookAt(0, 0.6, 0);
+
+// Node structure for differential growth
+class Node {
+  constructor(x, y, age = 0) {
+    this.x = x;
+    this.y = y;
+    this.z = 0;
+    this.age = age;
+    this.vx = 0;
+    this.vy = 0;
+    this.fixed = false;
+  }
+}
+
+const nodes = [];
+const INIT_NODES = 24;
+const MAX_NODES = 3200;
+const MIN_DIST = 0.022;
+const MAX_DIST = 0.048;
+const REPEL_RADIUS = 0.06;
+const ATTRACT_STRENGTH = 0.0008;
+const REPEL_STRENGTH = 0.0012;
+const SPLIT_THRESHOLD = MAX_DIST * 0.85;
+
+// Initialize circle of nodes
+const R0 = 0.12;
+for (let i = 0; i < INIT_NODES; i++) {
+  const ang = (i / INIT_NODES) * Math.PI * 2;
+  nodes.push(new Node(Math.cos(ang) * R0, Math.sin(ang) * R0, 0));
+}
+
+// Geometry for rendering
+const positions = new Float32Array(MAX_NODES * 3);
+const colors = new Float32Array(MAX_NODES * 3);
+const pointsGeom = new THREE.BufferGeometry();
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+pointsGeom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+pointsGeom.setDrawRange(0, INIT_NODES);
+
+// Restrained palette: earth tones, low saturation, low lightness
+// HSL(35, 28%, 42%) → rusty clay
+// HSL(18, 25%, 38%) → burnt sienna
+// HSL(210, 22%, 35%) → slate dusk
+// HSL(45, 30%, 48%) → dried wheat
+const palette = [
+  new THREE.Color().setHSL(35/360, 0.28, 0.42),
+  new THREE.Color().setHSL(18/360, 0.25, 0.38),
+  new THREE.Color().setHSL(210/360, 0.22, 0.35),
+  new THREE.Color().setHSL(45/360, 0.30, 0.48)
+];
+
+const pointsMat = new THREE.PointsMaterial({
+  size: 0.024,
+  vertexColors: true,
+  transparent: true,
+  opacity: 0.85,
+  blending: THREE.NormalBlending,
+  depthWrite: false,
+  sizeAttenuation: true
+});
+
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+// Line segments for structure
+const linePositions = new Float32Array(MAX_NODES * 2 * 3);
+const lineColors = new Float32Array(MAX_NODES * 2 * 3);
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+lineGeom.setAttribute('color', new THREE.BufferAttribute(lineColors, 3));
+const lineMat = new THREE.LineBasicMaterial({ 
+  vertexColors: true, 
+  transparent: true, 
+  opacity: 0.35,
+  blending: THREE.NormalBlending 
+});
+const lines = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lines);
+
+// Differential growth step
+function growthStep(dt) {
+  const n = nodes.length;
+  
+  // Reset forces
+  for (let i = 0; i < n; i++) {
+    if (!nodes[i].fixed) {
+      nodes[i].vx = 0;
+      nodes[i].vy = 0;
+    }
+  }
+  
+  // Neighbor attraction + global repulsion
+  for (let i = 0; i < n; i++) {
+    const ni = nodes[i];
+    const prev = nodes[(i - 1 + n) % n];
+    const next = nodes[(i + 1) % n];
+    
+    // Attract to neighbors
+    let dx = (prev.x - ni.x) + (next.x - ni.x);
+    let dy = (prev.y - ni.y) + (next.y - ni.y);
+    ni.vx += dx * ATTRACT_STRENGTH;
+    ni.vy += dy * ATTRACT_STRENGTH;
+    
+    // Repel from all others
+    for (let j = 0; j < n; j++) {
+      if (i === j) continue;
+      const nj = nodes[j];
+      dx = ni.x - nj.x;
+      dy = ni.y - nj.y;
+      const d2 = dx*dx + dy*dy;
+      if (d2 < REPEL_RADIUS * REPEL_RADIUS && d2 > 0.0001) {
+        const d = Math.sqrt(d2);
+        const force = REPEL_STRENGTH * (1.0 - d / REPEL_RADIUS);
+        ni.vx += (dx / d) * force;
+        ni.vy += (dy / d) * force;
+      }
+    }
+  }
+  
+  // Apply velocities with damping
+  for (let i = 0; i < n; i++) {
+    const ni = nodes[i];
+    if (!ni.fixed) {
+      ni.x += ni.vx * 0.5;
+      ni.y += ni.vy * 0.5;
+    }
+    ni.age += dt * 0.015;
+  }
+  
+  // Split edges that are too long
+  if (nodes.length < MAX_NODES) {
+    for (let i = n - 1; i >= 0; i--) {
+      const ni = nodes[i];
+      const next = nodes[(i + 1) % nodes.length];
+      const dx = next.x - ni.x;
+      const dy = next.y - ni.y;
+      const d = Math.sqrt(dx*dx + dy*dy);
+      
+      if (d > SPLIT_THRESHOLD) {
+        const newNode = new Node(
+          (ni.x + next.x) * 0.5,
+          (ni.y + next.y) * 0.5,
+          (ni.age + next.age) * 0.5
+        );
+        nodes.splice(i + 1, 0, newNode);
+        if (nodes.length >= MAX_NODES) break;
+      }
+    }
+  }
+}
+
+// Update geometry
+function updateGeometry() {
+  const n = nodes.length;
+  
+  // Update points
+  for (let i = 0; i < n; i++) {
+    const node = nodes[i];
+    // Age drives Z (upward rise)
+    const rise = Math.pow(node.age, 1.8) * 0.7;
+    node.z = rise;
+    
+    positions[i*3] = node.x;
+    positions[i*3+1] = node.y;
+    positions[i*3+2] = rise;
+    
+    // Color by age
+    const ageNorm = Math.min(node.age * 0.6, 1.0);
+    const colorIdx = Math.floor(ageNorm * (palette.length - 0.01));
+    const col = palette[colorIdx];
+    colors[i*3] = col.r;
+    colors[i*3+1] = col.g;
+    colors[i*3+2] = col.b;
+  }
+  pointsGeom.attributes.position.needsUpdate = true;
+  pointsGeom.attributes.color.needsUpdate = true;
+  pointsGeom.setDrawRange(0, n);
+  
+  // Update lines
+  let lineIdx = 0;
+  for (let i = 0; i < n; i++) {
+    const ni = nodes[i];
+    const next = nodes[(i + 1) % n];
+    const rise1 = Math.pow(ni.age, 1.8) * 0.7;
+    const rise2 = Math.pow(next.age, 1.8) * 0.7;
+    
+    linePositions[lineIdx*3] = ni.x;
+    linePositions[lineIdx*3+1] = ni.y;
+    linePositions[lineIdx*3+2] = rise1;
+    
+    linePositions[lineIdx*3+3] = next.x;
+    linePositions[lineIdx*3+4] = next.y;
+    linePositions[lineIdx*3+5] = rise2;
+    
+    const ageAvg = (ni.age + next.age) * 0.5;
+    const ageNorm = Math.min(ageAvg * 0.6, 1.0);
+    const colIdx = Math.floor(ageNorm * (palette.length - 0.01));
+    const col = palette[colIdx];
+    lineColors[lineIdx*3] = col.r * 0.7;
+    lineColors[lineIdx*3+1] = col.g * 0.7;
+    lineColors[lineIdx*3+2] = col.b * 0.7;
+    lineColors[lineIdx*3+3] = col.r * 0.7;
+    lineColors[lineIdx*3+4] = col.g * 0.7;
+    lineColors[lineIdx*3+5] = col.b * 0.7;
+    
+    lineIdx += 2;
+  }
+  lineGeom.attributes.position.needsUpdate = true;
+  lineGeom.attributes.color.needsUpdate = true;
+  lineGeom.setDrawRange(0, n * 2);
+}
+
+// Track centroid for camera
+function getCentroid() {
+  let cx = 0, cy = 0, cz = 0;
+  const n = nodes.length;
+  for (let i = 0; i < n; i++) {
+    cx += nodes[i].x;
+    cy += nodes[i].y;
+    cz += Math.pow(nodes[i].age, 1.8) * 0.7;
+  }
+  return { x: cx/n, y: cy/n, z: cz/n };
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let t0 = performance.now();
+let lastT = t0;
+
+function loop() {
+  const now = performance.now();
+  const dt = Math.min((now - lastT) * 0.001, 0.05);
+  lastT = now;
+  const elapsed = (now - t0) * 0.001;
+  
+  // Growth steps — slow and deliberate
+  if (elapsed < 15) {
+    for (let i = 0; i < 3; i++) {
+      growthStep(dt);
+    }
+  } else {
+    growthStep(dt);
+  }
+  
+  updateGeometry();
+  
+  // Camera tracks centroid gently
+  const c = getCentroid();
+  const targetY = c.y + c.z * 0.5 + 0.4;
+  camera.position.y += (targetY + 1.8 - camera.position.y) * 0.02;
+  
+  // Very slow camera drift left-right
+  const driftX = Math.sin(elapsed * 0.08) * 0.3;
+  camera.position.x += (driftX - camera.position.x) * 0.02;
+  
+  camera.lookAt(c.x, c.y + c.z * 0.5, c.z);
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.borderColor='rgba(215,107,90,0.5)';this.style.color='#d76b5a';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>

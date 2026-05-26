@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mnz · membrane that grows into a tower</title>
+<!-- MOTION: ascent, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a14; overflow:hidden;
+               color:#a8b8d0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  /* desaturated dawn gradient with paper grain texture */
+  body {
+    background:
+      linear-gradient(to bottom,
+        #1a1825 0%,
+        #221f28 22%,
+        #2a2328 45%,
+        #3a2e28 68%,
+        #4a3a2f 88%,
+        #5a4838 100%);
+  }
+  canvas { display:block; }
+  #sky-canvas {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 1;
+    opacity: 0.35;
+  }
+  #webgl-canvas {
+    position: fixed;
+    top: 0; left: 0;
+    z-index: 2;
+  }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; z-index:10; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; z-index:10; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; z-index:10; }
+</style>
+</head>
+<body>
+<canvas id="sky-canvas"></canvas>
+<div id="webgl-canvas"></div>
+<div class="id">mnz · membrane that grows into a tower</div>
+<div class="hint">vertical drift transforms disc into vascular tower — base anchored, apex climbs</div>
+<div class="src">descended from sav · structured ascent with age-weighted lift</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script>
+// starfield + horizon texture layer — inhabit the sky
+(function(){
+  const canvas = document.getElementById('sky-canvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  
+  // scattered stars
+  ctx.fillStyle = '#d0cfc0';
+  for (let i = 0; i < 180; i++){
+    const x = Math.random() * canvas.width;
+    const y = Math.random() * canvas.height * 0.6; // upper 60%
+    const r = Math.random() * 0.8 + 0.3;
+    ctx.globalAlpha = Math.random() * 0.4 + 0.2;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  
+  // ground horizon — thin line at bottom 12%
+  const gradH = ctx.createLinearGradient(0, canvas.height * 0.88, 0, canvas.height);
+  gradH.addColorStop(0, 'rgba(90,72,56,0)');
+  gradH.addColorStop(0.5, 'rgba(42,35,40,0.25)');
+  gradH.addColorStop(1, 'rgba(26,24,37,0.4)');
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = gradH;
+  ctx.fillRect(0, canvas.height * 0.88, canvas.width, canvas.height * 0.12);
+  
+  // paper grain overlay
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = imgData.data;
+  for (let i = 0; i < d.length; i += 4){
+    const noise = (Math.random() - 0.5) * 18;
+    d[i] += noise; d[i+1] += noise; d[i+2] += noise;
+  }
+  ctx.putImageData(imgData, 0, 0);
+})();
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x1a1825, 0.012);
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 12, 32);
+camera.lookAt(0, 8, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.getElementById('webgl-canvas').appendChild(renderer.domElement);
+
+// ────────────── membrane geometry
+// base ring of particles at y=0, additional rings at y>0
+// each particle tracks its 'age' — how long since it was added
+// older particles drift upward faster, creating a tower form
+
+const RINGS = 18;
+const PTS_PER_RING = 36;
+const N = RINGS * PTS_PER_RING;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const age = new Float32Array(N);
+const seedArr = new Float32Array(N);
+
+// init: horizontal disc at y=0, rings from r=1 to r=6
+let idx = 0;
+for (let ring = 0; ring < RINGS; ring++){
+  const r = 1.0 + (ring / (RINGS - 1)) * 5.0;
+  const y = 0;
+  for (let i = 0; i < PTS_PER_RING; i++){
+    const th = (i / PTS_PER_RING) * Math.PI * 2;
+    pos[idx*3]     = Math.cos(th) * r;
+    pos[idx*3 + 1] = y;
+    pos[idx*3 + 2] = Math.sin(th) * r;
+    vel[idx*3] = 0;
+    vel[idx*3+1] = 0;
+    vel[idx*3+2] = 0;
+    age[idx] = 0;
+    seedArr[idx] = Math.random();
+    idx++;
+  }
+}
+
+// particle update: age-based upward drift
+// bottom ring (ring 0) is anchored, upper rings lift proportionally
+function step(dt){
+  for (let i = 0; i < N; i++){
+    age[i] += dt;
+    const ring = Math.floor(i / PTS_PER_RING);
+    const ringFrac = ring / (RINGS - 1);
+    
+    // anchor base, lift upper portions with age
+    if (ring === 0){
+      vel[i*3+1] = 0; // base stays at y=0
+    } else {
+      // velocity proportional to ring height and age
+      const liftSpeed = 0.8 * ringFrac * (1.0 + age[i] * 0.15);
+      vel[i*3+1] = liftSpeed;
+    }
+    
+    // slight radial expansion as it rises
+    const ex = pos[i*3] * 0.02 * ringFrac;
+    const ez = pos[i*3+2] * 0.02 * ringFrac;
+    vel[i*3]   = ex;
+    vel[i*3+2] = ez;
+    
+    // integrate
+    pos[i*3]     += vel[i*3] * dt;
+    pos[i*3 + 1] += vel[i*3+1] * dt;
+    pos[i*3 + 2] += vel[i*3+2] * dt;
+  }
+  
+  // camera follows centroid Y
+  let cy = 0;
+  for (let i = 0; i < N; i++) cy += pos[i*3+1];
+  cy /= N;
+  camera.position.y = cy + 4;
+  camera.lookAt(0, cy, 0);
+}
+
+// ────────────── render: particles + connecting lines (vascular mesh)
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seedArr, 1));
+
+// line segments: connect each particle to its neighbors in same ring + adjacent rings
+const lineIndices = [];
+for (let ring = 0; ring < RINGS; ring++){
+  const base = ring * PTS_PER_RING;
+  // ring connections
+  for (let i = 0; i < PTS_PER_RING; i++){
+    const next = (i + 1) % PTS_PER_RING;
+    lineIndices.push(base + i, base + next);
+  }
+  // cross-ring connections (to next ring)
+  if (ring < RINGS - 1){
+    const nextBase = (ring + 1) * PTS_PER_RING;
+    for (let i = 0; i < PTS_PER_RING; i++){
+      lineIndices.push(base + i, nextBase + i);
+    }
+  }
+}
+const lineGeom = new THREE.BufferGeometry();
+lineGeom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+lineGeom.setIndex(lineIndices);
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const pointMat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec3 p = position;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float t = uTime * 0.5 + seed * 6.28;
+      float pulse = 0.6 + 0.4 * sin(t);
+      gl_PointSize = (1.8 + pulse * 0.6) * uPixel * (18.0 / dist);
+      
+      // palette: bone, rust, dusk — desaturated earthy
+      vec3 bone = vec3(0.85, 0.82, 0.75);
+      vec3 rust = vec3(0.68, 0.42, 0.32);
+      vec3 dusk = vec3(0.52, 0.48, 0.58);
+      float h = p.y / 20.0;
+      vCol = mix(rust, mix(bone, dusk, smoothstep(0.3, 0.7, h)), smoothstep(0.0, 1.0, h));
+      vAlpha = clamp(1.0 - (dist - 30.0) / 40.0, 0.0, 1.0);
+      
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 12.0) * vAlpha * 0.8;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, pointMat);
+scene.add(points);
+
+const lineMat = new THREE.LineBasicMaterial({
+  color: 0x6a5548,
+  transparent: true,
+  opacity: 0.18,
+  blending: THREE.AdditiveBlending,
+  fog: false
+});
+const lines = new THREE.LineSegments(lineGeom, lineMat);
+scene.add(lines);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  const skyCanvas = document.getElementById('sky-canvas');
+  skyCanvas.width = innerWidth;
+  skyCanvas.height = innerHeight;
+});
+
+let lastT = performance.now();
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = now / 1000;
+  step(dt);
+  geom.attributes.position.needsUpdate = true;
+  lineGeom.attributes.position.needsUpdate = true;
+  
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim().split(' ')[0]||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>

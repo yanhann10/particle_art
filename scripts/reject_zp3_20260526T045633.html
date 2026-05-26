@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zp3 · physarum continuous branching network</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  body {
+    background: #0a0a0e;
+  }
+  canvas { display:block; position: absolute; top: 0; left: 0; }
+  #bg-canvas { z-index: 1; }
+  #main-canvas { z-index: 2; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; z-index: 10; }
+</style>
+</head>
+<body>
+<canvas id="bg-canvas"></canvas>
+<canvas id="main-canvas"></canvas>
+<div class="id">zp3 · physarum continuous branching network</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ─────────── BACKGROUND LAYER: desaturated sky gradient + starfield + ground horizon
+const bgCanvas = document.getElementById('bg-canvas');
+const bgCtx = bgCanvas.getContext('2d');
+bgCanvas.width = innerWidth;
+bgCanvas.height = innerHeight;
+
+function paintBackground(){
+  const w = bgCanvas.width, h = bgCanvas.height;
+  // desaturated dawn gradient: muted indigo → soft mauve → warm ash
+  const grad = bgCtx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0.0,  '#12121c');  // deep indigo
+  grad.addColorStop(0.35, '#1a1525');  // muted plum
+  grad.addColorStop(0.65, '#2a2230');  // warm ash
+  grad.addColorStop(0.88, '#3a2e2a');  // dusky brown
+  grad.addColorStop(1.0,  '#4a3a32');  // earth tone
+  bgCtx.fillStyle = grad;
+  bgCtx.fillRect(0, 0, w, h);
+
+  // starfield specks: tiny, sparse, low opacity
+  bgCtx.fillStyle = 'rgba(220, 215, 205, 0.18)';
+  for (let i = 0; i < 180; i++){
+    const x = Math.random() * w;
+    const y = Math.random() * h * 0.6;  // top 60% only
+    const r = Math.random() < 0.9 ? 0.6 : 1.2;
+    bgCtx.beginPath();
+    bgCtx.arc(x, y, r, 0, Math.PI * 2);
+    bgCtx.fill();
+  }
+
+  // ground horizon: subtle line at bottom 15%
+  const horizonY = h * 0.88;
+  bgCtx.strokeStyle = 'rgba(80, 70, 60, 0.25)';
+  bgCtx.lineWidth = 1.5;
+  bgCtx.beginPath();
+  bgCtx.moveTo(0, horizonY);
+  bgCtx.lineTo(w, horizonY);
+  bgCtx.stroke();
+
+  // atmospheric scatter: faint radial glow from bottom center
+  const centerX = w * 0.5;
+  const centerY = h * 1.1;
+  const radGrad = bgCtx.createRadialGradient(centerX, centerY, 0, centerX, centerY, h * 0.9);
+  radGrad.addColorStop(0.0, 'rgba(90, 70, 50, 0.08)');
+  radGrad.addColorStop(0.5, 'rgba(60, 50, 45, 0.03)');
+  radGrad.addColorStop(1.0, 'rgba(0, 0, 0, 0)');
+  bgCtx.fillStyle = radGrad;
+  bgCtx.fillRect(0, 0, w, h);
+
+  // paper grain texture overlay
+  const imgData = bgCtx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+  for (let i = 0; i < data.length; i += 4){
+    const noise = (Math.random() - 0.5) * 8;
+    data[i]     += noise;
+    data[i + 1] += noise;
+    data[i + 2] += noise;
+  }
+  bgCtx.putImageData(imgData, 0, 0);
+}
+paintBackground();
+
+addEventListener('resize', () => {
+  bgCanvas.width = innerWidth;
+  bgCanvas.height = innerHeight;
+  paintBackground();
+});
+
+// ─────────── MAIN SCENE: physarum network (continuous growth, no reset)
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0a0a0e, 0.012);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 28);
+const renderer = new THREE.WebGLRenderer({ 
+  canvas: document.getElementById('main-canvas'),
+  antialias: true, 
+  alpha: true 
+});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+
+// Physarum parameters tuned for stable vascular branching
+const AGENT_COUNT = 48000;
+const SENSOR_ANGLE = 0.42;   // 24° cone
+const SENSOR_DIST = 2.8;
+const ROTATION_ANGLE = 0.28; // 16° turn
+const STEP_SIZE = 0.18;
+const DEPOSIT_AMOUNT = 0.95;
+const DECAY_FACTOR = 0.982;  // slow decay → stable trails
+const DIFFUSE_RADIUS = 1;
+
+const GRID_W = 512;
+const GRID_H = 512;
+const WORLD_SCALE = 32;
+const trail = new Float32Array(GRID_W * GRID_H);
+
+// Agent state
+const agentX = new Float32Array(AGENT_COUNT);
+const agentY = new Float32Array(AGENT_COUNT);
+const agentAngle = new Float32Array(AGENT_COUNT);
+
+// Init: central cluster with radial bias
+for (let i = 0; i < AGENT_COUNT; i++){
+  const r = Math.random() * 2.5 + 0.4;
+  const th = Math.random() * Math.PI * 2;
+  agentX[i] = GRID_W * 0.5 + Math.cos(th) * r * 8;
+  agentY[i] = GRID_H * 0.5 + Math.sin(th) * r * 8;
+  agentAngle[i] = th + (Math.random() - 0.5) * 0.6;
+}
+
+function sampleTrail(x, y){
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  if (ix < 0 || ix >= GRID_W || iy < 0 || iy >= GRID_H) return 0;
+  return trail[iy * GRID_W + ix];
+}
+
+function depositTrail(x, y, amount){
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  if (ix < 0 || ix >= GRID_W || iy < 0 || iy >= GRID_H) return;
+  const idx = iy * GRID_W + ix;
+  trail[idx] = Math.min(10.0, trail[idx] + amount);
+}
+
+function stepPhysarum(){
+  // Motor stage: sense environment, turn toward food
+  for (let i = 0; i < AGENT_COUNT; i++){
+    const x = agentX[i];
+    const y = agentY[i];
+    const angle = agentAngle[i];
+
+    const fwdX = x + Math.cos(angle) * SENSOR_DIST;
+    const fwdY = y + Math.sin(angle) * SENSOR_DIST;
+    const leftX = x + Math.cos(angle - SENSOR_ANGLE) * SENSOR_DIST;
+    const leftY = y + Math.sin(angle - SENSOR_ANGLE) * SENSOR_DIST;
+    const rightX = x + Math.cos(angle + SENSOR_ANGLE) * SENSOR_DIST;
+    const rightY = y + Math.sin(angle + SENSOR_ANGLE) * SENSOR_DIST;
+
+    const fwd = sampleTrail(fwdX, fwdY);
+    const left = sampleTrail(leftX, leftY);
+    const right = sampleTrail(rightX, rightY);
+
+    let newAngle = angle;
+    if (fwd > left && fwd > right){
+      // continue straight
+    } else if (fwd < left && fwd < right){
+      // random turn when both sides equal
+      newAngle += (Math.random() < 0.5 ? -1 : 1) * ROTATION_ANGLE;
+    } else if (left > right){
+      newAngle -= ROTATION_ANGLE;
+    } else if (right > left){
+      newAngle += ROTATION_ANGLE;
+    }
+
+    agentAngle[i] = newAngle;
+    const nx = x + Math.cos(newAngle) * STEP_SIZE;
+    const ny = y + Math.sin(newAngle) * STEP_SIZE;
+
+    // Boundary: bounce off edges
+    if (nx < 1 || nx >= GRID_W - 1){
+      agentAngle[i] = Math.PI - agentAngle[i];
+    } else {
+      agentX[i] = nx;
+    }
+    if (ny < 1 || ny >= GRID_H - 1){
+      agentAngle[i] = -agentAngle[i];
+    } else {
+      agentY[i] = ny;
+    }
+
+    depositTrail(agentX[i], agentY[i], DEPOSIT_AMOUNT);
+  }
+
+  // Diffuse + decay
+  const newTrail = new Float32Array(GRID_W * GRID_H);
+  for (let y = DIFFUSE_RADIUS; y < GRID_H - DIFFUSE_RADIUS; y++){
+    for (let x = DIFFUSE_RADIUS; x < GRID_W - DIFFUSE_RADIUS; x++){
+      let sum = 0;
+      let count = 0;
+      for (let dy = -DIFFUSE_RADIUS; dy <= DIFFUSE_RADIUS; dy++){
+        for (let dx = -DIFFUSE_RADIUS; dx <= DIFFUSE_RADIUS; dx++){
+          sum += trail[(y + dy) * GRID_W + (x + dx)];
+          count++;
+        }
+      }
+      const avg = sum / count;
+      newTrail[y * GRID_W + x] = avg * DECAY_FACTOR;
+    }
+  }
+  trail.set(newTrail);
+}
+
+// ─────────── RENDER: trail texture → particle system
+const particleCount = 65000;
+const positions = new Float32Array(particleCount * 3);
+const intensities = new Float32Array(particleCount);
+
+function updateParticles(){
+  let idx = 0;
+  const threshold = 0.35;  // only bright trails
+  for (let y = 0; y < GRID_H && idx < particleCount; y++){
+    for (let x = 0; x < GRID_W && idx < particleCount; x++){
+      const val = trail[y * GRID_W + x];
+      if (val > threshold){
+        const wx = (x / GRID_W - 0.5) * WORLD_SCALE;
+        const wy = (y / GRID_H - 0.5) * WORLD_SCALE;
+        positions[idx * 3]     = wx;
+        positions[idx * 3 + 1] = -wy;  // flip Y for screen coords
+        positions[idx * 3 + 2] = 0;
+        intensities[idx] = Math.min(1.0, val / 4.0);
+        idx++;
+      }
+    }
+  }
+  // fill remainder with invisible particles
+  for (; idx < particleCount; idx++){
+    positions[idx * 3] = 0;
+    positions[idx * 3 + 1] = 0;
+    positions[idx * 3 + 2] = -1000;
+    intensities[idx] = 0;
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('intensity', new THREE.BufferAttribute(intensities, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float intensity;
+    varying float vIntensity;
+    varying float vDist;
+    void main(){
+      vIntensity = intensity;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vDist = -mv.z;
+      float size = 1.4 + intensity * 1.6;
+      gl_PointSize = size * uPixel * (18.0 / vDist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vIntensity;
+    varying float vDist;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float alpha = exp(-r * 12.0) * vIntensity * 0.75;
+      // palette: rust/copper/bone — aged vascular network
+      vec3 col = mix(
+        vec3(0.52, 0.38, 0.28),  // rust brown
+        vec3(0.78, 0.62, 0.45),  // bone
+        smoothstep(0.2, 0.9, vIntensity)
+      );
+      // subtle warm glow at high intensity
+      col = mix(col, vec3(0.88, 0.72, 0.52), smoothstep(0.75, 1.0, vIntensity) * 0.3);
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Track centroid for camera framing
+let centroidX = 0, centroidY = 0;
+function updateCentroid(){
+  let sumX = 0, sumY = 0, count = 0;
+  for (let i = 0; i < particleCount; i++){
+    if (intensities[i] > 0.1){
+      sumX += positions[i * 3];
+      sumY += positions[i * 3 + 1];
+      count++;
+    }
+  }
+  if (count > 0){
+    const targetX = sumX / count;
+    const targetY = sumY / count;
+    centroidX += (targetX - centroidX) * 0.02;
+    centroidY += (targetY - centroidY) * 0.02;
+  }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let lastT = performance.now();
+let stepCounter = 0;
+function loop(){
+  const now = performance.now();
+  const dt = Math.min(0.04, (now - lastT) / 1000);
+  lastT = now;
+  uniforms.uTime.value = now / 1000;
+
+  // Physarum grows every frame (no reset)
+  stepPhysarum();
+  stepCounter++;
+  if (stepCounter % 2 === 0){
+    updateParticles();
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.intensity.needsUpdate = true;
+    updateCentroid();
+  }
+
+  // Camera: slow drift pass, tracking the growing centroid
+  const driftPhase = (now * 0.00008) % 1.0;
+  const driftX = Math.sin(driftPhase * Math.PI * 2) * 3.5;
+  const driftY = Math.cos(driftPhase * Math.PI * 2) * 2.2;
+  camera.position.x = centroidX + driftX;
+  camera.position.y = centroidY + driftY;
+  camera.position.z = 28 + Math.sin(driftPhase * Math.PI) * 4;
+  camera.lookAt(centroidX, centroidY, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<!-- MOTION: drift, intensity: calm -->
+</body>
+</html>
