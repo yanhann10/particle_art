@@ -40,10 +40,10 @@ const N = 80000;
 const partCount = 12;
 const THREAD_COUNT = 8000;
 
-const uTime    = { value: 0.0 };
-const uPixelR  = { value: renderer.getPixelRatio() };
-const uJam     = { value: 0.0 };
-const uShudder = { value: 0.0 };
+const uTime      = { value: 0.0 };
+const uPixelR    = { value: renderer.getPixelRatio() };
+const uJam       = { value: 0.0 };
+const uShudder   = { value: 0.0 };
 
 // 12 parts arranged in a ring at radius 14, in the XY plane.
 // Wide enough for FOV 65° at dist 26 (frustum ±26*tan(32.5°)=±16.4 units wide).
@@ -84,9 +84,56 @@ vec3 partWorldPos(
 }
 `;
 
+// Palette as GLSL function — avoids WebGL1 dynamic uniform-array indexing restriction
+const PALETTE_GLSL = `
+vec3 getPaletteColor(float pid) {
+  if      (pid < 0.5)  return vec3(0.753, 0.224, 0.169);
+  else if (pid < 1.5)  return vec3(0.180, 0.525, 0.757);
+  else if (pid < 2.5)  return vec3(0.831, 0.627, 0.090);
+  else if (pid < 3.5)  return vec3(0.118, 0.518, 0.286);
+  else if (pid < 4.5)  return vec3(0.533, 0.306, 0.627);
+  else if (pid < 5.5)  return vec3(0.792, 0.435, 0.118);
+  else if (pid < 6.5)  return vec3(0.102, 0.322, 0.463);
+  else if (pid < 7.5)  return vec3(0.851, 0.533, 0.502);
+  else if (pid < 8.5)  return vec3(0.490, 0.400, 0.031);
+  else if (pid < 9.5)  return vec3(0.078, 0.561, 0.467);
+  else if (pid < 10.5) return vec3(0.573, 0.169, 0.129);
+  else                  return vec3(0.627, 0.251, 0.000);
+}
+`;
+
+// Disk normals as 12 separate vec3 uniforms — avoids WebGL1 dynamic array indexing
+const uDiskNormal = [];
+for (let i = 0; i < 12; i++) uDiskNormal.push({ value: new THREE.Vector3(0, 1, 0) });
+
+const DISK_NORMAL_GLSL = `
+uniform vec3 uDN0, uDN1, uDN2, uDN3, uDN4, uDN5;
+uniform vec3 uDN6, uDN7, uDN8, uDN9, uDN10, uDN11;
+vec3 getDiskNormal(float pid) {
+  if      (pid < 0.5)  return uDN0;
+  else if (pid < 1.5)  return uDN1;
+  else if (pid < 2.5)  return uDN2;
+  else if (pid < 3.5)  return uDN3;
+  else if (pid < 4.5)  return uDN4;
+  else if (pid < 5.5)  return uDN5;
+  else if (pid < 6.5)  return uDN6;
+  else if (pid < 7.5)  return uDN7;
+  else if (pid < 8.5)  return uDN8;
+  else if (pid < 9.5)  return uDN9;
+  else if (pid < 10.5) return uDN10;
+  else                  return uDN11;
+}
+`;
+
 // ---- MACHINE PARTICLES ----
 const machineMat = new THREE.ShaderMaterial({
-  uniforms: { uTime, uPixel: uPixelR, uJam },
+  uniforms: {
+    uTime, uPixel: uPixelR, uJam,
+    uDN0:  uDiskNormal[0],  uDN1:  uDiskNormal[1],  uDN2:  uDiskNormal[2],
+    uDN3:  uDiskNormal[3],  uDN4:  uDiskNormal[4],  uDN5:  uDiskNormal[5],
+    uDN6:  uDiskNormal[6],  uDN7:  uDiskNormal[7],  uDN8:  uDiskNormal[8],
+    uDN9:  uDiskNormal[9],  uDN10: uDiskNormal[10], uDN11: uDiskNormal[11]
+  },
   transparent: true,
   depthWrite: false,
   blending: THREE.AdditiveBlending,
@@ -94,21 +141,31 @@ const machineMat = new THREE.ShaderMaterial({
     uniform float uTime;
     uniform float uPixel;
     uniform float uJam;
+    // cameraPosition is injected automatically by Three.js ShaderMaterial
 
     attribute float partId;
     attribute float localAngle;
-    attribute float radius;      // max disk radius (stored per particle but same per part)
+    attribute float radius;
     attribute float axisX;
     attribute float axisY;
     attribute float axisZ;
     attribute float speed;
     attribute float phase;
     attribute float wobble;
-    attribute float particleR;   // actual radius for THIS particle (0..maxR)
+    attribute float particleR;
 
     varying float vBrightness;
+    varying vec3  vColor;
+    varying float vFace;
+    varying float vJitter;
 
     ${PART_POS_FN}
+    ${PALETTE_GLSL}
+    ${DISK_NORMAL_GLSL}
+
+    float hash(float n) {
+      return fract(sin(n * 127.1 + 311.7) * 43758.5453);
+    }
 
     void main(){
       vec3 p = partWorldPos(partId, localAngle, radius,
@@ -116,37 +173,58 @@ const machineMat = new THREE.ShaderMaterial({
                             speed, phase, wobble,
                             particleR, uTime, uJam);
 
+      vColor = getPaletteColor(partId);
+
+      vec3 diskNormal = normalize(getDiskNormal(partId));
+      vec3 worldPos   = (modelMatrix * vec4(p, 1.0)).xyz;
+      vec3 toCam      = normalize(cameraPosition - worldPos);
+      vFace = dot(diskNormal, toCam);
+
       float t = uTime * speed + phase;
-      // Vary brightness by radial distance from center (edge = brighter rim)
       float radFrac = particleR / max(radius, 0.001);
       vBrightness = 0.40 + 0.60 * (0.5 + 0.5 * abs(sin(t + phase))) * (0.3 + 0.7 * radFrac);
 
+      vJitter = hash(localAngle * 17.3 + partId * 91.7 + particleR * 53.1);
+
       vec4 mv = modelViewMatrix * vec4(p, 1.0);
       float dist = length(mv.xyz);
-      // At dist~26, 200/26 = 7.7px. Good for N=28 falloff.
-      gl_PointSize = uPixel * clamp(200.0 / dist, 2.0, 22.0);
-      gl_Position = projectionMatrix * mv;
+
+      // Front: small sandy points 2-3px; Back: larger glassy points 4-6px
+      float isFront = step(0.0, vFace);
+      float szFront = clamp(130.0 / dist, 2.0, 3.5);
+      float szBack  = clamp(240.0 / dist, 4.0, 6.5);
+      gl_PointSize = uPixel * mix(szBack, szFront, isFront);
+      gl_Position  = projectionMatrix * mv;
     }
   `,
   fragmentShader: `
     varying float vBrightness;
+    varying vec3  vColor;
+    varying float vFace;
+    varying float vJitter;
 
     void main(){
       vec2 d = gl_PointCoord - 0.5;
       float r = dot(d, d);
       if (r > 0.25) discard;
 
-      // N=28 — crisp falloff
-      float sharpness = pow(max(0.0, 1.0 - r * 4.0), 28.0);
+      float isFront = step(0.0, vFace);
 
-      vec3 rust = mix(
-        vec3(0.93, 0.43, 0.07),
-        vec3(0.99, 0.77, 0.16),
-        vBrightness
-      );
+      // Front (sandy): N=28 crisp; Back (glassy): N=16 soft
+      float sharpFront = pow(max(0.0, 1.0 - r * 4.0), 28.0);
+      float sharpBack  = pow(max(0.0, 1.0 - r * 4.0), 16.0);
 
-      float alpha = sharpness * (0.60 + 0.35 * vBrightness);
-      gl_FragColor = vec4(rust, alpha);
+      // Brightness jitter only on front (±0.15)
+      float briF = clamp(vBrightness + (vJitter - 0.5) * 0.30, 0.0, 1.0);
+      float briB = vBrightness;
+
+      vec3 colorF = vColor * (0.6 + 0.8 * briF);
+      vec3 colorB = mix(vColor, vec3(1.0), 0.2) * (0.4 + 0.5 * briB);
+
+      vec3  finalColor = mix(colorB, colorF, isFront);
+      float alpha      = mix(sharpBack * 0.35, sharpFront * 0.85, isFront);
+
+      gl_FragColor = vec4(finalColor, alpha);
     }
   `
 });
@@ -341,6 +419,7 @@ function buildMachine(seed) {
 
   return {
     total, pos, pId, lAng, rad, axXa, axYa, axZa, spd_a, ph_a, wob_a, partR_a,
+    parts,  // expose part definitions so we can extract disk normals
     threads: {
       T2, tPos,
       ta_pId, ta_lAng, ta_rad, ta_axX, ta_axY, ta_axZ, ta_spd, ta_ph, ta_wob, ta_pR,
@@ -351,8 +430,13 @@ function buildMachine(seed) {
 }
 
 function setupOrUpdate(data) {
-  const { total, pos, pId, lAng, rad, axXa, axYa, axZa, spd_a, ph_a, wob_a, partR_a } = data;
+  const { total, pos, pId, lAng, rad, axXa, axYa, axZa, spd_a, ph_a, wob_a, partR_a, parts } = data;
   const t = data.threads;
+
+  // Update per-part disk normal uniforms (= rotation axes)
+  for (let i = 0; i < partCount; i++) {
+    uDiskNormal[i].value.set(parts[i].axX, parts[i].axY, parts[i].axZ);
+  }
 
   if (!machineGeom) {
     machineGeom = new THREE.BufferGeometry();
