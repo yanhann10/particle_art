@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zrl · trembling calyx Lorenz</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#080604; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#9a8f82; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#9a8f82; }
+</style>
+</head>
+<body>
+<div class="id">zrl</div>
+<div class="hint">Lorenz × calyx · σ=10 ρ=28 · orbit drag</div>
+<div class="src">kxu×ikw · trembling calyx Lorenz · 80k particles</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── scene setup ──────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 10, 22);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x080604, 1);
+document.body.appendChild(renderer.domElement);
+
+// ── Lorenz ODE (CPU) ─────────────────────────────────────────────────────────
+// σ=10, ρ=28, β=8/3  (ikw classic parameters)
+const SIGMA = 10.0, RHO = 28.0, BETA = 8.0 / 3.0;
+const DT = 0.005;
+const STEPS_PER_FRAME = 4;
+
+const ACTIVE = 3000;                    // live Lorenz particles
+const TRAIL_SLOTS = 77000;              // history trail buffer (total = 80k)
+const TOTAL = ACTIVE + TRAIL_SLOTS;
+
+// Lorenz state for each active particle
+const lx = new Float32Array(ACTIVE);
+const ly = new Float32Array(ACTIVE);
+const lz = new Float32Array(ACTIVE);
+
+// seed with different phases along the attractor
+for (let i = 0; i < ACTIVE; i++) {
+  const phase = i * 0.1;
+  lx[i] = Math.sin(phase) * 7.5 + (Math.random() - 0.5) * 1.5;
+  ly[i] = Math.cos(phase) * 7.5 + (Math.random() - 0.5) * 1.5;
+  lz[i] = 25.0 + Math.sin(phase * 0.7) * 10.0 + (Math.random() - 0.5) * 3.0;
+}
+
+// warm-up: run 500 steps so particles are on the attractor
+for (let step = 0; step < 500; step++) {
+  for (let i = 0; i < ACTIVE; i++) {
+    const dx = SIGMA * (ly[i] - lx[i]);
+    const dy = lx[i] * (RHO - lz[i]) - ly[i];
+    const dz = lx[i] * ly[i] - BETA * lz[i];
+    lx[i] += dx * DT;
+    ly[i] += dy * DT;
+    lz[i] += dz * DT;
+  }
+}
+
+// ── calyx surface mapping ─────────────────────────────────────────────────────
+// Lorenz state → calyx 3D position
+// θ = atan2(ly, lx)  azimuthal angle
+// h = clamp((lz - 5) / 30, 0, 1)  normalized height
+// r(θ,h,t) = (2.8 + 0.9*sin(5*θ + t*0.2)) * (0.35 + 0.65*h)  petal interference (kxu)
+// world: x = r*cos(θ), z = r*sin(θ), y = (h - 0.5)*8  (cup hangs / rises)
+function calyxPos(lxi, lyi, lzi, t, outX, outY, outZ, idx) {
+  const theta = Math.atan2(lyi, lxi);
+  const h = Math.max(0, Math.min(1, (lzi - 5.0) / 30.0));
+  const r = (2.8 + 0.9 * Math.sin(5.0 * theta + t * 0.2)) * (0.35 + 0.65 * h);
+  // cup shape: radius scales with h so petals flare at top
+  const cupR = r * (1.0 + 0.4 * h * h);
+  outX[idx] = cupR * Math.cos(theta);
+  outY[idx] = (h - 0.2) * 9.0;   // y-axis is height in the cup
+  outZ[idx] = cupR * Math.sin(theta);
+}
+
+// ── geometry: one big Points object ──────────────────────────────────────────
+const positions = new Float32Array(TOTAL * 3);
+const colors    = new Float32Array(TOTAL * 3);
+const sizes     = new Float32Array(TOTAL);
+const ages      = new Float32Array(TOTAL);  // 0=active, 1=oldest trail
+
+// initialize trail buffer to spread positions around
+for (let i = ACTIVE; i < TOTAL; i++) {
+  const a = Math.random() * Math.PI * 2;
+  const h = Math.random();
+  const r = (2.8 + 0.9 * Math.sin(5 * a)) * (0.35 + 0.65 * h);
+  positions[i * 3]     = r * Math.cos(a) * 0.1;
+  positions[i * 3 + 1] = (h - 0.2) * 9.0 * 0.1;
+  positions[i * 3 + 2] = r * Math.sin(a) * 0.1;
+  ages[i] = 1.0;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('aColor',   new THREE.BufferAttribute(colors,    3));
+geom.setAttribute('aSize',    new THREE.BufferAttribute(sizes,     1));
+geom.setAttribute('aAge',     new THREE.BufferAttribute(ages,      1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: { uPixel: { value: renderer.getPixelRatio() } },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uPixel;
+    attribute vec3 aColor;
+    attribute float aSize;
+    attribute float aAge;
+    varying vec3 vColor;
+    varying float vAge;
+    varying float vSize;
+    void main(){
+      vColor = aColor;
+      vAge   = aAge;
+      vSize  = aSize;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = max(1.0, -mv.z);
+      gl_PointSize = aSize * uPixel * (18.0 / dist);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+    varying float vAge;
+    varying float vSize;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      float edge = vSize > 3.0 ? 0.22 : 0.25;
+      if (r > edge) discard;
+      float soft = vSize > 3.0 ? 6.0 : 12.0;
+      float alpha = exp(-r * soft);
+      gl_FragColor = vec4(vColor * alpha, alpha);
+    }
+  `
+});
+
+const pointsMesh = new THREE.Points(geom, mat);
+scene.add(pointsMesh);
+
+// ── trail ring buffer ─────────────────────────────────────────────────────────
+// We cycle through TRAIL_SLOTS, overwriting the oldest slot each frame.
+// Each slot holds 1 position per active particle → we batch-write ACTIVE positions.
+const TRAIL_FRAMES = Math.floor(TRAIL_SLOTS / ACTIVE);  // ≈25 frames of history
+let trailWritePtr = 0;  // which frame-slot to write next (0..TRAIL_FRAMES-1)
+
+// ── color helpers ─────────────────────────────────────────────────────────────
+// age=0: bright cyan active heads
+// age=0.1..0.3: amber/gold (fresh trail)
+// age=0.3..1.0: rust-copper (old trail)
+function setColor(arr, base, age) {
+  if (age < 0.001) {
+    // active: bright electric cyan
+    arr[base]     = 80  / 255;
+    arr[base + 1] = 220 / 255;
+    arr[base + 2] = 255 / 255;
+  } else if (age < 0.15) {
+    // fresh trail: bright amber-gold
+    const t = age / 0.15;
+    arr[base]     = (200 + (80 - 200) * t) / 255;
+    arr[base + 1] = (160 + (220 - 160) * t * (1 - t) * 4 + (220 - 160) * (1-t)) / 255;
+    arr[base + 2] = (60  + (255 - 60) * (1 - t)) / 255;
+  } else {
+    // old trail: rust-copper fade
+    const t = Math.min(1.0, (age - 0.15) / 0.85);
+    arr[base]     = (180 - 60 * t) / 255;
+    arr[base + 1] = (90  - 40 * t) / 255;
+    arr[base + 2] = (40  - 20 * t) / 255;
+  }
+}
+
+function setSize(arr, idx, age) {
+  if (age < 0.001) {
+    arr[idx] = 6.5;   // large active head
+  } else if (age < 0.15) {
+    arr[idx] = 3.5 - age * 8.0;  // shrink from 3.5 → ~2.3
+  } else {
+    arr[idx] = Math.max(1.5, 2.2 - age * 0.8);
+  }
+}
+
+// ── orbit controls ────────────────────────────────────────────────────────────
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0.0, orbitPhi = 0.52;
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+addEventListener('pointermove', (e) => {
+  if (!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi = Math.max(0.1, Math.min(1.5, orbitPhi - (e.clientY - prevY) * 0.005));
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  mat.uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+// ── jitter helper (ikw hand-tremor) ──────────────────────────────────────────
+let _jitterSeed = 12345;
+function jitter() {
+  _jitterSeed = (_jitterSeed * 1664525 + 1013904223) >>> 0;
+  return (_jitterSeed / 4294967296) - 0.5;
+}
+
+// ── RK4 Lorenz step ───────────────────────────────────────────────────────────
+function lorenzDeriv(x, y, z, dxOut, dyOut, dzOut) {
+  dxOut[0] = SIGMA * (y - x);
+  dyOut[0] = x * (RHO - z) - y;
+  dzOut[0] = x * y - BETA * z;
+}
+const k1x = [0], k1y = [0], k1z = [0];
+const k2x = [0], k2y = [0], k2z = [0];
+const k3x = [0], k3y = [0], k3z = [0];
+const k4x = [0], k4y = [0], k4z = [0];
+
+function rk4Step(i) {
+  const x = lx[i], y = ly[i], z = lz[i];
+  lorenzDeriv(x, y, z, k1x, k1y, k1z);
+  lorenzDeriv(x + k1x[0]*DT*0.5, y + k1y[0]*DT*0.5, z + k1z[0]*DT*0.5, k2x, k2y, k2z);
+  lorenzDeriv(x + k2x[0]*DT*0.5, y + k2y[0]*DT*0.5, z + k2z[0]*DT*0.5, k3x, k3y, k3z);
+  lorenzDeriv(x + k3x[0]*DT, y + k3y[0]*DT, z + k3z[0]*DT, k4x, k4y, k4z);
+  lx[i] = x + (DT/6) * (k1x[0] + 2*k2x[0] + 2*k3x[0] + k4x[0]);
+  ly[i] = y + (DT/6) * (k1y[0] + 2*k2y[0] + 2*k3y[0] + k4y[0]);
+  lz[i] = z + (DT/6) * (k1z[0] + 2*k2z[0] + 2*k3z[0] + k4z[0]);
+}
+
+// ── main loop ─────────────────────────────────────────────────────────────────
+const start = performance.now();
+let firstFrame = true;
+
+// Temp arrays for calyx output
+const tmpX = new Float32Array(ACTIVE);
+const tmpY = new Float32Array(ACTIVE);
+const tmpZ = new Float32Array(ACTIVE);
+
+function loop() {
+  const now = performance.now();
+  const t = (now - start) / 1000;
+
+  // ── advance Lorenz ODE ────────────────────────────────────────────────────
+  for (let step = 0; step < STEPS_PER_FRAME; step++) {
+    for (let i = 0; i < ACTIVE; i++) rk4Step(i);
+  }
+
+  // ── write current active positions into trail buffer ──────────────────────
+  // Before updating active slots, copy current positions to trail
+  const trailBase = ACTIVE + trailWritePtr * ACTIVE;
+
+  // compute calyx positions for all active particles
+  for (let i = 0; i < ACTIVE; i++) {
+    // hand-tremor (ikw): small spatial jitter
+    const jx = jitter() * 0.08;
+    const jy = jitter() * 0.08;
+    const jz = jitter() * 0.08;
+    calyxPos(lx[i] + jx, ly[i] + jy, lz[i] + jz, t, tmpX, tmpY, tmpZ, i);
+  }
+
+  // write trail slot
+  for (let i = 0; i < ACTIVE; i++) {
+    // age of this trail slot: 0 = freshest (will be set next frame)
+    // We want uniform age across all trail frames
+    // trailWritePtr=0 is newest, TRAIL_FRAMES-1 is oldest
+    // After writing, age = 0 (freshest); we'll compute age on the fly via ptr math
+    const slotBase = (trailBase + i) * 3;
+    positions[slotBase]     = tmpX[i];
+    positions[slotBase + 1] = tmpY[i];
+    positions[slotBase + 2] = tmpZ[i];
+  }
+
+  // ── update age & color for all trail slots ────────────────────────────────
+  for (let frame = 0; frame < TRAIL_FRAMES; frame++) {
+    // how old is this frame relative to current write ptr?
+    let frameDelta = (trailWritePtr - frame + TRAIL_FRAMES) % TRAIL_FRAMES;
+    const age = (frameDelta + 1) / TRAIL_FRAMES;  // 1/TF = freshest, 1.0 = oldest
+
+    const base = ACTIVE + frame * ACTIVE;
+    for (let i = 0; i < ACTIVE; i++) {
+      const idx = base + i;
+      ages[idx] = age;
+      setColor(colors, idx * 3, age);
+      setSize(sizes, idx, age);
+    }
+  }
+
+  // advance trail write pointer
+  trailWritePtr = (trailWritePtr + 1) % TRAIL_FRAMES;
+
+  // ── update active particle positions & appearance ─────────────────────────
+  for (let i = 0; i < ACTIVE; i++) {
+    positions[i * 3]     = tmpX[i];
+    positions[i * 3 + 1] = tmpY[i];
+    positions[i * 3 + 2] = tmpZ[i];
+    ages[i] = 0.0;
+    setColor(colors, i * 3, 0.0);
+    sizes[i] = 6.5;
+  }
+
+  // ── mark GPU buffers dirty ────────────────────────────────────────────────
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.aColor.needsUpdate   = true;
+  geom.attributes.aSize.needsUpdate    = true;
+  geom.attributes.aAge.needsUpdate     = true;
+
+  // ── orbit camera ──────────────────────────────────────────────────────────
+  const autoTheta = t * 0.09;
+  const theta = autoTheta + orbitTheta;
+  const phi   = orbitPhi;
+  const radius = 24;
+  camera.position.set(
+    radius * Math.sin(theta) * Math.sin(phi),
+    radius * Math.cos(phi),
+    radius * Math.cos(theta) * Math.sin(phi)
+  );
+  camera.lookAt(0, 1.0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-close').onclick=function(){window.parent!==window?window.parent.postMessage({type:"dismiss-and-next"},"*"):history.back();};
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
