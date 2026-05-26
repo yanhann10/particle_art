@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>w50 · kusama obsessive lucy · el anatsui amber tide</title>
+<!-- MOTION: breathing, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1410; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.6; letter-spacing:0.06em;
+             font-family: ui-monospace, "SF Mono", Menlo, monospace; color:#e5dcd2; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy · metallic tide …</div>
+<div class="id">w50</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(52, innerWidth / innerHeight, 0.1, 600);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1410, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── instance layout: central Lucy + 3 concentric rings ── */
+const COPIES = 30;
+const PER_CENTER = 28000;
+const PER_RING   = 1200;
+const N = PER_CENTER + (COPIES - 1) * PER_RING;
+
+const copyOffsets = [];
+const copyScales  = [];
+
+// center
+copyOffsets.push(new THREE.Vector3(0, 0, 0));
+copyScales.push(1.0);
+
+// ring 1 — 7 copies
+for (let i = 0; i < 7; i++) {
+  const a = (i / 7) * Math.PI * 2;
+  copyOffsets.push(new THREE.Vector3(Math.cos(a) * 22, 0, Math.sin(a) * 22));
+  copyScales.push(0.52);
+}
+// ring 2 — 11 copies
+for (let i = 0; i < 11; i++) {
+  const a = (i / 11) * Math.PI * 2 + 0.28;
+  copyOffsets.push(new THREE.Vector3(Math.cos(a) * 42, 0, Math.sin(a) * 42));
+  copyScales.push(0.33);
+}
+// ring 3 — 11 copies, fading into distance
+for (let i = 0; i < 11; i++) {
+  const a = (i / 11) * Math.PI * 2 + 0.14;
+  copyOffsets.push(new THREE.Vector3(Math.cos(a) * 64, 0, Math.sin(a) * 64));
+  copyScales.push(0.21);
+}
+
+const restPositions = new Float32Array(N * 3);
+const localRest     = new Float32Array(N * 3);
+const seedsArr      = new Float32Array(N);
+const scaleArr      = new Float32Array(N);
+const heightArr     = new Float32Array(N);
+
+const uniforms = {
+  uTime:      { value: 0 },
+  uPixel:     { value: renderer.getPixelRatio() },
+  uReady:     { value: 0.0 },
+  uDotFreq:   { value: 2.6 },
+  uDotRad:    { value: 0.34 }
+};
+
+/* ── shaders ── */
+const vertexShader = `
+  uniform float uTime;
+  uniform float uPixel;
+  uniform float uReady;
+  uniform float uDotFreq;
+  uniform float uDotRad;
+  attribute vec3  rest;
+  attribute vec3  localR;
+  attribute float seed;
+  attribute float sc;
+  attribute float height;
+  varying vec3  vCol;
+  varying float vAlpha;
+
+  /* 3-D polka-dot lattice intersected with surface → circles on skin */
+  float polkaDot(vec3 p, float freq, float rad) {
+    vec3 cell = fract(p * freq + 0.5) - 0.5;
+    return 1.0 - smoothstep(rad - 0.05, rad + 0.05, length(cell));
+  }
+
+  void main() {
+    vec3 p = rest;
+    float t = uTime * 0.25 + seed * 6.2831;
+
+    /* TORNADO — vertical spiral with radius increasing as particles rise */
+    float angle = seed * 6.2831 * 8.0 + uTime * 0.3;
+    float radiusScale = 0.15 + 0.25 * height;
+    vec3 tornadoOffset = vec3(
+      cos(angle) * radiusScale * sin(t * 0.8),
+      0.0,
+      sin(angle) * radiusScale * sin(t * 0.8)
+    );
+    p += tornadoOffset * sc;
+
+    /* dot pattern sampled in local (un-offset) space */
+    float freq = uDotFreq + 0.12 * sin(uTime * 0.18);
+    float dot  = polkaDot(localR, freq, uDotRad);
+
+    /* El Anatsui palette: warm amber/ochre/sienna/copper with tip-lightening */
+    vec3 ochre  = vec3(0.78, 0.58, 0.24);  // #c7943d
+    vec3 sienna = vec3(0.52, 0.31, 0.22);  // #854f38
+    vec3 copper = vec3(0.72, 0.45, 0.28);  // #b87248
+    vec3 dust   = vec3(0.92, 0.84, 0.66);  // #ebd7a8
+    
+    /* tip-lightening: highest particles (head/top) receive dust tone */
+    float tipFactor = smoothstep(0.75, 1.0, height);
+    vec3 baseColor = mix(sienna, ochre, dot * 0.6);
+    baseColor = mix(baseColor, copper, dot);
+    vec3 finalColor = mix(baseColor, dust, tipFactor * 0.85);
+    
+    vCol = finalColor;
+
+    /* assembly reveal — spiral inward */
+    float revealAngle = seed * 6.2831 * 4.0;
+    float revealRadius = 50.0 + seed * 30.0;
+    vec3 entry = vec3(cos(revealAngle) * revealRadius, sin(seed * 20.0) * 25.0, sin(revealAngle) * revealRadius);
+    float reveal = smoothstep(0.0, 1.0, uReady);
+    p = mix(entry, p, reveal);
+
+    vAlpha = reveal * (0.82 + 0.18 * dot);
+
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    float camDist = -mv.z;
+    float sz = (1.6 + 0.7 * dot) * uPixel * (42.0 / max(camDist, 1.0)) * reveal;
+    gl_PointSize = max(1.0, sz);
+    gl_Position  = projectionMatrix * mv;
+  }
+`;
+
+const fragmentShader = `
+  varying vec3  vCol;
+  varying float vAlpha;
+  void main() {
+    vec2 d = gl_PointCoord - 0.5;
+    float r2 = dot(d, d);
+    if (r2 > 0.25) discard;
+    float a = smoothstep(0.25, 0.06, r2) * vAlpha;
+    gl_FragColor = vec4(vCol * a, a);
+  }
+`;
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: true,
+  depthTest: true,
+  blending: THREE.NormalBlending,
+  vertexShader,
+  fragmentShader
+});
+
+const geom   = new THREE.BufferGeometry();
+const points  = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── ground plane: metallic amber floor ── */
+const floorGeo = new THREE.PlaneGeometry(200, 200, 1, 1);
+floorGeo.rotateX(-Math.PI / 2);
+const floorMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: true,
+  uniforms: { uTime: uniforms.uTime, uReady: uniforms.uReady },
+  vertexShader: `
+    varying vec2 vUv;
+    varying vec3 vWPos;
+    void main() {
+      vUv = uv;
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWPos = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uReady;
+    varying vec3 vWPos;
+    void main() {
+      float freq = 0.18 + 0.008 * sin(uTime * 0.15);
+      vec2 cell = fract(vWPos.xz * freq + 0.5) - 0.5;
+      float d = length(cell);
+      float dot = 1.0 - smoothstep(0.28, 0.34, d);
+      vec3 base = vec3(0.10, 0.08, 0.06);
+      vec3 accent = vec3(0.78, 0.58, 0.24);
+      vec3 col = mix(base, accent, dot * 0.3);
+      float fade = smoothstep(100.0, 30.0, length(vWPos.xz));
+      gl_FragColor = vec4(col, fade * 0.25 * uReady);
+    }
+  `
+});
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.position.y = -8.5;
+scene.add(floor);
+
+/* ── load Stanford Lucy ── */
+const loadingEl = document.getElementById('loading');
+let revealStart = 0;
+
+new PLYLoader().load(
+  'https://threejs.org/examples/models/ply/binary/Lucy100k.ply',
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size   = bb.getSize(new THREE.Vector3());
+    const baseScale = 15 / Math.max(size.x, size.y, size.z);
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(baseScale, baseScale, baseScale);
+
+    const mesh    = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp     = new THREE.Vector3();
+
+    let idx = 0;
+    const minY = bb.min.y * baseScale;
+    const maxY = bb.max.y * baseScale;
+    const rangeY = maxY - minY;
+
+    for (let c = 0; c < COPIES; c++) {
+      const count = c === 0 ? PER_CENTER : PER_RING;
+      const s   = copyScales[c];
+      const off = copyOffsets[c];
+      for (let i = 0; i < count; i++) {
+        sampler.sample(tmp);
+        const lx = tmp.x * s, ly = tmp.y * s, lz = tmp.z * s;
+        localRest[idx * 3]     = lx;
+        localRest[idx * 3 + 1] = ly;
+        localRest[idx * 3 + 2] = lz;
+        restPositions[idx * 3]     = lx + off.x;
+        restPositions[idx * 3 + 1] = ly + off.y;
+        restPositions[idx * 3 + 2] = lz + off.z;
+        seedsArr[idx] = Math.random();
+        scaleArr[idx] = s;
+        heightArr[idx] = (ly - minY) / rangeY;
+        idx++;
+      }
+    }
+
+    const posArr = new Float32Array(N * 3);
+    geom.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+    geom.setAttribute('localR',   new THREE.BufferAttribute(localRest, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seedsArr, 1));
+    geom.setAttribute('sc',       new THREE.BufferAttribute(scaleArr, 1));
+    geom.setAttribute('height',   new THREE.BufferAttribute(heightArr, 1));
+
+    loadingEl.style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      loadingEl.textContent = `loading lucy · ${(xhr.loaded / xhr.total * 100).toFixed(0)}%`;
+    }
+  },
+  () => { loadingEl.textContent = 'load failed — check network'; }
+);
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── animation loop ── */
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 3500);
+  }
+
+  /* camera: slow orbit tracking centroid, with gentle vertical bob */
+  const orbitR = 30 + 6 * Math.sin(t * 0.055);
+  const angle  = t * 0.05;
+  const camY   = 5 + 3.5 * Math.sin(t * 0.07);
+  camera.position.set(Math.sin(angle) * orbitR, camY, Math.cos(angle) * orbitR);
+  camera.lookAt(0, 0.5, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
