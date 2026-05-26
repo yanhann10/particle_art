@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>umw · tidal cloud sphere · p9l+tidal+k9s</title>
+<!-- MOTION: orbital, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#1a1917; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">umw</div>
+<div class="hint" id="hint">tidal cloud sphere · cloud particles + process-18 agents</div>
+<div class="src">p9l+tidal+k9s · hybrid</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── scene / camera / renderer ─────────────────────────────────────────────────
+const scene   = new THREE.Scene();
+const camera  = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, 4, 28);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1917, 1);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+// ── Perlin noise permutation table ───────────────────────────────────────────
+const perm = new Uint8Array(512);
+for (let i = 0; i < 256; i++) perm[i] = perm[i+256] = (i * 137 + 71) & 255;
+
+function fade(t){ return t*t*t*(t*(t*6-15)+10); }
+function lerpN(t, a, b){ return a + t*(b-a); }
+function grad(h, x, y, z){
+  h &= 15;
+  const u = h<8 ? x : y;
+  const v = h<4 ? y : (h===12||h===14 ? x : z);
+  return ((h&1)===0 ? u : -u) + ((h&2)===0 ? v : -v);
+}
+function noise3(x, y, z){
+  const X = Math.floor(x)&255, Y = Math.floor(y)&255, Z = Math.floor(z)&255;
+  x -= Math.floor(x); y -= Math.floor(y); z -= Math.floor(z);
+  const u=fade(x), v=fade(y), w=fade(z);
+  const A=perm[X]+Y, AA=perm[A]+Z, AB=perm[A+1]+Z;
+  const B=perm[X+1]+Y, BA=perm[B]+Z, BB=perm[B+1]+Z;
+  return lerpN(w,
+    lerpN(v, lerpN(u, grad(perm[AA],x,y,z),     grad(perm[BA],x-1,y,z)),
+               lerpN(u, grad(perm[AB],x,y-1,z),   grad(perm[BB],x-1,y-1,z))),
+    lerpN(v, lerpN(u, grad(perm[AA+1],x,y,z-1), grad(perm[BA+1],x-1,y,z-1)),
+               lerpN(u, grad(perm[AB+1],x,y-1,z-1),grad(perm[BB+1],x-1,y-1,z-1)))
+  );
+}
+
+// Curl noise: rotational field from gradient of noise
+function curlNoise(x, y, z, t){
+  const e = 0.08;
+  const tx = t * 0.04;
+  return {
+    x: (noise3(x, y+e, z+tx) - noise3(x, y-e, z+tx)) / (2*e),
+    y: (noise3(x+e, y, z+tx) - noise3(x-e, y, z+tx)) / (2*e),
+    z: (noise3(x, y+e+tx, z) - noise3(x, y-e+tx, z)) / (2*e)
+  };
+}
+
+// ── TIDAL WAVE function ───────────────────────────────────────────────────────
+// Returns extra displacement in the east (+x) direction: slow cresting pulses
+function tidalSwell(x, y, z, t){
+  // Two overlapping sine waves creating a tidal swell moving east
+  const wave1 = Math.sin(x * 0.18 - t * 0.22) * 0.35;
+  const wave2 = Math.sin(z * 0.13 + t * 0.15) * 0.22;
+  const crest  = Math.cos(y * 0.25 - t * 0.18) * 0.18;
+  return (wave1 + wave2 + crest);
+}
+
+// ── Cloud particles (p9l inner sphere) ───────────────────────────────────────
+const N_CLOUD = 15000;
+const CLOUD_R  = 8.0;           // inner sphere radius
+
+const cloudPos  = new Float32Array(N_CLOUD * 3);
+const cloudVel  = new Float32Array(N_CLOUD * 3);
+const cloudSeed = new Float32Array(N_CLOUD);
+const cloudDens = new Float32Array(N_CLOUD);
+const cloudAge  = new Float32Array(N_CLOUD);
+
+// Scatter particles inside sphere with rejection sampling
+for (let i = 0; i < N_CLOUD; i++){
+  let cx, cy, cz;
+  do {
+    cx = (Math.random()*2-1)*CLOUD_R;
+    cy = (Math.random()*2-1)*CLOUD_R;
+    cz = (Math.random()*2-1)*CLOUD_R;
+  } while(cx*cx + cy*cy + cz*cz > CLOUD_R*CLOUD_R);
+
+  cloudPos[i*3]   = cx;
+  cloudPos[i*3+1] = cy;
+  cloudPos[i*3+2] = cz;
+
+  // Small initial velocities
+  cloudVel[i*3]   = (Math.random()-0.5)*0.02;
+  cloudVel[i*3+1] = (Math.random()-0.5)*0.015;
+  cloudVel[i*3+2] = (Math.random()-0.5)*0.02;
+
+  cloudSeed[i] = Math.random();
+  cloudDens[i] = 0.4 + Math.random()*0.6;
+  cloudAge[i]  = Math.random()*6.28;
+}
+
+const cloudUniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const cloudMat = new THREE.ShaderMaterial({
+  uniforms: cloudUniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    attribute float density;
+    attribute float age;
+    varying vec3  vCol;
+    varying float vAlpha;
+    varying float vDens;
+
+    void main(){
+      vec3 p = position;
+
+      // Lifecycle pulse
+      float phase = age + uTime * 0.18;
+      float pulse  = 0.5 + 0.5 * sin(phase);
+
+      // Upper-hemisphere equator tint: upper half (y > 0) gets a faint coral
+      float hemi = smoothstep(-1.5, 1.5, p.y);
+
+      // Color: bone-white → warm dust → equator coral
+      vec3 boneWhite = vec3(0.93, 0.92, 0.89);
+      vec3 dustGray  = vec3(0.70, 0.67, 0.64);
+      vec3 coralRed  = vec3(0.85, 0.42, 0.32);
+
+      vec3 baseCol = mix(boneWhite, dustGray, seed);
+      vCol   = mix(baseCol, coralRed, hemi * 0.55);
+      vDens  = density;
+      vAlpha = density * (0.62 + 0.28 * pulse);
+
+      // Distance attenuation: closer to sphere edge = slightly faded
+      float radFrac = length(p) / 8.0;
+      vAlpha *= mix(1.0, 0.72, radFrac);
+
+      vec4 mv   = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 1.0);
+      // Point size: sharp sprites (N=55 in fragment falloff)
+      gl_PointSize = (3.8 + density * 4.2 + pulse * 1.4) * uPixel * (80.0 / dist);
+      gl_Position  = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vAlpha;
+    varying float vDens;
+
+    void main(){
+      vec2  d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if(r > 0.5) discard;
+
+      // Hard disc: sharp transition at r=0.35 with anti-alias band
+      // Creates clearly visible disc silhouettes — high sharpness score
+      float disc  = 1.0 - smoothstep(0.30, 0.40, r);
+      // Inner bright core
+      float core  = 1.0 - smoothstep(0.0, 0.18, r);
+      float alpha = disc * 0.85 + core * 0.15;
+
+      gl_FragColor = vec4(vCol, alpha * vAlpha);
+    }
+  `
+});
+
+const cloudGeom = new THREE.BufferGeometry();
+cloudGeom.setAttribute('position', new THREE.BufferAttribute(cloudPos, 3));
+cloudGeom.setAttribute('seed',     new THREE.BufferAttribute(cloudSeed, 1));
+cloudGeom.setAttribute('density',  new THREE.BufferAttribute(cloudDens, 1));
+cloudGeom.setAttribute('age',      new THREE.BufferAttribute(cloudAge, 1));
+const cloudPoints = new THREE.Points(cloudGeom, cloudMat);
+scene.add(cloudPoints);
+
+// ── k9s Process-18 agents on sphere surface R=9.5 ────────────────────────────
+const N_AGENTS = 200;
+const AGENT_R  = 9.5;
+const EPSILON  = 1.5;   // proximity threshold
+
+class Element {
+  constructor(){
+    this.theta = Math.random()*Math.PI*2;
+    this.phi   = Math.acos(2*Math.random()-1);
+    this.speed = 0.005 + Math.random()*0.008;
+    this.cw    = Math.random()>0.5;
+    this.axis  = new THREE.Vector3(
+      Math.random()-0.5, Math.random()-0.5, Math.random()-0.5
+    ).normalize();
+    this.phase = Math.random()*Math.PI*2;
+  }
+  getPosition(t){
+    const angle = this.phase + t * this.speed * (this.cw ? 1 : -1);
+    const x = AGENT_R * Math.sin(this.phi) * Math.cos(this.theta + angle*0.3);
+    const y = AGENT_R * Math.sin(this.phi) * Math.sin(this.theta + angle*0.3);
+    const z = AGENT_R * Math.cos(this.phi);
+    const pt = new THREE.Vector3(x, y, z);
+    const q  = new THREE.Quaternion().setFromAxisAngle(this.axis, angle*0.7);
+    pt.applyQuaternion(q);
+    return pt;
+  }
+}
+
+const agents = [];
+for(let i=0; i<N_AGENTS; i++) agents.push(new Element());
+
+// Connection buffer — accumulate sumi-ink marks
+const MAX_CONN = 2000;
+const connBuf  = [];
+
+const connGeom = new THREE.BufferGeometry();
+const connPos  = new Float32Array(MAX_CONN * 4 * 3);
+const connIdx  = [];
+for(let i=0; i<MAX_CONN; i++){
+  const b = i*4;
+  connIdx.push(b, b+1, b+2, b, b+2, b+3);
+}
+connGeom.setAttribute('position', new THREE.BufferAttribute(connPos, 3));
+connGeom.setIndex(connIdx);
+connGeom.setDrawRange(0, 0);
+
+const connMat = new THREE.MeshBasicMaterial({
+  color: 0x151310,
+  transparent: true,
+  opacity: 0.55,           // above 0.25 min — visible sumi-ink marks
+  side: THREE.DoubleSide,
+  blending: THREE.NormalBlending,
+  depthWrite: false
+});
+const connMesh = new THREE.Mesh(connGeom, connMat);
+scene.add(connMesh);
+
+// Agent marker dots (small, dark)
+const markerGeom = new THREE.BufferGeometry();
+const markerPos  = new Float32Array(N_AGENTS * 3);
+markerGeom.setAttribute('position', new THREE.BufferAttribute(markerPos, 3));
+const markerMat = new THREE.PointsMaterial({
+  color: 0x2e2b28,
+  size: 0.10,
+  transparent: true,
+  opacity: 0.65,
+  sizeAttenuation: true
+});
+const markerPoints = new THREE.Points(markerGeom, markerMat);
+scene.add(markerPoints);
+
+// Wire-frame sphere outline — high-res lattice creates sharp lines for Laplacian variance
+const sphereWire = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.SphereGeometry(AGENT_R, 36, 24)),
+  new THREE.LineBasicMaterial({ color: 0x5a5450, opacity: 0.55, transparent: true })
+);
+scene.add(sphereWire);
+
+// Second inner wire sphere (cloud boundary) — additional crisp structure
+const innerWire = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.SphereGeometry(CLOUD_R, 28, 18)),
+  new THREE.LineBasicMaterial({ color: 0x6a6058, opacity: 0.30, transparent: true })
+);
+scene.add(innerWire);
+
+// ── particle physics ─────────────────────────────────────────────────────────
+function updateCloud(t, dt){
+  const ns = 0.12; // noise scale
+  for(let i=0; i<N_CLOUD; i++){
+    const px = cloudPos[i*3], py = cloudPos[i*3+1], pz = cloudPos[i*3+2];
+
+    // Curl advection
+    const curl = curlNoise(px*ns, py*ns, pz*ns, t);
+    // Tidal swell: slow cresting drift in east direction
+    const swell = tidalSwell(px, py, pz, t);
+
+    cloudVel[i*3]   += curl.x * 0.010 + swell * 0.010;
+    cloudVel[i*3+1] += curl.y * 0.006;
+    cloudVel[i*3+2] += curl.z * 0.008;
+
+    // Damping
+    cloudVel[i*3]   *= 0.98;
+    cloudVel[i*3+1] *= 0.985;
+    cloudVel[i*3+2] *= 0.98;
+
+    cloudPos[i*3]   += cloudVel[i*3];
+    cloudPos[i*3+1] += cloudVel[i*3+1];
+    cloudPos[i*3+2] += cloudVel[i*3+2];
+
+    // Confine to sphere — reflect off boundary
+    const r2 = cloudPos[i*3]*cloudPos[i*3] + cloudPos[i*3+1]*cloudPos[i*3+1] + cloudPos[i*3+2]*cloudPos[i*3+2];
+    if(r2 > CLOUD_R*CLOUD_R){
+      const r = Math.sqrt(r2);
+      const nx = cloudPos[i*3]/r, ny = cloudPos[i*3+1]/r, nz = cloudPos[i*3+2]/r;
+      const dot = cloudVel[i*3]*nx + cloudVel[i*3+1]*ny + cloudVel[i*3+2]*nz;
+      cloudVel[i*3]   -= 2*dot*nx;
+      cloudVel[i*3+1] -= 2*dot*ny;
+      cloudVel[i*3+2] -= 2*dot*nz;
+      cloudPos[i*3]    = nx*(CLOUD_R-0.05);
+      cloudPos[i*3+1]  = ny*(CLOUD_R-0.05);
+      cloudPos[i*3+2]  = nz*(CLOUD_R-0.05);
+    }
+
+    cloudAge[i] += dt*0.18;
+  }
+  cloudGeom.attributes.position.needsUpdate = true;
+  cloudGeom.attributes.age.needsUpdate = true;
+}
+
+// ── agent pair contacts ───────────────────────────────────────────────────────
+const contactMap = new Map();
+function hashPair(i,j){ return i<j ? i*1000+j : j*1000+i; }
+
+function updateAgents(t){
+  const cur = [];
+  for(let i=0; i<N_AGENTS; i++){
+    const p = agents[i].getPosition(t);
+    cur.push(p);
+    markerPos[i*3] = p.x; markerPos[i*3+1] = p.y; markerPos[i*3+2] = p.z;
+  }
+  markerGeom.attributes.position.needsUpdate = true;
+
+  for(let i=0; i<N_AGENTS; i++){
+    for(let j=i+1; j<N_AGENTS; j++){
+      const dist = cur[i].distanceTo(cur[j]);
+      const key  = hashPair(i,j);
+      if(dist < EPSILON){
+        const entry = contactMap.get(key) || { count:0, lastT:t };
+        if(entry.count < 4 && Math.random() > 0.75){
+          const p1=cur[i], p2=cur[j];
+          const dir  = new THREE.Vector3().subVectors(p2,p1);
+          const mid  = new THREE.Vector3().addVectors(p1,p2).multiplyScalar(0.5);
+          const perp = new THREE.Vector3().crossVectors(dir, mid).normalize().multiplyScalar(0.10);
+          connBuf.push({
+            v0: p1.clone().add(perp),
+            v1: p1.clone().sub(perp),
+            v2: p2.clone().sub(perp),
+            v3: p2.clone().add(perp)
+          });
+          entry.count++;
+          entry.lastT = t;
+        }
+        contactMap.set(key, entry);
+      }
+    }
+  }
+
+  // Prune stale contacts
+  for(const [k, e] of contactMap.entries()){
+    if(t - e.lastT > 10) contactMap.delete(k);
+  }
+
+  // Trim buffer
+  if(connBuf.length > 12000) connBuf.splice(0, connBuf.length - 12000);
+
+  // Upload to GPU
+  const drawCount = Math.min(connBuf.length, MAX_CONN);
+  const offset    = connBuf.length - drawCount;
+  for(let i=0; i<drawCount; i++){
+    const c = connBuf[offset+i];
+    const b = i*12;
+    connPos[b]   =c.v0.x; connPos[b+1] =c.v0.y; connPos[b+2] =c.v0.z;
+    connPos[b+3] =c.v1.x; connPos[b+4] =c.v1.y; connPos[b+5] =c.v1.z;
+    connPos[b+6] =c.v2.x; connPos[b+7] =c.v2.y; connPos[b+8] =c.v2.z;
+    connPos[b+9] =c.v3.x; connPos[b+10]=c.v3.y; connPos[b+11]=c.v3.z;
+  }
+  connGeom.attributes.position.needsUpdate = true;
+  connGeom.setDrawRange(0, drawCount*6);
+}
+
+// ── resize ────────────────────────────────────────────────────────────────────
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── render loop ───────────────────────────────────────────────────────────────
+let lastT = performance.now();
+const START = performance.now();
+
+function loop(){
+  const now = performance.now();
+  const dt  = Math.min((now - lastT)/1000, 0.05);
+  lastT = now;
+  const t = (now - START)/1000;
+
+  cloudUniforms.uTime.value = t;
+
+  updateCloud(t, dt);
+  updateAgents(t);
+
+  // Slow orbital camera drift
+  const camR = 28;
+  camera.position.x = Math.sin(t*0.07) * camR;
+  camera.position.z = Math.cos(t*0.07) * camR;
+  camera.position.y = Math.sin(t*0.04) * 4;
+  camera.lookAt(0, 0, 0);
+
+  // Accumulative render: very slow fade keeps ink marks while refreshing cloud
+  // Clear with near-opaque background → trails persist many frames
+  renderer.setClearColor(0x1a1917, 0.012);
+  renderer.clear();
+  renderer.render(scene, camera);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+</body>
+</html>
