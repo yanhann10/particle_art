@@ -49,6 +49,7 @@ PREFS   = REPO / "scripts" / "preferences.json"
 WORDS   = REPO / "scripts" / "word_movements.json"
 SURPRISE_WORDS = REPO / "scripts" / "surprise_words.json"
 ARTIST_PERSONALITIES = REPO / "scripts" / "artist_personalities.json"
+SOTA_TECHNIQUES = REPO / "scripts" / "sota_techniques.json"
 LOG     = REPO / "scripts" / "improv_log.jsonl"
 
 # mode-sample distribution. Sums to 1.0.
@@ -60,7 +61,7 @@ LOG     = REPO / "scripts" / "improv_log.jsonl"
 #             dominates bottom-quartile of weak pieces 11/25)
 # So we lean toward surprise/artist branches (which produce more legible
 # distinct work) and away from chain (which drifts after gen ≥ 4).
-MODE_WEIGHTS = {"chain": 0.30, "surprise": 0.40, "artist": 0.30}
+MODE_WEIGHTS = {"chain": 0.25, "surprise": 0.30, "artist": 0.20, "technique": 0.25}
 
 
 def load_json(p: Path) -> dict:
@@ -143,6 +144,17 @@ def sample_word(mode: str, recent: list[dict]) -> tuple[str, dict]:
         extra_meta carries mode-specific extras (e.g. artist name+practice).
     """
     used_recent = {r.get("word") for r in recent[-12:] if r.get("word")}
+
+    if mode == "technique":
+        pool = _load_word_pool(SOTA_TECHNIQUES, "techniques")
+        candidates = [e for e in pool if e["word"] not in used_recent] or pool
+        counts = element_counts.word_counts()
+        weights = element_counts.bias_weights(
+            candidates, [1.0] * len(candidates), counts,
+            key=lambda e: e["word"], beta=1.0,
+        )
+        chosen = random.choices(candidates, weights=weights, k=1)[0]
+        return chosen["word"], {"concept": chosen["concept"]}
 
     if mode == "artist":
         pool = _load_word_pool(ARTIST_PERSONALITIES, "personalities")
@@ -262,13 +274,24 @@ def build_prompt(parent: dict, parent_html: str, word: str,
             f"particle-art medium, NOT like a literal pastiche of their "
             f"famous works.\n"
         )
+    elif not user_directive and mode == "technique":
+        concept = extras.get("concept", "")
+        framing = (
+            "## SOTA technique to reinterpret\n"
+            "**" + word + "** - " + concept + "\n\n"
+            "This is a TECHNIQUE branch. Apply the named generative/shader technique as an "
+            "ORIGINAL three.js PARTICLE-ART interpretation (points/lines/planes), evolving the parent. "
+            "Reinterpret the technique conceptually for a particle medium. You MUST NOT copy, paste, or "
+            "reproduce any existing shader's source code; invent your own implementation. The result must "
+            "read as a recognizable, intentful form (no formless noise), restrained palette, slow motion.\n"
+        )
     elif not user_directive:
         framing = f"## Word\n**{word}**\n"
 
     system = (
         "You are an improv engine for a particle-art evolutionary gallery. "
         "Each tick the system gives you ONE WORD and ONE PARENT PIECE plus "
-        "a MODE (chain / surprise / artist). Your job is to feel the word "
+        "a MODE (chain / surprise / artist / technique). Your job is to feel the word "
         "and follow the mode's framing to produce ONE self-contained HTML "
         "file (three.js via importmap from unpkg.com, all GLSL inline, no "
         "build step, no external CSS/JS files beyond CDN imports). Keep "
