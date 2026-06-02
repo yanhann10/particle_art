@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dla · Quantum Cloud Aggregation</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#070809; overflow:hidden;
+               color:#aab2bd; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; width:100vw; height:100vh; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.5; font-size: 11px; letter-spacing: 0.06em; color:#aab2bd; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.3; font-size: 10px; letter-spacing: 0.04em; color:#7e8893; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.3; font-size: 10px; letter-spacing: 0.04em; color:#7e8893; }
+</style>
+</head>
+<body>
+<div class="id">dla</div>
+<div class="hint">diffusion-limited aggregation · standing figure</div>
+<div class="src">ThoughtTrace signals → DLA dendrites · Gormley Quantum Cloud</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+function qp(n){ return new URL(location.href).searchParams.get(n); }
+function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+
+// --- STATE ---
+let TT = { signals: null, current: null };
+// Tunable density: dendrite particles + surrounding detached haze.
+const N_CLUSTER = 30000;   // particles that belong to the aggregated figure
+const N_HAZE    = 12000;   // detached walkers drifting around the body (Quantum Cloud)
+const N = N_CLUSTER + N_HAZE;
+
+// --- RENDERER & CAMERA ---
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 30;
+const camera = new THREE.OrthographicCamera(
+  frustumSize*aspect/-2, frustumSize*aspect/2,
+  frustumSize/2, frustumSize/-2, 0.1, 2000);
+camera.position.set(0, 0, 100);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({
+  antialias: false, powerPreference: "high-performance",
+  precision: "highp", preserveDrawingBuffer: true
+});
+const DPR = Math.min(devicePixelRatio * 1.1, 2.1);
+renderer.setPixelRatio(DPR);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x070809, 1);
+document.body.appendChild(renderer.domElement);
+
+// ============================================================
+// FIGURE ATTRACTOR FIELD
+// A standing human silhouette defined as a union of capsules
+// (head, neck, torso, arms, legs). inside(x,y) -> distance to
+// the body surface; negative inside. DLA walkers only stick when
+// they are near/inside this field, so dendrites fill a figure.
+// Coordinate space: roughly y in [-13, 13], x in [-7, 7].
+// ============================================================
+function segDist(px, py, ax, ay, bx, by){
+  const dx = bx-ax, dy = by-ay;
+  const l2 = dx*dx + dy*dy;
+  let t = l2 > 0 ? ((px-ax)*dx + (py-ay)*dy)/l2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t*dx, cy = ay + t*dy;
+  return Math.hypot(px-cx, py-cy);
+}
+// capsule list: [ax,ay,bx,by,radius]
+// Arms held clearly away from the torso and legs split with a real gap so the
+// silhouette reads as an unmistakable standing human, not a column.
+const BODY = [
+  // head
+  [0, 11.2, 0, 11.2, 1.55],
+  // neck
+  [0, 9.3, 0, 10.0, 0.6],
+  // torso (shoulders -> waist), tapered
+  [0, 8.7, 0, 4.4, 2.3],
+  [0, 4.6, 0, 1.4, 1.7],
+  // left arm — angled outward from shoulder, then down (clear of torso)
+  [-2.0, 8.4, -4.0, 5.6, 0.8],
+  [-4.0, 5.6, -4.6, 1.8, 0.65],
+  // right arm
+  [ 2.0, 8.4,  4.0, 5.6, 0.8],
+  [ 4.0, 5.6,  4.6, 1.8, 0.65],
+  // left leg — splayed with a gap from the right leg
+  [-0.9, 1.6, -1.9, -5.0, 1.0],
+  [-1.9, -5.0, -2.4, -12.0, 0.85],
+  // right leg
+  [ 0.9, 1.6,  1.9, -5.0, 1.0],
+  [ 1.9, -5.0,  2.4, -12.0, 0.85],
+];
+// signed distance to figure surface (negative = inside)
+function bodySDF(x, y){
+  let d = 1e9;
+  for (let i=0;i<BODY.length;i++){
+    const c = BODY[i];
+    d = Math.min(d, segDist(x,y, c[0],c[1],c[2],c[3]) - c[4]);
+  }
+  return d;
+}
+
+// ============================================================
+// DLA GROWTH (precomputed)
+// Seed at the figure feet/core. Random walkers spawn at a radius,
+// random-walk, and stick when they (a) touch an existing cluster
+// particle AND (b) lie inside/near the body attractor field.
+// We bake an attachment ORDER so the reveal grows slowly.
+// A coarse occupancy grid makes neighbor checks cheap.
+// ============================================================
+function rngFactory(seed){
+  let s = seed >>> 0;
+  return () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+
+function growDLA(targetCount, seed){
+  const rng = rngFactory(seed);
+  // domain bounds
+  const minX=-7.5, maxX=7.5, minY=-13.5, maxY=13.5;
+  const cell = 0.42;                       // stick radius scale
+  const gw = Math.ceil((maxX-minX)/cell);
+  const gh = Math.ceil((maxY-minY)/cell);
+  const grid = new Int32Array(gw*gh).fill(-1);
+  const gi = (x,y)=>{
+    const cx = Math.floor((x-minX)/cell), cy = Math.floor((y-minY)/cell);
+    if (cx<0||cy<0||cx>=gw||cy>=gh) return -1;
+    return cy*gw+cx;
+  };
+  const xs = new Float32Array(targetCount);
+  const ys = new Float32Array(targetCount);
+  let count = 0;
+  function place(x,y){
+    const idx = gi(x,y);
+    if (idx<0) return false;
+    xs[count]=x; ys[count]=y; grid[idx]=count; count++;
+    return true;
+  }
+  // multiple seeds along the body skeleton so growth fills the whole figure,
+  // not just one limb. Seeds sit on capsule centerlines.
+  const seeds = [
+    [0,-11.0],[0,-7],[0,-3],[0,0.8],[0,4],[0,7],[0,9.5],[0,11.0],
+    [-3.2,0.8],[3.2,0.8],[-2.6,5.5],[2.6,5.5]
+  ];
+  for (const s of seeds) place(s[0], s[1]);
+
+  // neighbor occupied within stick distance?
+  function nearCluster(x,y){
+    const cx = Math.floor((x-minX)/cell), cy = Math.floor((y-minY)/cell);
+    for (let oy=-1;oy<=1;oy++) for (let ox=-1;ox<=1;ox++){
+      const nx=cx+ox, ny=cy+oy;
+      if (nx<0||ny<0||nx>=gw||ny>=gh) continue;
+      if (grid[ny*gw+nx] >= 0) return true;
+    }
+    return false;
+  }
+
+  const step = cell*0.85;
+  let attempts = 0;
+  const maxAttempts = targetCount * 600;
+  while (count < targetCount && attempts < maxAttempts){
+    attempts++;
+    // spawn a walker at a random point inside the body bounding region,
+    // biased to inside the figure so walks are productive.
+    let wx, wy, tries=0;
+    do {
+      wx = lerp(minX, maxX, rng());
+      wy = lerp(minY, maxY, rng());
+      tries++;
+    } while (bodySDF(wx,wy) > 0.9 && tries < 10);  // spawn strictly inside the figure
+
+    // random walk, must stay inside the body field
+    let life = 70;
+    while (life-- > 0){
+      // attach test — stick only inside/at the skin so dendrites trace the form
+      if (nearCluster(wx,wy)){
+        const sdf = bodySDF(wx,wy);
+        if (sdf < 0.18){
+          if (place(wx,wy)) break;
+        }
+      }
+      // step
+      const a = rng()*6.2831853;
+      wx += Math.cos(a)*step;
+      wy += Math.sin(a)*step;
+      // hard-ish confinement: reflect walkers back inside if they leave the figure.
+      // Keeps the arm/leg gaps empty instead of bridging them.
+      const sdf = bodySDF(wx,wy);
+      if (sdf > 0.35){
+        const e=0.22;
+        const gx = (bodySDF(wx+e,wy)-bodySDF(wx-e,wy));
+        const gy = (bodySDF(wx,wy+e)-bodySDF(wx,wy-e));
+        const gl = Math.hypot(gx,gy)+1e-6;
+        // step back along gradient proportional to how far outside we are
+        const push = Math.min(1.8, sdf*1.4) * step;
+        wx -= gx/gl*push; wy -= gy/gl*push;
+      }
+      if (wx<minX||wx>maxX||wy<minY||wy>maxY){ break; }
+    }
+  }
+  return { xs, ys, count };
+}
+
+// ============================================================
+// BUILD BUFFERS
+// position (final aggregated xyz), order (attach index -> reveal),
+// seed (per-particle noise), kind (0 = dendrite, 1 = haze).
+// ============================================================
+let geom, points, mat;
+
+function build(seed){
+  const dla = growDLA(N_CLUSTER, seed);
+  const n = dla.count;
+
+  const pos   = new Float32Array(N*3);
+  const ord   = new Float32Array(N);     // 0..1 reveal order
+  const seeds = new Float32Array(N);
+  const kind  = new Float32Array(N);
+  const depth = new Float32Array(N);     // small z for volume feel
+  const rng = rngFactory(seed ^ 0x9e3779b9);
+
+  // dendrite particles
+  for (let i=0;i<N_CLUSTER;i++){
+    if (i < n){
+      const x = dla.xs[i], y = dla.ys[i];
+      // tiny scatter so dendrites read as segments not a smooth fill
+      pos[i*3]   = x + (rng()-0.5)*0.18;
+      pos[i*3+1] = y + (rng()-0.5)*0.18;
+      pos[i*3+2] = (rng()-0.5)*2.2 * (1.0 - clamp01(Math.abs(x)/4.5));
+      ord[i] = i / Math.max(1,n);        // attach order -> grows from seeds outward in time
+      kind[i] = 0;
+    } else {
+      // unused -> offscreen
+      pos[i*3]=99999; pos[i*3+1]=99999; pos[i*3+2]=0;
+      ord[i]=2.0; kind[i]=0;
+    }
+    seeds[i]=rng();
+    depth[i]=pos[i*3+2];
+  }
+
+  // haze: detached walkers forming the Quantum Cloud around the figure.
+  // denser near the silhouette, diffusing outward.
+  for (let k=0;k<N_HAZE;k++){
+    const i = N_CLUSTER + k;
+    // sample a point on the figure skin, then cast a detached segment outward.
+    // Quantum Cloud: discrete segments diffusing AWAY from the body, sparser
+    // with distance, leaving a clear silhouette edge that re-forms into haze.
+    let bx, by, t=0;
+    do {
+      bx = lerp(-7, 7, rng());
+      by = lerp(-13, 13, rng());
+      t++;
+    } while (bodySDF(bx,by) > 1.6 && t < 8);
+    const ang = rng()*6.2831853;
+    // gap then plume: nothing right at the skin, segments float beyond it
+    const out = 1.0 + Math.pow(rng(), 2.2) * 9.0;   // 1..10 units out, heavily weighted near
+    const hx = bx + Math.cos(ang)*out;
+    const hy = by + Math.sin(ang)*out*0.9;
+    pos[i*3]   = hx;
+    pos[i*3+1] = hy;
+    pos[i*3+2] = (rng()-0.5)*9.0;
+    ord[i] = 0.20 + rng()*0.80;          // haze appears across the reveal
+    kind[i] = 1;
+    seeds[i]= rng();
+    depth[i]= pos[i*3+2];
+  }
+
+  return { pos, ord, seeds, kind, depth };
+}
+
+// ============================================================
+// SHADER — slow reveal of the aggregation + gentle breathing.
+// uReveal (0..1) gates particles by attach order so the figure
+// grows from seeds outward. Palette: steel/graphite + cool glow.
+// NOTE: never uses ShaderMaterial fog uniforms.
+// ============================================================
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: Math.min(devicePixelRatio, 1.8) },
+  uReveal: { value: 0 },
+  // ThoughtTrace-driven aesthetics
+  uGlow:     { value: 0.5 },   // affirmation -> cool glow intensity
+  uExpand:   { value: 0.0 },   // expectation -> haze diffusion
+  uCoolHue:  { value: 0.5 },   // reactionValence -> warm/cool balance
+  uBreath:   { value: 0.04 },  // satisfaction -> breathing amplitude
+};
+
+mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uReveal, uGlow, uExpand, uCoolHue, uBreath;
+    attribute float order, seed, kind, depth;
+    varying vec3 vColor; varying float vAlpha;
+
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+
+    void main(){
+      vec3 p = position;
+      if (p.x > 9000.0){ gl_Position = vec4(2.0,2.0,2.0,1.0); vAlpha=0.0; return; }
+
+      float t = uTime;
+
+      // --- slow reveal by attachment order (DLA growth playback) ---
+      // a soft leading edge so dendrites pop in gradually, not all at once.
+      float rev = smoothstep(order - 0.06, order + 0.02, uReveal);
+
+      // --- gentle breathing: figure condenses / expands slowly ---
+      vec2 c = p.xy;
+      float r = length(c) + 0.001;
+      float breath = 1.0 + uBreath * sin(t*0.20 + seed*1.7);
+      // dendrites breathe subtly; haze breathes more (the cloud condenses/diffuses)
+      float kBreath = mix(0.4, 1.6, kind);
+      c *= 1.0 + (breath - 1.0) * kBreath;
+
+      // haze slowly diffuses outward with expectation, then drifts back (Quantum Cloud)
+      vec2 outDir = normalize(c + vec2(0.0001));
+      float drift = (0.5 + 0.5*sin(t*0.07 + seed*6.2831)) * uExpand * kind;
+      c += outDir * drift * (0.6 + 0.4*r*0.1);
+
+      // micro shimmer on detached particles (very slow)
+      float shim = (hash(vec2(seed, floor(t*0.15))) - 0.5);
+      c += vec2(shim, shim*0.7) * kind * 0.25;
+
+      // small z wobble for volume
+      float z = depth + sin(t*0.18 + seed*4.0) * (0.6 + 1.2*kind);
+
+      vec3 worldPos = vec3(c, z);
+
+      // ---------- PALETTE: steel / graphite with cool glow ----------
+      // base graphite, brighter toward the spine/core
+      float coreProx = 1.0 - clamp(abs(p.x)/4.0, 0.0, 1.0);    // near vertical axis = denser figure core
+      float vert = clamp((p.y + 13.0)/26.0, 0.0, 1.0);
+
+      vec3 graphite = vec3(0.34, 0.39, 0.46);
+      vec3 steel    = vec3(0.55, 0.64, 0.74);
+      vec3 coolGlow = vec3(0.45, 0.78, 0.95);     // cyan steel glow
+      vec3 warmEdge = vec3(0.70, 0.60, 0.50);     // faint warm graphite
+
+      vec3 col = mix(graphite, steel, coreProx*0.7 + 0.15);
+      // cool glow accumulates on the figure core, modulated by affirmation
+      col = mix(col, coolGlow, coreProx * uGlow * 0.55 * (0.6 + 0.4*sin(t*0.12 + p.y*0.1)));
+      // valence shifts hue slightly warm/cool
+      col = mix(col, warmEdge, (1.0 - uCoolHue) * 0.18 * (1.0 - coreProx));
+
+      // haze is dimmer, cooler, more diffuse -> reads as detached cloud
+      col = mix(col, coolGlow*0.6 + graphite*0.4, kind*0.5);
+
+      vColor = col;
+
+      // alpha: dendrites solid, haze faint; core brighter than extremities
+      float coreBright = 0.55 + 0.45*coreProx;
+      float aDend = 0.85 * coreBright;
+      float aHaze = 0.22 * (0.5 + 0.5*coreProx);
+      vAlpha = mix(aDend, aHaze, kind) * rev;
+
+      vec4 mv = modelViewMatrix * vec4(worldPos, 1.0);
+      gl_Position = projectionMatrix * mv;
+
+      float baseSize = mix(2.6, 1.7, kind);
+      gl_PointSize = uPixel * baseSize * (0.85 + 0.4*coreProx);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor; varying float vAlpha;
+    void main(){
+      float d = length(gl_PointCoord - 0.5);
+      if (d > 0.5) discard;
+      float edge = 1.0 - smoothstep(0.18, 0.5, d);
+      edge = pow(edge, 1.4);
+      vec3 col = pow(vColor * 1.25, vec3(0.9));
+      gl_FragColor = vec4(col, vAlpha * edge * 0.92);
+    }
+  `
+});
+
+function regenerate(seed){
+  const { pos, ord, seeds, kind, depth } = build(seed);
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.setAttribute('order', new THREE.BufferAttribute(ord, 1));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('kind', new THREE.BufferAttribute(kind, 1));
+    geom.setAttribute('depth', new THREE.BufferAttribute(depth, 1));
+    points = new THREE.Points(geom, mat); scene.add(points);
+  } else {
+    geom.attributes.position.array.set(pos); geom.attributes.position.needsUpdate = true;
+    geom.attributes.order.array.set(ord); geom.attributes.order.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds); geom.attributes.seed.needsUpdate = true;
+    geom.attributes.kind.array.set(kind); geom.attributes.kind.needsUpdate = true;
+    geom.attributes.depth.array.set(depth); geom.attributes.depth.needsUpdate = true;
+  }
+}
+
+// ============================================================
+// SIGNAL MAPPING — keep the conceptual thread: ThoughtTrace
+// perception signals drive the figure's aesthetic.
+// ============================================================
+function mapSignal(sig){
+  const s  = clamp01(sig?.satisfaction ?? 0.5);
+  const e  = clamp01(sig?.expectation ?? 0.0);
+  const a  = clamp01(sig?.affirmation ?? 0.0);
+  const rv = Math.max(-1, Math.min(1, sig?.reactionValence ?? 0.0));
+  return {
+    uGlow:    lerp(0.30, 0.95, a),
+    uExpand:  lerp(0.20, 1.30, e),
+    uCoolHue: clamp01((rv + 1) / 2),
+    uBreath:  lerp(0.025, 0.07, s),
+  };
+}
+
+function applyParams(p){
+  for (const k in p) if (uniforms[k]) uniforms[k].value = p[k];
+}
+
+// ============================================================
+// BOOT + LOOP
+// ============================================================
+const seed0 = (parseInt(qp('seed')||'0',10) || 1234567) >>> 0;
+regenerate(seed0);
+applyParams(mapSignal(null));
+
+let started = performance.now();
+const REVEAL_SECS = 12.0;   // slow aggregation reveal
+
+function loop(){
+  const now = performance.now();
+  const t = (now - started) / 1000;
+  uniforms.uTime.value = t;
+
+  // slow reveal then hold; gentle re-pulse so it keeps breathing
+  const rev = clamp01(t / REVEAL_SECS);
+  uniforms.uReveal.value = rev;
+
+  // ONE slow camera drift: a barely-perceptible orbit-less push/parallax.
+  const drift = Math.sin(t * 0.025) * 0.6;
+  camera.position.x = drift;
+  camera.position.y = 0.4 * Math.sin(t * 0.018);
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+addEventListener('resize', () => {
+  const asp = innerWidth/innerHeight;
+  camera.left = frustumSize*asp/-2; camera.right = frustumSize*asp/2;
+  camera.top = frustumSize/2; camera.bottom = frustumSize/-2;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// load ThoughtTrace signals -> drive aesthetics
+(async () => {
+  try {
+    const res = await fetch('./ThoughtTrace.signals.json', { cache: 'no-store' });
+    const arr = await res.json();
+    TT.signals = arr;
+    // pick a signal (selectable via ?sig=) — default to an affirmation-rich one
+    const sel = qp('sig');
+    let sig;
+    if (sel !== null && arr[+sel]) sig = arr[+sel];
+    else {
+      // choose the signal with strongest affirmation for a luminous figure
+      sig = arr.reduce((best,c)=> ( (c.affirmation??0) > (best.affirmation??0) ? c : best), arr[0]);
+    }
+    TT.current = sig;
+    applyParams(mapSignal(sig));
+  } catch (e) {
+    console.warn('signals load failed, using defaults', e);
+  }
+})();
+</script>
+</body>
+</html>

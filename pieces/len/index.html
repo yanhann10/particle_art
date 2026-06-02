@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>len · Agent-System Radiolarian (Haeckel Kunstformen)</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0805; overflow:hidden;
+               color:#cdbfa6; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; width:100vw; height:100vh; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.5; font-size: 11px; letter-spacing: 0.06em; color:#cdbfa6; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.3; font-size: 10px; letter-spacing: 0.04em; color:#9c8a6c; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.3; font-size: 10px; letter-spacing: 0.04em; color:#9c8a6c; }
+</style>
+<style id="art-clean-ui-hide">
+body > *:not(canvas):not(#savePNGButton):not(#startVideoButton):not(#stopVideoButton):not(#captureStatus) {
+  display:none !important; visibility:hidden !important; opacity:0 !important; pointer-events:none !important;
+}
+canvas { display:block !important; visibility:visible !important; opacity:1 !important; width:100vw !important; height:100vh !important; }
+</style>
+</head>
+<body>
+<div class="id">len</div>
+<div class="hint">multi-agent boids · radial symmetry field · driven by ThoughtTrace signals</div>
+<div class="src">Haeckel radiolarian · GPU agent swarm · 65k flocking specimens</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+
+// ---------------------------------------------------------------------------
+//  ThoughtTrace signals: the agent-dialogue perception field. We aggregate the
+//  corpus into a handful of macro-signals that drive the SWARM: symmetry order,
+//  agent speed, flock cohesion, shell count and palette warmth.
+// ---------------------------------------------------------------------------
+let SIG = {
+  satisfaction: 0.55, expectation: 0.30, reasonIntensity: 0.4,
+  reactionValence: 0.2, reorientation: 0.1, affirmation: 0.3
+};
+let SYM = 6;     // radial symmetry order (Haeckel radiolarian spokes)
+let SHELLS = 3;  // concentric shells the agents organize onto
+
+async function loadSignals(){
+  try {
+    const arr = await fetch('./ThoughtTrace.signals.json').then(r=>r.json());
+    if (Array.isArray(arr) && arr.length){
+      const acc = { satisfaction:0, expectation:0, reasonIntensity:0, reactionValence:0, reorientation:0, affirmation:0 };
+      for (const s of arr){
+        acc.satisfaction   += s.satisfaction   ?? 0;
+        acc.expectation    += s.expectation    ?? 0;
+        acc.reasonIntensity+= s.reasonIntensity?? 0;
+        acc.reactionValence+= s.reactionValence?? 0;
+        acc.reorientation  += s.reorientation  ?? 0;
+        acc.affirmation    += s.affirmation    ?? 0;
+      }
+      const n = arr.length;
+      for (const k in acc) acc[k] /= n;
+      SIG = acc;
+      // Expectation (anticipatory branching) sets the number of radial spokes;
+      // bounded to a Haeckel-plausible 5..12 fold symmetry.
+      SYM = Math.round(lerp(5, 12, clamp01(SIG.expectation*2.2 + SIG.reasonIntensity*0.4)));
+      SYM = Math.max(5, Math.min(12, SYM));
+      // satisfaction -> how many concentric shells the colony settles onto
+      SHELLS = Math.max(2, Math.min(4, Math.round(lerp(2, 4, clamp01(SIG.satisfaction*1.4)))));
+    }
+  } catch(e){ /* keep defaults */ }
+}
+
+// ---------------------------------------------------------------------------
+//  RENDERER
+// ---------------------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({
+  antialias:false, powerPreference:"high-performance", precision:"highp", preserveDrawingBuffer:true
+});
+const DPR = Math.min(devicePixelRatio*1.1, 2.0);
+renderer.setPixelRatio(DPR);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0805, 1);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+const isGL2 = renderer.capabilities.isWebGL2;
+const FloatType = THREE.FloatType;
+
+// ---------------------------------------------------------------------------
+//  AGENTS: state held in two ping-pong float textures of size TEX x TEX.
+//   posTex : xy = position in world [-1,1] disc, z = phase, w = shell index
+//   velTex : xy = velocity, z = wander seed, w = role (0 spoke-streamer / 1 orbiter)
+//  TEX*TEX agents integrate boids + a radial symmetry field every frame.
+// ---------------------------------------------------------------------------
+const TEX = 256;                 // 65,536 agents
+const AGENTS = TEX*TEX;
+
+const dataParams = {
+  type: FloatType,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+  format: THREE.RGBAFormat, depthBuffer:false, stencilBuffer:false
+};
+function makeRT(){ return new THREE.WebGLRenderTarget(TEX, TEX, dataParams); }
+let posA = makeRT(), posB = makeRT();
+let velA = makeRT(), velB = makeRT();
+
+// initial state textures
+const posInit = new THREE.DataTexture(new Float32Array(AGENTS*4), TEX, TEX, THREE.RGBAFormat, FloatType);
+const velInit = new THREE.DataTexture(new Float32Array(AGENTS*4), TEX, TEX, THREE.RGBAFormat, FloatType);
+{
+  const pd = posInit.image.data, vd = velInit.image.data;
+  for (let i=0;i<AGENTS;i++){
+    const a = i*2.399963;                  // golden angle scatter
+    const r = Math.sqrt(Math.random())*0.95;
+    pd[i*4+0] = Math.cos(a)*r;
+    pd[i*4+1] = Math.sin(a)*r;
+    pd[i*4+2] = Math.random();             // phase
+    pd[i*4+3] = Math.floor(Math.random()*4); // tentative shell index
+    const sp = 0.002;
+    vd[i*4+0] = (Math.random()-0.5)*sp;
+    vd[i*4+1] = (Math.random()-0.5)*sp;
+    vd[i*4+2] = Math.random();             // wander seed
+    vd[i*4+3] = Math.random()<0.5?0.0:1.0; // role: streamer vs orbiter
+  }
+  posInit.needsUpdate = true; velInit.needsUpdate = true;
+}
+
+// fullscreen sim quad
+const simScene = new THREE.Scene();
+const simCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const simQuad = new THREE.Mesh(new THREE.PlaneGeometry(2,2), null);
+simScene.add(simQuad);
+
+const VS_QUAD = `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.0,1.0);}`;
+
+// --- COPY material: blit an init DataTexture into a render target -------------
+const copyMat = new THREE.ShaderMaterial({
+  uniforms:{ uTex:{value:null} },
+  vertexShader: VS_QUAD,
+  fragmentShader:`precision highp float; varying vec2 vUv; uniform sampler2D uTex;
+    void main(){ gl_FragColor = texture2D(uTex, vUv); }`
+});
+function blit(srcTex, dstRT){
+  copyMat.uniforms.uTex.value = srcTex;
+  simQuad.material = copyMat;
+  renderer.setRenderTarget(dstRT);
+  renderer.render(simScene, simCam);
+  renderer.setRenderTarget(null);
+}
+
+// --- VELOCITY update: boids rules + radial symmetry field --------------------
+const velMat = new THREE.ShaderMaterial({
+  uniforms:{
+    uPos:{value:null}, uVel:{value:null}, uTexel:{value:new THREE.Vector2(1/TEX,1/TEX)},
+    uTime:{value:0}, uDt:{value:1.0},
+    uSym:{value:SYM}, uShells:{value:SHELLS},
+    uSpeed:{value:0.0032}, uCohesion:{value:1.0}, uReorient:{value:0.1}
+  },
+  vertexShader: VS_QUAD,
+  fragmentShader:`
+    precision highp float;
+    varying vec2 vUv;
+    uniform sampler2D uPos, uVel;
+    uniform vec2 uTexel;
+    uniform float uTime, uDt, uSym, uShells, uSpeed, uCohesion, uReorient;
+
+    // sample a sparse neighborhood in TEXTURE space (agents adjacent in the
+    // data texture are spatially scattered, so this samples a random-ish local
+    // crowd — good enough for emergent flocking at this density).
+    void main(){
+      vec4 P = texture2D(uPos, vUv);
+      vec4 V = texture2D(uVel, vUv);
+      vec2 pos = P.xy;
+      vec2 vel = V.xy;
+      float role = V.w;
+
+      vec2 sep = vec2(0.0);
+      vec2 ali = vec2(0.0);
+      vec2 coh = vec2(0.0);
+      float cnt = 0.0;
+
+      const int K = 12;
+      for (int i=0;i<K;i++){
+        float fi = float(i);
+        // spiral of taps around this agent's texel -> a sampled neighbourhood
+        float ang = fi*2.399963;
+        float rad = (1.0 + fi*1.7);
+        vec2 off = vec2(cos(ang),sin(ang))*rad*uTexel;
+        vec2 nuv = fract(vUv + off);
+        vec2 npos = texture2D(uPos, nuv).xy;
+        vec2 nvel = texture2D(uVel, nuv).xy;
+        vec2 d = pos - npos;
+        float dist = length(d) + 1e-5;
+        if (dist < 0.10){
+          sep += (d/dist) * (0.10 - dist);   // separation: push apart when close
+          ali += nvel;                        // alignment
+          coh += npos;                        // cohesion target
+          cnt += 1.0;
+        }
+      }
+      vec2 acc = vec2(0.0);
+      if (cnt > 0.0){
+        ali /= cnt;
+        coh = coh/cnt - pos;
+        acc += sep * 0.020;
+        acc += (ali - vel) * 0.010;
+        acc += coh * 0.0030 * uCohesion;
+      }
+
+      // ---- radial symmetry FIELD: organizes the flock into a radiolarian ----
+      float r = length(pos) + 1e-5;
+      float a = atan(pos.y, pos.x);
+      vec2 radial = pos / r;                  // outward unit
+      vec2 tang   = vec2(-radial.y, radial.x);// tangent (for orbiting)
+
+      // (1) concentric shells: pull agents toward the nearest of uShells rings.
+      //     ring radii spread across the plate (large organism).
+      float rMax = 0.94;
+      float best = 1e9; float targetR = 0.5;
+      for (int s=0;s<4;s++){
+        if (float(s) >= uShells) break;
+        float rr = rMax * (0.30 + 0.70*float(s)/max(uShells-1.0,1.0));
+        float dd = abs(r - rr);
+        if (dd < best){ best = dd; targetR = rr; }
+      }
+      acc += radial * (targetR - r) * 0.024;  // settle firmly onto shell
+
+      // (2) N-fold radial spokes: snap angle toward nearest spoke direction so
+      //     streamers flow along struts -> the radiolarian skeleton.
+      float seg = 6.2831853/uSym;
+      float spokeA = floor(a/seg + 0.5) * seg;
+      vec2  spokeDir = vec2(cos(spokeA), sin(spokeA));
+      // angular error -> force pushing onto the nearest spoke line
+      vec2 toSpokeLine = spokeDir*dot(pos,spokeDir) - pos;
+      // streamers (role 0) hug spokes strongly; orbiters (role 1) ride shells.
+      float spokePull = mix(0.030, 0.006, role);
+      acc += toSpokeLine * spokePull;
+
+      // (3) gentle motion: streamers stream OUTWARD/inward along spokes,
+      //     orbiters drift tangentially around their shell -> visible agency.
+      float dir = (P.z < 0.5) ? 1.0 : -1.0;   // half stream out, half in
+      acc += spokeDir * dir * 0.0012 * (1.0-role);     // along-strut flow
+      acc += tang * (0.5 + 0.5*sin(uTime*0.05 + P.w)) * 0.0016 * role; // orbit
+
+      // (4) occasional re-routing: a slow wandering nudge so agents re-decide
+      //     paths — keeps the system reading as autonomous, not frozen.
+      float w = V.z;
+      float wob = sin(uTime*0.12 + w*30.0)*cos(uTime*0.07 + w*11.0);
+      acc += tang * wob * 0.0009 * (0.6 + uReorient);
+
+      // keep specimen on the plate
+      if (r > rMax){ acc += radial * (rMax - r) * 0.06; }
+
+      vel += acc;
+      // damping + speed clamp -> SLOW, graceful motion
+      vel *= 0.90;
+      float spd = length(vel);
+      float maxS = uSpeed;
+      if (spd > maxS) vel = vel/spd*maxS;
+
+      gl_FragColor = vec4(vel, V.z, role);
+    }`
+});
+
+// --- POSITION update: integrate velocity, keep phase/shell -------------------
+const posMat = new THREE.ShaderMaterial({
+  uniforms:{ uPos:{value:null}, uVel:{value:null}, uDt:{value:1.0} },
+  vertexShader: VS_QUAD,
+  fragmentShader:`
+    precision highp float; varying vec2 vUv;
+    uniform sampler2D uPos, uVel; uniform float uDt;
+    void main(){
+      vec4 P = texture2D(uPos, vUv);
+      vec4 V = texture2D(uVel, vUv);
+      vec2 pos = P.xy + V.xy*uDt;
+      // clamp to disc
+      float r = length(pos);
+      if (r > 0.99) pos = pos/r*0.99;
+      gl_FragColor = vec4(pos, P.z, P.w);
+    }`
+});
+
+function simStep(dt){
+  // velocity B <- f(posA, velA)
+  velMat.uniforms.uPos.value = posA.texture;
+  velMat.uniforms.uVel.value = velA.texture;
+  velMat.uniforms.uTime.value = uTime;
+  velMat.uniforms.uDt.value = dt;
+  simQuad.material = velMat;
+  renderer.setRenderTarget(velB);
+  renderer.render(simScene, simCam);
+  // position B <- posA + velB
+  posMat.uniforms.uPos.value = posA.texture;
+  posMat.uniforms.uVel.value = velB.texture;
+  posMat.uniforms.uDt.value = dt;
+  simQuad.material = posMat;
+  renderer.setRenderTarget(posB);
+  renderer.render(simScene, simCam);
+  renderer.setRenderTarget(null);
+  // swap
+  let t;
+  t = posA; posA = posB; posB = t;
+  t = velA; velA = velB; velB = t;
+}
+
+// ---------------------------------------------------------------------------
+//  RENDER: draw agents as specimen points. Each agent is replicated SYM times
+//  by rotation so the flock reads as a radially-symmetric radiolarian instantly
+//  while the underlying agents genuinely flock and stream.
+// ---------------------------------------------------------------------------
+const aspect = innerWidth/innerHeight;
+const frustum = 2.05;
+const camera = new THREE.OrthographicCamera(frustum*aspect/-2, frustum*aspect/2, frustum/2, frustum/-2, 0.1, 100);
+camera.position.set(0,0,10); camera.lookAt(0,0,0);
+const scene = new THREE.Scene();
+
+// one vertex per (agent x symmetry copy). aRef = texel of the agent, aCopy = which fold.
+const COPIES = 12;               // max; we mask by uSym in shader
+const NPTS = AGENTS * COPIES;
+const aRef  = new Float32Array(NPTS*2);
+const aCopy = new Float32Array(NPTS);
+{
+  let k=0;
+  for (let i=0;i<AGENTS;i++){
+    const u = ((i % TEX)+0.5)/TEX;
+    const v = (Math.floor(i/TEX)+0.5)/TEX;
+    for (let c=0;c<COPIES;c++){
+      aRef[k*2]=u; aRef[k*2+1]=v; aCopy[k]=c; k++;
+    }
+  }
+}
+const pgeom = new THREE.BufferGeometry();
+pgeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(NPTS*3),3));
+pgeom.setAttribute('aRef', new THREE.BufferAttribute(aRef,2));
+pgeom.setAttribute('aCopy', new THREE.BufferAttribute(aCopy,1));
+
+const pMat = new THREE.ShaderMaterial({
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  uniforms:{
+    uPos:{value:null}, uVel:{value:null}, uTime:{value:0},
+    uPixel:{value:Math.min(devicePixelRatio,2.0)}, uSym:{value:SYM},
+    uValence:{value:SIG.reactionValence}, uAffirm:{value:SIG.affirmation}
+  },
+  vertexShader:`
+    precision highp float;
+    uniform sampler2D uPos, uVel; uniform float uTime, uPixel, uSym;
+    attribute vec2 aRef; attribute float aCopy;
+    varying float vRad; varying float vSpeed; varying float vAng; varying float vOn;
+    void main(){
+      vOn = (aCopy < uSym) ? 1.0 : 0.0;     // only render uSym copies
+      vec4 P = texture2D(uPos, aRef);
+      vec2 V = texture2D(uVel, aRef).xy;
+      vec2 pos = P.xy;
+      // rotate this copy by aCopy * (2pi/uSym) -> radial symmetry
+      float seg = 6.2831853/uSym;
+      float ca = cos(seg*aCopy), sa = sin(seg*aCopy);
+      vec2 rp = vec2(ca*pos.x - sa*pos.y, sa*pos.x + ca*pos.y);
+
+      float rad = length(rp);
+      vRad = rad;
+      vAng = atan(rp.y, rp.x);
+      vSpeed = length(V);
+
+      // very gentle global breathing (slow), no chaotic camera motion.
+      float breath = 1.0 + 0.010*sin(uTime*0.10);
+      vec2 world = rp * 1.02 * breath;
+
+      vec4 mv = modelViewMatrix*vec4(world, 0.0, 1.0);
+      gl_Position = projectionMatrix*mv;
+      float sz = uPixel*(1.3 + 2.2*smoothstep(0.0,0.004,vSpeed));
+      gl_PointSize = sz * vOn;
+    }`,
+  fragmentShader:`
+    precision highp float;
+    varying float vRad; varying float vSpeed; varying float vAng; varying float vOn;
+    uniform float uValence, uAffirm, uSym;
+    void main(){
+      if (vOn < 0.5) discard;
+      float d = length(gl_PointCoord-0.5);
+      if (d>0.5) discard;
+      float edge = pow(1.0-smoothstep(0.05,0.5,d), 1.5);
+
+      // Haeckel jewel-tone palette tied to radius:
+      //  core      -> warm amber / specimen gold
+      //  mid-shell -> verdigris teal (radiolarian glass skeleton)
+      //  outer rim -> crimson / garnet plate ink
+      vec3 amberCore = vec3(1.00, 0.74, 0.30);
+      vec3 verdigris = vec3(0.14, 0.68, 0.62);
+      vec3 garnet    = vec3(0.84, 0.20, 0.22);
+      vec3 ivory     = vec3(0.97, 0.92, 0.78);
+
+      float t1 = smoothstep(0.04, 0.50, vRad);
+      float t2 = smoothstep(0.58, 0.95, vRad);
+      vec3 col = mix(amberCore, verdigris, t1);
+      col = mix(col, garnet, t2);
+
+      // concentric jewel banding -> shells alternate gold/teal
+      float band = 0.5 + 0.5*cos(vRad*20.0);
+      col = mix(col, mix(amberCore, verdigris, 0.5), band*0.16);
+
+      // fast-moving streamers flash ivory -> you can SEE the flows
+      float flow = smoothstep(0.0018, 0.0045, vSpeed);
+      col = mix(col, ivory, flow*0.45*(0.6+0.4*uAffirm));
+
+      // radial spoke accent: brighten along the SYM struts
+      float spoke = pow(abs(cos(vAng*uSym*0.5)), 6.0);
+      col += ivory*spoke*0.16;
+
+      // valence shifts warm/cool within jewel range
+      col = mix(col, col.bgr*vec3(0.9,1.0,1.05), clamp(-uValence,0.0,1.0)*0.22);
+
+      float a = edge * (0.50 + 0.50*flow);
+      col = pow(col*1.18, vec3(0.92));
+      gl_FragColor = vec4(col, a);
+    }`
+});
+const points = new THREE.Points(pgeom, pMat);
+scene.add(points);
+
+// ---------------------------------------------------------------------------
+//  TRAIL feedback buffer: accumulate the scene with a slow fade so you read the
+//  agents' flow lines as faint motion trails.
+// ---------------------------------------------------------------------------
+const rtTrail = {
+  type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+  format: THREE.RGBAFormat, depthBuffer:false, stencilBuffer:false
+};
+function makeTrail(){ return new THREE.WebGLRenderTarget(innerWidth, innerHeight, rtTrail); }
+let trailA = makeTrail(), trailB = makeTrail();
+
+// fade material: draw previous trail dimmed into current
+const fadeMat = new THREE.ShaderMaterial({
+  uniforms:{ uPrev:{value:null}, uFade:{value:0.90} },
+  vertexShader: VS_QUAD,
+  fragmentShader:`precision highp float; varying vec2 vUv; uniform sampler2D uPrev; uniform float uFade;
+    void main(){ vec3 c = texture2D(uPrev, vUv).rgb * uFade; gl_FragColor = vec4(c,1.0); }`
+});
+// composite trail buffer to screen over the plate
+const compMat = new THREE.ShaderMaterial({
+  transparent:true, blending:THREE.AdditiveBlending, depthWrite:false,
+  uniforms:{ uTex:{value:null} },
+  vertexShader: VS_QUAD,
+  fragmentShader:`precision highp float; varying vec2 vUv; uniform sampler2D uTex;
+    void main(){ vec3 c = texture2D(uTex, vUv).rgb; gl_FragColor = vec4(c, 1.0); }`
+});
+
+// ---------------------------------------------------------------------------
+//  Plate background: sepia Kunstformen framing.
+// ---------------------------------------------------------------------------
+const plateMat = new THREE.ShaderMaterial({
+  depthWrite:false,
+  uniforms:{ uAspect:{value:aspect} },
+  vertexShader: VS_QUAD,
+  fragmentShader:`
+    precision highp float; varying vec2 vUv; uniform float uAspect;
+    void main(){
+      vec2 p = vUv;
+      vec2 c = (p-0.5)*vec2(uAspect,1.0);
+      float r = length(c);
+      vec3 paper = mix(vec3(0.10,0.085,0.065), vec3(0.045,0.038,0.030), smoothstep(0.2,1.1,r));
+      vec2 b = abs(p-0.5);
+      float frame = smoothstep(0.470,0.474,max(b.x,b.y)) * (1.0-smoothstep(0.486,0.492,max(b.x,b.y)));
+      paper += vec3(0.18,0.14,0.09)*frame*0.5;
+      gl_FragColor = vec4(paper,1.0);
+    }`
+});
+
+// ---------------------------------------------------------------------------
+//  Boot + animate
+// ---------------------------------------------------------------------------
+let uTime = 0;
+let last = performance.now();
+let booted = false;
+
+function animate(now){
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, (now-last)/1000); last = now;
+  uTime += dt;
+  if (!booted) return;
+
+  // advance the agent simulation (fixed sub-steps for stability / smoothness)
+  velMat.uniforms.uSym.value = SYM;
+  velMat.uniforms.uShells.value = SHELLS;
+  simStep(1.0);
+
+  pMat.uniforms.uPos.value = posA.texture;
+  pMat.uniforms.uVel.value = velA.texture;
+  pMat.uniforms.uTime.value = uTime;
+  pMat.uniforms.uSym.value = SYM;
+
+  // 1) fade previous trail into trailB
+  fadeMat.uniforms.uPrev.value = trailA.texture;
+  simQuad.material = fadeMat;
+  renderer.setRenderTarget(trailB);
+  renderer.clear();
+  renderer.render(simScene, simCam);
+  // 2) draw agents additively on top of the faded trail
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+  // swap trails
+  let t = trailA; trailA = trailB; trailB = t;
+
+  // 3) draw plate, then composite trail buffer (with live agents) over it
+  renderer.clear();
+  simQuad.material = plateMat;
+  renderer.render(simScene, simCam);
+  compMat.uniforms.uTex.value = trailA.texture;
+  simQuad.material = compMat;
+  renderer.render(simScene, simCam);
+}
+
+(async function init(){
+  await loadSignals();
+  pMat.uniforms.uValence.value = SIG.reactionValence;
+  pMat.uniforms.uAffirm.value = SIG.affirmation;
+  // signal-driven swarm dynamics
+  velMat.uniforms.uSpeed.value  = lerp(0.0022, 0.0042, clamp01(SIG.reasonIntensity*1.3));
+  velMat.uniforms.uCohesion.value = lerp(0.7, 1.3, clamp01(SIG.satisfaction*1.4));
+  velMat.uniforms.uReorient.value = clamp01(SIG.reorientation*2.0 + 0.1);
+
+  // load initial agent state
+  blit(posInit, posA); blit(velInit, velA);
+  // warm-up: let the colony self-organize onto the skeleton before reveal
+  for (let i=0;i<140;i++) simStep(1.0);
+  booted = true;
+  requestAnimationFrame(animate);
+})();
+
+addEventListener('resize', ()=>{
+  const a = innerWidth/innerHeight;
+  camera.left = frustum*a/-2; camera.right = frustum*a/2;
+  camera.top = frustum/2; camera.bottom = frustum/-2;
+  camera.updateProjectionMatrix();
+  plateMat.uniforms.uAspect.value = a;
+  renderer.setSize(innerWidth, innerHeight);
+  trailA.dispose(); trailB.dispose();
+  trailA = makeTrail(); trailB = makeTrail();
+});
+</script>
+</body>
+</html>
