@@ -1,0 +1,1640 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>t57 · coral vortex</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#050302; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; width:100vw; height:100vh; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; color:#a89984; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size: 10px; letter-spacing: 0.04em; color:#a89984; }
+
+  /* HUD Styles */
+  #hud {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none; display: none;
+    font-family: ui-monospace, "SF Mono", monospace;
+    text-transform: uppercase; color: rgba(168, 153, 132, 0.8);
+  }
+  #hud.active { display: block; }
+  .hud-frame {
+    position: absolute; border: 1px solid rgba(168, 153, 132, 0.15);
+    padding: 12px; font-size: 10px; line-height: 1.4;
+  }
+  .hud-tl { top: 20px; left: 20px; border-right: none; border-bottom: none; }
+  .hud-tr { top: 20px; right: 20px; border-left: none; border-bottom: none; text-align: right; }
+  .hud-bl { bottom: 20px; left: 20px; border-right: none; border-top: none; }
+  .hud-br { bottom: 20px; right: 20px; border-left: none; border-top: none; text-align: right; }
+  
+  .hud-vitals { margin-top: 8px; }
+  .hud-vitals div { display: flex; justify-content: space-between; width: 180px; margin-bottom: 2px; }
+  .hud-bar-bg { width: 80px; height: 4px; background: rgba(168, 153, 132, 0.1); margin-left: 8px; position: relative; top: 5px; }
+  .hud-bar-val { height: 100%; background: rgba(168, 153, 132, 0.5); transition: width 0.3s ease; }
+  
+  .hud-scanline {
+    position: absolute; width: 100%; height: 1px;
+    background: rgba(168, 153, 132, 0.05);
+    top: 0; animation: scan 8s linear infinite;
+  }
+  @keyframes scan { from { top: 0%; } to { top: 100%; } }
+  
+  .hud-grid {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    background-image: 
+      linear-gradient(rgba(168, 153, 132, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(168, 153, 132, 0.03) 1px, transparent 1px);
+    background-size: 100px 100px;
+  }
+</style>
+
+<style id="art-clean-ui-hide">
+body > *:not(canvas):not(#savePNGButton):not(#startVideoButton):not(#stopVideoButton):not(#captureStatus) {
+  display:none !important;
+  visibility:hidden !important;
+  opacity:0 !important;
+  pointer-events:none !important;
+}
+canvas {
+  display:block !important;
+  visibility:visible !important;
+  opacity:1 !important;
+  width:100vw !important;
+  height:100vh !important;
+}
+</style>
+
+
+<style id="save-button-contrast-css">
+#savePNGButton {
+  display:block !important;
+  visibility:visible !important;
+  opacity:1 !important;
+  pointer-events:auto !important;
+}
+</style>
+
+</head>
+<body>
+<div id="hud">
+  <div class="hud-grid"></div>
+  <div class="hud-scanline"></div>
+  <div class="hud-frame hud-tl">
+    <div>NEURAL_TRACE_v2.01</div>
+    <div id="hud-id" style="opacity:0.5">ID: NULL</div>
+    <div style="margin-top:10px">ANALYSIS_MODE: SYNTHETIC_MRI</div>
+  </div>
+  <div class="hud-frame hud-tr">
+    <div>RESOLUTION: <span id="hud-res">1x</span></div>
+    <div>BUFFER: <span id="hud-particles">120k</span></div>
+    <div style="margin-top:10px" id="hud-timestamp">T+00.00s</div>
+  </div>
+  <div class="hud-frame hud-bl">
+    <div>SIGNAL_VITALS</div>
+    <div class="hud-vitals" id="hud-vitals"></div>
+  </div>
+  <div class="hud-frame hud-br">
+    <div>MORPH_STRUCT_PARAMS</div>
+    <div id="hud-morph" style="margin-top:8px; opacity:0.7; font-size:9px"></div>
+  </div>
+</div>
+<div class="id">t57</div>
+<div class="hint">click to regenerate · curl-driven flow</div>
+<div class="src">Riley lines → fluid phase · 120k particles</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// --- HELPERS ---
+function qp(n){ return new URL(location.href).searchParams.get(n); }
+function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+
+// --- STATE ---
+let TT = { enabled: false, signals: null, current: null };
+let currentParams = null, targetParams = null;
+const N = 120000;
+let geom, points, mat;
+
+// --- RENDERER & CAMERA ---
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 28;
+const camera = new THREE.OrthographicCamera(frustumSize*aspect/-2, frustumSize*aspect/2, frustumSize/2, frustumSize/-2, 0.1, 2000);
+camera.position.set(0, 0, 100);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({
+  antialias: false,
+  powerPreference: "high-performance",
+  precision: "highp",
+  preserveDrawingBuffer: true
+});
+const resMult = parseFloat(qp('res')) || 1.0;
+// Retina MBP sweet spot: avoid excessive supersampling blur.
+// Slightly under native DPR keeps particles crisp/fullscreen.
+const DPR = Math.min(devicePixelRatio * 1.12, 2.1);
+renderer.setPixelRatio(DPR * resMult);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050302, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- UNIFORMS ---
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: Math.min(devicePixelRatio, 1.6) },
+  uFlowScale: { value: 1.0 },
+  uFluidThreshold: { value: 0.5 },
+  uComplexity: { value: 1.5 },
+  uViscosity: { value: 0.1 },
+  uJitter: { value: 0.0 },
+  uDepth: { value: 0.0 },
+  uVortex: { value: 0.0 },
+  uShatter: { value: 0.0 },
+  uTension: { value: 0.0 },
+  uCohesion: { value: 0.0 },
+  uMirror: { value: 0.0 },
+  uGeometric: { value: 0.0 },
+  uViewport: { value: new THREE.Vector4(0, 0, 1, 1) },
+  uGridMode: { value: 0.0 },
+  uTraceNeighborhoods: { value: 1.0 },
+
+  // Z-axis sonar suction cycle
+  uZCycle: { value: 0.0 },
+  uCameraPush: { value: 0.0 },
+  uOpeningRestraint: { value: 1.0 },
+  uHueRot: { value: 0.0 },
+};
+
+// --- SHADER ---
+mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uFlowScale, uFluidThreshold, uComplexity, uViscosity, uJitter, uDepth, uVortex, uShatter, uTension, uCohesion, uMirror, uGeometric, uGridMode, uTraceNeighborhoods, uZCycle, uCameraPush, uOpeningRestraint;
+    uniform vec4 uViewport;
+    attribute vec2 birthPos; attribute float seed, strokeId;
+    varying vec3 vColor; varying float vAlpha;
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float noise(vec2 p) {
+      vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);
+      return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
+    }
+    float stream(vec2 p, float t) {
+      float n = noise(p * 0.8 + t * 0.15) * 2.0;
+      float complexAmt = smoothstep(1.05, 1.45, uComplexity);
+      n += noise(p * 1.6 - vec2(t * 0.2, 0.0)) * 0.5 * complexAmt;
+
+      float geoAmt = smoothstep(0.05, 0.25, uGeometric);
+      n = mix(n, sin(p.x * 2.0) * cos(p.y * 2.0) * 4.0, geoAmt * 0.8);
+      return n + length(p) * uVortex * 0.5;
+    }
+
+    float pick6(float idx, float m0, float m1, float m2, float m3, float m4, float m5){
+      if (idx < 0.5) return m0;
+      if (idx < 1.5) return m1;
+      if (idx < 2.5) return m2;
+      if (idx < 3.5) return m3;
+      if (idx < 4.5) return m4;
+      return m5;
+    }
+    float softPulse(float phase, float center, float width){
+      float d = (phase - center) / max(0.001, width);
+      return exp(-d*d);
+    }
+
+    float smootherPulse(float x, float a, float b, float c, float d){
+      return smoothstep(a, b, x) * (1.0 - smoothstep(c, d, x));
+    }
+
+    void main(){
+      float t = uTime * 0.3;
+      t += 0.18 * sin(uTime * 0.017) + 0.09 * sin(uTime * 0.041 + seed * 6.28318);
+      vec2 p = birthPos;
+
+      // Phase-aware shader LOD for late contraction/orb.
+      // Reduces cost only when the object is already visually compact/fading.
+      float lodFinalPhase = smoothstep(0.78, 0.96, uZCycle);
+      float lodVeryLate = smoothstep(0.88, 0.995, uZCycle);
+      float lodOuter = smoothstep(8.0, 13.5, length(p)) * lodFinalPhase;
+
+      // Soft irregular neighborhoods, not visible pie slices.
+      float rBase = length(p);
+      float angBase = atan(p.y, p.x) + 3.14159265;
+      float organicWarp = 0.55 * sin(rBase * 0.33 + uTime * 0.014)
+                        + 0.22 * sin(p.x * 0.23 - p.y * 0.17 + uTime * 0.019)
+                        + 0.10 * sin(seed * 6.28318);
+      float nPos = (angBase + organicWarp) / 6.2831853 * 6.0;
+      float nA = floor(nPos);
+      float nB = mod(nA + 1.0, 6.0);
+      float nBlend = smoothstep(0.10, 0.90, fract(nPos));
+
+      // Neighborhood 0 uses the supplied intent/perception example.
+      float sat = mix(
+        pick6(nA, 0.5357, 0.9354, 0.2198, 0.8997, 0.9600, 0.5335),
+        pick6(nB, 0.5357, 0.9354, 0.2198, 0.8997, 0.9600, 0.5335),
+        nBlend);
+      float expectation = mix(
+        pick6(nA, 0.5833, 0.2463, 0.5668, 0.2173, 0.1162, 0.1203),
+        pick6(nB, 0.5833, 0.2463, 0.5668, 0.2173, 0.1162, 0.1203),
+        nBlend);
+      float reasonIntensity = mix(
+        pick6(nA, 1.0000, 0.5980, 0.3296, 0.6983, 0.6553, 0.5234),
+        pick6(nB, 1.0000, 0.5980, 0.3296, 0.6983, 0.6553, 0.5234),
+        nBlend);
+      float valence = mix(
+        pick6(nA, 0.0714, 0.9423, 0.2438, 0.9250, 0.9693, 0.6101),
+        pick6(nB, 0.0714, 0.9423, 0.2438, 0.9250, 0.9693, 0.6101),
+        nBlend);
+      float reorientation = mix(
+        pick6(nA, 0.0000, 0.0556, 0.3470, 0.0752, 0.0285, 0.0197),
+        pick6(nB, 0.0000, 0.0556, 0.3470, 0.0752, 0.0285, 0.0197),
+        nBlend);
+      float affirmation = mix(
+        pick6(nA, 0.0714, 0.9038, 0.1713, 0.7395, 0.9019, 0.1018),
+        pick6(nB, 0.0714, 0.9038, 0.1713, 0.7395, 0.9019, 0.1018),
+        nBlend);
+
+      // Perception from agent turns/reactions.
+      float explicitAff = mix(pick6(nA, 3.0/7.0, 0.90, 0.17, 0.74, 0.90, 0.10),
+                              pick6(nB, 3.0/7.0, 0.90, 0.17, 0.74, 0.90, 0.10), nBlend);
+      float scopeFit = mix(pick6(nA, 2.0/7.0, 0.04, 0.38, 0.06, 0.03, 0.08),
+                           pick6(nB, 2.0/7.0, 0.04, 0.38, 0.06, 0.03, 0.08), nBlend);
+      float contentRel = mix(pick6(nA, 2.0/7.0, 0.55, 0.20, 0.62, 0.70, 0.38),
+                             pick6(nB, 2.0/7.0, 0.55, 0.20, 0.62, 0.70, 0.38), nBlend);
+
+      // Different loop duration per neighborhood.
+      float dur = mix(pick6(nA, 10.0, 8.0, 12.0, 21.0, 15.5, 13.0),
+                      pick6(nB, 10.0, 8.0, 12.0, 21.0, 15.5, 13.0), nBlend);
+      float phase = fract(uTime / dur);
+
+      vec2 radialDir = normalize(p + vec2(0.0001));
+      vec2 tangentDir = vec2(-radialDir.y, radialDir.x);
+
+      // Dialogue motion grammar:
+      // expectation       -> search tendrils, anticipatory leaning, branching paths
+      // affirmation       -> phase-locking, damping, stable orbit formation
+      // scope_fit friction-> shear, stalled flow, compression scars
+      // content relevance -> connective bridges / information highways
+      // reorientation     -> local coordinate redirection
+      float early = softPulse(phase, 0.16, 0.20);
+      float middle = softPulse(phase, 0.50, 0.24);
+      float late = softPulse(phase, 0.82, 0.26);
+
+      float expectationBurst = expectation * reasonIntensity * (0.38 + 0.62 * early);
+      float affirmationSteady = (affirmation + explicitAff) * 0.5 * (0.50 + 0.50 * late);
+      float friction = scopeFit + 0.45 * reorientation;
+      float relevanceGlue = contentRel;
+
+      // Space-warp experiment: localized inversion / domain reciprocation.
+      // This is not damping. It changes the topology of the subspace:
+      // p' = p / ||p||^2, around an off-center local origin.
+      float invAng = atan(p.y, p.x);
+      float invCenter = 0.62831853; // 36 degrees, upper-right neighborhood
+      float invWidth = 0.72;        // about 41 degrees
+      float invDiff = abs(atan(sin(invAng - invCenter), cos(invAng - invCenter)));
+      float invRegion = 1.0 - smoothstep(invWidth * 0.55, invWidth, invDiff);
+
+      // One loop only, after the original image has time to read.
+      float invLoop = smoothstep(0.44, 0.56, uZCycle) * (1.0 - smoothstep(0.78, 0.92, uZCycle));
+
+      vec2 invOrigin = vec2(2.3, 1.4);
+      vec2 qInv = p - invOrigin;
+      float r2Inv = dot(qInv, qInv) + 0.55;
+
+      // Inversion map, rescaled into artwork coordinates.
+      vec2 pInv = invOrigin + qInv / r2Inv * 18.0;
+
+      // Neighboring bands alternate between normal space and inverted space.
+      // This creates genuine opposite topology rather than weaker same-direction flow.
+      float invBand = 0.5 + 0.5 * sin(dot(qInv, normalize(vec2(0.82, 0.57))) * 2.2 + seed * 6.28318);
+      float invBandMask = smoothstep(0.36, 0.64, invBand);
+
+      float invSemantic = 0.18 + 0.44 * reorientation + 0.32 * friction + 0.20 * expectation;
+      float invAmt = invRegion * invLoop * invBandMask * invSemantic * (1.0 - 0.35 * lodOuter);
+
+      p = mix(p, pInv, invAmt);
+
+      // Counter-space nudge for adjacent bands, so inversion reads as reciprocation.
+      vec2 invDir = normalize(pInv - p + vec2(0.0001));
+      vec2 normalDir = normalize(qInv + vec2(0.0001));
+      p += (invDir - normalDir) * invRegion * invLoop * (1.0 - invBandMask) * (0.32 + 0.08 * length(qInv));
+
+      // Third-loop magic mirror: stronger inversion combination.
+      // Instead of repeating the same expand/withdraw, the subspace becomes a double-sided mirror.
+      float mirrorLoop = smoothstep(0.66, 0.76, uZCycle) * (1.0 - smoothstep(0.90, 0.99, uZCycle));
+
+      vec2 mirrorOriginA = invOrigin;
+      vec2 mirrorOriginB = vec2(-2.4, -1.6);
+
+      vec2 qA = p - mirrorOriginA;
+      vec2 qB = p - mirrorOriginB;
+
+      float r2A = dot(qA, qA) + 0.42;
+      float r2B = dot(qB, qB) + 0.58;
+
+      vec2 invA = mirrorOriginA + qA / r2A * 20.0;
+      vec2 invB = mirrorOriginB + qB / r2B * 16.0;
+
+      // Magic mirror fold: reflect one inverted field through the other.
+      vec2 mirrorAxis = normalize(vec2(0.74, -0.67));
+      vec2 mirrorPerp = vec2(-mirrorAxis.y, mirrorAxis.x);
+
+      float sideA = dot(invA - mirrorOriginA, mirrorAxis);
+      float sideB = dot(invB - mirrorOriginB, mirrorPerp);
+
+      vec2 reflectedA = invA - 2.0 * mirrorAxis * sideA;
+      vec2 reflectedB = invB - 2.0 * mirrorPerp * sideB;
+
+      // Localized third-loop regions:
+      // upper-right uses mirror A, lower-left uses mirror B.
+      float aP = atan(p.y, p.x);
+      float upperRight = 1.0 - smoothstep(0.52, 0.92, abs(atan(sin(aP - 0.62831853), cos(aP - 0.62831853))));
+      float lowerLeft = 1.0 - smoothstep(0.62, 1.05, abs(atan(sin(aP - 3.9269908), cos(aP - 3.9269908))));
+
+      float magicRegion = mirrorLoop * max(invRegion, max(upperRight, lowerLeft));
+      float semanticMirror = 0.20 + 0.42 * reorientation + 0.30 * expectation + 0.18 * friction;
+
+      // Soft micro tessellation only inside mirror space, to make the 3rd loop less repetitive.
+      vec2 cell = fract((p - mirrorOriginA) * (0.24 + 0.10 * mirrorLoop)) - 0.5;
+      vec2 microMirror = mirrorOriginA + cell * 7.5;
+
+      vec2 mirrorMixA = mix(invA, reflectedA, 0.45 + 0.30 * invBandMask);
+      vec2 mirrorMixB = mix(invB, reflectedB, 0.55 - 0.24 * invBandMask);
+      vec2 magicTarget = mix(mirrorMixA, mirrorMixB, lowerLeft);
+      magicTarget = mix(magicTarget, microMirror, 0.16 * mirrorLoop * upperRight);
+
+      float magicAmt = magicRegion * semanticMirror * (1.0 - 0.45 * lodOuter);
+      p = mix(p, magicTarget, magicAmt);
+
+      // Entire structure expands slightly in the third loop.
+      float globalMirrorExpand = mirrorLoop * (1.0 - smoothstep(0.84, 0.99, uZCycle));
+      p *= 1.0 + 0.060 * globalMirrorExpand;
+
+      // Inner particles spiral toward negative z during the magic mirror loop.
+      float innerMirror = (1.0 - smoothstep(2.8, 5.9, length(p))) * mirrorLoop;
+      vec2 innerRad = normalize(p + vec2(0.001));
+      vec2 innerTan = vec2(-innerRad.y, innerRad.x);
+      p += innerTan * innerMirror * (0.42 + 0.18 * sin(uTime * 0.68 + seed * 6.28318));
+      p -= innerRad * innerMirror * 0.14;
+
+      // Variables for z/alpha after position construction.
+      float mirrorDepth = magicAmt * (dot(normalize(qA + vec2(0.001)), mirrorAxis)) * 11.0;
+      float innerNegativeZ = -20.0 * innerMirror;
+      float outerFade = mirrorLoop * smoothstep(7.0, 12.2, length(p));
+
+      // Third contraction finality:
+      // around ~43s in the default 52s cycle, do not return to the original frame.
+      // Instead, contract into a warped, higher-contrast final form.
+      float finality = smoothstep(0.805, 0.855, uZCycle) * (1.0 - smoothstep(0.965, 1.0, uZCycle));
+
+      vec2 finalOrigin = vec2(0.15, -0.10);
+      vec2 qFinal = p - finalOrigin;
+      float rFinal = length(qFinal) + 0.001;
+      vec2 dirFinal = qFinal / rFinal;
+      vec2 tanFinal = vec2(-dirFinal.y, dirFinal.x);
+
+      // Not the same original contraction:
+      // compress to an off-center warped seal, then shear into a final spatial fold.
+      float seal = smoothstep(0.805, 0.890, uZCycle);
+      float sealRelease = 1.0 - smoothstep(0.925, 0.985, uZCycle);
+      float sealAmt = finality * seal * sealRelease;
+
+      // Inversion-flavored final contraction. The center becomes boundary-like,
+      // while the outer field folds inward and partially disappears.
+      vec2 pSealInv = finalOrigin + qFinal / (dot(qFinal, qFinal) + 0.80) * 13.0;
+      vec2 finalFold = finalOrigin
+                     + dirFinal * (2.8 + 0.20 * rFinal)
+                     + tanFinal * sin(rFinal * 1.1 + uTime * 0.42 + seed * 6.28318) * (0.55 + 0.18 * rFinal);
+
+      vec2 finalTarget = mix(pSealInv, finalFold, 0.46 + 0.24 * affirmationSteady);
+      p = mix(p, finalTarget, sealAmt * (0.42 + 0.22 * reorientation + 0.18 * expectation));
+
+      // Strong final contraction in z: inner structure recedes, outer structure darkens.
+      float finalInner = (1.0 - smoothstep(2.8, 6.0, rFinal)) * finality;
+      float finalOuter = smoothstep(7.0, 12.4, rFinal) * finality;
+      p += tanFinal * finalInner * 0.28 * sin(uTime * 0.70 + seed * 6.28318);
+      p *= 1.0 - finalInner * 0.035;
+
+      float finalDepth = -22.0 * finalInner + 8.0 * sealAmt * sin(rFinal * 0.7 + seed * 2.0);
+      float finalOuterFade = finalOuter;
+
+      // Slow globular relic ending.
+      // This preserves the nice finality, but uses a broad phase so the collapse feels deliberate.
+      float orbPhase = smoothstep(0.875, 0.995, uZCycle);
+      vec2 orbCenter = vec2(0.10 * sin(uTime * 0.045), -0.07 * cos(uTime * 0.038));
+      vec2 qOrb = p - orbCenter;
+      float rOrb = length(qOrb) + 0.0001;
+      vec2 dOrb = qOrb / rOrb;
+      vec2 tOrb = vec2(-dOrb.y, dOrb.x);
+
+      // Volumetric orb model:
+      // map the final contraction onto an implied 3D spherical shell before shrinking.
+      float orbRadius = mix(5.2, 1.15, orbPhase);
+      float orbNormR = clamp(rOrb / max(0.001, orbRadius), 0.0, 1.0);
+      float sphereCap = sqrt(max(0.0, 1.0 - orbNormR * orbNormR));
+
+      // Use seed/noise to choose front/back hemisphere so it reads as a volume,
+      // not a flat disk. This gives back-side particles cooler/dimmer treatment.
+      float hemiSeed = sin(seed * 19.17 + atan(qOrb.y, qOrb.x) * 1.7 + uTime * 0.09);
+      float orbFront = step(0.0, hemiSeed);
+      float orbSide = mix(-1.0, 1.0, orbFront);
+
+      // Rim is strongest near the curved edge of the sphere.
+      float orbRim = orbPhase * smoothstep(0.56, 0.96, orbNormR) * (1.0 - smoothstep(0.96, 1.0, orbNormR));
+
+      // Subtle perspective: back side compresses slightly and sinks.
+      float backSide = orbPhase * (1.0 - orbFront);
+      p = orbCenter + qOrb * mix(1.0, 0.88, backSide * sphereCap);
+
+      // Seashell memory holds through the slow contraction.
+      float shellMemory = smoothstep(0.80, 0.90, uZCycle) * (1.0 - smoothstep(0.985, 1.0, uZCycle));
+      float shellTwist = sin(rOrb * 1.22 + uTime * 0.22 + seed * 6.28318);
+      p += tOrb * shellMemory * shellTwist * 0.20;
+      p += dOrb * shellMemory * 0.08 * sin(rOrb * 0.85 + seed * 3.1);
+
+      // Collapse into one breathing orb, but gently. Do not over-accelerate.
+      float orbBreath = 1.0 + 0.045 * sin(uTime * 0.42 + seed * 6.28318) * (1.0 - orbPhase * 0.65);
+      vec2 orbTarget =
+          orbCenter
+        + dOrb * (orbRadius * 0.42 + 0.22 * (1.0 - orbPhase)) * orbBreath
+        + tOrb * sin(rOrb * (0.90 + 0.45 * (1.0 - orbPhase)) + seed * 6.28318)
+          * 0.075 * (1.0 - orbPhase);
+
+      float orbAttract = orbPhase * 0.56;
+      float orbShrink = mix(1.0, 0.42, orbPhase);
+      p = mix(p, orbTarget, orbAttract);
+      p = orbCenter + (p - orbCenter) * orbShrink;
+
+      float sphereZ = orbSide * sphereCap * mix(0.0, 16.0, orbPhase);
+      float orbDepth = -14.0 * orbPhase - 1.4 * rOrb * orbPhase + sphereZ;
+      float orbOuterFade = orbPhase * smoothstep(3.2, 11.8, rOrb);
+      float orbCoreGlow = orbPhase * (1.0 - smoothstep(0.0, 1.65, rOrb));
+
+      // Two interacting systems: user-intent field and agent-response field.
+      // Their phase difference produces negotiation instead of one-way expansion.
+      float userWave = sin(phase * 6.2831853 + rBase * (0.28 + 0.45 * expectation));
+      float agentWave = sin(phase * 6.2831853 * (0.72 + 0.35 * affirmationSteady) - rBase * (0.18 + 0.35 * relevanceGlue) + 1.7);
+      float phaseAgreement = 1.0 - abs(userWave - agentWave) * 0.5;
+      phaseAgreement = clamp(phaseAgreement, 0.0, 1.0);
+
+      // Expectation as search, not just bloom.
+      float branchCount = 3.0 + floor(expectation * 7.0);
+      float branchSignal = sin(angBase * branchCount + phase * 6.2831853 + noise(p * 0.18) * 2.8);
+      float branchMask = pow(abs(branchSignal), 5.5);
+      float searching = branchMask * expectationBurst;
+
+      // Anticipatory leaning: the body moves slightly before the branch arrives.
+      vec2 anticipation = normalize(vec2(
+        sin(phase * 6.2831853 + nA * 1.37),
+        cos(phase * 6.2831853 * 0.81 + nA * 0.91)
+      ));
+
+      p += anticipation * expectationBurst * (0.20 + 0.20 * early);
+      p += radialDir * rBase * expectationBurst * (0.035 + 0.065 * userWave);
+      p += tangentDir * searching * 0.34;
+
+      // Content relevance as bridges: persistent corridors that stitch neighborhoods together.
+      float bridge = pow(abs(sin(angBase * 2.0 - phase * 6.2831853 * 0.55 + rBase * 0.22)), 10.0);
+      p += tangentDir * bridge * relevanceGlue * 0.16;
+      p += radialDir * bridge * relevanceGlue * 0.12;
+
+      // Affirmation as phase-locking and stable orbit.
+      float orbit = sin(uTime * (0.040 + 0.020 * affirmationSteady) + rBase * 0.34);
+      p += tangentDir * orbit * 0.09 * affirmationSteady * phaseAgreement;
+      p *= (1.0 - 0.040 * affirmationSteady * phaseAgreement);
+
+      // Scope-fit friction as shear / stalled flow / compression scars.
+      float shearBand = smoothstep(0.68, 0.98, abs(sin(angBase * 4.0 + rBase * 0.38 - phase * 3.14159)));
+      float stall = friction * middle * shearBand;
+      p -= radialDir * rBase * stall * 0.060;
+      p += tangentDir * sin(rBase * 1.25 + phase * 6.2831853) * stall * 0.34;
+
+      // Reorientation as local coordinate redirection, smooth not jumpy.
+      float redirect = reorientation * middle;
+      float redirectAng = redirect * 0.42 * sin(phase * 6.2831853 + rBase * 0.27);
+      mat2 Rd = mat2(cos(redirectAng), -sin(redirectAng), sin(redirectAng), cos(redirectAng));
+      p = mix(p, Rd * p, smoothstep(0.05, 0.50, redirect));
+
+      // Shared memory trail: neither user nor agent fully resets.
+      float memoryTrail = noise(p * 0.12 + vec2(uTime * 0.010, -uTime * 0.013));
+      p += radialDir * (memoryTrail - 0.5) * (0.035 + 0.070 * relevanceGlue + 0.030 * affirmationSteady);
+      // Smooth symmetry so we don't "pop" when crossing thresholds during morphs.
+      float mirrorAmt = smoothstep(0.06, 0.22, uMirror);
+      vec2 pAbs = abs(p);
+      p = mix(p, pAbs, mirrorAmt);
+      float kaleiAmt = smoothstep(0.48, 0.82, uMirror);
+      float ang = atan(pAbs.y, pAbs.x);
+      float slice = 6.28318 / 8.0;
+      float angK = mod(ang, slice) - slice * 0.5;
+      vec2 pK = vec2(cos(angK), sin(angK)) * length(pAbs);
+      p = mix(p, pK, kaleiAmt);
+      float age = mod(seed * 100.0 + t * 0.4, 1.0);
+      vec2 flow = vec2(0.0);
+      for(float i = 0.0; i < 1.0; i += 0.1) {
+        // Late-phase LOD: fewer stream samples when final/orb phase is visually compact.
+        if(lodFinalPhase > 0.55 && i > 0.45) break;
+        if(lodVeryLate > 0.65 && i > 0.32) break;
+        if(lodOuter > 0.50 && i > 0.28) break;
+        if(i > age) break;
+        float eps = 0.01;
+        float d1 = stream(p * uFlowScale + vec2(eps, 0.0), t + i * 3.0);
+        float d2 = stream(p * uFlowScale - vec2(eps, 0.0), t + i * 3.0);
+        float d3 = stream(p * uFlowScale + vec2(0.0, eps), t + i * 3.0);
+        float d4 = stream(p * uFlowScale - vec2(0.0, eps), t + i * 3.0);
+        vec2 c = vec2(d3 - d4, -(d1 - d2)) / (2.0 * eps);
+        float geoLock = smoothstep(0.52, 0.78, uGeometric);
+        vec2 cLock = c;
+        float axisMix = smoothstep(-0.08, 0.08, abs(c.x) - abs(c.y));
+        cLock = mix(vec2(0.0, c.y), vec2(c.x, 0.0), axisMix);
+        c = mix(c, cLock, geoLock);
+        c.x *= (1.0 + uTension * 3.0); c.y /= (1.0 + uTension * 2.0);
+        float semanticJitter = uJitter * (0.35 + 0.95 * expectation + 0.75 * friction) * (1.0 - 0.58 * affirmationSteady * phaseAgreement);
+        float semanticCohesion = uCohesion * (0.62 + 0.92 * affirmationSteady + 0.55 * relevanceGlue + 0.18 * sat);
+        float semanticVisc = uViscosity * (0.74 + 0.40 * reasonIntensity + 0.20 * relevanceGlue - 0.26 * friction);
+        vec2 bridgePull = tangentDir * bridge * relevanceGlue * 0.035;
+        vec2 stallDrag = -p * 0.020 * friction * middle;
+        flow += (c + bridgePull + stallDrag + (-p * 0.05 * semanticCohesion) + vec2(-c.y, c.x) * (noise(p * 2.0 + i + t) - 0.5) * semanticJitter) * semanticVisc;
+      }
+      float rot = length(flow) * uVortex * 0.4;
+      vec2 ff = vec2(flow.x * cos(rot) - flow.y * sin(rot), flow.x * sin(rot) + flow.y * cos(rot));
+      float invDepth = invRegion * invLoop * (invBandMask - 0.5) * (7.0 + 0.35 * length(p - vec2(2.3, 1.4)));
+      vec3 pos = vec3(
+        p + ff * 4.0,
+        sin(p.x * 0.1 + p.y * 0.1 + t) * uDepth
+        + invDepth
+        + mirrorDepth
+        + innerNegativeZ
+        + finalDepth
+        + orbDepth
+      );
+
+      // Cinematic z-axis sonar cycle:
+      // The piece first returns close to its original state, then an off-center suction source behind
+      // the current center pulls the inner sonar backward; later the outer sonar follows.
+      // Each ring travels along a curving 0→360° xy trajectory, flows out behind z, then returns.
+      float zc = uZCycle;
+      float rrSonar = length(pos.xy);
+
+      // One-way suction on the second trial -> behind-plane transit -> opposite-end escape.
+      // Less clockwise/counterclockwise: this is now mostly a through-field trajectory,
+      // like magnetic flux passing around an invisible globe, not an orbiting funnel.
+      float captureNoise = noise(pos.xy * 0.16 + vec2(seed * 4.7, uTime * 0.012));
+      float vein = pow(abs(sin(atan(pos.y, pos.x) * 2.4 + rrSonar * 0.18 + seed * 5.3)), 2.0);
+
+      float innerBand = smoothstep(6.4, 1.0, rrSonar);
+      float outerBand = smoothstep(4.6, 9.4, rrSonar) * (1.0 - smoothstep(11.5, 14.0, rrSonar));
+
+      // First trial: prepare/align. Second trial: actual suction.
+      float firstTrial = smootherPulse(zc, 0.18, 0.28, 0.42, 0.54);
+      float secondTrial = smootherPulse(zc, 0.46, 0.56, 0.92, 1.00);
+
+      float capture = clamp((innerBand * 0.95 + outerBand * 0.70) * secondTrial, 0.0, 1.0);
+      capture *= smoothstep(0.18, 0.90, captureNoise * 0.58 + vein * 0.60);
+
+      vec2 globeCenter = vec2(
+        0.50 * sin(uTime * 0.020 + 1.1),
+       -0.36 * cos(uTime * 0.018 + 0.6)
+      );
+
+      vec2 rel = pos.xy - globeCenter;
+      float rg = length(rel) + 0.001;
+      vec2 eRad = rel / rg;
+      vec2 eTan = vec2(-eRad.y, eRad.x);
+
+      // A stable entry-to-exit axis. Particles enter from one side and leave the opposite end.
+      float axisAng = 0.85 + 0.20 * sin(uTime * 0.013);
+      vec2 axis = vec2(cos(axisAng), sin(axisAng));
+      float side = sign(dot(rel, axis) + 0.001);
+      vec2 entryDir = -axis * side;
+      vec2 exitDir  =  axis * side;
+
+      // Particle delay creates head-over-tail movement through the field.
+      float delay = seed * 0.18 + smoothstep(3.5, 10.5, rrSonar) * 0.14;
+      float s = clamp((zc - 0.48 - delay) / 0.46, 0.0, 1.0);
+
+      // Monotonic phases. Once particles enter, they keep going through.
+      float alignPrep = firstTrial * (0.35 + 0.65 * vein);
+      float suckIn = smoothstep(0.00, 0.30, s);
+      float tunnelHold = smoothstep(0.22, 0.42, s) * (1.0 - smoothstep(0.64, 0.78, s));
+      float emerge = smoothstep(0.62, 0.92, s);
+
+      // Satisfaction/affirmation as materially different curl functions, but restrained:
+      // satisfaction = smooth field-line curvature
+      // affirmation = laminar locking/steadiness, reducing spin noise
+      float satisfactionCurl = sat * (0.35 + 0.65 * tunnelHold);
+      float affirmationCurl = affirmationSteady * (0.35 + 0.65 * tunnelHold);
+
+      // S-curve around invisible globe, not circular rotation.
+      float lateral = sin(s * 3.14159265) * (0.55 + 1.25 * satisfactionCurl);
+      float braid = sin(s * 6.2831853 + seed * 6.28318) * 0.22 * (1.0 - affirmationCurl);
+      vec2 fieldLine = normalize(axis * mix(-side, side, s) + eTan * (lateral + braid));
+
+      // Laminar locking from affirmation: less counter-rotation, more coherent through-flow.
+      fieldLine = normalize(mix(fieldLine, axis * side, affirmationCurl * emerge * 0.55));
+
+      float fieldStrength = capture * (0.34 + 0.34 * vein + 0.20 * expectationBurst);
+
+      // Prep: small alignment only, no suction yet.
+      pos.xy += axis * alignPrep * 0.10 * sin(seed * 6.28318 + rg * 0.2);
+
+      // 1) Sucked in decisively toward behind-plane.
+      pos.xy += entryDir * fieldStrength * suckIn * (0.78 + 0.035 * rg);
+      pos.xy -= eRad * fieldStrength * suckIn * (0.16 + 0.012 * rg);
+      pos.z  += -40.0 * fieldStrength * suckIn;
+
+      // 2) Tunneling period: forward through-field drift behind the plane.
+      pos.xy += fieldLine * fieldStrength * tunnelHold * (1.05 + 0.055 * rg);
+      pos.xy += eTan * fieldStrength * tunnelHold * lateral * 0.18;
+      pos.z  += -18.0 * fieldStrength * tunnelHold;
+
+      // 3) Escape from the opposite end, not backward out of the entrance.
+      pos.xy += exitDir * fieldStrength * emerge * (1.35 + 0.085 * rg);
+      pos.xy += eRad * fieldStrength * emerge * (0.28 + 0.035 * rg);
+      pos.z  += fieldStrength * emerge * (38.0 + 1.50 * rg);
+
+      // Some decay behind plane; a few take an outer return loop.
+      float decay = tunnelHold * fieldStrength * smoothstep(0.54, 0.94, noise(vec2(seed * 13.1, rg * 0.09)));
+      float outerLoopSeed = smoothstep(0.70, 0.97, noise(vec2(seed * 7.7 + 2.0, rg * 0.15)));
+      float outerLoop = emerge * outerLoopSeed * capture * (0.25 + 0.55 * satisfactionCurl);
+      vec2 returnArc = normalize(globeCenter - pos.xy + eTan * side * (2.4 + rg * 0.16));
+      pos.xy += returnArc * outerLoop * (0.32 + 0.09 * rg);
+      pos.z  += outerLoop * 7.0;
+
+      float pushScale = 1.0 + uCameraPush * (tunnelHold * fieldStrength * 0.06 + emerge * fieldStrength * 0.10);
+      pos.xy *= pushScale;
+      float fluid = smoothstep(uFluidThreshold - 0.1, uFluidThreshold + 0.1, noise(p * 2.0 + t * 0.2));
+      // Layered warm-metallic palette with inner/outer hue separation.
+      // Outer gold drifts slightly copper/amber.
+      // Inner gold drifts slightly ivory/champagne.
+
+      float radial = clamp(length(pos.xy) / 12.0, 0.0, 1.0);
+
+      vec3 outerGoldA = vec3(0.30, 0.12, 0.05); // dark bronze
+      vec3 outerGoldB = vec3(0.86, 0.34, 0.10); // amber copper
+
+      vec3 innerGoldA = vec3(0.68, 0.78, 0.78); // crisp cool silver
+      vec3 innerGoldB = vec3(0.22, 0.92, 1.00); // vivid cyan silver
+
+      float hueNoise = smoothstep(
+        0.25,
+        0.75,
+        fract(strokeId * 0.38 + noise(p * 2.0 + t * 0.2))
+      );
+
+      // Bronze/cyan material palette, closer to the original reference.
+      // Bronze is the warm base; cyan-silver marks trace/depth/intelligence.
+      // Satisfaction/affirmation are deliberately NOT mostly color now; they drive curl above.
+      vec3 bronzeHeat = vec3(0.70, 0.25, 0.07) * (0.28 + 0.44 * expectation);
+      vec3 agedBronze = vec3(0.42, 0.18, 0.07) * (0.28 + 0.28 * relevanceGlue);
+      vec3 cyanSilver = vec3(0.28, 0.90, 0.98) * (0.28 + 0.42 * relevanceGlue + 0.20 * tunnelHold * fieldStrength + 0.28 * emerge * fieldStrength);
+      vec3 paleSpec = vec3(0.56, 0.42, 0.26) * (0.05 + 0.08 * bridge + 0.06 * searching);
+      vec3 frictionTeal = vec3(0.24, 0.58, 0.64) * (0.14 + 0.46 * friction);
+      vec3 semanticTint = normalize(bronzeHeat + agedBronze + cyanSilver + paleSpec + frictionTeal);
+
+      vec3 outerTone = mix(outerGoldA, outerGoldB, hueNoise);
+      vec3 innerTone = mix(innerGoldA, innerGoldB, hueNoise * 0.7);
+      float openingGoldRestraint = mix(0.55, 1.0, smoothstep(0.16, 0.46, uZCycle));
+      outerTone = mix(outerTone, semanticTint, openingGoldRestraint * (0.13 + 0.14 * expectation + 0.08 * friction));
+      innerTone = mix(innerTone, semanticTint, openingGoldRestraint * (0.12 + 0.16 * affirmationSteady + 0.04 * tunnelHold * fieldStrength + 0.12 * emerge * fieldStrength));
+
+      // Slight radial spectral separation
+      vec3 warmCoolBlend = mix(innerTone, outerTone, radial);
+
+      // Fluid regions glow brighter/whiter
+      vColor = mix(
+        warmCoolBlend,
+        vec3(0.66, 0.50, 0.34),
+        fluid * 0.055
+      );
+      vColor = mix(vColor, vec3(0.68, 0.34, 0.14), finality * 0.10);
+      vColor = mix(vColor, vec3(0.78, 0.40, 0.16), orbCoreGlow * 0.12);
+
+      // Orb volume color: warm front, cool silver back, bronze rim.
+      vec3 orbFrontWarm = vec3(0.86, 0.46, 0.18);
+      vec3 orbBackCool = vec3(0.42, 0.78, 0.88);
+      vec3 orbRimBronze = vec3(0.72, 0.28, 0.10);
+      vec3 orbVolumeColor = mix(orbBackCool, orbFrontWarm, orbFront);
+      orbVolumeColor = mix(orbVolumeColor, orbRimBronze, orbRim * 0.55);
+      vColor = mix(vColor, orbVolumeColor, orbPhase * 0.22);
+      vAlpha = mix(0.42, 1.08, fluid) * (0.5 + 0.5 * smoothstep(-50.0, 50.0, pos.z)) * smoothstep(0.0, 0.1, age) * smoothstep(1.0, 0.9, age);
+
+      float readableDensity = 0.82 + 0.22 * sat + 0.18 * affirmationSteady + 0.14 * relevanceGlue;
+      float searchSparsity = 1.0 - 0.16 * searching;
+      float bridgeGlow = 1.0 + 0.24 * bridge * relevanceGlue;
+      float frictionShadow = 1.0 - 0.20 * stall;
+      float lockGlow = 1.0 + 0.15 * affirmationSteady * phaseAgreement;
+
+      // Opening restraint keeps first frame less crowded.
+      // The second-trial transit dims particles only while behind the implied plane.
+      float openingSparse = mix(0.64, 1.0, smoothstep(0.12, 0.44, uZCycle));
+      float tunnelVisibility = 1.0 - 0.36 * decay - 0.10 * tunnelHold * fieldStrength + 0.20 * emerge * fieldStrength + 0.10 * outerLoop;
+      float invAccent = 1.0 + 0.22 * invRegion * invLoop * abs(invBandMask - 0.5);
+      float mirrorAccent = 1.0 + 0.20 * magicRegion;
+      float outerMirrorFade = mix(1.0, 0.38, clamp(outerFade, 0.0, 1.0));
+      float innerMirrorDim = mix(1.0, 0.70, clamp(innerMirror, 0.0, 1.0));
+
+      // Finality: high-contrast contraction, not a plain return.
+      float finalContrast = 1.0 + 0.22 * finality * (1.0 - finalOuterFade);
+      float finalFade = mix(1.0, 0.30, clamp(finalOuterFade, 0.0, 1.0));
+      float finalSealGlow = 1.0 + 0.16 * finalInner;
+
+      // Orb ending: outer field fades gradually, core remains as small glowing relic.
+      float orbFade = mix(1.0, 0.18, clamp(orbOuterFade, 0.0, 1.0));
+      float orbGlow = 1.0 + 0.78 * orbCoreGlow;
+
+      // Volumetric cues: front side brighter, back side dimmer, curved rim highlighted.
+      float orbDepthAlpha = mix(0.72, 1.18, orbFront) * (1.0 + 0.34 * orbRim);
+      vAlpha *= readableDensity * searchSparsity * bridgeGlow * frictionShadow * lockGlow * openingSparse * tunnelVisibility * invAccent * mirrorAccent * outerMirrorFade * innerMirrorDim * finalContrast * finalFade * finalSealGlow * orbFade * orbGlow * mix(1.0, orbDepthAlpha, orbPhase);
+      // Integer-ish point sizes reduce retina shimmer/blurring.
+      float baseSize = mix(3.05, 1.62, fluid);
+      gl_PointSize = floor(uPixel * baseSize * mix(2.14, 1.82, lodVeryLate)) / 2.0;
+
+      // No center fade: the origin-dot bug is fixed at the particle-buffer source.
+      // Keeping the center visible prevents an artificial black hole during morphs.
+      if (uGridMode > 0.5) {
+        vec2 gridPos = uViewport.xy + ((pos.xy / 18.0) * 0.5 + 0.5) * uViewport.zw;
+        gl_Position = vec4(gridPos * 2.0 - 1.0, 0.0, 1.0); gl_PointSize *= uViewport.z;
+      } else {
+        vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+        mv.z += uCameraPush * 10.0;
+        gl_Position = projectionMatrix * mv;
+      }
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor; varying float vAlpha;
+    uniform float uHueRot;
+    vec3 hueShift(vec3 c, float a){
+      const vec3 k = vec3(0.57735026);
+      float ca = cos(a);
+      return c*ca + cross(k,c)*sin(a) + k*dot(k,c)*(1.0-ca);
+    }
+
+    float pick6(float idx, float m0, float m1, float m2, float m3, float m4, float m5){
+      if (idx < 0.5) return m0;
+      if (idx < 1.5) return m1;
+      if (idx < 2.5) return m2;
+      if (idx < 3.5) return m3;
+      if (idx < 4.5) return m4;
+      return m5;
+    }
+    float softPulse(float phase, float center, float width){
+      float d = (phase - center) / max(0.001, width);
+      return exp(-d*d);
+    }
+
+    float smootherPulse(float x, float a, float b, float c, float d){
+      return smoothstep(a, b, x) * (1.0 - smoothstep(c, d, x));
+    }
+
+    void main(){
+      if (length(gl_PointCoord - 0.5) > 0.5) discard;
+      // Sharper particle edge profile for fullscreen retina rendering.
+      float d = length(gl_PointCoord - 0.5);
+      float edge = 1.0 - smoothstep(0.22, 0.5, d);
+      edge = pow(edge, 1.35);
+      vec3 col = pow(vColor * 1.42, vec3(0.82));
+      col = hueShift(col, uHueRot);
+      gl_FragColor = vec4(col, vAlpha * edge * 0.88);
+    }
+  `
+});
+
+// --- CORE ---
+function build(seed){
+  const pos = new Float32Array(N*3), bpos = new Float32Array(N*2), seeds = new Float32Array(N), ids = new Float32Array(N);
+  let s = seed >>> 0; const rng = () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const bias = Number.isFinite(window.__strokeBias) ? window.__strokeBias : 0;
+  const ns = Math.max(60, Math.min(260, Math.floor((160 + bias * 70) + rng() * 60)));
+  const pps = Math.floor(N / ns);
+  let idx = 0;
+  for (let i = 0; i < ns && idx < N; i++){
+    const a = i * 2.399963;
+    const env = Math.max(0.22, 0.55 + 0.42*Math.sin(a + 0.6) + 0.16*Math.sin(2.0*a + 2.1) + 0.10*Math.sin(3.0*a - 0.4));
+    const r = Math.sqrt(rng()) * 8.5 * env;
+    let bx = Math.cos(a)*r, by = Math.sin(a)*r;
+    bx = bx*1.18 + 2.4; by = by*0.78 - 1.6;
+    for (let j = 0; j < pps && idx < N; j++){
+      const x = bx+(rng()-0.5)*0.3, y = by+(rng()-0.5)*0.3;
+      pos[idx*3]=x; pos[idx*3+1]=y; pos[idx*3+2]=0;
+      bpos[idx*2]=x; bpos[idx*2+1]=y;
+      seeds[idx]=rng();
+      ids[idx]=i;
+      idx++;
+    }
+  }
+
+  // Critical: N is not always divisible by ns.
+  // Without this, the remaining Float32Array values stay at (0,0), producing a bright center dot.
+  // Put unused particles offscreen and mark them with strokeId < 0.
+  while (idx < N) {
+    pos[idx*3]=99999.0; pos[idx*3+1]=99999.0; pos[idx*3+2]=0.0;
+    bpos[idx*2]=99999.0; bpos[idx*2+1]=99999.0;
+    seeds[idx]=0.0; ids[idx]=-1.0;
+    idx++;
+  }
+
+  return { pos, bpos, seeds, ids };
+}
+
+function regenerate(){
+  const { pos, bpos, seeds, ids } = build(Math.floor(Math.random()*1e9));
+  if (!geom) {
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.setAttribute('birthPos', new THREE.BufferAttribute(bpos, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('strokeId', new THREE.BufferAttribute(ids, 1));
+    points = new THREE.Points(geom, mat); scene.add(points);
+  } else {
+    geom.attributes.position.array.set(pos); geom.attributes.position.needsUpdate = true;
+    geom.attributes.birthPos.array.set(bpos); geom.attributes.birthPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds); geom.attributes.seed.needsUpdate = true;
+    geom.attributes.strokeId.array.set(ids); geom.attributes.strokeId.needsUpdate = true;
+  }
+}
+
+// --- MAPPING ---
+function mapSignalMaster(sig){
+  const s = clamp01(sig?.satisfaction ?? 0.5), e = clamp01(sig?.expectation ?? 0.0), ri = clamp01(sig?.reasonIntensity ?? 0.3), ro = clamp01(sig?.reorientation ?? 0.0), a = clamp01(sig?.affirmation ?? 0.0), rv = Math.max(-1, Math.min(1, sig?.reactionValence ?? 0.0));
+  return {
+    uFlowScale: lerp(0.55, 1.45, clamp01(0.6*e + 0.4*ri)),
+    uFluidThreshold: lerp(0.60, 0.34, s),
+    uComplexity: lerp(1.0, 3.0, e),
+    uViscosity: lerp(0.05, 0.25, s),
+    uJitter: lerp(0.0, 1.2, ro*0.4),
+    uDepth: lerp(0.0, 10.0, a),
+    uVortex: lerp(0.0, 8.0, s),
+    uShatter: lerp(0.0, 1.2, ro),
+    uTension: lerp(0.0, 4.0, e),
+    uCohesion: lerp(0.0, 6.0, ri),
+    uGeometric: lerp(0.0, 1.0, e),
+    uMirror: lerp(0.0, 2.0, a),
+    strokeBias: (ri - 0.5) * 1.6,
+    grade: {
+      hue: lerp(-28, 24, (rv+1)/2),
+      sat: lerp(0.85, 1.55, clamp01(0.6*e+0.4*(1-ro))),
+      bri: lerp(0.92, 1.22, clamp01(0.7*a+0.3*s)),
+      con: lerp(0.92, 1.45, clamp01(0.7*ro+0.3*(1-s)))
+    }
+  };
+}
+
+function mapSignalIndex(sig){
+  // If sig is null, return the "Original 2gl" baseline
+  const isBaseline = !sig;
+  const s = clamp01(sig?.satisfaction ?? 0.5),
+        e = clamp01(sig?.expectation ?? 0.0),
+        ri = clamp01(sig?.reasonIntensity ?? 0.3),
+        ro = clamp01(sig?.reorientation ?? 0.0),
+        a = clamp01(sig?.affirmation ?? 0.0),
+        rv = Math.max(-1, Math.min(1, sig?.reactionValence ?? 0));
+
+  let mode = 'LAMINAR (ORIGINAL)';
+  if (isBaseline) mode = 'ORIGINAL 2GL';
+  else if (e > 0.6 && e > s && e > a) mode = 'CRYSTALLINE GRID';
+  else if (s > 0.6 && s > e && s > a) mode = 'RADIAL VORTEX';
+  else if (a > 0.6 && a > e && a > s) mode = 'KALEIDOSCOPIC SYMMETRY';
+
+  return {
+    uFlowScale: isBaseline ? 1.0 : lerp(0.55, 1.45, clamp01(0.6*e + 0.4*ri)),
+    uFluidThreshold: isBaseline ? 0.5 : lerp(0.60, 0.34, s),
+    uComplexity: isBaseline ? 2.0 : lerp(1.0, 3.5, e),
+    uViscosity: 0.1 + (s - 0.5) * 0.1,
+    uJitter: isBaseline ? 0.0 : lerp(0.0, 1.2, ro*0.4),
+    uDepth: isBaseline ? 0.0 : lerp(0.0, 12.0, a),
+    uVortex: isBaseline ? 0.0 : lerp(0.0, 10.0, s),
+    uShatter: isBaseline ? 0.0 : lerp(0.0, 1.2, ro),
+    uTension: isBaseline ? 0.0 : lerp(0.0, 4.0, e),
+    uCohesion: isBaseline ? 0.0 : lerp(0.0, 6.0, ri),
+    uGeometric: isBaseline ? 0.0 : lerp(0.0, 1.0, e),
+    uMirror: isBaseline ? 0.0 : lerp(0.0, 2.0, a),
+    strokeBias: isBaseline ? 0.0 : (ri - 0.5) * 1.6,
+    neuralMode: mode,
+    grade: {
+      hue: isBaseline ? 0 : lerp(-28, 24, (rv+1)/2),
+      sat: isBaseline ? 1.0 : lerp(0.85, 1.55, clamp01(0.6*e+0.4*(1-ro))),
+      bri: isBaseline ? 1.0 : lerp(0.92, 1.22, clamp01(0.7*a+0.3*s)),
+      con: isBaseline ? 1.0 : lerp(0.92, 1.45, clamp01(0.7*ro+0.3*(1-s)))
+    }
+  };
+}
+
+function updateHUD(sig, p){
+  if(qp('mode') !== 'hud') return;
+  document.getElementById('hud').classList.add('active');
+  document.getElementById('hud-id').innerHTML = `ID: ${sig?.id || 'LOCAL'}${p?.neuralMode ? `<br>MODE: ${p.neuralMode}` : ''}`;
+  const vitalsEl = document.getElementById('hud-vitals');
+  vitalsEl.innerHTML = ['satisfaction', 'expectation', 'reorientation', 'affirmation'].map(v => {
+    const val = sig?.[v] ?? 0;
+    return `<div>${v.slice(0,4)} <div class="hud-bar-bg"><div class="hud-bar-val" style="width:${val*100}%"></div></div> <span>${val.toFixed(2)}</span></div>`;
+  }).join('');
+}
+
+function lerpParams(cur, tar, t) {
+  const next = {};
+  for (const k in tar) {
+    if (typeof tar[k] === 'number') next[k] = lerp(cur?.[k] ?? tar[k], tar[k], t);
+    else if (typeof tar[k] === 'object') { next[k] = {}; for (const s in tar[k]) next[k][s] = lerp(cur?.[k]?.[s] ?? tar[k][s], tar[k][s], t); }
+  }
+  return next;
+}
+
+function dampAlpha(dtStep, tau){
+  // dtStep: seconds; tau: "time to settle" seconds
+  const t = Math.max(1e-4, tau);
+  const d = Math.max(0, dtStep);
+  return 1 - Math.exp(-d / t);
+}
+
+function breathe(v, amt, speed, phase){
+  // amt is a fractional modulation (0.05 = ±5%)
+  const t = uniforms.uTime.value * speed + (phase || 0);
+  return v * (1 + amt * Math.sin(t));
+}
+
+function mixParams(a, b, t){
+  const out = {};
+  const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
+  for (const k of keys) {
+    const av = a?.[k];
+    const bv = b?.[k];
+    if (typeof av === 'number' && typeof bv === 'number') out[k] = lerp(av, bv, t);
+    else if (av && bv && typeof av === 'object' && typeof bv === 'object' && !Array.isArray(av) && !Array.isArray(bv)) out[k] = mixParams(av, bv, t);
+    else out[k] = (t < 0.5 ? (av ?? bv) : (bv ?? av));
+  }
+  return out;
+}
+
+function getMix(dt){
+  const q = qp('mix');
+  if (q !== null) return clamp01(parseFloat(q));
+  // poetic default: asymmetric inhale/exhale with small holds
+  const speed = parseFloat(qp('mixSpeed')) || 0.055; // cycles/sec
+  const inhale = clamp01(parseFloat(qp('inhale')) || 0.55); // fraction of cycle
+  const holdTop = clamp01(parseFloat(qp('holdTop')) || 0.08);
+  const holdBottom = clamp01(parseFloat(qp('holdBottom')) || 0.06);
+
+  const cyc = (dt * speed) % 1;
+  const a = holdBottom;
+  const b = a + inhale;
+  const c = b + holdTop;
+  const d = 1.0;
+
+  const easeInOutSine = (t) => 0.5 - 0.5 * Math.cos(Math.PI * clamp01(t));
+  const easeOutCubic = (t) => 1 - Math.pow(1 - clamp01(t), 3);
+  const easeInCubic = (t) => Math.pow(clamp01(t), 3);
+
+  // bottom hold -> inhale (slow breath expanding chest) -> top hold -> exhale (reflection)
+  if (cyc < a) return 0.0;
+  if (cyc < b) return easeInOutSine((cyc - a) / Math.max(1e-6, (b - a)));
+  if (cyc < c) return 1.0;
+  // exhale: start gently, settle slowly
+  const t = (cyc - c) / Math.max(1e-6, (d - c));
+  return 1.0 - (0.65 * easeOutCubic(t) + 0.35 * easeInCubic(t));
+}
+
+function mapSignalMixed(sig, mix){
+  // Some params (symmetry/geometric switches) can "pop" visually; ease them slower.
+  const a = mapSignalMaster(sig);
+  const b = mapSignalIndex(sig);
+  const t = clamp01(mix);
+  const ts = t * t * (3 - 2 * t); // smoothstep easing
+  const slow = Math.pow(ts, 1.6);
+
+  const out = mixParams(a, b, ts);
+  // slow-blend the more discontinuous knobs
+  out.uMirror = lerp(a.uMirror, b.uMirror, slow);
+  out.uGeometric = lerp(a.uGeometric, b.uGeometric, slow);
+  out.uTension = lerp(a.uTension, b.uTension, slow);
+  out.uCohesion = lerp(a.uCohesion, b.uCohesion, slow);
+  out.uShatter = lerp(a.uShatter, b.uShatter, slow);
+  return out;
+}
+
+function applySignal(sig){
+  TT.current = sig || null; if(!sig) return;
+  const mix = getMix((performance.now() - start) / 1000);
+  targetParams = mapSignalMixed(sig, mix);
+  if (!currentParams) currentParams = JSON.parse(JSON.stringify(targetParams));
+  window.__strokeBias = targetParams.strokeBias;
+  updateHUD(sig, targetParams);
+}
+
+const start = performance.now();
+let __lastT = start;
+let __mix = 0.0;
+
+// Frame-rate compensated visual clock.
+// The late finality/orb phase intentionally advances slower than real time,
+// so high FPS does not make the contraction feel rushed.
+let __visualClock = 0.0;
+let __lastZCycle = 0.0;
+function latePhaseScale(z){
+  // Starts gently after 0.78, slows more during orb/finality.
+  const a = Math.max(0, Math.min(1, (z - 0.78) / 0.10)); // 0.78 -> 0.88
+  const b = Math.max(0, Math.min(1, (z - 0.88) / 0.10)); // 0.88 -> 0.98
+  const smoothA = a * a * (3 - 2 * a);
+  const smoothB = b * b * (3 - 2 * b);
+  return 1.0 - 0.38 * smoothA - 0.20 * smoothB; // bottoms around 0.42x
+}
+
+// Loop variation state: each breath cycle gets a slightly different visual temperament.
+// This avoids the "same inhale/exhale forever" feeling while keeping the morph smooth.
+let __cycleIndex = -1;
+let __loopVariant = {
+  flow: 1.0,
+  threshold: 0.0,
+  complexity: 1.0,
+  viscosity: 1.0,
+  jitter: 1.0,
+  depth: 1.0,
+  vortex: 1.0,
+  tension: 1.0,
+  cohesion: 1.0,
+  hue: 0.0,
+  sat: 1.0,
+  bri: 1.0,
+  con: 1.0
+};
+
+function seededRand(n){
+  const x = Math.sin(n * 127.1 + 311.7) * 43758.5453123;
+  return x - Math.floor(x);
+}
+
+function updateLoopVariant(dt){
+  const speed = parseFloat(qp('mixSpeed')) || 0.055;
+  const cycle = Math.floor(dt * speed);
+  if (cycle === __cycleIndex) return;
+
+  __cycleIndex = cycle;
+  const r = (k) => seededRand(cycle * 17.0 + k);
+
+  __loopVariant = {
+    flow: lerp(0.88, 1.14, r(1)),
+    threshold: lerp(-0.035, 0.035, r(2)),
+    complexity: lerp(0.90, 1.18, r(3)),
+    viscosity: lerp(0.82, 1.22, r(4)),
+    jitter: lerp(0.80, 1.35, r(5)),
+    depth: lerp(0.78, 1.30, r(6)),
+    vortex: lerp(0.78, 1.26, r(7)),
+    tension: lerp(0.86, 1.18, r(8)),
+    cohesion: lerp(0.86, 1.18, r(9)),
+    hue: lerp(-10.0, 10.0, r(10)),
+    sat: lerp(0.94, 1.10, r(11)),
+    bri: lerp(0.96, 1.08, r(12)),
+    con: lerp(0.94, 1.12, r(13))
+  };
+}
+
+function applyLoopVariant(p){
+  if (!p) return p;
+  const v = __loopVariant;
+  const out = JSON.parse(JSON.stringify(p));
+
+  out.uFlowScale = Math.max(0.2, out.uFlowScale * v.flow);
+  out.uFluidThreshold = clamp01(out.uFluidThreshold + v.threshold);
+  out.uComplexity = Math.max(0.2, out.uComplexity * v.complexity);
+  out.uViscosity = Math.max(0.005, out.uViscosity * v.viscosity);
+  out.uJitter = Math.max(0.0, out.uJitter * v.jitter);
+  out.uDepth = Math.max(0.0, out.uDepth * v.depth);
+  out.uVortex = Math.max(0.0, out.uVortex * v.vortex);
+  out.uTension = Math.max(0.0, out.uTension * v.tension);
+  out.uCohesion = Math.max(0.0, out.uCohesion * v.cohesion);
+
+  if (out.grade) {
+    out.grade.hue = out.grade.hue + v.hue;
+    out.grade.sat = out.grade.sat * v.sat;
+    out.grade.bri = out.grade.bri * v.bri;
+    out.grade.con = out.grade.con * v.con;
+  }
+
+  return out;
+}
+
+function loop(){
+  const now = performance.now();
+  const dt = (now - start) / 1000;
+  const dtStep = Math.min(0.1, (now - __lastT) / 1000);
+  __lastT = now;
+
+  // Cinematic cycle:
+  // 0.00-0.25 original/restraint
+  // 0.28-0.70 inner sonar suction through z
+  // 0.56-0.96 outer sonar suction through z
+  // 0.78-1.00 slowed finality/orb contraction
+  const zDur = parseFloat(qp('zDur')) || 26.0;
+
+  // Use previous phase to decide how much visual time advances this frame.
+  // This is the core speed-consistency fix.
+  const visualScale = latePhaseScale(__lastZCycle);
+  __visualClock += dtStep * visualScale;
+
+  const zCycle = (__visualClock % zDur) / zDur;
+  __lastZCycle = zCycle;
+  uniforms.uTime.value = __visualClock;
+  uniforms.uZCycle.value = zCycle;
+  const camPush = Math.sin(Math.PI * Math.min(1, Math.max(0, (zCycle - 0.24) / 0.72)));
+  uniforms.uCameraPush.value = Math.max(0, camPush);
+  uniforms.uOpeningRestraint.value = Math.min(1, Math.max(0, (zCycle - 0.10) / 0.32));
+  updateLoopVariant(dt);
+  // Smooth mix itself (prevents tiny pixel pops during rapid parameter landscape changes)
+  const targetMix = getMix(dt);
+  const mixTau = parseFloat(qp('mixTau')) || 2.4;
+  __mix = __mix + (targetMix - __mix) * dampAlpha(dtStep, mixTau);
+  const mix = __mix;
+  // continuously re-evaluate target mapping so interpolation works live
+  targetParams = applyLoopVariant(mapSignalMixed(TT.current, mix));
+  if (!currentParams) currentParams = JSON.parse(JSON.stringify(targetParams));
+  const tau = parseFloat(qp('morphTau')) || 1.35;
+  const a = dampAlpha(dtStep, tau);
+  if (qp('mode') === 'grid' && TT.signals) {
+    renderer.autoClear = true; renderer.clear(); renderer.autoClear = false;
+    uniforms.uGridMode.value = 1.0;
+    for (let i = 0; i < 16; i++) {
+      const sig = TT.signals[i % TT.signals.length], p = applyLoopVariant(mapSignalMixed(sig, mix));
+      uniforms.uViewport.value.set((i%4)/4, Math.floor(i/4)/4, 0.25, 0.25);
+      const b = (v, amt, spd) => breathe(v + 0.0001, amt, spd, i * 0.7);
+      Object.keys(p).forEach(k => { if(uniforms[k]) uniforms[k].value = p[k]; });
+      uniforms.uDepth.value = b(p.uDepth, 0.06, 0.35);
+      uniforms.uVortex.value = b(p.uVortex, 0.08, 0.22);
+      renderer.render(scene, camera);
+    }
+  } else {
+    uniforms.uGridMode.value = 0.0; uniforms.uViewport.value.set(0,0,1,1); renderer.autoClear = true;
+    currentParams = lerpParams(currentParams, targetParams, a);
+    const p = currentParams, b = (v, amt, spd) => breathe(v + 0.0001, amt, spd, 0.0);
+    Object.keys(p).forEach(k => { if(k.startsWith('u') && uniforms[k]) uniforms[k].value = p[k]; });
+    uniforms.uDepth.value = b(p.uDepth, 0.06, 0.35);
+    uniforms.uVortex.value = b(p.uVortex, 0.08, 0.22);
+    if (window.__setGrade) window.__setGrade(p); updateHUD(TT.current, p); renderer.render(scene, camera);
+  }
+  requestAnimationFrame(loop);
+}
+
+// --- BOOT ---
+applySignal({"id": "VORTEX", "satisfaction": 0.6, "expectation": 0.1, "reasonIntensity": 0.7, "reorientation": 0.16, "affirmation": 0.0, "reactionValence": 0.3});
+regenerate();
+loop();
+addEventListener('click', regenerate);
+addEventListener('resize', () => {
+  const na = innerWidth/innerHeight; camera.left=frustumSize*na/-2; camera.right=frustumSize*na/2;
+  camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = Math.min(devicePixelRatio, 1.6);
+});
+
+async function init(){
+  const res = await fetch('./ThoughtTrace.signals.json', { cache: 'no-store' });
+  const arr = await res.json(); TT.signals = arr;
+  const wanted = qp('sig');
+  if (wanted) { applySignal(arr.find(x => String(x.id) === wanted)); }
+  window.__TT = { applyById: (id) => applySignal(arr.find(x => String(x.id) === id)), pickTriptych: () => [arr[0], arr[1], arr[2]].map(x => x.id) };
+  window.__TRACE_DIALOGUE_MAPPING = {
+  "agent_turns": "In ThoughtTrace.sample10.jsonl, agent/assistant turns are messages where type == 'assistant'. Their reactions array is the perception signal for that agent output.",
+  "dialogue_attributes_from_agent_turn": {
+    "reactionLabels": "raw perception counts per assistant output",
+    "perceived_satisfaction": "positive reaction labels minus friction labels",
+    "affirmation": "explicit_affirmation ratio",
+    "perceived_relevance": "content_relevance plus positive reaction support",
+    "perceived_friction": "scope_fit + partial_satisfaction ratio",
+    "style_pressure": "presentation_style + scope_fit ratio",
+    "dialogue_settling": "how much the output resolves the exchange",
+    "dialogue_tension": "how much the output creates compression/redirect pressure",
+    "agent_continuity": "how well the output sustains the thread"
+  },
+  "visual_mapping": {
+    "expectation": "bold outward expansion + branching/fanning movement",
+    "reasonIntensity": "amplifies expectation burst and local detail",
+    "affirmation": "steadier slower movement, cohesion, damping, settling",
+    "scope_fit": "compression, kink, darker tension",
+    "content_relevance": "connective tissue/glue/readability",
+    "explicit_affirmation": "late-turn stabilizing glow/cohesion"
+  }
+};
+  window.__exportHighRes = (s) => { renderer.setPixelRatio(Math.min(devicePixelRatio, 2) * s); renderer.setSize(innerWidth, innerHeight); };
+window.__GLOBULAR_ORB_VOLUME_MAPPING = {
+  "change": "final orb now uses implied 3D spherical shell instead of flat circular shrink",
+  "added": [
+    "spherical z displacement",
+    "front/back hemisphere alpha",
+    "back-side perspective compression",
+    "rim highlight",
+    "warm front and cool silver back color split"
+  ],
+  "kept": [
+    "visual clock pacing fix",
+    "slow final orb collapse",
+    "seashell memory"
+  ]
+};
+window.__FINAL_ORB_PACING_FIX = {
+  "base": "uploaded 2gl_third_contraction_finality(1).html",
+  "speed_consistency": [
+    "added independent __visualClock",
+    "latePhaseScale slows visual time after uZCycle 0.78",
+    "uTime and uZCycle now use visual clock, not raw real-time dt"
+  ],
+  "globular_ending": [
+    "slow orbPhase 0.875-0.995",
+    "seashell memory preserved",
+    "breathing relic target",
+    "gentle shrink, no aggressive contraction"
+  ],
+  "performance_safety": [
+    "flow loop breaks after fewer samples in late/orb phase",
+    "outer-particle LOD",
+    "mirror/inversion impact reduced for outer fading particles",
+    "slightly lower point size late"
+  ],
+  "default_zDur": 56
+};
+  window.__THIRD_CONTRACTION_FINALITY_MAPPING = {
+  "change": "third contraction no longer returns to original frame",
+  "timing": "default 52s cycle, finality begins around uZCycle 0.805, roughly 42s",
+  "effect": [
+    "off-center inversion-flavored contraction",
+    "high contrast sealed form",
+    "outer field fades out",
+    "inner structure recedes toward negative z",
+    "signals finality rather than deja-vu reset"
+  ]
+};
+  window.__THIRD_LOOP_MAGIC_MIRROR_MAPPING = {
+  "base": "2gl_space_warp_inversion_experiment",
+  "third_loop": "magic mirror inversion combination",
+  "methods": [
+    "double inversion around two off-center origins",
+    "mirror reflection of inverted fields",
+    "localized micro-tessellation inside mirror space",
+    "global third-loop expansion",
+    "outer fade-out",
+    "inner negative-z spiral"
+  ],
+  "goal": "3rd loop should feel like a stronger space-warp event rather than a repeated expand/withdraw"
+};
+  window.__SPACE_WARP_INVERSION_MAPPING = {
+  "concept": "space-warp experiment",
+  "warp": "localized inversion / domain reciprocation",
+  "math": "pInv = origin + (p - origin) / dot(p - origin, p - origin) * scale",
+  "visual_result": "neighboring bands alternate between normal space and inverted space",
+  "region": "upper-right subarea around 36 degrees",
+  "purpose": "true opposite topology instead of same-direction curl damping"
+};
+  window.__SECOND_TRIAL_OPPOSITE_ESCAPE_MAPPING = {
+  "change": "reduced clockwise/counterclockwise orbiting",
+  "cycle": "first trial aligns/prepares, second trial performs real suction",
+  "escape": "particles exit through the opposite end of the implied magnetic field, not backward from the entrance",
+  "satisfaction": "controls smooth S-curve field-line curvature",
+  "affirmation": "controls laminar locking and reduces rotational noise"
+};
+  window.__ONE_WAY_CURL_TUNNEL_BRONZE_MAPPING = {
+  "fixes": [
+    "suction is now one-way: captured particles keep going behind-plane instead of reversing halfway",
+    "tunneling period added before emergence",
+    "satisfaction and affirmation now encode two materially different curl fields",
+    "palette shifted from bright gold/white to bronze + cyan-silver"
+  ],
+  "curl_mapping": {
+    "satisfaction": "closed resolved orbital curl around implied globe",
+    "affirmation": "phase-locked braided curl that stabilizes the tunnel",
+    "expectation": "entry force and emergence energy",
+    "scope_fit/reorientation": "friction and shear"
+  }
+};
+  window.__CURL_TUNNEL_MAPPING = {
+  "change": "satisfaction and affirmation now drive curl functions, not primarily color",
+  "satisfactionCurl": "closed, resolved, orbital curl around implied globe during behind-plane tunneling",
+  "affirmationCurl": "phase-locking curl that stabilizes/damps chaotic spread while keeping circulation",
+  "tunneling": "particles remain behind the current plane for a period, circulating on existing visual form, then emerge/expand on the other side",
+  "no_literal_tunnel": "no tunnel geometry or light beam is drawn"
+};
+  window.__MAGNETIC_FIELD_ESCAPE_MAPPING = {
+  "concept": "Invisible globe magnetic-field escape",
+  "visible_globe": false,
+  "motion": {
+    "enter": "particles flow toward the implied globe along soft field lines",
+    "behind": "particles pass behind current plane with z-depth",
+    "escape": "particles emerge head-over-tail on the opposite magnetic arc",
+    "decay": "some particles dim/disappear while behind",
+    "outer_loop": "some particles take a wider magnetic return loop back toward center"
+  },
+  "math": {
+    "localPhase": "fract(zCycle + seed offset + radius offset)",
+    "fieldDir": "vec2(cos(theta + arc), sin(theta + arc))",
+    "exitDir": "-fieldDir",
+    "curlDir": "perpendicular(fieldDir)"
+  }
+};
+  window.__Z_SUCTION_FIX = {
+  "fix": "Removed literal circular suction-hole behavior.",
+  "suction": "Invisible off-plane force captures noisy subsets of particles by seed, radius, angle, and local noise.",
+  "escape": "Some particles travel behind z and re-emerge outward as uneven streams from behind the plane.",
+  "visual_goal": "No clean round center void; motion should read as force-field capture and escape."
+};
+  window.__TRACE_Z_SONAR_MAPPING = {
+  "z_axis_cycle": {
+    "0.00_0.25": "quiet original state, less crowded, restrained gold",
+    "0.28_0.70": "inner sonar sucked toward an off-center force behind the current center",
+    "0.56_0.96": "outer sonar follows through the same z-axis suction",
+    "0.96_1.00": "returns toward first frame"
+  },
+  "motion": {
+    "xy": "curvy 0 to 360 degree orbital trajectories around the suction vector",
+    "z": "particles pass behind the plane, then flow out from behind",
+    "camera": "camera push illusion via z and scale during suction"
+  },
+  "palette": "balanced gold/silver two-tone; opening is intentionally less golden"
+};
+  window.__TRACE_MOTION_LANGUAGE = {
+  "new_motion_language": {
+    "expectation": [
+      "anticipatory leaning",
+      "search tendrils",
+      "branch/fork trajectories",
+      "speculative fanning"
+    ],
+    "affirmation": [
+      "phase-locking between user and agent waves",
+      "stable orbit movement",
+      "damped jitter",
+      "cohesive settling"
+    ],
+    "scope_fit": [
+      "shear bands",
+      "stalled flow",
+      "compression scars",
+      "friction shadow"
+    ],
+    "content_relevance": [
+      "bridges",
+      "information corridors",
+      "persistent connective tissue"
+    ],
+    "reorientation": [
+      "smooth local coordinate redirection",
+      "temporary manifold rotation"
+    ]
+  },
+  "dialogue_model": "The visual is no longer one scalar mood field. It treats each neighborhood as a user-intent wave negotiating phase with an agent-response wave."
+};
+}
+init().catch(()=>{});
+</script>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+
+<!-- gp: universal grade panel -->
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">morphology</div>
+  <label>complexity<span id="gp-v-complexity">1.50</span></label><input id="gp-complexity" type="range" min="1" max="4" step="0.01" value="1.5">
+  <label>viscosity<span id="gp-v-viscosity">0.10</span></label><input id="gp-viscosity" type="range" min="0.01" max="0.5" step="0.001" value="0.1">
+  <label>jitter<span id="gp-v-jitter">0.00</span></label><input id="gp-jitter" type="range" min="0" max="2" step="0.01" value="0">
+  <label>depth<span id="gp-v-depth">0.00</span></label><input id="gp-depth" type="range" min="0" max="15" step="0.1" value="0">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label><input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>sat<span id="gp-v-sat">1.00</span></label><input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>bri<span id="gp-v-bri">1.00</span></label><input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>con<span id="gp-v-con">1.00</span></label><input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+</div>
+
+<script>
+(function(){
+  var G={hue:0,sat:1,bri:1,con:1}, pid='2gl';
+  function fmt(k,v){ return k==='hue'?Math.round(v)+'°':(+v).toFixed(2); }
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    document.querySelectorAll('canvas').forEach(c => c.style.filter=f);
+  }
+  window.__setGrade = function(cfg){
+    const g = cfg.grade || {};
+    if(g.hue!==undefined) G.hue=g.hue; if(g.sat!==undefined) G.sat=g.sat; if(g.bri!==undefined) G.bri=g.bri; if(g.con!==undefined) G.con=g.con;
+    ['hue','sat','bri','con'].forEach(k => { 
+      const el=document.getElementById('gp-'+k); if(el){el.value=G[k]; document.getElementById('gp-v-'+k).textContent=fmt(k,G[k]);} 
+    });
+    applyFilter();
+  };
+  ['hue','sat','bri','con'].forEach(k => {
+    document.getElementById('gp-'+k).addEventListener('input', e => { G[k]=+e.target.value; document.getElementById('gp-v-'+k).textContent=fmt(k,G[k]); applyFilter(); });
+  });
+})();
+</script>
+
+
+
+
+<div id="captureStatus" style="
+position:fixed;
+right:16px;
+bottom:118px;
+z-index:2147483647;
+display:block!important;
+visibility:visible!important;
+opacity:0.92!important;
+pointer-events:none!important;
+background:rgba(0,0,0,0.64);
+color:#d9852b;
+border:1px solid rgba(217,133,43,0.35);
+border-radius:10px;
+padding:7px 10px;
+font:11px ui-monospace, Menlo, monospace;
+">capture ready</div>
+
+<button id="savePNGButton" style="
+position:fixed;
+right:16px;
+bottom:80px;
+z-index:2147483647;
+display:block!important;
+visibility:visible!important;
+opacity:0.92!important;
+pointer-events:auto!important;
+background:rgba(0,0,0,0.72);
+color:#d9852b;
+border:1px solid rgba(217,133,43,0.60);
+border-radius:10px;
+padding:9px 12px;
+font:12px ui-monospace, Menlo, monospace;
+cursor:pointer;
+">SAVE PNG</button>
+
+<button id="startVideoButton" style="
+position:fixed;
+right:116px;
+bottom:16px;
+z-index:2147483647;
+display:block!important;
+visibility:visible!important;
+opacity:0.92!important;
+pointer-events:auto!important;
+background:rgba(0,0,0,0.72);
+color:#d9852b;
+border:1px solid rgba(217,133,43,0.60);
+border-radius:10px;
+padding:9px 12px;
+font:12px ui-monospace, Menlo, monospace;
+cursor:pointer;
+">START VIDEO</button>
+
+<button id="stopVideoButton" style="
+position:fixed;
+right:16px;
+bottom:16px;
+z-index:2147483647;
+display:block!important;
+visibility:visible!important;
+opacity:0.92!important;
+pointer-events:auto!important;
+background:rgba(0,0,0,0.72);
+color:#d9852b;
+border:1px solid rgba(217,133,43,0.60);
+border-radius:10px;
+padding:9px 12px;
+font:12px ui-monospace, Menlo, monospace;
+cursor:pointer;
+">STOP VIDEO</button>
+
+<script id="robust-png-video-capture">
+window.addEventListener('load', () => {
+  const status = document.getElementById('captureStatus');
+  const setStatus = (s) => { if (status) status.textContent = s; };
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'block';
+    a.style.position = 'fixed';
+    a.style.left = '0';
+    a.style.top = '0';
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+      a.remove();
+    }, 2000);
+  }
+
+  const saveBtn = document.getElementById('savePNGButton');
+  if (saveBtn) {
+    saveBtn.onclick = () => {
+      const canvas = document.querySelector('canvas');
+      if (!canvas) return setStatus('no canvas');
+
+      setStatus('saving png...');
+      // Wait one frame so WebGL has just rendered into preserved buffer.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          try {
+            canvas.toBlob((blob) => {
+              if (!blob || blob.size < 1000) {
+                setStatus('png failed or blank');
+                return;
+              }
+              downloadBlob(blob, `2gl_capture_${canvas.width}x${canvas.height}_${Date.now()}.png`);
+              setStatus('png downloaded');
+            }, 'image/png');
+          } catch (e) {
+            console.error(e);
+            setStatus('png error');
+          }
+        });
+      });
+    };
+  }
+
+  let recorder = null;
+  let chunks = [];
+  let stopTimer = null;
+
+  function startVideo() {
+    const canvas = document.querySelector('canvas');
+    if (!canvas) return setStatus('no canvas');
+
+    if (recorder && recorder.state === 'recording') {
+      setStatus('already recording');
+      return;
+    }
+
+    chunks = [];
+    const fps = 30;
+    const stream = canvas.captureStream(fps);
+    let mime = 'video/webm;codecs=vp9';
+    if (!MediaRecorder.isTypeSupported(mime)) mime = 'video/webm;codecs=vp8';
+    if (!MediaRecorder.isTypeSupported(mime)) mime = 'video/webm';
+
+    try {
+      recorder = new MediaRecorder(stream, {
+        mimeType: mime,
+        videoBitsPerSecond: 24000000
+      });
+    } catch (e) {
+      console.error(e);
+      setStatus('recorder error');
+      return;
+    }
+
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size) chunks.push(e.data);
+    };
+
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: mime });
+      if (!blob.size) {
+        setStatus('video empty');
+        return;
+      }
+      downloadBlob(blob, `2gl_video_${canvas.width}x${canvas.height}_${Date.now()}.webm`);
+      setStatus('video downloaded');
+    };
+
+    recorder.start();
+    setStatus('recording...');
+    stopTimer = setTimeout(stopVideo, 30000); // max safety stop
+  }
+
+  function stopVideo() {
+    if (stopTimer) {
+      clearTimeout(stopTimer);
+      stopTimer = null;
+    }
+    if (recorder && recorder.state === 'recording') {
+      setStatus('stopping video...');
+      recorder.stop();
+    } else {
+      setStatus('not recording');
+    }
+  }
+
+  const startBtn = document.getElementById('startVideoButton');
+  const stopBtn = document.getElementById('stopVideoButton');
+  if (startBtn) startBtn.onclick = startVideo;
+  if (stopBtn) stopBtn.onclick = stopVideo;
+
+  setStatus('capture ready');
+});
+</script>
+
+</body>
+</html>
