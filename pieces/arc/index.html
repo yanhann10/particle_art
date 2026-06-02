@@ -32,6 +32,10 @@ function lerp(a,b,t){ return a + (b-a)*t; }
 // --- STATE ---
 let TT = { signals: null, current: null };
 const N = 120000;
+// Global fountain loop: every water emitter's period divides LOOP, and the water
+// clock (uLoopTime) wraps at LOOP, so the fountain repeats seamlessly every LOOP s.
+// (The slow camera drift keeps its own continuous clock — it's not part of the loop.)
+const LOOP = 12.0;
 let geom, points, mat;
 
 // --- RENDERER & CAMERA ---
@@ -56,6 +60,8 @@ camera.lookAt(STRUCT_CENTER);
 // --- UNIFORMS ---
 const uniforms = {
   uTime: { value: 0 },
+  uLoopTime: { value: 0 },           // water clock, wrapped to [0,LOOP) for seamless looping
+  uLoop: { value: LOOP },
   uPixel: { value: Math.min(devicePixelRatio, 1.7) },
   // biomorphic / growth signal drivers (slow)
   uGrowth:    { value: 1.0 },   // 0..1 how fully grown (animated in on boot)
@@ -73,7 +79,7 @@ const uniforms = {
 mat = new THREE.ShaderMaterial({
   uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
   vertexShader: `
-    uniform float uTime, uPixel, uGrowth, uBreath, uVerdigris, uGold, uLattice, uOrnament, uColonnade, uWater, uGravity;
+    uniform float uTime, uLoopTime, uLoop, uPixel, uGrowth, uBreath, uVerdigris, uGold, uLattice, uOrnament, uColonnade, uWater, uGravity;
     // base structural coords baked on CPU:
     //  aStruct.xyz = resting architectural position (stone) OR emission point (water)
     //  aMeta.x = role
@@ -106,8 +112,9 @@ mat = new THREE.ShaderMaterial({
       if (role > 4.5) {
         vec3 e = aStruct;                 // emission origin
         float period = max(0.5, aFlow.w);
-        // each particle has its own phase so the stream reads as continuous
-        float t = mod(uTime + aMeta.y * period, period);
+        // each particle has its own phase so the stream reads as continuous;
+        // uLoopTime wraps at LOOP and period divides LOOP -> the stream loops seamlessly.
+        float t = mod(uLoopTime + aMeta.y * period, period);
 
         vec3 pw = e;
         float fade = 1.0;
@@ -138,13 +145,14 @@ mat = new THREE.ShaderMaterial({
         } else {
           // ---- BASIN RIPPLE: water pooling in a ledge/base basin, gently rippling ----
           float br = aFlow.w;             // basin radius
-          // ring ripples expanding outward then resetting (slow)
+          // ring ripples expanding outward then resetting — looped over LOOP
           float ang = oph * 6.2831;
-          float rr = mix(0.1, br, fract(uTime*0.06 + aMeta.y));
+          float w = 6.2831 / uLoop;                       // base loop frequency (1 cycle / LOOP)
+          float rr = mix(0.1, br, fract(uLoopTime/uLoop + aMeta.y));
           pw = e + vec3(cos(ang)*rr, 0.0, sin(ang)*rr);
-          // surface bob
-          pw.y += 0.06 * sin(uTime*0.5 + rr*5.0 + ang*3.0);
-          foam = 0.25 + 0.25*sin(uTime*0.7 + ang*4.0);
+          // surface bob + foam shimmer at integer multiples of the loop frequency (seamless)
+          pw.y += 0.06 * sin(w*uLoopTime + rr*5.0 + ang*3.0);
+          foam = 0.25 + 0.25*sin(2.0*w*uLoopTime + ang*4.0);
           fade = 0.85;
         }
 
@@ -310,16 +318,16 @@ function build(seedVal){
     return baseR * (1.0 - tier*0.16);
   }
 
-  // Budget split: ~74% stone architecture, ~26% water
-  const N_COL  = Math.floor(N*0.17); // colonnade shafts
-  const N_LAT  = Math.floor(N*0.28); // lattice screens (the bulk of the silhouette body)
-  const N_COR  = Math.floor(N*0.11); // cornices / setback ledges
-  const N_VLT  = Math.floor(N*0.09); // vault ribs
-  const N_FIN  = Math.floor(N*0.05); // finials / crown
-  const N_VEIL = Math.floor(N*0.18); // cascading water veils over tier weirs
-  const N_JET  = Math.floor(N*0.05); // arcing jets from crown + corners
-  const N_BAS  = Math.floor(N*0.06); // basin ripples at ledges + base
-  // remainder -> finials/crown overflow
+  // Budget split: stone tower body (NO crown) + water fountain.
+  // Crown spire + apex finials removed per art direction — the tower top is blunt,
+  // capped by its top cornice ledge. Freed budget → lattice/veils/basins so density holds.
+  const N_COL  = Math.floor(N*0.18); // colonnade shafts
+  const N_LAT  = Math.floor(N*0.34); // lattice screens (the bulk of the silhouette body)
+  const N_COR  = Math.floor(N*0.13); // cornices / setback ledges (incl. top-tier cap)
+  const N_VEIL = Math.floor(N*0.22); // cascading water veils over tier weirs
+  const N_JET  = Math.floor(N*0.05); // arcing jets from top-tier corners
+  const N_BAS  = Math.floor(N*0.08); // basin ripples at ledges + base
+  // any remainder -> extra lattice (filled at end so no unused origin particles)
 
   // ---- 1. COLONNADE: vertical column shafts at every bay edge, each tier ----
   for (let k=0; k<N_COL; k++){
@@ -386,53 +394,12 @@ function build(seedVal){
     put(x, yy, z, 2.0, hP, (a/(Math.PI*2)*8.0)%1, rng());
   }
 
-  // ---- 4. RIBBED VAULT CROWN: ribs arcing up & in from the top tier ----
-  const crownBase = TIERS*tierH; // ~15
-  for (let k=0; k<N_VLT; k++){
-    const ribSide = Math.floor(rng()*SIDES);
-    const a = (ribSide/SIDES)*Math.PI*2;
-    const t = rng();                       // 0 base of rib .. 1 apex
-    const r0 = radiusAt(TIERS-1)*0.86;
-    // rib arcs inward and up to a shared apex (vaulting)
-    const rr = r0*(1.0 - t) + 0.1;
-    const yy = crownBase + t*3.4;          // rises ~3.4 above the body
-    // gentle ogee curve
-    const arc = Math.sin(t*Math.PI)*0.6;
-    const rArc = rr + arc*0.0;
-    const x = Math.cos(a)*rArc, z = Math.sin(a)*rArc;
-    const hP = Math.min(1.0, yy/(totalH+3.4));
-    put(x, yy, z, 3.0, hP, t, rng());
-  }
-
-  // ---- 5. FINIALS / GILDED CROWN: clustered points at the apex + tier corners ----
-  const finialEnd = idx + N_FIN;
-  while (idx < finialEnd && idx < N){
-    const r = rng();
-    if (r < 0.6){
-      // central apex finial
-      const a = rng()*Math.PI*2;
-      const t = Math.pow(rng(),0.6);
-      const yy = crownBase + 3.2 + t*1.8;
-      const rr = (1.0-t)*0.9*(0.4+0.6*rng());
-      const x=Math.cos(a)*rr, z=Math.sin(a)*rr;
-      const hP = Math.min(1.0,(yy)/(totalH+5.0));
-      put(x,yy,z,4.0,hP, rng(), rng());
-    } else {
-      // small corner finials at top-tier column tops
-      const side = Math.floor(rng()*SIDES);
-      const a = (side/SIDES)*Math.PI*2;
-      const rr = radiusAt(TIERS-1)*0.98;
-      const yy = crownBase + 0.1 + rng()*0.7;
-      const x=Math.cos(a)*rr, z=Math.sin(a)*rr;
-      const hP = Math.min(1.0, yy/(totalH+5.0));
-      put(x,yy,z,4.0,hP, rng(), rng());
-    }
-  }
+  // ---- (crown removed) ---- top of the tower body; used by water emitters below.
+  const crownBase = TIERS*tierH; // ~15 — blunt top of the tiered tower (no spire)
 
   // =====================================================================
   //  WATER GENERATOR — cascades, jets, basins tied to the architecture.
   // =====================================================================
-  const apexY = crownBase + 3.2 + 1.8;        // finial apex height (~20)
 
   // ---- 6. CASCADE VEILS: sheets spilling over the lip of each setback tier ----
   // Each tier's top ledge is a weir; water sheets over it and falls to the tier below.
@@ -449,32 +416,25 @@ function build(seedVal){
     // sheet cascades down 1.5-2.5 tiers so the veils are long and clearly read as water
     const dropTiers = 1.5 + rng()*1.0;
     const dropH = Math.min(lipY, dropTiers*tierH);
-    const period = Math.sqrt(2.0*Math.max(1.0, dropH)/9.2) * (0.95+0.15*rng());
+    let period = Math.sqrt(2.0*Math.max(1.0, dropH)/9.2) * (0.95+0.15*rng());
+    period = LOOP / Math.max(1, Math.round(LOOP/period));   // snap to divide LOOP -> seamless
     const phase = rng();
     const lateral = rng();                       // shimmer phase
     putW(ox, lipY, oz, 5.0, phase, lateral, vx, vy, vz, period);
   }
 
-  // ---- 7. ARCING JETS: slow parabolas from the crown apex + top-tier corners ----
+  // ---- 7. ARCING JETS: slow parabolas from the top-tier corners, arcing outward ----
+  // (central crown jet removed with the spire — jets now rise only from the tower edge)
   for (let k=0; k<N_JET; k++){
-    let ox, oy, oz, a, speed, up;
-    if (rng() < 0.5){
-      // central crown jet: launches up & gently out, big slow arc
-      a = rng()*Math.PI*2;
-      const rr = 0.4*rng();
-      ox = Math.cos(a)*rr; oz = Math.sin(a)*rr; oy = apexY;
-      speed = 1.6 + rng()*0.8; up = 4.2 + rng()*1.2;
-    } else {
-      // corner jets at top-tier finials, arcing outward over the edge
-      const side = Math.floor(rng()*SIDES);
-      a = (side/SIDES)*Math.PI*2;
-      const rr = radiusAt(TIERS-1)*0.98;
-      ox = Math.cos(a)*rr; oz = Math.sin(a)*rr; oy = crownBase + 0.6;
-      speed = 2.0 + rng()*0.9; up = 3.0 + rng()*1.0;
-    }
+    const side = Math.floor(rng()*SIDES);
+    const a = (side/SIDES)*Math.PI*2;
+    const rr = radiusAt(TIERS-1)*0.98;
+    const ox = Math.cos(a)*rr, oz = Math.sin(a)*rr, oy = crownBase + 0.6;
+    const speed = 2.0 + rng()*0.9, up = 3.0 + rng()*1.0;
     const vx = Math.cos(a)*speed, vz = Math.sin(a)*speed, vy = up;
     // time aloft until it falls back well below launch (long slow arc)
-    const period = (vy + Math.sqrt(vy*vy + 2.0*9.2*Math.max(2.0, oy*0.5)))/9.2;
+    let period = (vy + Math.sqrt(vy*vy + 2.0*9.2*Math.max(2.0, oy*0.5)))/9.2;
+    period = LOOP / Math.max(1, Math.round(LOOP/period));   // snap to divide LOOP -> seamless
     putW(ox, oy, oz, 6.0, rng(), rng(), vx, vy, vz, period);
   }
 
@@ -493,6 +453,28 @@ function build(seedVal){
     const phase = rng();
     putW(0.0, basinY, 0.0, 7.0, phase, ang, 0,0,0, basinR);
     // store true center via aStruct already (0,basinY,0); ripple expands from center
+  }
+
+  // ---- FILL REMAINDER: top up any unused budget with extra lattice threads so no
+  //      particle defaults to the origin (role 0 at 0,0,0) and shows as a clump. ----
+  while (idx < N){
+    const tier = Math.min(TIERS-1, Math.floor(rng()*TIERS));
+    const y0 = tier*tierH;
+    const r  = radiusAt(tier);
+    const side = Math.floor(rng()*SIDES);
+    const faceA = (side+0.5)/SIDES * Math.PI*2;
+    const u = rng()-0.5, v = rng();
+    const fx = u*Math.PI*8.0, fy = v*Math.PI*8.0;
+    const star = Math.abs(Math.sin(fx)*Math.cos(fy)) + Math.abs(Math.cos(fx)*Math.sin(fy));
+    const interlace = Math.abs(Math.sin(fx+fy));
+    const thread = Math.max(star, interlace*0.9);
+    if (thread < 0.62) continue;                 // keep only lattice threads
+    const faceWidth = r * Math.sin(Math.PI/SIDES) * 1.9;
+    const px = u*faceWidth, py = y0 + v*tierH*0.96 + tierH*0.02;
+    const ca=Math.cos(faceA), sa=Math.sin(faceA);
+    const surfR = r * (0.99 + 0.02*(thread-0.7));
+    const wx = ca*surfR - sa*px, wz = sa*surfR + ca*px;
+    put(wx, py, wz, 1.0, py/totalH, ((thread)+v*0.3)%1, rng());
   }
 
   return { aPos, aStr, aMeta, aFlow };
@@ -546,6 +528,7 @@ function loop(){
   const dt = Math.min(0.05, (now - __lastT)/1000);
   __lastT = now;
   uniforms.uTime.value = tSec;
+  uniforms.uLoopTime.value = tSec % LOOP;   // wrapped clock → fountain repeats every LOOP s
 
   // Growth: structure grows in over ~5s on load / regen, then holds (no looping churn).
   const g = clamp01((now - __growthStart)/1000 / 5.0);
