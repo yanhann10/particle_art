@@ -119,6 +119,12 @@ def call(system: str, user: str) -> tuple[str, str]:
     if os.environ.get("PARTICLE_ART_PROVIDER") == "bedrock":
         out = call_bedrock(system, user)
         return out, "bedrock"
+    if os.environ.get("PARTICLE_ART_PROVIDER") == "subscription":
+        # subscription-only: a usage-limit / auth failure is a clean stop, never a paid Bedrock spend
+        out = call_subscription(system, user)
+        if out is None:
+            raise ProviderError("subscription unavailable (Max usage limit or auth) — no bedrock fallback")
+        return out, "subscription"
     out = call_subscription(system, user)
     if out:
         return out, "subscription"
