@@ -197,10 +197,22 @@ def _rejection_block() -> str:
     return "\n".join(lines) if lines else ""
 
 
+def _threejs_advice_block() -> str:
+    """Recent three.js technique notes from the expert reviewer (async memory).
+
+    Lazy import so a missing module never breaks a tick."""
+    try:
+        from threejs_expert import advice_block
+        return advice_block()
+    except Exception:
+        return ""
+
+
 def build_prompt(parent: dict, parent_html: str, word: str,
                  mode: str, extras: dict,
                  user_directive: str | None = None) -> tuple[str, str]:
     rejection = _rejection_block()
+    tj_advice = _threejs_advice_block()
     eval_note = read_top_eval_note()
 
     # User-submitted directive overrides mode framing entirely.
@@ -265,6 +277,7 @@ def build_prompt(parent: dict, parent_html: str, word: str,
         "0.55, font-size 11px); the 3-char id will be supplied as "
         "<NEW_ID>.\n\n"
         + (("USER TASTE GUARDRAILS — read carefully:\n" + rejection + "\n\n") if rejection else "")
+        + ((tj_advice + "\n\n") if tj_advice else "")
         + "Reflexes to engage in EVERY mode:\n"
         + "  - Form must remain RECOGNIZABLE; no noise blobs.\n"
         + "  - Subject must occupy >10% of frame at default camera.\n"
@@ -363,9 +376,11 @@ def main():
                     help="user-submitted feedback text (overrides word/mode framing)")
     args = ap.parse_args()
 
-    # budget gate. Two budget calls per tick (gen + refine) plus 2 critic
-    # calls = ~4× the per-tick cost on Bedrock. Subscription = $0.
-    ok, why = budget.can_spend(lib_claude.BEDROCK_COST_ESTIMATE_USD * 4)
+    # budget gate. Per tick: gen v1 + critic v1 + threejs-expert review +
+    # gen v2 + critic v2 = ~5× the per-tick cost on Bedrock. Subscription = $0.
+    # (The expert review self-gates and skips if the cap is hit, so it can
+    # never block a tick — this reservation just keeps accounting honest.)
+    ok, why = budget.can_spend(lib_claude.BEDROCK_COST_ESTIMATE_USD * 5)
     if not ok and not args.dry_run:
         print(f"abort: budget — {why}")
         return 2
@@ -417,10 +432,31 @@ def main():
         s1 = critic.judge(html_v1, mode, word, extras, parent["id"], parent.get("title", ""))
         score_log["v1"] = s1
         print(f"critic v1: exec={s1['execution_score']} aes={s1['aesthetic_score']} → {s1['combined']:.1f}")
+
+        # three.js TECHNIQUE reviewer debates v1 before the refine pass. Its
+        # one concrete directive (e.g. "use InstancedMesh", "sample with
+        # MeshSurfaceSampler") is folded into the refine feedback so v2 can
+        # adopt the better three.js path. Non-fatal + budget-self-gated.
+        refine_fb = s1["feedback"]
+        try:
+            import threejs_expert
+            tj = threejs_expert.review(html_v1, {
+                "piece_id": f"(pending parent={parent['id']})",
+                "title": f"improv·{mode} · {word}",
+                "direction": parent.get("direction", ""),
+                "mode": mode, "word": word, "parent_id": parent["id"],
+            })
+            if tj and tj.get("directive"):
+                score_log["threejs"] = {"directive": tj["directive"], "tools": tj.get("tools", [])}
+                refine_fb = refine_fb + "\n\n[three.js technique — adopt if it fits the form] " + tj["directive"]
+                print(f"threejs-expert: {tj['directive']}")
+        except Exception as e:
+            print(f"threejs-expert skipped: {e}")
+
         # refinement attempt
         try:
             html_v2, provider_v2 = _generate_one(parent, parent_html, word, mode, extras,
-                                                 refine_feedback=s1["feedback"],
+                                                 refine_feedback=refine_fb,
                                                  user_directive=user_dir)
             html_v2_holder["html"] = html_v2
             s2 = critic.judge(html_v2, mode, word, extras, parent["id"], parent.get("title", ""))
@@ -583,11 +619,10 @@ def main():
 
     print(f"created: pieces/{new_id}/  (parent={parent['id']}, word={word}, mode={mode}, gen={new_meta['generation']}, provider={final_provider})")
 
-    run_git("add",
-            f"pieces/{new_id}",
-            "lineage.json",
-            "taste.json",
-            "scripts/improv_log.jsonl")
+    git_add = [f"pieces/{new_id}", "lineage.json", "taste.json", "scripts/improv_log.jsonl"]
+    if (REPO / "scripts" / "threejs_advice.jsonl").exists():
+        git_add.append("scripts/threejs_advice.jsonl")
+    run_git("add", *git_add)
     # Reject artifacts intentionally NOT pushed (kept local for inspection).
     msg = f"improv·{mode} {parent['id']} → {new_id} · {word}"
     run_git("commit", "-m", msg)
