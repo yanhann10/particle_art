@@ -5,6 +5,7 @@
 # Cron fires every 15 min; a min-gap guard enforces >=45 min spacing (limit-safe pacing,
 # fast retry after a usage-limit skip).
 set -u
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 REPO="${PARTICLE_ART_REPO:-$HOME/git_repo/particle_art}"
 LOG_DIR="$REPO/.logs"; mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/evolve-$(date -u +%Y%m).log"
