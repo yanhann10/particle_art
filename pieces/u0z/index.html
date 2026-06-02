@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>u0z · lucy ricochet</title>
+<!-- MOTION: scatter, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a080c; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+           letter-spacing:0.06em; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.6; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy …</div>
+<div class="id">u0z</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 0, 30);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a080c, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 60000;
+const positions    = new Float32Array(N * 3);
+const restPositions = new Float32Array(N * 3);
+const seeds        = new Float32Array(N);
+
+/* ── ricochet state ── */
+const RICOCHET_INTERVAL = 9.0;   // seconds between strikes
+const RICOCHET_DURATION = 3.8;   // seconds for full scatter-and-return
+let impactAge = -1.0;
+const impactPos = new THREE.Vector3();
+const impactDir = new THREE.Vector3();
+let lastImpactT = -RICOCHET_INTERVAL + 4.0; // first strike at ~5s after reveal
+let modelLoaded = false;
+
+const uniforms = {
+  uTime:      { value: 0 },
+  uPixel:     { value: renderer.getPixelRatio() },
+  uReady:     { value: 0.0 },
+  uImpactPos: { value: new THREE.Vector3(0,0,0) },
+  uImpactAge: { value: -1.0 },
+  uImpactDir: { value: new THREE.Vector3(-1,0,0) }
+};
+
+/* ── tracer projectile ── */
+const tracerGeo = new THREE.BufferGeometry();
+const tracerPosAttr = new Float32Array(3);
+tracerGeo.setAttribute('position', new THREE.BufferAttribute(tracerPosAttr, 3));
+const tracerMat = new THREE.PointsMaterial({
+  size: 4, color: 0xf0c888, transparent: true, opacity: 0,
+  blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true
+});
+const tracer = new THREE.Points(tracerGeo, tracerMat);
+scene.add(tracer);
+let tracerOrigin = new THREE.Vector3();
+let tracerTarget = new THREE.Vector3();
+let tracerFlyStart = -10;
+const TRACER_FLY_DUR = 0.45;
+
+/* ── main particle material ── */
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform vec3  uImpactPos;
+    uniform float uImpactAge;
+    uniform vec3  uImpactDir;
+    attribute vec3  rest;
+    attribute float seed;
+    varying vec3  vCol;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = rest;
+      float t = uTime * 0.5 + seed * 6.2831;
+
+      // gentle breathing — particles drift along approximate normal
+      vec3 n = normalize(p + vec3(0.001));
+      p += n * sin(t) * 0.055 * (1.0 + 0.4 * sin(seed * 9.0));
+
+      // ── ricochet scatter ──
+      float hitGlow = 0.0;
+      if (uImpactAge >= 0.0 && uImpactAge < ${RICOCHET_DURATION.toFixed(1)}) {
+        float d = distance(rest, uImpactPos);
+        float radius = 2.8;
+        float influence = smoothstep(radius, 0.0, d);
+
+        // scatter direction: mostly away from impact, with reflected component
+        vec3 away = normalize(rest - uImpactPos + vec3(0.0001));
+        vec3 surfN = normalize(rest);
+        vec3 refl  = reflect(uImpactDir, surfN);
+        vec3 sDir  = normalize(away * 0.55 + refl * 0.45);
+
+        // per-particle variation in scatter distance
+        float pVar = 1.0 + seed * 1.8;
+
+        // time envelope: burst (0-0.25s) → drift (0.25-1.6s) → return (1.6-3.8s)
+        float age = uImpactAge;
+        float env;
+        if (age < 0.25) {
+          env = smoothstep(0.0, 0.25, age);
+        } else if (age < 1.6) {
+          env = 1.0 - 0.08 * (age - 0.25); // slight settling
+        } else {
+          env = (1.0 - 0.08 * 1.35) * (1.0 - smoothstep(1.6, ${RICOCHET_DURATION.toFixed(1)}, age));
+        }
+
+        float mag = influence * env * 2.5 * pVar;
+        p += sDir * mag;
+
+        // hit glow: brief warm flash near impact
+        hitGlow = influence * max(0.0, 1.0 - age * 1.8);
+      }
+
+      // assembly reveal: fly in from random sphere
+      vec3 entry = vec3(sin(seed*40.0), cos(seed*30.0), sin(seed*22.0)) * 18.0;
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      // ── color: bone-warm palette, ember flash on hit ──
+      float energy = 0.4 + 0.6 * sin(t * 0.7);
+      vec3 ivory = vec3(0.93, 0.90, 0.84);
+      vec3 amber = vec3(0.92, 0.74, 0.50);
+      vec3 ember = vec3(0.72, 0.30, 0.18);
+      vec3 col = mix(ivory, amber, energy);
+      col = mix(col, ember, smoothstep(0.78, 1.0, energy) * 0.5);
+
+      // impact flash: brief shift toward a cooler ash-rose
+      vec3 flashCol = vec3(0.96, 0.82, 0.66);
+      col = mix(col, flashCol, hitGlow * 0.7);
+
+      vCol = col;
+      vAlpha = (0.42 + 0.58 * energy) * (0.4 + 0.6 * uReady);
+
+      // size: slightly larger near impact for emphasis
+      float sizeBoost = 1.0 + hitGlow * 0.8;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.0 + 1.4 * energy) * sizeBoost * uPixel * (45.0 / dist) * (0.4 + 0.6 * uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const loadingEl = document.getElementById('loading');
+
+/* ── load Stanford Lucy ── */
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+new PLYLoader().load(PLY_URL,
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const scale = 15 / Math.max(size.x, size.y, size.z);
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp = new THREE.Vector3();
+    for (let i = 0; i < N; i++){
+      sampler.sample(tmp);
+      restPositions[i*3]   = tmp.x;
+      restPositions[i*3+1] = tmp.y;
+      restPositions[i*3+2] = tmp.z;
+      seeds[i] = Math.random();
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+
+    loadingEl.style.display = 'none';
+    revealStart = performance.now();
+    modelLoaded = true;
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      loadingEl.textContent = `loading lucy · ${pct}%`;
+    }
+  },
+  (err) => { loadingEl.textContent = 'load failed'; console.error(err); }
+);
+
+let revealStart = 0;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── pick a random impact on Lucy's surface ── */
+function triggerRicochet(t) {
+  // pick a random rest-position as impact target
+  const idx = Math.floor(Math.random() * N);
+  impactPos.set(restPositions[idx*3], restPositions[idx*3+1], restPositions[idx*3+2]);
+
+  // incoming direction: pick from curated angles (camera-left, above, below-right)
+  const angles = [
+    new THREE.Vector3( 1,  0.2, 0.5),  // from right
+    new THREE.Vector3(-1,  0.3, 0.4),  // from left
+    new THREE.Vector3( 0.3, 1,  0.2),  // from above
+    new THREE.Vector3( 0.5,-0.8, 0.6), // from below-right
+    new THREE.Vector3(-0.4,-0.3, 1),   // from behind-left
+  ];
+  const chosen = angles[Math.floor(Math.random() * angles.length)];
+  impactDir.copy(chosen).normalize();
+
+  // set tracer origin: far along the incoming direction
+  tracerOrigin.copy(impactPos).addScaledVector(impactDir, -25);
+  tracerTarget.copy(impactPos);
+  tracerFlyStart = t - TRACER_FLY_DUR; // tracer arrives right at t
+
+  uniforms.uImpactPos.value.copy(impactPos);
+  uniforms.uImpactDir.value.copy(impactDir);
+
+  lastImpactT = t;
+  impactAge = 0;
+}
+
+const startMs = performance.now();
+function loop(){
+  const t = (performance.now() - startMs) / 1000;
+  uniforms.uTime.value = t;
+
+  // reveal
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 2800);
+  }
+
+  // ── ricochet timing ──
+  if (modelLoaded && uniforms.uReady.value > 0.98) {
+    const sinceLast = t - lastImpactT;
+    if (sinceLast >= RICOCHET_INTERVAL) {
+      triggerRicochet(t);
+    }
+    if (impactAge >= 0) {
+      impactAge = t - lastImpactT;
+      if (impactAge > RICOCHET_DURATION) impactAge = -1.0;
+    }
+    uniforms.uImpactAge.value = impactAge;
+  }
+
+  // ── tracer projectile ──
+  const tracerAge = t - (tracerFlyStart);
+  if (tracerAge >= 0 && tracerAge <= TRACER_FLY_DUR + 0.15) {
+    const prog = Math.min(1.0, tracerAge / TRACER_FLY_DUR);
+    const eased = prog * prog; // accelerate into target
+    const tp = new THREE.Vector3().lerpVectors(tracerOrigin, tracerTarget, eased);
+    tracerPosAttr[0] = tp.x; tracerPosAttr[1] = tp.y; tracerPosAttr[2] = tp.z;
+    tracerGeo.attributes.position.needsUpdate = true;
+    tracerMat.opacity = prog < 0.95 ? 0.7 + 0.3 * prog : Math.max(0, 1.0 - (tracerAge - TRACER_FLY_DUR) * 8);
+    tracerMat.size = 3 + prog * 3;
+  } else {
+    tracerMat.opacity = 0;
+  }
+
+  // very slow camera drift — not rotation, just a gentle lateral float
+  camera.position.x = Math.sin(t * 0.025) * 1.2;
+  camera.position.y = Math.cos(t * 0.018) * 0.6;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<!-- piece-ctrl: standard gallery controls -->
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+<!-- gp: universal grade panel (injected by scripts/inject_grade_panel.py) -->
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    for(var k in G){
+      document.getElementById('gp-'+k).value=G[k];
+      document.getElementById('gp-v-'+k).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    load().forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+</body>
+</html>
