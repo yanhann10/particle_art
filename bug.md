@@ -30,6 +30,7 @@
 ## Hard bans
 
 * **LeePerrySmith.glb** — never load this model. Reject any piece containing the string `LeePerrySmith`.
+* **Radial red-line / thread-burst** — never generate bright lines radiating outward from a central orb/disc (the Chiharu Shiota red-thread family restyled). User 2026-06-01: "never do these radial red line again." Banned regardless of color — a verdigris/teal recolor (m8p) of the red original (i09) is equally rejected. The structure is the violation, not the hue.
 
 ## Code-detectable visual failures — REJECT if present
 

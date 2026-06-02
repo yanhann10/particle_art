@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ere · Cosmic nebula with biomorphic pulsing</title>
+<!-- MOTION: breathing, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background:
+      radial-gradient(ellipse at 42% 48%, #1a0a2e 0%, #16213e 28%, #0f3460 52%, #533483 78%, #2d1b4e 100%),
+      #0a0512;
+    background-blend-mode: normal;
+    color: #e8d4f8; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  /* deep space grain — violet-tinted noise */
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0.15 0 0.10 0 0.04  0 0.08 0.12 0 0.02  0.20 0.10 0.25 0 0.06  0 0 0 0.28 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.6'/></svg>");
+    mix-blend-mode: multiply; opacity: 0.45;
+  }
+  /* cosmic light — ember glow from bottom-right, indigo shadow from top-left */
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background: 
+      radial-gradient(ellipse 110% 100% at 72% 85%, rgba(255,140,60,0.22), rgba(255,140,60,0) 50%),
+      radial-gradient(ellipse 95% 90% at 15% 18%, rgba(100,50,180,0.18), rgba(100,50,180,0) 55%);
+    mix-blend-mode: screen;
+  }
+  canvas { display:block; position: relative; z-index: 0; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; z-index:5; color: #d4b8e8; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; z-index:5; color: #d4b8e8; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; z-index:5; color: #d4b8e8; }
+</style>
+</head>
+<body>
+<div class="id">ezx</div>
+<div class="hint">click to regenerate · drag to nudge — nebula breathes, ember to indigo</div>
+<div class="src">vascular pulsing · biomorphic tissue · cosmic palette · particle ecology</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Descended from ere (Riley pattern). This iteration replaces the parchment-print aesthetic
+// with a cosmic nebula environment: ember-core particle clusters pulse with peristalsis-like
+// waves (organic breathing), surrounded by smooth indigo halos. The form is a living tissue,
+// not an interference pattern. Palette: warm orange-red cores (#ff8c3c, #ff6b1a) bleeding into
+// deep violet-indigo (#2d1b4e, #16213e). Framing: particles occupy >15% of viewport at rest.
+// Motion: gentle vascular pulsing — clusters expand/contract in a wave from root to tip.
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 120);
+camera.position.set(0, 0, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ────────────── CORE NEBULA: vascular pulsing clusters
+// Each particle is seeded with a 3D position that defines a base "vein" path.
+// Particles cluster around these paths; a pulsation front sweeps through,
+// contracting/expanding density like a heartbeat or peristalsis.
+
+const N_CORE = 85000;
+const positions = new Float32Array(N_CORE * 3);
+const seeds     = new Float32Array(N_CORE);
+const pathIds   = new Float32Array(N_CORE);    // which vascular path this particle belongs to
+
+let regrowSeed = Math.random() * 1e9;
+
+function buildNebula(seed) {
+  // mulberry32 PRNG
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = s + 0x6d2b79f5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  // Define 5 primary vascular paths — each a 3D curve from origin outward
+  const paths = [];
+  for (let p = 0; p < 5; p++) {
+    paths.push({
+      theta: (p / 5) * Math.PI * 2 + rng() * 0.3,
+      phi:   Math.PI * 0.3 + rng() * 0.4,
+      twist: rng() * Math.PI * 2,
+      scale: 1.0 + rng() * 0.3
+    });
+  }
+
+  // Sample particles around vascular paths
+  // Density follows a Gaussian along each path; pulsation will modulate this.
+  let written = 0;
+  let attempts = 0;
+
+  while (written < N_CORE && attempts < N_CORE * 20) {
+    attempts++;
+
+    // Pick a path
+    const pathIdx = Math.floor(rng() * paths.length);
+    const path = paths[pathIdx];
+
+    // Sample along the path (parameter t ∈ [0, 1])
+    const t = rng();
+
+    // 3D curve: spiral outward with twist
+    const r = t * 5.5;
+    const radial_angle = path.theta + path.twist * t;
+    const vertical = Math.sin(path.phi) * r * 0.6;
+    const base_x = Math.cos(radial_angle) * r;
+    const base_z = Math.sin(radial_angle) * r;
+
+    // Add Gaussian jitter perpendicular to the path
+    const jitter_mag = 0.35 * Math.exp(-t * 1.2); // tighter toward tip
+    const jitter_angle = rng() * Math.PI * 2;
+    const jitter_r = Math.sqrt(-2 * Math.log(Math.max(1e-6, rng()))) * jitter_mag;
+    
+    const x = base_x + jitter_r * Math.cos(jitter_angle);
+    const y = vertical - 0.5 + jitter_r * Math.sin(jitter_angle) * 0.5;
+    const z = base_z + jitter_r * Math.cos(jitter_angle + Math.PI * 0.5) * 0.6;
+
+    // Acceptance: higher density near path core, lower at halo
+    const radDist = Math.sqrt(jitter_r * jitter_r);
+    const coreDensity = Math.exp(-radDist * radDist * 1.8);
+    const radialFalloff = Math.exp(-r * r * 0.08);
+    const accept = rng() < coreDensity * radialFalloff * (0.5 + 0.5 * Math.cos(path.theta * 1.3));
+
+    if (!accept) continue;
+
+    positions[written * 3]     = x;
+    positions[written * 3 + 1] = y;
+    positions[written * 3 + 2] = z;
+    seeds[written]             = rng();
+    pathIds[written]           = pathIdx + rng() * 0.1; // path index + jitter for gradient
+    written++;
+  }
+
+  // Pad unfilled slots
+  for (let i = written; i < N_CORE; i++) {
+    positions[i * 3]     = 0;
+    positions[i * 3 + 1] = -10;
+    positions[i * 3 + 2] = 0;
+    seeds[i]             = 0;
+    pathIds[i]           = -1;
+  }
+}
+
+buildNebula(Math.floor(regrowSeed));
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('pathId',   new THREE.BufferAttribute(pathIds, 1));
+
+const uniforms = {
+  uTime:    { value: 0 },
+  uPixel:   { value: renderer.getPixelRatio() },
+  uPointer: { value: new THREE.Vector2(0, 0) }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec2  uPointer;
+    attribute float seed;
+    attribute float pathId;
+    varying float vDepth;
+    varying float vPulse;
+    varying float vColor;
+
+    void main() {
+      vec3 p = position;
+
+      // Subtle pointer-driven tilt
+      float tiltX = uPointer.y * 0.18;
+      float tiltZ = -uPointer.x * 0.18;
+      float ca = cos(tiltX), sa = sin(tiltX);
+      float cb = cos(tiltZ), sb = sin(tiltZ);
+      vec3 q = vec3(p.x, p.y * ca - p.z * sa, p.y * sa + p.z * ca);
+      q = vec3(q.x * cb + q.y * sb, -q.x * sb + q.y * cb, q.z);
+
+      // PERISTALSIS: vascular pulsing wave
+      // Each path has a pulsation front that sweeps outward over ~3 seconds.
+      // Particles near the front contract inward (cluster), then relax.
+      float pathPhase = pathId * 6.28 * 0.5;
+      float pulseWave = mod(uTime * 0.33 + pathPhase, 6.28);
+      
+      // Distance along the path (approximated from length)
+      float dist = length(p);
+      float distPhase = (dist / 5.5) * 6.28;
+      
+      // Pulsation envelope: gaussian moving along the path
+      float pulseFront = pulseWave + distPhase;
+      float pulse = exp(-pow(mod(pulseFront, 6.28) - 3.14, 2.0) * 0.5);
+      
+      // Contract particles toward the path center during pulse
+      float contractAmt = pulse * 0.18;
+      vec3 centerDir = normalize(p);
+      q -= centerDir * contractAmt;
+      
+      // Slow drift: the overall nebula drifts like a breathing body
+      float breatheAmt = 0.04 * sin(uTime * 0.24 + seed * 6.28);
+      q.y += breatheAmt;
+
+      vPulse = pulse;
+      vColor = pathId * 0.2 + seed * 0.3;
+
+      vec4 mv = modelViewMatrix * vec4(q, 1.0);
+      vDepth = -mv.z;
+
+      // Point size varies with pulse: tighter clusters are denser, show as brighter
+      float sizeVar = 0.8 + 1.2 * pulse;
+      gl_PointSize = sizeVar * uPixel * (5.5 / vDepth);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vDepth;
+    varying float vPulse;
+    varying float vColor;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      float soft = exp(-r * 22.0);
+
+      // Cosmic palette: ember core (warm orange-red) to indigo halo
+      // Pulsing particles are warm cores; relaxed particles fade to cool indigo.
+      vec3 emberCore   = vec3(1.0, 0.54, 0.24);   // #ff8c3c
+      vec3 emberBright = vec3(1.0, 0.73, 0.35);   // #ffbb58
+      vec3 indigoDeep  = vec3(0.18, 0.10, 0.32);  // #2d1b4e
+      vec3 indigoDim   = vec3(0.10, 0.06, 0.22);  // #1a0f38
+
+      // Color transition: pulsing → warm, relaxed → cool
+      vec3 pulseColor  = mix(emberCore, emberBright, vPulse);
+      vec3 haloColor   = mix(indigoDeep, indigoDim, 1.0 - vPulse);
+      vec3 col = mix(haloColor, pulseColor, vPulse * 0.8 + vColor * 0.2);
+
+      // Depth fade: distant particles fade to background
+      float haze = clamp((vDepth - 10.0) / 8.0, 0.0, 0.6);
+      col = mix(col, vec3(0.08, 0.04, 0.14), haze * 0.5);
+
+      // Alpha modulation: pulsing cores glow brighter
+      float alpha = soft * (0.65 + 0.35 * vPulse) * (1.0 - haze * 0.4);
+
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ────────────── HALO LAYER: smooth low-density indigo wash
+const N_HALO = 12000;
+const haloGeom = new THREE.BufferGeometry();
+const haloPos  = new Float32Array(N_HALO * 3);
+const haloSeed = new Float32Array(N_HALO);
+
+for (let i = 0; i < N_HALO; i++) {
+  const r = Math.sqrt(Math.random()) * 6.5;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.random() * Math.PI;
+  haloPos[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
+  haloPos[i * 3 + 1] = r * Math.cos(phi) * 0.4 - 0.3;
+  haloPos[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+  haloSeed[i] = Math.random();
+}
+
+haloGeom.setAttribute('position', new THREE.BufferAttribute(haloPos, 3));
+haloGeom.setAttribute('seed',     new THREE.BufferAttribute(haloSeed, 1));
+
+const haloMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: uniforms.uTime, uPixel: uniforms.uPixel },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vGlow;
+    varying float vDepth;
+
+    void main() {
+      vec3 p = position;
+      // Slow drift through halo
+      float t = uTime * 0.06 + seed * 6.28;
+      p.x += sin(t * 0.7 + seed * 15.0) * 0.25;
+      p.y += cos(t * 0.5 + seed * 11.0) * 0.18;
+      p.z += sin(t * 0.6 + seed * 18.0) * 0.22;
+
+      // Glow varies with position (bias toward lower-right for ember light)
+      vGlow = 0.20 + 0.35 * smoothstep(-1.0, 1.0, p.x * 0.25 + p.y * 0.15);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      gl_PointSize = (0.7 + 0.5 * vGlow) * uPixel * (3.5 / vDepth);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vGlow;
+    varying float vDepth;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      float soft = exp(-r * 18.0);
+
+      // Deep indigo, low opacity — atmospheric halo
+      vec3 halos = vec3(0.16, 0.08, 0.28);
+      float alpha = soft * 0.35 * vGlow * 0.5;
+
+      gl_FragColor = vec4(halos, alpha);
+    }
+  `
+});
+
+const halo = new THREE.Points(haloGeom, haloMat);
+scene.add(halo);
+
+// ────────────── Interaction
+addEventListener('pointermove', (e) => {
+  uniforms.uPointer.value.set(
+    (e.clientX / innerWidth)  * 2 - 1,
+    (e.clientY / innerHeight) * 2 - 1
+  );
+});
+
+addEventListener('click', () => {
+  regrowSeed = Math.random() * 1e9;
+  buildNebula(Math.floor(regrowSeed));
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.seed.needsUpdate = true;
+  geom.attributes.pathId.needsUpdate = true;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ────────────── Animation loop
+const start = performance.now();
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // Camera drifts gently — cosmic observation
+  camera.position.x = Math.sin(t * 0.04) * 0.5;
+  camera.position.y = 0.3 + Math.sin(t * 0.035 + 1.5) * 0.35;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(255,140,60,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(255,140,60,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,140,60,0.4);border-radius:3px;padding:4px 10px;color:rgba(255,140,60,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#ff8c3c';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    var since=new Date();
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>
