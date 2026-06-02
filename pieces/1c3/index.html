@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1c3 · wires in an evening wind</title>
+<!-- MOTION: drift, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#08070a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.38; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.5; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">1c3</div>
+<div class="hint">a steady wind from the west · drag to orbit</div>
+<div class="src">Gonzalez-Torres · gloaming · wires in an evening wind</div>
+<div class="stat" id="stat">wind →</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*  WIRES IN AN EVENING WIND
+    ────────────────────────
+    Seven light-wires are strung between pinned posts and hang as catenaries
+    in twilight depth. ONE readable law governs everything you see:
+
+        WIND  —  a single steady gust from -x toward +x.
+
+    The wind never reverses. It swells and eases (a slow envelope) and a
+    gentle ripple travels DOWNWIND along each wire, so gusts visibly move
+    through the line the way wind moves through telephone wires or a
+    clothesline at dusk. Gravity only sets the resting droop; the motion the
+    eye reads is the wind catching the wires and letting them fall back.
+
+    Substrate (not the "motion" — just what makes the wires cohere):
+      spring-chain Hooke's law + viscous damping, endpoints pinned,
+      explicit Euler. Wind is added as a uniform downwind acceleration.
+*/
+
+const BG = 0x08070a;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 1.2, 19);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.autoRotate = false;            // Y-axis autorotate banned
+controls.target.set(0, -2, 0);
+
+// --- Spring-chain substrate constants ---
+const K   = 80.0;   // spring stiffness  [Hooke: F = k·(|r|−L0)]
+const C   = 7.0;    // viscous damping   [F = −c·v]
+const G   = 9.8;    // gravity (downward, −y) — sets resting droop only
+const M   = 1.0;    // mass per node
+const DT  = 0.004;  // Euler timestep [s]
+const STEPS_PER_FRAME = 6;
+
+// --- THE WIND (the one law) ---
+// gust acceleration in +x, always positive → unidirectional, never reverses.
+const WIND_BASE  = 3.4;   // steady push
+const WIND_SWELL = 5.6;   // slow swell amplitude
+function windGust(wt, audio) {
+  // two slow sines → an organic swell that always stays > 0
+  const swell = (0.5 + 0.5 * Math.sin(wt * 0.40))
+              * (0.6 + 0.4 * Math.sin(wt * 0.17 + 1.3));
+  let g = WIND_BASE + WIND_SWELL * swell;
+  g *= (1.0 + audio.level * 1.4);      // sound leans into the wind
+  g += audio.bass * 4.0;
+  return g;
+}
+
+// --- Wire layout ---
+const STRAND_COUNT = 7;
+const NODES_PER    = 60;
+const STRAND_Z     = [-3.6, -2.4, -1.2, 0.0, 1.2, 2.4, 3.6];
+const STRAND_SAG   = [1.00, 1.22, 0.92, 1.16, 1.02, 1.26, 0.94];
+const STRAND_WIDTH = [6.0,  6.8,  5.6,  7.0,  6.2,  6.6,  5.8];
+
+const strands = [];
+function initStrand(si) {
+  const W = STRAND_WIDTH[si], sag = STRAND_SAG[si], z0 = STRAND_Z[si], N = NODES_PER;
+  const nodes = [];
+  for (let i = 0; i < N; i++) {
+    const t  = i / (N - 1);
+    const tx = (t * 2 - 1);
+    nodes.push({
+      x: tx * W,
+      y: -sag * 2.1 * tx * tx,                 // parabolic catenary start
+      z: z0 + (Math.random() - 0.5) * 0.1,
+      vx: 0, vy: 0, vz: 0,
+      pinned: i === 0 || i === N - 1           // posts
+    });
+  }
+  let arcLen = 0;
+  for (let i = 0; i < N - 1; i++) {
+    const a = nodes[i], b = nodes[i + 1];
+    arcLen += Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+  }
+  return { nodes, L0: arcLen / (N - 1), z0 };
+}
+for (let si = 0; si < STRAND_COUNT; si++) strands.push(initStrand(si));
+
+// --- One Euler step for one wire, under gravity + spring + WIND ---
+function stepStrand(strand, gust) {
+  const { nodes, L0 } = strand;
+  const N = nodes.length;
+  const ax = new Float64Array(N), ay = new Float64Array(N), az = new Float64Array(N);
+
+  for (let i = 0; i < N; i++) {
+    const v = nodes[i];
+    if (v.pinned) continue;
+
+    // gravity (droop)
+    ay[i] -= G;
+
+    // WIND: steady push downwind (+x). A ripple travels along the wire so the
+    // gust visibly moves through the line; ripple stays positive → still +x.
+    const ripple = 1.0 + 0.5 * Math.sin(v.x * 0.55 - gust.phase);
+    ax[i] += gust.mag * ripple;
+    // wind also lofts the wire slightly where it catches (never downward)
+    ay[i] += gust.mag * 0.16 * Math.max(0.0, Math.sin(v.x * 0.5 - gust.phase * 0.9));
+
+    // damping
+    ax[i] -= (C / M) * v.vx;
+    ay[i] -= (C / M) * v.vy;
+    az[i] -= (C / M) * v.vz;
+
+    // spring neighbours (Hooke)
+    for (const j of [i - 1, i + 1]) {
+      if (j < 0 || j >= N) continue;
+      const u = nodes[j];
+      const ex = u.x - v.x, ey = u.y - v.y, ez = u.z - v.z;
+      const dist = Math.hypot(ex, ey, ez);
+      if (dist < 1e-8) continue;
+      const fmag = (K / M) * (dist - L0) / dist;
+      ax[i] += fmag * ex; ay[i] += fmag * ey; az[i] += fmag * ez;
+    }
+  }
+  for (let i = 0; i < N; i++) {
+    const v = nodes[i];
+    if (v.pinned) continue;
+    v.vx += ax[i] * DT; v.vy += ay[i] * DT; v.vz += az[i] * DT;
+    v.x  += v.vx * DT;  v.y  += v.vy * DT;  v.z  += v.vz * DT;
+  }
+}
+function stepAll(gust) { for (const s of strands) stepStrand(s, gust); }
+
+// --- 42k particles distributed along all wires ---
+const N_RENDER = 42000;
+const rPos    = new Float32Array(N_RENDER * 3);
+const rSeeds  = new Float32Array(N_RENDER);
+const rAge    = new Float32Array(N_RENDER);
+const rStrand = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('strandId', new THREE.BufferAttribute(rStrand, 1));
+
+const uniforms = {
+  uTime:       { value: 0 },
+  uPixel:      { value: renderer.getPixelRatio() },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.032 },
+  uGloaming:   { value: 0.0 },
+  uWind:       { value: 0.0 },   // 0..1 normalized gust → faint glint when wind catches
+  uBeat:       { value: 0.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uGloaming;
+    uniform float uWind;
+    uniform float uBeat;
+    uniform float uFogDensity;
+    attribute float seed;
+    attribute float age;
+    attribute float strandId;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFog;
+
+    void main() {
+      vec3 p = position;
+
+      // gentle per-bulb life (not the motion — just keeps filaments breathing)
+      float pulse = 0.86 + 0.14 * sin(uTime * 0.9 + seed * 40.0);
+
+      // aged, restrained palette — rust / bone / dusk / midnight (all low-sat)
+      vec3 ember    = vec3(0.72, 0.45, 0.26);  // rust
+      vec3 bone     = vec3(0.80, 0.71, 0.58);  // warm bone
+      vec3 dusk     = vec3(0.52, 0.47, 0.60);  // desaturated lavender
+      vec3 midnight = vec3(0.20, 0.19, 0.31);  // indigo
+
+      float k = clamp(age * 1.2, 0.0, 1.0);
+      vec3 base = mix(ember, bone, k);
+      vec3 night = mix(dusk, midnight, smoothstep(0.4, 1.0, uGloaming));
+      base = mix(base, night, uGloaming * 0.6);
+      base = mix(base, dusk, strandId * 0.07 * uGloaming);
+
+      // wind catches the wire → a faint warm glint, tied to the one law
+      base += ember * uWind * 0.10;
+      base += bone * uBeat * 0.12;
+
+      vCol = base * pulse;
+      vAlpha = mix(0.58, 0.26, uGloaming * 0.5) + 0.14 * pulse;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 1.7 * uPixel * (42.0 / dist);
+      gl_Position  = projectionMatrix * mv;
+
+      float fd = length(mv.xyz);
+      vFog = 1.0 - exp(-uFogDensity * uFogDensity * fd * fd);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFog;
+    uniform vec3 uFogColor;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float core = exp(-r * 22.0);
+      float halo = exp(-r * 7.0) * 0.3;
+      float a = (core + halo) * vAlpha;
+      vec3 col = mix(vCol, uFogColor, vFog);
+      a *= (1.0 - vFog * 0.8);
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Wire underlay — one faint line per strand
+const wires = [];
+for (let si = 0; si < STRAND_COUNT; si++) {
+  const wg = new THREE.BufferGeometry();
+  const wp = new Float32Array(NODES_PER * 3);
+  wg.setAttribute('position', new THREE.BufferAttribute(wp, 3));
+  wg.setDrawRange(0, NODES_PER);
+  const wm = new THREE.LineBasicMaterial({ color: 0x1c1922, transparent: true, opacity: 0.22 });
+  const wl = new THREE.Line(wg, wm);
+  scene.add(wl);
+  wires.push({ geom: wg, positions: wp, line: wl });
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Read the optional audio bus (safe with zero audio: every band is 0).
+function readAudio() {
+  if (!window.AR) return { t: performance.now(), level: 0, bass: 0, mid: 0, treble: 0, beat: 0 };
+  return { t: AR.t, level: AR.level || 0, bass: AR.bass || 0,
+           mid: AR.mid || 0, treble: AR.treble || 0, beat: AR.beat || 0 };
+}
+
+// Pre-settle: catenary forms under gravity + steady base wind, so at t=0 the
+// wires already hang and already lean downwind — full, moving frame on load.
+{
+  const g0 = { mag: WIND_BASE, phase: 0 };
+  for (let s = 0; s < 900; s++) stepAll(g0);
+}
+
+const statEl = document.getElementById('stat');
+let t0 = null;
+
+function loop() {
+  const a = readAudio();
+  if (t0 === null) t0 = a.t;
+  const t = (a.t - t0) * 0.001;     // PRIMARY clock → audio-warped when present
+  uniforms.uTime.value = t;
+  uniforms.uGloaming.value = Math.min(1.0, t / 90.0);
+  uniforms.uBeat.value = a.beat;
+
+  // current gust magnitude + a downwind-traveling ripple phase
+  const mag = windGust(t, a);
+  const gust = { mag, phase: t * 1.3 };
+  uniforms.uWind.value = Math.min(1.0, (mag - WIND_BASE) / (WIND_SWELL + 4.0));
+
+  for (let s = 0; s < STEPS_PER_FRAME; s++) stepAll(gust);
+
+  const age = Math.min(1.0, t / 120.0);
+  const allSegments = [];
+  let totalLen = 0, totalVerts = 0;
+  let gcx = 0, gcy = 0, gcz = 0, gn = 0;
+
+  for (let si = 0; si < STRAND_COUNT; si++) {
+    const { nodes } = strands[si];
+    const N = nodes.length;
+    totalVerts += N;
+    const w = wires[si];
+    for (let i = 0; i < N; i++) {
+      w.positions[i*3] = nodes[i].x; w.positions[i*3+1] = nodes[i].y; w.positions[i*3+2] = nodes[i].z;
+      gcx += nodes[i].x; gcy += nodes[i].y; gcz += nodes[i].z; gn++;
+    }
+    w.geom.attributes.position.needsUpdate = true;
+    for (let i = 0; i < N - 1; i++) {
+      const A = nodes[i], B = nodes[i + 1];
+      const L = Math.hypot(B.x - A.x, B.y - A.y, B.z - A.z);
+      allSegments.push({ ax: A.x, ay: A.y, az: A.z, bx: B.x, by: B.y, bz: B.z, len: L, strandId: si });
+      totalLen += L;
+    }
+  }
+
+  // camera tracks centroid (framing follows the billow, never fixed at startup)
+  if (gn > 0) {
+    gcx /= gn; gcy /= gn; gcz /= gn;
+    controls.target.lerp(new THREE.Vector3(gcx, gcy, gcz), 0.02);
+  }
+
+  if (totalLen > 0) {
+    let written = 0;
+    const spread = 0.02;
+    for (let si = 0; si < allSegments.length; si++) {
+      const seg = allSegments[si];
+      const share = (si === allSegments.length - 1)
+        ? N_RENDER - written
+        : Math.max(1, Math.floor(N_RENDER * seg.len / totalLen));
+      for (let k = 0; k < share && written < N_RENDER; k++) {
+        const u  = Math.random();
+        const cu = u < 0.5 ? u * u * 2 : 1 - (1 - u) * (1 - u) * 2;  // bias toward bulbs
+        rPos[written*3]   = seg.ax + (seg.bx - seg.ax) * cu + (Math.random() - 0.5) * spread;
+        rPos[written*3+1] = seg.ay + (seg.by - seg.ay) * cu + (Math.random() - 0.5) * spread * 0.5;
+        rPos[written*3+2] = seg.az + (seg.bz - seg.az) * cu + (Math.random() - 0.5) * spread;
+        rAge[written] = age;
+        rStrand[written] = seg.strandId / STRAND_COUNT;
+        written++;
+      }
+    }
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.age.needsUpdate = true;
+    geom.attributes.strandId.needsUpdate = true;
+  }
+
+  const arrows = '→'.repeat(1 + Math.round(uniforms.uWind.value * 3));
+  statEl.textContent = `wind ${arrows}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<script src="/audio-reactive.js" defer></script>
+</body>
+</html>

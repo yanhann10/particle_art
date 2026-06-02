@@ -1,0 +1,251 @@
+<div id="hud">
+  <div class="hud-grid"></div>
+  <div class="hud-scanline"></div>
+  <div class="hud-frame hud-tl">
+    <div>NEURAL_TRACE_v2.01</div>
+    <div id="hud-id" style="opacity:0.5">ID: NULL</div>
+    <div style="margin-top:10px">ANALYSIS_MODE: SYNTHETIC_MRI</div>
+  </div>
+  <div class="hud-frame hud-tr">
+    <div>RESOLUTION: <span id="hud-res">1x</span></div>
+    <div>BUFFER: <span id="hud-particles">120k</span></div>
+    <div style="margin-top:10px" id="hud-timestamp">T+00.00s</div>
+  </div>
+  <div class="hud-frame hud-bl">
+    <div>SIGNAL_VITALS</div>
+    <div class="hud-vitals" id="hud-vitals"></div>
+  </div>
+  <div class="hud-frame hud-br">
+    <div>MORPH_STRUCT_PARAMS</div>
+    <div id="hud-morph" style="margin-top:8px; opacity:0.7; font-size:9px"></div>
+  </div>
+</div>
+<div class="id">2gl</div>
+<div class="hint">click to regenerate · curl-driven flow</div>
+<div class="src">Riley lines → fluid phase · 120k particles</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// --- HELPERS ---
+function qp(n){ return new URL(location.href).searchParams.get(n); }
+function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+
+// --- STATE ---
+let TT = { enabled: false, signals: null, current: null };
+let currentParams = null, targetParams = null;
+const N = 120000;
+let geom, points, mat;
+
+// --- RENDERER & CAMERA ---
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 28;
+const camera = new THREE.OrthographicCamera(frustumSize*aspect/-2, frustumSize*aspect/2, frustumSize/2, frustumSize/-2, 0.1, 2000);
+camera.position.set(0, 0, 100);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+const resMult = parseFloat(qp('res')) || 1.0;
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2) * resMult);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1612, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- UNIFORMS ---
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: Math.min(devicePixelRatio, 2) },
+  uFlowScale: { value: 1.0 },
+  uFluidThreshold: { value: 0.5 },
+  uComplexity: { value: 1.5 },
+  uViscosity: { value: 0.1 },
+  uJitter: { value: 0.0 },
+  uDepth: { value: 0.0 },
+  uVortex: { value: 0.0 },
+  uShatter: { value: 0.0 },
+  uTension: { value: 0.0 },
+  uCohesion: { value: 0.0 },
+  uMirror: { value: 0.0 },
+  uGeometric: { value: 0.0 },
+  uViewport: { value: new THREE.Vector4(0, 0, 1, 1) },
+  uGridMode: { value: 0.0 },
+};
+
+// --- SHADER ---
+mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uFlowScale, uFluidThreshold, uComplexity, uViscosity, uJitter, uDepth, uVortex, uShatter, uTension, uCohesion, uMirror, uGeometric, uGridMode;
+    uniform vec4 uViewport;
+    attribute vec2 birthPos; attribute float seed, strokeId;
+    varying vec3 vColor; varying float vAlpha;
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float noise(vec2 p) {
+      vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);
+      return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
+    }
+    float stream(vec2 p, float t) {
+      float n = noise(p * 0.8 + t * 0.15) * 2.0;
+      if (uComplexity > 1.2) n += noise(p * 1.6 - vec2(t * 0.2, 0.0)) * 0.5;
+      if (uGeometric > 0.1) n = mix(n, sin(p.x * 2.0) * cos(p.y * 2.0) * 4.0, uGeometric * 0.8);
+      return n + length(p) * uVortex * 0.5;
+    }
+    void main(){
+      float t = uTime * 0.3; vec2 p = birthPos;
+      if (uMirror > 0.1) {
+        p = abs(p);
+        if (uMirror > 0.5) {
+          float a = atan(p.y, p.x); float slice = 6.28318 / 8.0;
+          a = mod(a, slice) - slice * 0.5; p = vec2(cos(a), sin(a)) * length(p);
+        }
+      }
+      float age = mod(seed * 100.0 + t * 0.4, 1.0);
+      vec2 flow = vec2(0.0);
+      for(float i = 0.0; i < 1.0; i += 0.1) {
+        if(i > age) break;
+        float eps = 0.01;
+        float d1 = stream(p * uFlowScale + vec2(eps, 0.0), t + i * 3.0);
+        float d2 = stream(p * uFlowScale - vec2(eps, 0.0), t + i * 3.0);
+        float d3 = stream(p * uFlowScale + vec2(0.0, eps), t + i * 3.0);
+        float d4 = stream(p * uFlowScale - vec2(0.0, eps), t + i * 3.0);
+        vec2 c = vec2(d3 - d4, -(d1 - d2)) / (2.0 * eps);
+        if (uGeometric > 0.6) { if (abs(c.x) > abs(c.y)) c.y = 0.0; else c.x = 0.0; }
+        c.x *= (1.0 + uTension * 3.0); c.y /= (1.0 + uTension * 2.0);
+        flow += (c + (-p * 0.05 * uCohesion) + vec2(-c.y, c.x) * (noise(p * 2.0 + i + t) - 0.5) * uJitter) * uViscosity;
+      }
+      float rot = length(flow) * uVortex * 0.4;
+      vec2 ff = vec2(flow.x * cos(rot) - flow.y * sin(rot), flow.x * sin(rot) + flow.y * cos(rot));
+      vec3 pos = vec3(p + ff * 4.0, sin(p.x * 0.1 + p.y * 0.1 + t) * uDepth);
+      float fluid = smoothstep(uFluidThreshold - 0.1, uFluidThreshold + 0.1, noise(p * 2.0 + t * 0.2));
+      vColor = mix(mix(vec3(0.82,0.45,0.28), vec3(0.35,0.62,0.65), smoothstep(0.3,0.7,fract(strokeId*0.38+noise(p*2.0+t*0.2)))), vec3(0.92,0.88,0.78), fluid * 0.3);
+      vAlpha = mix(0.2, 0.7, fluid) * (0.5 + 0.5 * smoothstep(-50.0, 50.0, pos.z)) * smoothstep(0.0, 0.1, age) * smoothstep(1.0, 0.9, age);
+      gl_PointSize = uPixel * mix(3.0, 1.5, fluid);
+      if (uGridMode > 0.5) {
+        vec2 gridPos = uViewport.xy + ((pos.xy / 18.0) * 0.5 + 0.5) * uViewport.zw;
+        gl_Position = vec4(gridPos * 2.0 - 1.0, 0.0, 1.0); gl_PointSize *= uViewport.z;
+      } else { gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0); }
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor; varying float vAlpha;
+    void main(){
+      if (length(gl_PointCoord - 0.5) > 0.5) discard;
+      gl_FragColor = vec4(vColor, vAlpha * (1.0 - smoothstep(0.3, 0.5, length(gl_PointCoord - 0.5))));
+    }
+  `
+});
+
+// --- CORE ---
+function build(seed){
+  const pos = new Float32Array(N*3), bpos = new Float32Array(N*2), seeds = new Float32Array(N), ids = new Float32Array(N);
+  let s = seed >>> 0; const rng = () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const bias = Number.isFinite(window.__strokeBias) ? window.__strokeBias : 0;
+  const ns = Math.max(60, Math.min(260, Math.floor((160 + bias * 70) + rng() * 60)));
+  const pps = Math.floor(N / ns);
+  let idx = 0;
+  for (let i = 0; i < ns && idx < N; i++){
+    const a = i * 2.399963, r = Math.sqrt(rng()) * 10, bx = Math.cos(a)*r, by = Math.sin(a)*r;
+    for (let j = 0; j < pps && idx < N; j++){
+      const x = bx+(rng()-0.5)*0.3, y = by+(rng()-0.5)*0.3;
+      pos[idx*3]=x; pos[idx*3+1]=y; pos[idx*3+2]=0; bpos[idx*2]=x; bpos[idx*2+1]=y; seeds[idx]=rng(); ids[idx]=i; idx++;
+    }
+  }
+  return { pos, bpos, seeds, ids };
+}
+
+function regenerate(){
+  const { pos, bpos, seeds, ids } = build(Math.floor(Math.random()*1e9));
+  if (!geom) {
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.setAttribute('birthPos', new THREE.BufferAttribute(bpos, 2));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('strokeId', new THREE.BufferAttribute(ids, 1));
+    points = new THREE.Points(geom, mat); scene.add(points);
+  } else {
+    geom.attributes.position.array.set(pos); geom.attributes.position.needsUpdate = true;
+    geom.attributes.birthPos.array.set(bpos); geom.attributes.birthPos.needsUpdate = true;
+    geom.attributes.seed.array.set(seeds); geom.attributes.seed.needsUpdate = true;
+    geom.attributes.strokeId.array.set(ids); geom.attributes.strokeId.needsUpdate = true;
+  }
+}
+
+// --- MAPPING ---
+function mapSignal(sig){
+  const s = clamp01(sig?.satisfaction ?? 0.5), e = clamp01(sig?.expectation ?? 0.0), ri = clamp01(sig?.reasonIntensity ?? 0.3), ro = clamp01(sig?.reorientation ?? 0.0), a = clamp01(sig?.affirmation ?? 0.0), rv = Math.max(-1, Math.min(1, sig?.reactionValence ?? 0.0));
+  return {
+    uFlowScale: lerp(0.55, 1.45, clamp01(0.6*e + 0.4*ri)), uFluidThreshold: lerp(0.60, 0.34, s), uComplexity: lerp(1.0, 3.0, e), uViscosity: lerp(0.05, 0.25, s), uJitter: lerp(0.0, 1.2, ro*0.4), uDepth: lerp(0.0, 10.0, a), uVortex: lerp(0.0, 8.0, s), uShatter: lerp(0.0, 1.2, ro), uTension: lerp(0.0, 4.0, e), uCohesion: lerp(0.0, 6.0, ri), uGeometric: lerp(0.0, 1.0, e), uMirror: lerp(0.0, 2.0, a), strokeBias: (ri - 0.5) * 1.6, grade: { hue: lerp(-28, 24, (rv+1)/2), sat: lerp(0.85, 1.55, clamp01(0.6*e+0.4*(1-ro))), bri: lerp(0.92, 1.22, clamp01(0.7*a+0.3*s)), con: lerp(0.92, 1.45, clamp01(0.7*ro+0.3*(1-s))) }
+  };
+}
+
+function updateHUD(sig, p){
+  if(qp('mode') !== 'hud') return;
+  document.getElementById('hud').classList.add('active');
+  document.getElementById('hud-id').textContent = 'ID: ' + (sig?.id || 'LOCAL');
+  const vitalsEl = document.getElementById('hud-vitals');
+  vitalsEl.innerHTML = ['satisfaction', 'expectation', 'reorientation', 'affirmation'].map(v => {
+    const val = sig?.[v] ?? 0;
+    return `<div>${v.slice(0,4)} <div class="hud-bar-bg"><div class="hud-bar-val" style="width:${val*100}%"></div></div> <span>${val.toFixed(2)}</span></div>`;
+  }).join('');
+}
+
+function lerpParams(cur, tar, t) {
+  const next = {};
+  for (const k in tar) {
+    if (typeof tar[k] === 'number') next[k] = lerp(cur?.[k] ?? tar[k], tar[k], t);
+    else if (typeof tar[k] === 'object') { next[k] = {}; for (const s in tar[k]) next[k][s] = lerp(cur?.[k]?.[s] ?? tar[k][sub], tar[k][s], t); }
+  }
+  return next;
+}
+
+const start = performance.now();
+function loop(){
+  const dt = (performance.now() - start) / 1000; uniforms.uTime.value = dt;
+  if (!targetParams) { targetParams = mapSignal(null); currentParams = JSON.parse(JSON.stringify(targetParams)); }
+  if (qp('mode') === 'grid' && TT.signals) {
+    renderer.autoClear = true; renderer.clear(); renderer.autoClear = false;
+    uniforms.uGridMode.value = 1.0;
+    for (let i = 0; i < 16; i++) {
+      const sig = TT.signals[i % TT.signals.length], p = mapSignal(sig);
+      uniforms.uViewport.value.set((i%4)/4, Math.floor(i/4)/4, 0.25, 0.25);
+      const b = (v, a, s) => v + Math.sin(dt*s+i)*a*(v+0.1);
+      Object.keys(p).forEach(k => { if(uniforms['u'+k.charAt(0).toUpperCase()+k.slice(1)]) uniforms['u'+k.charAt(0).toUpperCase()+k.slice(1)].value = p[k]; });
+      uniforms.uDepth.value = b(p.uDepth, 0.15, 0.5); uniforms.uVortex.value = b(p.uVortex, 0.2, 0.3);
+      renderer.render(scene, camera);
+    }
+  } else {
+    uniforms.uGridMode.value = 0.0; uniforms.uViewport.value.set(0,0,1,1); renderer.autoClear = true;
+    currentParams = lerpParams(currentParams, targetParams, 0.05);
+    const p = currentParams, b = (v, a, s) => v + Math.sin(dt*s)*a*(v+0.1);
+    Object.keys(p).forEach(k => { if(k.startsWith('u') && uniforms[k]) uniforms[k].value = p[k]; });
+    uniforms.uDepth.value = b(p.uDepth, 0.15, 0.5); uniforms.uVortex.value = b(p.uVortex, 0.2, 0.3);
+    if (window.__setGrade) window.__setGrade(p); updateHUD(TT.current, p); renderer.render(scene, camera);
+  }
+  requestAnimationFrame(loop);
+}
+
+// --- BOOT ---
+regenerate();
+loop();
+addEventListener('click', regenerate);
+addEventListener('resize', () => {
+  const na = innerWidth/innerHeight; camera.left=frustumSize*na/-2; camera.right=frustumSize*na/2;
+  camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+async function init(){
+  const res = await fetch('./ThoughtTrace.signals.json', { cache: 'no-store' });
+  const arr = await res.json(); TT.signals = arr;
+  const wanted = qp('sig');
+  if (wanted) { const s = arr.find(x => String(x.id) === wanted); if (s) { TT.enabled = true; TT.current = s; targetParams = mapSignal(s); currentParams = JSON.parse(JSON.stringify(targetParams)); window.__strokeBias = targetParams.strokeBias; regenerate(); } }
+  window.__TT = { applyById: (id) => { const s = arr.find(x => String(x.id) === id); if (s) { TT.enabled = true; TT.current = s; targetParams = mapSignal(s); setQp('sig', id); regenerate(); } } };
+  window.__exportHighRes = (s) => { renderer.setPixelRatio(Math.min(devicePixelRatio, 2) * s); renderer.setSize(innerWidth, innerHeight); };
+}
+init().catch(()=>{});
+</script>
