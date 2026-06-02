@@ -39,14 +39,10 @@ MIN_NONBACKGROUND_FRACTION = 0.01
 # CONTRAST GATE — user 2026-05-07: many pieces pass the non-bg threshold yet
 # the eye reads them as "empty / faint / cant see / blurry / low-contrast"
 # (jwu, kjn, 7wq, si0, usm flagged). Reject when grayscale stddev is too
-# small (image is mostly one shade) or dynamic range of luminance is too
-# narrow (no real foreground/background separation).
-# Range uses p99-p1 (not p95-p5): a bright crisp subject on a dark ground
-# is fully visible but may cover <5% of pixels, so p95 would still sit in the
-# dark majority and wrongly read range~0. p99-p1 lets a subject covering ≳1%
-# register, so dark backgrounds pass while globally-faint images still fail.
+# small (image is mostly one shade) or dynamic range (p95 - p5 of luminance)
+# is too narrow (no real foreground/background separation).
 MIN_GRAYSCALE_STDDEV   = 12.0   # 0..255 scale
-MIN_LUMA_DYNAMIC_RANGE = 35.0   # p99 - p1 of luminance, 0..255 scale
+MIN_LUMA_DYNAMIC_RANGE = 35.0   # p95 - p5 of luminance, 0..255 scale
 # BLUR GATE — Laplacian variance measures edge sharpness. Blurry renders (feathered
 # sprites, Gaussian-smeared particles, soft halos drowning the form) score near zero;
 # sharp renders score 50+. Pieces like si0/7wq/610 that the user flagged as "blurry"
@@ -144,8 +140,8 @@ def validate(piece_ids: list[str], record_clip: bool = False,
                 # contrast gate — reject low-stddev / narrow-range renders
                 gray = arr.astype(np.float32) @ np.array([0.299, 0.587, 0.114])
                 gstd = float(gray.std())
-                p1, p99 = np.percentile(gray, [1, 99])
-                drange = float(p99 - p1)
+                p5, p95 = np.percentile(gray, [5, 95])
+                drange = float(p95 - p5)
 
                 # blur gate — Laplacian variance: low = blurry/soft, high = sharp
                 lap = (gray[2:, 1:-1] - 2 * gray[1:-1, 1:-1] + gray[:-2, 1:-1]

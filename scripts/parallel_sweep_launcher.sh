@@ -47,7 +47,7 @@ while true; do
     echo "[$SESSION_ID] Claimed: ${PIECE_ARRAY[@]}"
 
     # Spawn 5 agents in parallel (one per piece)
-    PIDS=()
+    declare -A PIDS
     for PIECE_ID in "${PIECE_ARRAY[@]}"; do
         (
             echo "[$SESSION_ID] Starting sweep for $PIECE_ID..."
@@ -59,13 +59,13 @@ while true; do
                 python3 "$COORDINATOR" mark "$PIECE_ID" done --notes "sweep failed"
             fi
         ) &
-        PIDS+=($!)
+        PIDS[$PIECE_ID]=$!
     done
 
     # Wait for all agents to finish
     echo "[$SESSION_ID] Waiting for ${#PIDS[@]} sweeps to complete..."
-    for PID in "${PIDS[@]}"; do
-        wait $PID || true
+    for PIECE_ID in "${!PIDS[@]}"; do
+        wait ${PIDS[$PIECE_ID]} || true
     done
 
     echo "[$SESSION_ID] Batch complete. Continuing..."

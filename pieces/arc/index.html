@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arc · Tiered Fountain — biomorphic architecture in water</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#070a0c; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; width:100vw; height:100vh; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.5; font-size: 11px; letter-spacing: 0.06em; color:#bcae8a; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.30; font-size: 10px; letter-spacing: 0.04em; color:#8aa39a; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.30; font-size: 10px; letter-spacing: 0.04em; color:#8aa39a; }
+</style>
+</head>
+<body>
+<div class="id">arc</div>
+<div class="hint">click to regrow · tiered fountain</div>
+<div class="src">art-deco tiers · cascading veils · arcing jets · rippling basins · 120k particles</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// --- HELPERS ---
+function qp(n){ return new URL(location.href).searchParams.get(n); }
+function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+
+// --- STATE ---
+let TT = { signals: null, current: null };
+const N = 120000;
+let geom, points, mat;
+
+// --- RENDERER & CAMERA ---
+const scene = new THREE.Scene();
+const renderer = new THREE.WebGLRenderer({
+  antialias: false, powerPreference: "high-performance",
+  precision: "highp", preserveDrawingBuffer: true
+});
+const DPR = Math.min(devicePixelRatio * 1.1, 2.1);
+renderer.setPixelRatio(DPR);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x070a0c, 1);
+document.body.appendChild(renderer.domElement);
+
+// Perspective camera framed on the structure centroid (~y=9, the middle of the tower).
+const STRUCT_CENTER = new THREE.Vector3(0, 8.2, 0);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 2000);
+const CAM_RAD = 27.0;
+camera.position.set(0, 8.5, CAM_RAD);
+camera.lookAt(STRUCT_CENTER);
+
+// --- UNIFORMS ---
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: Math.min(devicePixelRatio, 1.7) },
+  // biomorphic / growth signal drivers (slow)
+  uGrowth:    { value: 1.0 },   // 0..1 how fully grown (animated in on boot)
+  uBreath:    { value: 0.0 },   // slow organic swell of ornament
+  uVerdigris: { value: 0.45 },  // patina amount on stone (signal driven)
+  uGold:      { value: 0.45 },  // gold-leaf accent on ornament ridges
+  uLattice:   { value: 1.0 },   // mashrabiya lattice density
+  uOrnament:  { value: 1.0 },   // arabesque relief depth
+  uColonnade: { value: 1.0 },   // column / rib prominence
+  uWater:     { value: 1.0 },   // overall water flow amount (signal driven)
+  uGravity:   { value: 9.2 },   // gravity for ballistic water (world units / s^2)
+};
+
+// --- SHADER ---
+mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uGrowth, uBreath, uVerdigris, uGold, uLattice, uOrnament, uColonnade, uWater, uGravity;
+    // base structural coords baked on CPU:
+    //  aStruct.xyz = resting architectural position (stone) OR emission point (water)
+    //  aMeta.x = role
+    //     stone: 0 column shaft, 1 lattice screen, 2 setback cornice, 3 vault rib, 4 finial/crown
+    //     water: 5 cascade veil, 6 arcing jet, 7 basin ripple
+    //  aMeta.y = height param 0..1 (stone) | phase offset 0..1 (water loop)
+    //  aMeta.z = ornament phase (stone) | spread/lateral param (water)
+    //  aMeta.w = seed
+    //  aFlow.xyz = launch velocity (water) | unused (stone)
+    //  aFlow.w   = loop period seconds (water) | basin radius (ripple)
+    attribute vec3 aStruct;
+    attribute vec4 aMeta;
+    attribute vec4 aFlow;
+    varying vec3 vColor; varying float vAlpha;
+    varying float vWater;   // 0 stone .. 1 water (for fragment foam softening)
+
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+
+    void main(){
+      float role = aMeta.x;
+      float h    = aMeta.y;       // 0 base .. 1 crown
+      float oph  = aMeta.z;       // ornament phase
+      float seed = aMeta.w;
+
+      vWater = 0.0;
+
+      // =====================================================================
+      //  WATER SYSTEMS (roles 5,6,7) — ballistic, continuous loops, no noise.
+      // =====================================================================
+      if (role > 4.5) {
+        vec3 e = aStruct;                 // emission origin
+        float period = max(0.5, aFlow.w);
+        // each particle has its own phase so the stream reads as continuous
+        float t = mod(uTime + aMeta.y * period, period);
+
+        vec3 pw = e;
+        float fade = 1.0;
+        float foam = 0.0;
+
+        if (role < 5.5) {
+          // ---- CASCADE VEIL: a sheet of water spilling over a tier weir ----
+          // gentle outward launch + gravity; the sheet stands slightly proud of the stone
+          vec3 v = aFlow.xyz;             // small outward+down launch
+          pw = e + v * t + vec3(0.0, -0.5*uGravity*t*t, 0.0);
+          vec2 outN = normalize(e.xz + vec2(0.0001));
+          // bow outward as it falls so the veil reads as water in front of the face
+          pw.xz += outN * (0.25 + 0.30*t);
+          // thin shimmer across the falling sheet (slow, not chaotic)
+          float ph = oph * 6.2831;
+          pw.xz += outN * 0.06 * sin(t*2.2 + ph);
+          // light foam flecks only — veils stay mostly translucent cyan
+          foam = 0.25 * smoothstep(0.3*period, period, t);
+          // fade in at the lip, out near the bottom catch
+          fade = smoothstep(0.0, 0.10*period, t) * smoothstep(period, period*0.82, t);
+          fade = clamp(fade + 0.20, 0.0, 1.0);
+        } else if (role < 6.5) {
+          // ---- ARCING JET: a slow parabolic spray launched from crown/corners ----
+          vec3 v = aFlow.xyz;             // up-and-out launch velocity
+          pw = e + v * t + vec3(0.0, -0.5*uGravity*t*t, 0.0);
+          foam = smoothstep(period*0.45, period, t);   // breaks into spray near apex/landing
+          fade = smoothstep(0.0, 0.08*period, t) * smoothstep(period, period*0.82, t);
+        } else {
+          // ---- BASIN RIPPLE: water pooling in a ledge/base basin, gently rippling ----
+          float br = aFlow.w;             // basin radius
+          // ring ripples expanding outward then resetting (slow)
+          float ang = oph * 6.2831;
+          float rr = mix(0.1, br, fract(uTime*0.06 + aMeta.y));
+          pw = e + vec3(cos(ang)*rr, 0.0, sin(ang)*rr);
+          // surface bob
+          pw.y += 0.06 * sin(uTime*0.5 + rr*5.0 + ang*3.0);
+          foam = 0.25 + 0.25*sin(uTime*0.7 + ang*4.0);
+          fade = 0.85;
+        }
+
+        // ---- WATER COLOR: luminous translucent cyan -> white foam ----
+        vec3 waterDeep = vec3(0.30, 0.72, 0.92);   // luminous cyan (visible even mid-fall)
+        vec3 waterLit  = vec3(0.60, 0.92, 1.00);   // lit water
+        vec3 foamC     = vec3(0.95, 1.00, 1.00);   // white foam
+        vec3 wcol = mix(waterDeep, waterLit, 0.4 + 0.6*clamp(foam,0.0,1.0));
+        wcol = mix(wcol, foamC, clamp(foam*foam,0.0,1.0));
+
+        vColor = wcol;
+        vWater = 1.0;
+        // water glows brightly against the stone so the fountain reads instantly
+        vAlpha = clamp(0.70 + 0.30*foam, 0.0, 1.0) * fade * uWater;
+
+        float wsz = (role < 5.5) ? 2.4 : (role < 6.5 ? 2.6 : 2.2);
+        gl_PointSize = max(1.0, floor(uPixel * wsz * (0.9 + 0.5*foam)));
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(pw, 1.0);
+        return;
+      }
+
+      vec3 p = aStruct;
+
+      // ---- BIOMORPHIC GROWTH: structure grows up from the base, coral-like ----
+      // Particles above the current growth front are pulled toward a seed point until grown.
+      float front = uGrowth * 1.18;
+      float born = smoothstep(front - 0.16, front, h) < 0.5 ? 1.0 : smoothstep(front, front - 0.16, h);
+      born = clamp(smoothstep(front + 0.02, front - 0.18, h), 0.0, 1.0);
+      // ungrown particles tuck toward the trunk axis near their own height
+      vec3 seedPos = vec3(0.0, p.y * 0.65, 0.0);
+      p = mix(seedPos, p, born);
+
+      // ---- SLOW ORGANIC BREATHING of ornament (very gentle, never fast) ----
+      float bw = uBreath * (0.6 + 0.4*sin(oph*6.2831 + uTime*0.10));
+      // arabesque relief: ornament rides in/out along its surface normal-ish (radial in xz)
+      vec2 rad = normalize(p.xz + vec2(0.0001));
+      float relief = uOrnament * (0.20 + 0.55*sin(oph*6.2831 + h*9.0));
+      if (role > 0.5 && role < 1.5) {
+        // mashrabiya lattice cells swell subtly
+        p.xz += rad * relief * 0.10 * bw;
+        p.y  += sin(oph*12.566 + uTime*0.08) * 0.03 * uLattice * born;
+      }
+      if (role > 2.5 && role < 3.5) {
+        // vault ribs breathe outward slightly at the crown
+        p.xz += rad * 0.10 * uColonnade * (0.5+0.5*sin(uTime*0.09 + seed*6.28)) * born;
+      }
+      // whole structure: a single slow sway (one drift), tiny amplitude
+      float sway = sin(uTime*0.06) * 0.10;
+      p.x += sway * smoothstep(0.0, 1.0, h);
+
+      // ---- COLOR: cool stone -> verdigris patina -> gold-leaf ridges ----
+      vec3 stone    = vec3(0.50, 0.57, 0.62);   // cool grey limestone
+      vec3 shadow   = vec3(0.16, 0.22, 0.26);
+      vec3 verd     = vec3(0.20, 0.66, 0.54);   // verdigris copper-green
+      vec3 gold     = vec3(0.96, 0.78, 0.36);   // gold leaf
+      vec3 deepGold = vec3(0.72, 0.48, 0.16);
+
+      // ambient occlusion-ish: lower & inner = darker, upper & outer ornament = lighter
+      float aoY = mix(0.62, 1.0, h);
+      float radial = clamp(length(p.xz)/7.0, 0.0, 1.0);
+
+      vec3 col = mix(shadow, stone, aoY*(0.55+0.45*radial));
+
+      // verdigris pools in recesses (low ornament phase, lower-mid heights)
+      float patina = uVerdigris * smoothstep(0.55,0.05,oph) * smoothstep(0.05,0.45,h) * (0.4+0.6*(1.0-radial));
+      col = mix(col, verd, patina*0.8);
+
+      // gold leaf on ornament ridges (high ornament phase) + crown finials
+      float ridge = smoothstep(0.62, 0.95, sin(oph*6.2831 + h*9.0)*0.5+0.5);
+      float goldM = uGold * ridge * (0.35 + 0.65*smoothstep(0.4,1.0,h));
+      if (role > 3.5) goldM = uGold * (0.55 + 0.45*sin(oph*6.2831)); // crown/finials strongly gilded
+      col = mix(col, mix(deepGold, gold, smoothstep(0.5,1.0,h)), clamp(goldM,0.0,0.9));
+
+      // columns read as slightly brighter vertical strokes (colonnade)
+      if (role < 0.5) col *= 0.85 + 0.30*uColonnade;
+
+      vColor = col;
+
+      // alpha: ornament & ridges glow a touch; ungrown / seeding particles dim
+      float baseA = 0.55 + 0.40*ridge + 0.18*goldM;
+      baseA *= mix(0.25, 1.0, born);
+      // lattice slightly more transparent so screens read as screens
+      if (role > 0.5 && role < 1.5) baseA *= 0.78;
+      vAlpha = baseA;
+
+      // point size: ornament/crown slightly larger to catch light, columns crisp
+      float sz = 1.9;
+      if (role < 0.5) sz = 1.7;
+      else if (role > 3.5) sz = 2.3;
+      else if (role > 2.5) sz = 2.1;
+      gl_PointSize = max(1.0, floor(uPixel * sz));
+
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+      // keep distant ungrown trunk points small
+      gl_PointSize *= mix(0.6, 1.0, born);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor; varying float vAlpha; varying float vWater;
+    void main(){
+      vec2 c = gl_PointCoord - 0.5;
+      float d = length(c);
+      if (d > 0.5) discard;
+      // water droplets are softer/rounder with a bright core; stone is crisper
+      float inner = mix(0.18, 0.05, vWater);
+      float edge = 1.0 - smoothstep(inner, 0.5, d);
+      edge = pow(edge, mix(1.3, 1.6, vWater));
+      vec3 col = pow(vColor*1.18, vec3(0.86));
+      // give water a luminous cyan/white core so cascades glow
+      col += vWater * vec3(0.30,0.55,0.70) * (1.0 - smoothstep(0.0, 0.28, d));
+      gl_FragColor = vec4(col, vAlpha * edge * 0.9);
+    }
+  `
+});
+
+// ---------------------------------------------------------------------------
+// ARCHITECTURE GENERATOR
+// A bilaterally + radially symmetric "grown cathedral":
+//  - stacked art-deco setbacks (tiers narrowing with height)
+//  - columned colonnade on each tier face (vertical ribs)
+//  - mashrabiya / arabesque lattice screens filling the bays
+//  - ribbed vault crown + gilded finials
+// Built once into static attribute buffers; the shader animates growth/breath.
+// ---------------------------------------------------------------------------
+function build(seedVal){
+  const aPos  = new Float32Array(N*3);
+  const aStr  = new Float32Array(N*3);
+  const aMeta = new Float32Array(N*4);
+  const aFlow = new Float32Array(N*4);
+
+  let s = seedVal >>> 0;
+  const rng = () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s>>>15, 1|s); t = t + Math.imul(t ^ t>>>7, 61|t) ^ t; return ((t ^ t>>>14)>>>0)/4294967296; };
+
+  // tower parameters (slight per-seed variation, but always reads as architecture)
+  const SIDES = 8;                 // radial symmetry (octagonal plan -> strong symmetry)
+  const TIERS = 5;                 // art-deco setbacks
+  const tierH = 3.0;               // height of each tier
+  const baseR = 7.0;               // base radius
+  const totalH = TIERS * tierH;    // ~15 high
+
+  let idx = 0;
+  const put = (x,y,z, role, hParam, oph, seed) => {
+    if (idx >= N) return false;
+    aPos[idx*3]=x; aPos[idx*3+1]=y; aPos[idx*3+2]=z;
+    aStr[idx*3]=x; aStr[idx*3+1]=y; aStr[idx*3+2]=z;
+    aMeta[idx*4]=role; aMeta[idx*4+1]=hParam; aMeta[idx*4+2]=oph; aMeta[idx*4+3]=seed;
+    idx++;
+    return true;
+  };
+  // water emitter: aStruct = emission origin, aFlow = launch velocity + period/radius
+  const putW = (ox,oy,oz, role, phase, lateral, vx,vy,vz, periodOrRadius) => {
+    if (idx >= N) return false;
+    aPos[idx*3]=ox; aPos[idx*3+1]=oy; aPos[idx*3+2]=oz;
+    aStr[idx*3]=ox; aStr[idx*3+1]=oy; aStr[idx*3+2]=oz;
+    aMeta[idx*4]=role; aMeta[idx*4+1]=phase; aMeta[idx*4+2]=lateral; aMeta[idx*4+3]=rng();
+    aFlow[idx*4]=vx; aFlow[idx*4+1]=vy; aFlow[idx*4+2]=vz; aFlow[idx*4+3]=periodOrRadius;
+    idx++;
+    return true;
+  };
+
+  function radiusAt(tier){
+    // setbacks: each tier steps inward
+    return baseR * (1.0 - tier*0.16);
+  }
+
+  // Budget split: ~74% stone architecture, ~26% water
+  const N_COL  = Math.floor(N*0.17); // colonnade shafts
+  const N_LAT  = Math.floor(N*0.28); // lattice screens (the bulk of the silhouette body)
+  const N_COR  = Math.floor(N*0.11); // cornices / setback ledges
+  const N_VLT  = Math.floor(N*0.09); // vault ribs
+  const N_FIN  = Math.floor(N*0.05); // finials / crown
+  const N_VEIL = Math.floor(N*0.18); // cascading water veils over tier weirs
+  const N_JET  = Math.floor(N*0.05); // arcing jets from crown + corners
+  const N_BAS  = Math.floor(N*0.06); // basin ripples at ledges + base
+  // remainder -> finials/crown overflow
+
+  // ---- 1. COLONNADE: vertical column shafts at every bay edge, each tier ----
+  for (let k=0; k<N_COL; k++){
+    const tier = Math.min(TIERS-1, Math.floor(rng()*TIERS));
+    const y0 = tier*tierH;
+    const r  = radiusAt(tier);
+    const side = Math.floor(rng()*SIDES);
+    // columns sit at bay boundaries; small in-bay jitter for a few sub-columns
+    const subCol = Math.floor(rng()*3); // 0,1,2 -> 3 columns per face
+    const a = (side + (subCol)/3) / SIDES * Math.PI*2;
+    const colR = r * (0.96 + 0.04*Math.sin(subCol*2.1));
+    const yy = y0 + rng()*tierH*0.94 + 0.06;
+    // fluting: tiny radial ripple so shafts read as fluted columns
+    const flut = 0.06*Math.sin(yy*6.0);
+    const rr = colR + flut + (rng()-0.5)*0.06;
+    const x = Math.cos(a)*rr, z = Math.sin(a)*rr;
+    const hP = yy/totalH;
+    put(x, yy, z, 0.0, hP, (subCol/3+side*0.13)%1, rng());
+  }
+
+  // ---- 2. LATTICE SCREENS: mashrabiya / arabesque infill in each bay ----
+  // A bay is the wall between two columns; fill it with a perforated lattice.
+  for (let k=0; k<N_LAT; k++){
+    const tier = Math.min(TIERS-1, Math.floor(rng()*TIERS));
+    const y0 = tier*tierH;
+    const r  = radiusAt(tier);
+    const side = Math.floor(rng()*SIDES);
+    const faceA = (side+0.5)/SIDES * Math.PI*2;     // center of this face
+    // local coords across the face: u horizontal (-0.5..0.5), v vertical (0..1)
+    const u = rng()-0.5;
+    const v = rng();
+    // arabesque/mashrabiya pattern: keep points only where the lattice "thread" is.
+    // overlapping sinusoids form an 8-point star / interlace; reject the holes.
+    const fx = u*Math.PI*8.0;
+    const fy = v*Math.PI*8.0;
+    const star = Math.abs(Math.sin(fx)*Math.cos(fy)) + Math.abs(Math.cos(fx)*Math.sin(fy));
+    const interlace = Math.abs(Math.sin(fx+fy)) ;
+    const thread = Math.max(star, interlace*0.9);
+    if (thread < 0.62) { k--; continue; }            // skip the open holes -> real lattice
+    // place on the (slightly curved) face plane
+    const faceWidth = r * Math.sin(Math.PI/SIDES) * 1.9;
+    const px = u*faceWidth, py = y0 + v*tierH*0.96 + tierH*0.02;
+    // wrap onto the octagon face, push out to surface (with a little relief)
+    const ca=Math.cos(faceA), sa=Math.sin(faceA);
+    const surfR = r * (0.99 + 0.02*(thread-0.7));
+    const wx = ca*surfR - sa*px;
+    const wz = sa*surfR + ca*px;
+    const hP = py/totalH;
+    put(wx, py, wz, 1.0, hP, ((thread)+v*0.3)%1, rng());
+  }
+
+  // ---- 3. CORNICES / SETBACK LEDGES: horizontal banding at each tier top ----
+  for (let k=0; k<N_COR; k++){
+    const tier = Math.floor(rng()*TIERS);
+    const y0 = (tier+1)*tierH;
+    const r  = radiusAt(tier) * 1.04; // ledge oversails slightly
+    const a = rng()*Math.PI*2;
+    // a few stacked bands forming the cornice profile
+    const band = Math.floor(rng()*4);
+    const yy = y0 - band*0.10 - rng()*0.06;
+    const rr = r * (1.0 - band*0.012) + (rng()-0.5)*0.04;
+    const x = Math.cos(a)*rr, z = Math.sin(a)*rr;
+    const hP = yy/totalH;
+    put(x, yy, z, 2.0, hP, (a/(Math.PI*2)*8.0)%1, rng());
+  }
+
+  // ---- 4. RIBBED VAULT CROWN: ribs arcing up & in from the top tier ----
+  const crownBase = TIERS*tierH; // ~15
+  for (let k=0; k<N_VLT; k++){
+    const ribSide = Math.floor(rng()*SIDES);
+    const a = (ribSide/SIDES)*Math.PI*2;
+    const t = rng();                       // 0 base of rib .. 1 apex
+    const r0 = radiusAt(TIERS-1)*0.86;
+    // rib arcs inward and up to a shared apex (vaulting)
+    const rr = r0*(1.0 - t) + 0.1;
+    const yy = crownBase + t*3.4;          // rises ~3.4 above the body
+    // gentle ogee curve
+    const arc = Math.sin(t*Math.PI)*0.6;
+    const rArc = rr + arc*0.0;
+    const x = Math.cos(a)*rArc, z = Math.sin(a)*rArc;
+    const hP = Math.min(1.0, yy/(totalH+3.4));
+    put(x, yy, z, 3.0, hP, t, rng());
+  }
+
+  // ---- 5. FINIALS / GILDED CROWN: clustered points at the apex + tier corners ----
+  const finialEnd = idx + N_FIN;
+  while (idx < finialEnd && idx < N){
+    const r = rng();
+    if (r < 0.6){
+      // central apex finial
+      const a = rng()*Math.PI*2;
+      const t = Math.pow(rng(),0.6);
+      const yy = crownBase + 3.2 + t*1.8;
+      const rr = (1.0-t)*0.9*(0.4+0.6*rng());
+      const x=Math.cos(a)*rr, z=Math.sin(a)*rr;
+      const hP = Math.min(1.0,(yy)/(totalH+5.0));
+      put(x,yy,z,4.0,hP, rng(), rng());
+    } else {
+      // small corner finials at top-tier column tops
+      const side = Math.floor(rng()*SIDES);
+      const a = (side/SIDES)*Math.PI*2;
+      const rr = radiusAt(TIERS-1)*0.98;
+      const yy = crownBase + 0.1 + rng()*0.7;
+      const x=Math.cos(a)*rr, z=Math.sin(a)*rr;
+      const hP = Math.min(1.0, yy/(totalH+5.0));
+      put(x,yy,z,4.0,hP, rng(), rng());
+    }
+  }
+
+  // =====================================================================
+  //  WATER GENERATOR — cascades, jets, basins tied to the architecture.
+  // =====================================================================
+  const apexY = crownBase + 3.2 + 1.8;        // finial apex height (~20)
+
+  // ---- 6. CASCADE VEILS: sheets spilling over the lip of each setback tier ----
+  // Each tier's top ledge is a weir; water sheets over it and falls to the tier below.
+  for (let k=0; k<N_VEIL; k++){
+    // emit from the ledge (top) of tiers 0..TIERS-1; more water on lower/wider tiers
+    const tier = Math.min(TIERS-1, Math.floor(Math.pow(rng(),0.7)*TIERS));
+    const lipY = (tier+1)*tierH;                 // top of this tier = the weir lip
+    const lipR = radiusAt(tier) * 1.05;          // just past the oversailing cornice
+    const a = rng()*Math.PI*2;                   // all around the octagon
+    const ox = Math.cos(a)*lipR, oz = Math.sin(a)*lipR;
+    // small outward + downward launch over the lip (slow); gravity does the rest
+    const outward = 0.45 + rng()*0.30;
+    const vx = Math.cos(a)*outward, vz = Math.sin(a)*outward, vy = -0.10;
+    // sheet cascades down 1.5-2.5 tiers so the veils are long and clearly read as water
+    const dropTiers = 1.5 + rng()*1.0;
+    const dropH = Math.min(lipY, dropTiers*tierH);
+    const period = Math.sqrt(2.0*Math.max(1.0, dropH)/9.2) * (0.95+0.15*rng());
+    const phase = rng();
+    const lateral = rng();                       // shimmer phase
+    putW(ox, lipY, oz, 5.0, phase, lateral, vx, vy, vz, period);
+  }
+
+  // ---- 7. ARCING JETS: slow parabolas from the crown apex + top-tier corners ----
+  for (let k=0; k<N_JET; k++){
+    let ox, oy, oz, a, speed, up;
+    if (rng() < 0.5){
+      // central crown jet: launches up & gently out, big slow arc
+      a = rng()*Math.PI*2;
+      const rr = 0.4*rng();
+      ox = Math.cos(a)*rr; oz = Math.sin(a)*rr; oy = apexY;
+      speed = 1.6 + rng()*0.8; up = 4.2 + rng()*1.2;
+    } else {
+      // corner jets at top-tier finials, arcing outward over the edge
+      const side = Math.floor(rng()*SIDES);
+      a = (side/SIDES)*Math.PI*2;
+      const rr = radiusAt(TIERS-1)*0.98;
+      ox = Math.cos(a)*rr; oz = Math.sin(a)*rr; oy = crownBase + 0.6;
+      speed = 2.0 + rng()*0.9; up = 3.0 + rng()*1.0;
+    }
+    const vx = Math.cos(a)*speed, vz = Math.sin(a)*speed, vy = up;
+    // time aloft until it falls back well below launch (long slow arc)
+    const period = (vy + Math.sqrt(vy*vy + 2.0*9.2*Math.max(2.0, oy*0.5)))/9.2;
+    putW(ox, oy, oz, 6.0, rng(), rng(), vx, vy, vz, period);
+  }
+
+  // ---- 8. BASIN RIPPLES: pooled water rippling at each tier ledge + the base ----
+  for (let k=0; k<N_BAS; k++){
+    // basins sit on each tier ledge and a large one at the base
+    const tier = Math.floor(rng()*(TIERS+1));     // 0..TIERS (TIERS = base pool)
+    let basinY, basinR;
+    if (tier >= TIERS){
+      basinY = 0.15; basinR = baseR * 1.25;       // wide ground basin
+    } else {
+      basinY = (tier+1)*tierH + 0.05;
+      basinR = radiusAt(tier) * 0.92;
+    }
+    const ang = rng();                            // ring angle phase (0..1 -> *2pi in shader)
+    const phase = rng();
+    putW(0.0, basinY, 0.0, 7.0, phase, ang, 0,0,0, basinR);
+    // store true center via aStruct already (0,basinY,0); ripple expands from center
+  }
+
+  return { aPos, aStr, aMeta, aFlow };
+}
+
+function regenerate(){
+  const { aPos, aStr, aMeta, aFlow } = build(Math.floor(Math.random()*1e9));
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(aPos, 3));
+    geom.setAttribute('aStruct',  new THREE.BufferAttribute(aStr, 3));
+    geom.setAttribute('aMeta',    new THREE.BufferAttribute(aMeta, 4));
+    geom.setAttribute('aFlow',    new THREE.BufferAttribute(aFlow, 4));
+    points = new THREE.Points(geom, mat); scene.add(points);
+  } else {
+    geom.attributes.position.array.set(aPos); geom.attributes.position.needsUpdate = true;
+    geom.attributes.aStruct.array.set(aStr);  geom.attributes.aStruct.needsUpdate = true;
+    geom.attributes.aMeta.array.set(aMeta);   geom.attributes.aMeta.needsUpdate = true;
+    geom.attributes.aFlow.array.set(aFlow);   geom.attributes.aFlow.needsUpdate = true;
+  }
+  __growthStart = performance.now();
+}
+
+// --- SIGNAL MAPPING: ThoughtTrace perception -> material/ornament knobs (slow, subtle) ---
+function applySignal(sig){
+  TT.current = sig || null;
+  if (!sig) return;
+  const s  = clamp01(sig.satisfaction ?? 0.5);
+  const e  = clamp01(sig.expectation ?? 0.0);
+  const ri = clamp01(sig.reasonIntensity ?? 0.3);
+  const a  = clamp01(sig.affirmation ?? 0.0);
+  const rv = Math.max(-1, Math.min(1, sig.reactionValence ?? 0.0));
+  // satisfaction -> gold leaf; friction/reorientation -> verdigris patina; reason -> ornament density
+  __target.uGold      = lerp(0.30, 0.85, clamp01(0.6*s + 0.4*a));
+  __target.uVerdigris = lerp(0.25, 0.80, clamp01(0.5*(1-s) + 0.5*(sig.reorientation ?? 0)));
+  __target.uOrnament  = lerp(0.7, 1.35, clamp01(0.5*e + 0.5*ri));
+  __target.uLattice   = lerp(0.8, 1.3, clamp01(0.6*ri + 0.4*e));
+  __target.uColonnade = lerp(0.85, 1.25, clamp01(0.5*a + 0.5*s));
+  // reaction intensity / expectation -> more vigorous water flow (still slow & graceful)
+  __target.uWater     = lerp(0.75, 1.15, clamp01(0.5*e + 0.5*ri));
+}
+
+const __target = { uGold:0.45, uVerdigris:0.45, uOrnament:1.0, uLattice:1.0, uColonnade:1.0, uWater:1.0 };
+let __growthStart = performance.now();
+const start = performance.now();
+let __lastT = start;
+
+function loop(){
+  const now = performance.now();
+  const tSec = (now - start)/1000;
+  const dt = Math.min(0.05, (now - __lastT)/1000);
+  __lastT = now;
+  uniforms.uTime.value = tSec;
+
+  // Growth: structure grows in over ~5s on load / regen, then holds (no looping churn).
+  const g = clamp01((now - __growthStart)/1000 / 5.0);
+  uniforms.uGrowth.value = g*g*(3-2*g);
+
+  // slow ornament breath
+  uniforms.uBreath.value = 0.5 + 0.5*Math.sin(tSec*0.08);
+
+  // ease signal-driven knobs toward target (slow)
+  const k = 1 - Math.exp(-dt/1.8);
+  uniforms.uGold.value      = lerp(uniforms.uGold.value,      __target.uGold,      k);
+  uniforms.uVerdigris.value = lerp(uniforms.uVerdigris.value, __target.uVerdigris, k);
+  uniforms.uOrnament.value  = lerp(uniforms.uOrnament.value,  __target.uOrnament,  k);
+  uniforms.uLattice.value   = lerp(uniforms.uLattice.value,   __target.uLattice,   k);
+  uniforms.uColonnade.value = lerp(uniforms.uColonnade.value, __target.uColonnade, k);
+  uniforms.uWater.value     = lerp(uniforms.uWater.value,     __target.uWater,     k);
+
+  // ONE slow camera drift: a gentle orbit that always keeps the structure centered.
+  const ang = 0.32*Math.sin(tSec*0.035);   // very slow, small arc
+  const rad = CAM_RAD;
+  camera.position.x = Math.sin(ang)*rad;
+  camera.position.z = Math.cos(ang)*rad;
+  camera.position.y = 9.0 + 1.4*Math.sin(tSec*0.028);
+  camera.lookAt(STRUCT_CENTER);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+// --- BOOT ---
+regenerate();
+loop();
+addEventListener('click', regenerate);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = Math.min(devicePixelRatio, 1.7);
+});
+
+async function init(){
+  try {
+    const res = await fetch('./ThoughtTrace.signals.json', { cache: 'no-store' });
+    const arr = await res.json(); TT.signals = arr;
+    const wanted = qp('sig');
+    const pick = wanted ? arr.find(x => String(x.id) === wanted) : arr[0];
+    applySignal(pick);
+    window.__TT = { applyById: (id) => applySignal(arr.find(x => String(x.id) === id)) };
+  } catch(e){ /* piece still renders without signals */ }
+}
+init();
+</script>
+</body>
+</html>

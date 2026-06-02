@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crl · Cortical Trace — Differential Growth</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0604; overflow:hidden;
+               color:#e7d8c8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; width:100vw; height:100vh; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.5; font-size: 11px; letter-spacing: 0.06em; color:#e7d8c8; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.30; font-size: 10px; letter-spacing: 0.04em; color:#c9a07a; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.30; font-size: 10px; letter-spacing: 0.04em; color:#c9a07a; }
+</style>
+
+<style id="art-clean-ui-hide">
+body > *:not(canvas):not(#savePNGButton):not(#startVideoButton):not(#stopVideoButton):not(#captureStatus) {
+  display:none !important; visibility:hidden !important; opacity:0 !important; pointer-events:none !important;
+}
+canvas {
+  display:block !important; visibility:visible !important; opacity:1 !important; width:100vw !important; height:100vh !important;
+}
+</style>
+<style id="save-button-contrast-css">
+#savePNGButton { display:block !important; visibility:visible !important; opacity:1 !important; pointer-events:auto !important; }
+</style>
+</head>
+<body>
+<div class="id">crl</div>
+<div class="hint">differential growth · cortical / brain-coral</div>
+<div class="src">self-avoiding folds → gyri/sulci · 120k threads</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// --- HELPERS ---
+function qp(n){ return new URL(location.href).searchParams.get(n); }
+function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+
+// --- STATE ---
+let TT = { signals: null, current: null };
+let currentParams = null, targetParams = null;
+const N = 120000;
+let geom, points, mat;
+
+// --- RENDERER & CAMERA ---
+const scene = new THREE.Scene();
+const aspect = innerWidth / innerHeight;
+const frustumSize = 21;
+const camera = new THREE.OrthographicCamera(frustumSize*aspect/-2, frustumSize*aspect/2, frustumSize/2, frustumSize/-2, 0.1, 2000);
+camera.position.set(0, 0, 100);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({
+  antialias: false, powerPreference: "high-performance", precision: "highp", preserveDrawingBuffer: true
+});
+const resMult = parseFloat(qp('res')) || 1.0;
+const DPR = Math.min(devicePixelRatio * 1.12, 2.1);
+renderer.setPixelRatio(DPR * resMult);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0604, 1);
+document.body.appendChild(renderer.domElement);
+
+// --- UNIFORMS ---
+// A small, growth-focused parameter set. Signals modulate gyrification, fold
+// crowding, ridge sharpness, palette warmth, and growth rate — never fast motion.
+const uniforms = {
+  uTime:        { value: 0 },
+  uPixel:       { value: Math.min(devicePixelRatio, 1.6) },
+  uGrowth:      { value: 0.0 },   // 0..1 maturation of the cortex (slow)
+  uGyri:        { value: 5.2 },   // spatial frequency of the convolutions
+  uFold:        { value: 0.85 },  // how strongly threads fold to avoid themselves
+  uSulcus:      { value: 0.62 },  // depth/contrast of the grooves
+  uRidge:       { value: 1.0 },   // ridge sharpness
+  uWarp:        { value: 1.0 },   // domain-warp amount (organic irregularity)
+  uVascular:    { value: 0.35 },  // secondary vein network strength
+  uWarm:        { value: 0.55 },  // palette warmth (coral<->deep-sea)
+  uBreath:      { value: 0.5 },   // very slow living pulse
+};
+
+// --- SHADER ---
+mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uGrowth, uGyri, uFold, uSulcus, uRidge, uWarp, uVascular, uWarm, uBreath;
+    // birthPos: a point's home position along its growth curve, inside the organic body.
+    // arc:      0..1 position along that curve (used for staged growth + thickness).
+    // seed:     per-point randomness.  curveId: which thread it belongs to.
+    attribute vec2 birthPos; attribute float arc, seed, curveId;
+    varying vec3 vColor; varying float vAlpha;
+
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+    float noise(vec2 p){
+      vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+      return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),
+                 mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x), f.y);
+    }
+    float fbm(vec2 p){
+      float v=0.0, a=0.5;
+      for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.02; a*=0.5; }
+      return v;
+    }
+    // Smooth triangle wave -> turns a scalar field into parallel folded ridges.
+    float ridges(float x){ return abs(fract(x)-0.5)*2.0; }
+
+    void main(){
+      vec2 p = birthPos;
+      float r = length(p);
+
+      // ---- ORGANIC BODY MASK (so the form reads instantly, not a square blob) ----
+      // A lobed brain-like silhouette via low-freq angular modulation of radius.
+      float ang = atan(p.y, p.x);
+      float lobe = 9.4 + 1.7*sin(ang*2.0) + 0.9*sin(ang*3.0 + 0.7) + 0.7*sin(ang*5.0+1.9);
+      // central longitudinal fissure (the two-hemisphere split) — gentle dim, not a cut.
+      float fissure = smoothstep(0.0, 1.4, abs(p.x) + 0.6*fbm(p*0.18));
+      float body = (1.0 - smoothstep(lobe*0.92, lobe*1.02, r)) * mix(0.5, 1.0, fissure);
+
+      // ---- DOMAIN WARP (organic irregularity, NOT pure perlin drift) ----
+      // Slow warp gives the labyrinth its hand-grown wander.
+      vec2 w = vec2(fbm(p*0.22 + 11.3), fbm(p*0.22 - 7.1));
+      vec2 pw = p + (w - 0.5) * (2.4 * uWarp);
+
+      // ---- GYRIFICATION FIELD ----
+      // A reaction-diffusion-like potential: two warped distance fields interfere,
+      // producing convoluted, self-avoiding, space-filling bands (gyri/sulci).
+      float grow = clamp(uGrowth, 0.0, 1.0);
+      // gyri tighten as the cortex matures -> crowding.
+      float freq = uGyri * mix(0.62, 1.0, grow);
+      float phi = pw.x*0.5 + pw.y*0.32
+                + 1.4*fbm(pw*0.30)
+                + 0.8*sin(length(pw)*0.42 + 1.7);
+      float psi = pw.y*0.5 - pw.x*0.30
+                + 1.4*fbm(pw*0.30 + 4.7);
+      // interference of two band systems => convolution, not stripes.
+      float band = ridges(phi*freq*0.12) * ridges(psi*freq*0.12);
+      band = pow(band, mix(0.6, 1.7, uRidge));
+
+      // The fold: threads displace toward the nearest ridge crest, crowding into gyri.
+      // gradient of the band field (finite diff) gives the fold direction.
+      float e = 0.06;
+      float bx1 = ridges((phi+e)*freq*0.12)*ridges(psi*freq*0.12);
+      float bx0 = ridges((phi-e)*freq*0.12)*ridges(psi*freq*0.12);
+      float by1 = ridges(phi*freq*0.12)*ridges((psi+e)*freq*0.12);
+      float by0 = ridges(phi*freq*0.12)*ridges((psi-e)*freq*0.12);
+      vec2 grad = vec2(bx1-bx0, by1-by0);
+      vec2 foldDir = (length(grad)>1e-5) ? normalize(grad) : vec2(0.0);
+
+      // crowd toward crests; amount grows with maturation and toward the cortex surface.
+      // kept modest so threads pack densely into ridges rather than collapsing to dots.
+      float crowd = uFold * mix(0.35, 0.9, grow) * (0.55 + 0.45*smoothstep(0.3, 1.0, r/lobe));
+      p = pw + foldDir * crowd * (0.4 + 0.5*band);
+
+      // ---- SECONDARY VASCULAR NETWORK ----
+      // sparse bright veins threading through the grooves.
+      float vein = pow(ridges(fbm(p*0.5 + 2.0)*3.0), 5.0);
+      float veinMask = vein * uVascular;
+      p += vec2(-foldDir.y, foldDir.x) * veinMask * 0.25;
+
+      // ---- VERY SLOW LIVING MOTION ----
+      // breathing dilation + an almost-imperceptible crawl of the fold field.
+      float breath = 1.0 + 0.012 * uBreath * sin(uTime*0.18 + r*0.05);
+      p *= breath;
+      // tiny tangential creep so gyri appear to *grow* (extremely slow).
+      vec2 tang = vec2(-normalize(p+vec2(1e-4)).y, normalize(p+vec2(1e-4)).x);
+      p += tang * 0.05 * uBreath * sin(uTime*0.05 + curveId*0.21 + band*3.0);
+
+      // gentle z relief so ridges catch light over sulci (reads as folded tissue).
+      float relief = (band - 0.5) * uSulcus * 6.0 + (w.x-0.5)*1.5;
+      float z = relief - veinMask*2.0;
+
+      // staged growth reveal: arcs appear progressively as the cortex matures.
+      float arrived = smoothstep(arc-0.04, arc+0.02, grow*1.15);
+
+      vec3 pos = vec3(p, z);
+
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+
+      // ---- POINT SIZE: thicker on crests (gyri), thin in sulci ----
+      float thick = mix(2.2, 3.6, band);
+      gl_PointSize = max(2.0, floor(uPixel * thick));
+
+      // ---- LIVING-TISSUE PALETTE ----
+      // sulci = dark ink / deep-sea ; gyri crest = bone / coral pink / ochre.
+      vec3 sulcusCol = mix(vec3(0.46,0.22,0.20), vec3(0.20,0.32,0.38), 1.0-uWarm); // dim coral vs deep-sea
+      vec3 fleshCol  = mix(vec3(0.90,0.50,0.44), vec3(0.60,0.42,0.58), 1.0-uWarm); // coral vs orchid
+      vec3 ochreCol  = mix(vec3(0.92,0.68,0.40), vec3(0.50,0.70,0.70), 1.0-uWarm); // ochre vs sea-jade
+      vec3 boneCol   = mix(vec3(0.98,0.92,0.84), vec3(0.90,0.94,0.96), 1.0-uWarm); // bone vs pale
+
+      float crest = smoothstep(0.15, 0.92, band);
+      vec3 col = mix(sulcusCol, fleshCol, crest);
+      col = mix(col, ochreCol, smoothstep(0.45,0.85,band) * 0.6);
+      col = mix(col, boneCol, pow(crest, 3.0) * 0.5);
+      // veins glow warm-bright.
+      col = mix(col, vec3(0.98,0.86,0.70), min(veinMask*0.9, 0.6));
+      // subtle radial deepening toward the core (vascular shadow).
+      col *= mix(0.78, 1.06, smoothstep(0.0, lobe, r));
+
+      vColor = col;
+
+      // alpha: body mask + crest emphasis + growth reveal. Sulci dim but present
+      // (keeps the labyrinth readable & dense, not a scatter of bright tufts).
+      float a = body * arrived;
+      a *= mix(0.72, 1.0, crest);
+      a *= 0.78 + 0.22*smoothstep(0.0,0.4,arc);
+      vAlpha = clamp(a*1.5, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor; varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = length(d);
+      if (r > 0.5) discard;
+      // soft round thread with a slightly firm core (reads as a strand, not a dot)
+      float edge = 1.0 - smoothstep(0.22, 0.5, r);
+      edge = pow(edge, 1.1);
+      vec3 col = pow(vColor*1.12, vec3(0.88));
+      gl_FragColor = vec4(col, vAlpha * edge);
+    }
+  `
+});
+
+// --- GEOMETRY: grow self-avoiding threads that pack an organic body ---
+// Each thread is a wandering path biased to fill space (Lindenmayer-ish growth +
+// curl wander), clipped to a lobed silhouette. Points sampled densely along arcs.
+function build(seed){
+  const pos  = new Float32Array(N*3);
+  const bpos = new Float32Array(N*2);
+  const arcs = new Float32Array(N);
+  const seeds= new Float32Array(N);
+  const ids  = new Float32Array(N);
+
+  let s = seed >>> 0;
+  const rng = () => { s |= 0; s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = (t + Math.imul(t ^ t >>> 7, 61 | t)) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+
+  // value-noise for CPU wander (matches the spirit of the GPU field)
+  function vnoise(x,y){
+    const xi=Math.floor(x), yi=Math.floor(y), xf=x-xi, yf=y-yi;
+    const h=(a,b)=>{ const n=Math.sin(a*127.1+b*311.7)*43758.5453; return n-Math.floor(n); };
+    const u=xf*xf*(3-2*xf), v=yf*yf*(3-2*yf);
+    return (h(xi,yi)*(1-u)+h(xi+1,yi)*u)*(1-v) + (h(xi,yi+1)*(1-u)+h(xi+1,yi+1)*u)*v;
+  }
+  function lobeR(ang){ return 9.4 + 1.7*Math.sin(ang*2)+0.9*Math.sin(ang*3+0.7)+0.7*Math.sin(ang*5+1.9); }
+  function inside(x,y){
+    const r=Math.hypot(x,y), a=Math.atan2(y,x);
+    return r < lobeR(a)*0.9;
+  }
+
+  const nThreads = 1400;         // many short threads => dense, even coral packing
+  const ptsPer = Math.floor(N / nThreads);
+  let idx = 0;
+
+  for (let c = 0; c < nThreads && idx < N; c++){
+    // seed each thread somewhere inside the body (uniform area fill, no center pile-up)
+    let px, py, tries=0;
+    do {
+      const a = rng()*Math.PI*2, rr = Math.sqrt(rng())*9.6;
+      px = Math.cos(a)*rr; py = Math.sin(a)*rr; tries++;
+    } while(!inside(px,py) && tries<40);
+
+    // Grow along the gyrification CONTOUR so threads naturally trace ridges/grooves,
+    // giving the labyrinthine brain-coral wander instead of isolated tufts.
+    let dir = rng()*Math.PI*2;
+    const step = 0.085 + rng()*0.03;     // small step => smooth dense strands
+    const curlScale = 0.16 + rng()*0.05;
+    const curlGain = 0.55 + rng()*0.35;  // gentle bend => self-avoiding wander, not chaos
+
+    for (let j = 0; j < ptsPer && idx < N; j++){
+      const arc = j/(ptsPer-1);
+      pos[idx*3]=px; pos[idx*3+1]=py; pos[idx*3+2]=0;
+      bpos[idx*2]=px; bpos[idx*2+1]=py;
+      arcs[idx]=arc; seeds[idx]=rng(); ids[idx]=c;
+      idx++;
+
+      // heading follows a curl-noise field (parallel neighbors => folded sheets)
+      const n  = vnoise(px*curlScale + 31.0, py*curlScale - 17.0);
+      const n2 = vnoise(px*curlScale*1.9 - 5.0, py*curlScale*1.9 + 9.0);
+      const target = (n + 0.5*n2) * Math.PI * 2.0;   // field-driven heading
+      // steer toward field direction (low gain => coherent strands)
+      let d = target - dir; d = Math.atan2(Math.sin(d), Math.cos(d));
+      dir += d * curlGain * 0.25;
+      // boundary self-avoidance: curve back inward at the cortex edge
+      const r=Math.hypot(px,py), a=Math.atan2(py,px);
+      if (r > lobeR(a)*0.86){ const inward = Math.atan2(-py,-px); let di=inward-dir; di=Math.atan2(Math.sin(di),Math.cos(di)); dir += di*0.4; }
+      px += Math.cos(dir)*step;
+      py += Math.sin(dir)*step;
+    }
+  }
+
+  // park any leftover points far offscreen (avoids a bright origin dot)
+  while (idx < N){
+    pos[idx*3]=99999; pos[idx*3+1]=99999; pos[idx*3+2]=0;
+    bpos[idx*2]=99999; bpos[idx*2+1]=99999;
+    arcs[idx]=0; seeds[idx]=0; ids[idx]=-1; idx++;
+  }
+  return { pos, bpos, arcs, seeds, ids };
+}
+
+function regenerate(){
+  const { pos, bpos, arcs, seeds, ids } = build(Math.floor(Math.random()*1e9));
+  if (!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.setAttribute('birthPos', new THREE.BufferAttribute(bpos, 2));
+    geom.setAttribute('arc', new THREE.BufferAttribute(arcs, 1));
+    geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+    geom.setAttribute('curveId', new THREE.BufferAttribute(ids, 1));
+    points = new THREE.Points(geom, mat); scene.add(points);
+  } else {
+    geom.attributes.position.array.set(pos); geom.attributes.position.needsUpdate=true;
+    geom.attributes.birthPos.array.set(bpos); geom.attributes.birthPos.needsUpdate=true;
+    geom.attributes.arc.array.set(arcs); geom.attributes.arc.needsUpdate=true;
+    geom.attributes.seed.array.set(seeds); geom.attributes.seed.needsUpdate=true;
+    geom.attributes.curveId.array.set(ids); geom.attributes.curveId.needsUpdate=true;
+  }
+}
+
+// --- SIGNAL MAPPING -> growth/fold parameters (slow, organic; no fast motion) ---
+function mapSignal(sig){
+  const s  = clamp01(sig?.satisfaction ?? 0.5);
+  const e  = clamp01(sig?.expectation ?? 0.0);
+  const ri = clamp01(sig?.reasonIntensity ?? 0.3);
+  const ro = clamp01(sig?.reorientation ?? 0.0);
+  const a  = clamp01(sig?.affirmation ?? 0.0);
+  const rv = Math.max(-1, Math.min(1, sig?.reactionValence ?? 0.0));
+  return {
+    uGyri:     lerp(4.2, 7.2, e),                 // more expectation -> tighter convolutions
+    uFold:     lerp(0.65, 1.05, clamp01(0.5*e+0.5*ri)),
+    uSulcus:   lerp(0.45, 0.85, clamp01(0.6*ro+0.4*(1-s))), // friction -> deeper grooves
+    uRidge:    lerp(0.7, 1.3, ri),
+    uWarp:     lerp(0.7, 1.4, clamp01(0.6*ro+0.4*e)),
+    uVascular: lerp(0.20, 0.55, clamp01(0.6*s+0.4*a)),
+    uWarm:     lerp(0.38, 0.78, (rv+1)/2),        // valence shifts coral<->deep-sea
+    uBreath:   lerp(0.35, 0.8, a),
+  };
+}
+
+function lerpParams(cur, tar, t){
+  const out = {};
+  for (const k in tar){ out[k] = lerp(cur?.[k] ?? tar[k], tar[k], t); }
+  return out;
+}
+function dampAlpha(dt, tau){ const T=Math.max(1e-4,tau), d=Math.max(0,dt); return 1-Math.exp(-d/T); }
+
+function applySignal(sig){ TT.current = sig || null; targetParams = mapSignal(sig); if(!currentParams) currentParams = {...targetParams}; }
+
+// --- LOOP ---
+const start = performance.now();
+let lastT = start;
+
+// growth maturation: rises 0->1 over ~22s, then breathes slowly (no reset jolt)
+function growthCurve(t){
+  const mat = clamp01(t / 22.0);
+  const eased = mat*mat*(3-2*mat);
+  const idle = 0.5 + 0.5*Math.sin((t-22.0)*0.05);   // gentle ±, very slow
+  return clamp01(eased * (t<22.0 ? 1.0 : (0.92 + 0.08*idle)));
+}
+
+function loop(){
+  const now = performance.now();
+  const t = (now - start)/1000;
+  const dt = Math.min(0.1, (now - lastT)/1000); lastT = now;
+
+  uniforms.uTime.value = t;
+  uniforms.uGrowth.value = growthCurve(t);
+
+  // ONE slow camera drift: a gentle orbit-less pan + tiny zoom breath. Keeps centroid framed.
+  const drift = 0.6 * Math.sin(t*0.03);
+  const driftY = 0.4 * Math.sin(t*0.024 + 1.3);
+  const zoom = 1.0 + 0.03*Math.sin(t*0.018);
+  const a = innerWidth/innerHeight;
+  const fs = frustumSize*zoom;
+  camera.left = fs*a/-2 + drift; camera.right = fs*a/2 + drift;
+  camera.top = fs/2 + driftY; camera.bottom = fs/-2 + driftY;
+  camera.updateProjectionMatrix();
+
+  if (!targetParams) targetParams = mapSignal(TT.current);
+  if (!currentParams) currentParams = {...targetParams};
+  const al = dampAlpha(dt, parseFloat(qp('morphTau')) || 2.6);
+  currentParams = lerpParams(currentParams, targetParams, al);
+  for (const k in currentParams){ if (uniforms[k]) uniforms[k].value = currentParams[k]; }
+  if (window.__setGrade) window.__setGrade({ grade: gradeFromSignal(TT.current) });
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+function gradeFromSignal(sig){
+  const rv = Math.max(-1, Math.min(1, sig?.reactionValence ?? 0));
+  const s  = clamp01(sig?.satisfaction ?? 0.5);
+  return { hue: lerp(-8, 10, (rv+1)/2), sat: lerp(0.96,1.14,s), bri: 1.0, con: 1.04 };
+}
+
+// --- BOOT ---
+regenerate();
+loop();
+addEventListener('click', regenerate);
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = Math.min(devicePixelRatio, 1.6);
+});
+
+async function init(){
+  const res = await fetch('./ThoughtTrace.signals.json', { cache: 'no-store' });
+  const arr = await res.json(); TT.signals = arr;
+  const wanted = qp('sig');
+  if (wanted){ applySignal(arr.find(x => String(x.id) === wanted)); }
+  else { applySignal(arr[0]); }  // default to first trace so the form is signal-driven
+  window.__TT = { applyById: (id) => applySignal(arr.find(x => String(x.id) === id)) };
+}
+init().catch(()=>{});
+</script>
+
+<!-- gp: universal grade panel (kept for gallery parity) -->
+<script>
+(function(){
+  var G={hue:0,sat:1,bri:1,con:1};
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    document.querySelectorAll('canvas').forEach(c => c.style.filter=f);
+  }
+  window.__setGrade = function(cfg){
+    const g = cfg.grade || {};
+    if(g.hue!==undefined) G.hue=g.hue; if(g.sat!==undefined) G.sat=g.sat;
+    if(g.bri!==undefined) G.bri=g.bri; if(g.con!==undefined) G.con=g.con;
+    applyFilter();
+  };
+})();
+</script>
+
+<div id="captureStatus" style="position:fixed;right:16px;bottom:118px;z-index:2147483647;display:block!important;visibility:visible!important;opacity:0.92!important;pointer-events:none!important;background:rgba(0,0,0,0.64);color:#d9852b;border:1px solid rgba(217,133,43,0.35);border-radius:10px;padding:7px 10px;font:11px ui-monospace, Menlo, monospace;">capture ready</div>
+<button id="savePNGButton" style="position:fixed;right:16px;bottom:80px;z-index:2147483647;display:block!important;visibility:visible!important;opacity:0.92!important;pointer-events:auto!important;background:rgba(0,0,0,0.72);color:#d9852b;border:1px solid rgba(217,133,43,0.60);border-radius:10px;padding:9px 12px;font:12px ui-monospace, Menlo, monospace;cursor:pointer;">SAVE PNG</button>
+<button id="startVideoButton" style="position:fixed;right:116px;bottom:16px;z-index:2147483647;display:block!important;visibility:visible!important;opacity:0.92!important;pointer-events:auto!important;background:rgba(0,0,0,0.72);color:#d9852b;border:1px solid rgba(217,133,43,0.60);border-radius:10px;padding:9px 12px;font:12px ui-monospace, Menlo, monospace;cursor:pointer;">START VIDEO</button>
+<button id="stopVideoButton" style="position:fixed;right:16px;bottom:16px;z-index:2147483647;display:block!important;visibility:visible!important;opacity:0.92!important;pointer-events:auto!important;background:rgba(0,0,0,0.72);color:#d9852b;border:1px solid rgba(217,133,43,0.60);border-radius:10px;padding:9px 12px;font:12px ui-monospace, Menlo, monospace;cursor:pointer;">STOP VIDEO</button>
+
+<script id="robust-png-video-capture">
+window.addEventListener('load', () => {
+  const status = document.getElementById('captureStatus');
+  const setStatus = (s) => { if (status) status.textContent = s; };
+  function downloadBlob(blob, filename){
+    const url = URL.createObjectURL(blob); const a = document.createElement('a');
+    a.style.display='block'; a.style.position='fixed'; a.style.left='0'; a.style.top='0';
+    a.href=url; a.download=filename; document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 2000);
+  }
+  const saveBtn = document.getElementById('savePNGButton');
+  if (saveBtn) saveBtn.onclick = () => {
+    const canvas = document.querySelector('canvas'); if(!canvas) return setStatus('no canvas');
+    setStatus('saving png...');
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      try { canvas.toBlob((blob)=>{ if(!blob||blob.size<1000){ setStatus('png failed'); return; }
+        downloadBlob(blob, `crl_capture_${canvas.width}x${canvas.height}_${Date.now()}.png`); setStatus('png downloaded');
+      }, 'image/png'); } catch(e){ console.error(e); setStatus('png error'); }
+    }));
+  };
+  let recorder=null, chunks=[], stopTimer=null;
+  function startVideo(){
+    const canvas = document.querySelector('canvas'); if(!canvas) return setStatus('no canvas');
+    if (recorder && recorder.state==='recording') return setStatus('already recording');
+    chunks=[]; const stream = canvas.captureStream(30);
+    let mime='video/webm;codecs=vp9';
+    if(!MediaRecorder.isTypeSupported(mime)) mime='video/webm;codecs=vp8';
+    if(!MediaRecorder.isTypeSupported(mime)) mime='video/webm';
+    try { recorder = new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:24000000}); }
+    catch(e){ console.error(e); return setStatus('recorder error'); }
+    recorder.ondataavailable=(e)=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+    recorder.onstop=()=>{ const blob=new Blob(chunks,{type:mime}); if(!blob.size) return setStatus('video empty');
+      downloadBlob(blob, `crl_video_${canvas.width}x${canvas.height}_${Date.now()}.webm`); setStatus('video downloaded'); };
+    recorder.start(); setStatus('recording...'); stopTimer=setTimeout(stopVideo,30000);
+  }
+  function stopVideo(){ if(stopTimer){clearTimeout(stopTimer);stopTimer=null;}
+    if(recorder&&recorder.state==='recording'){ setStatus('stopping...'); recorder.stop(); } else setStatus('not recording'); }
+  const sb=document.getElementById('startVideoButton'), stb=document.getElementById('stopVideoButton');
+  if(sb) sb.onclick=startVideo; if(stb) stb.onclick=stopVideo;
+  setStatus('capture ready');
+});
+</script>
+</body>
+</html>
