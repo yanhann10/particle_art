@@ -27,7 +27,7 @@ VENV="$REPO/.venv"
 
 # Time-boxed experiment. improv_tick: hypothesis -> v1 -> critic -> (v2 -> critic) -> gate.
 RC=0
-OUTPUT=$(timeout 1200 "$VENV/bin/python3" "$REPO/scripts/improv_tick.py" --no-push 2>&1) || RC=$?
+OUTPUT=$(timeout 1800 "$VENV/bin/python3" "$REPO/scripts/improv_tick.py" --no-push 2>&1) || RC=$?
 echo "$OUTPUT" | sed "s/^/  /" >> "$LOG"
 
 # Detect subscription usage-limit -> clean skip, no spend, no hammer.

@@ -24,7 +24,7 @@ class ProviderError(RuntimeError):
     pass
 
 
-def call_subscription(system: str, user: str, timeout_s: int = 240) -> Optional[str]:
+def call_subscription(system: str, user: str, timeout_s: int = 600) -> Optional[str]:
     """Run `claude -p` with the user's subscription. Returns text or None if unavailable."""
     if not _which("claude"):
         return None
