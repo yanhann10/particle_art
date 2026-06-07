@@ -61,7 +61,10 @@ LOG     = REPO / "scripts" / "improv_log.jsonl"
 #             dominates bottom-quartile of weak pieces 11/25)
 # So we lean toward surprise/artist branches (which produce more legible
 # distinct work) and away from chain (which drifts after gen ≥ 4).
-MODE_WEIGHTS = {"chain": 0.25, "surprise": 0.30, "artist": 0.20, "technique": 0.25}
+# Re-tuned 2026-06-07 from 248 scored ticks: artist mean 7.00 (n=70),
+# surprise 6.75 (n=91), chain 6.55 (n=87) — shift weight chain -> artist.
+# See docs/reflections/2026-06-07-agency.md
+MODE_WEIGHTS = {"chain": 0.15, "surprise": 0.30, "artist": 0.30, "technique": 0.25}
 
 
 def load_json(p: Path) -> dict:
