@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hbi · playa — Worley cellular</title>
+<!-- MOTION: settle, intensity: calm -->
+<style>
+html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#1a1510}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;opacity:0.55;font-size:11px;letter-spacing:0.06em;z-index:5}
+</style>
+</head>
+<body>
+<div class="id">hbi</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── intent: a dried lakebed seen from a slight aerial angle at dusk —
+   Worley cells read as cracked clay plates, bright mineral-deposit edges
+   catching last light, dark earth interiors. Cracks imperceptibly widen
+   as moisture leaves. The viewer recognizes parched terrain.
+   Evokes Andy Goldsworthy's cracked-mud ephemera.
+   Creative constraint: Worley F2-F1 drives ALL visual decisions.
+   Algo-art pattern: Worley cellular noise (Steven Worley, 1996).
+   Hybridised element: Goldsworthy's earth-palette + Kiefer's scorched scale. ── */
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1510);
+
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 8, 36);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+/* ── deterministic rng ── */
+let _s = 991237;
+function rng(){_s=_s+0x6d2b79f5|0;let t=Math.imul(_s^_s>>>15,1|_s);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}
+
+/* ── Worley seeds — 6×6 jittered grid ── */
+const SEED_COUNT = 36;
+const GRID = 6;
+const CELL_SP = 5.2;
+const seedTexData = new Float32Array(SEED_COUNT * 4);
+const seedDrift = new Float32Array(SEED_COUNT * 2);
+
+for(let r=0;r<GRID;r++){
+  for(let c=0;c<GRID;c++){
+    const i = r*GRID+c;
+    const bx = (c-(GRID-1)/2)*CELL_SP + (rng()-0.5)*3.8;
+    const by = (r-(GRID-1)/2)*CELL_SP + (rng()-0.5)*3.8;
+    seedTexData[i*4]   = bx;
+    seedTexData[i*4+1] = by;
+    seedTexData[i*4+2] = 0.08 + rng()*0.3;
+    seedTexData[i*4+3] = rng();
+    const ang = Math.atan2(by, bx) + (rng()-0.5)*0.8;
+    const spd = 0.005 + rng()*0.009;
+    seedDrift[i*2]   = Math.cos(ang)*spd;
+    seedDrift[i*2+1] = Math.sin(ang)*spd;
+  }
+}
+
+const seedTex = new THREE.DataTexture(seedTexData, SEED_COUNT, 1, THREE.RGBAFormat, THREE.FloatType);
+seedTex.magFilter = THREE.NearestFilter;
+seedTex.minFilter = THREE.NearestFilter;
+seedTex.needsUpdate = true;
+
+/* ── particles — uniform disc ── */
+const N = 72000;
+const FIELD_R = 17;
+const positions = new Float32Array(N*3);
+const aRand = new Float32Array(N);
+
+for(let i=0;i<N;i++){
+  const ang = rng()*Math.PI*2;
+  const rad = Math.sqrt(rng())*FIELD_R;
+  positions[i*3]   = Math.cos(ang)*rad;
+  positions[i*3+1] = Math.sin(ang)*rad;
+  positions[i*3+2] = 0;
+  aRand[i] = rng();
+}
+
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.BufferAttribute(positions,3));
+geo.setAttribute('aRand', new THREE.BufferAttribute(aRand,1));
+
+/* ── shaders ── */
+const vertSrc = `
+uniform sampler2D uSeedTex;
+uniform float uTime;
+uniform float uPR;
+attribute float aRand;
+varying float vEdge;
+varying float vCellTint;
+varying float vAlpha;
+
+void main(){
+  vec2 p = position.xy;
+  float f1=1e10, f2=1e10;
+  float nIdx=0.0;
+
+  for(int i=0;i<${SEED_COUNT};i++){
+    vec2 uv = vec2((float(i)+0.5)/${SEED_COUNT}.0, 0.5);
+    vec4 sd = texture2D(uSeedTex, uv);
+    float d = distance(p, sd.xy);
+    if(d<f1){ f2=f1; f1=d; nIdx=float(i); }
+    else if(d<f2){ f2=d; }
+  }
+
+  float edge = f2 - f1;
+  vEdge = smoothstep(0.0, 1.4, edge);
+
+  vec2 cellUV = vec2((nIdx+0.5)/${SEED_COUNT}.0, 0.5);
+  vec4 cell = texture2D(uSeedTex, cellUV);
+  vCellTint = cell.w;
+
+  float plateH = cell.z * smoothstep(3.5, 0.0, f1);
+  float crackD = (1.0 - vEdge) * 0.18;
+  float settle = (1.0 - vEdge) * min(uTime*0.006, 0.45) * (0.3 + 0.7*aRand);
+
+  vec3 pos = vec3(p, plateH - crackD - settle);
+  vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+  gl_Position = projectionMatrix * mv;
+
+  float sz = mix(1.8, 3.0, vEdge);
+  gl_PointSize = sz * uPR * (55.0 / -mv.z);
+
+  float discFade = smoothstep(1.0, 0.82, length(p)/${FIELD_R}.0);
+  vAlpha = discFade;
+}`;
+
+const fragSrc = `
+varying float vEdge;
+varying float vCellTint;
+varying float vAlpha;
+
+void main(){
+  float d = length(gl_PointCoord - 0.5)*2.0;
+  if(d > 1.0) discard;
+  float a = smoothstep(1.0, 0.15, d);
+
+  vec3 clay1 = vec3(0.27, 0.21, 0.15);
+  vec3 clay2 = vec3(0.34, 0.27, 0.20);
+  vec3 interior = mix(clay1, clay2, vCellTint);
+  vec3 crack = vec3(0.73, 0.65, 0.53);
+  vec3 col = mix(crack, interior, vEdge);
+
+  float opacity = mix(0.88, 0.48, vEdge);
+  gl_FragColor = vec4(col, a * opacity * vAlpha);
+}`;
+
+const mat = new THREE.ShaderMaterial({
+  uniforms:{
+    uSeedTex:{value:seedTex},
+    uTime:{value:0},
+    uPR:{value:Math.min(devicePixelRatio,2)}
+  },
+  vertexShader:vertSrc,
+  fragmentShader:fragSrc,
+  transparent:true,
+  depthWrite:false
+});
+
+scene.add(new THREE.Points(geo, mat));
+
+/* ── atmospheric dust ── */
+const dustN = 1800;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustN*3);
+for(let i=0;i<dustN;i++){
+  dustPos[i*3]   = (rng()-0.5)*FIELD_R*2.2;
+  dustPos[i*3+1] = (rng()-0.5)*FIELD_R*2.2;
+  dustPos[i*3+2] = 0.4 + rng()*3.0;
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos,3));
+scene.add(new THREE.Points(dustGeo, new THREE.PointsMaterial({
+  color:0x8a7d6a, size:0.055, transparent:true, opacity:0.1,
+  sizeAttenuation:true, depthWrite:false
+})));
+
+/* ── warm under-glow ── */
+const glowMat = new THREE.MeshBasicMaterial({
+  color:0x261c12, transparent:true, opacity:0.35, depthWrite:false
+});
+const glowMesh = new THREE.Mesh(new THREE.PlaneGeometry(48,48), glowMat);
+glowMesh.position.z = -0.8;
+scene.add(glowMesh);
+
+/* ── subtle rim-light gradient (top-down warm streak) ── */
+const rimGeo = new THREE.PlaneGeometry(60,60);
+const rimMat = new THREE.ShaderMaterial({
+  transparent:true, depthWrite:false,
+  uniforms:{},
+  vertexShader:`varying vec2 vUv; void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+  fragmentShader:`varying vec2 vUv; void main(){
+    float g=smoothstep(0.0,0.5,distance(vUv,vec2(0.5)));
+    gl_FragColor=vec4(vec3(0.08,0.06,0.04), g*0.25);
+  }`
+});
+const rim = new THREE.Mesh(rimGeo, rimMat);
+rim.position.z = -0.6;
+scene.add(rim);
+
+/* ── resize ── */
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+  mat.uniforms.uPR.value=Math.min(devicePixelRatio,2);
+});
+
+/* ── animate ── */
+const t0 = performance.now();
+let prev = 0;
+
+function loop(){
+  const elapsed = (performance.now()-t0)/1000;
+  const dt = Math.min(elapsed - prev, 0.1);
+  prev = elapsed;
+
+  for(let i=0;i<SEED_COUNT;i++){
+    seedTexData[i*4]   += seedDrift[i*2]   * dt;
+    seedTexData[i*4+1] += seedDrift[i*2+1] * dt;
+  }
+  seedTex.needsUpdate = true;
+  mat.uniforms.uTime.value = elapsed;
+
+  camera.position.x = Math.sin(elapsed*0.012)*1.8;
+  camera.position.y = 8 + Math.sin(elapsed*0.008)*0.6;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+</body>
+</html>
