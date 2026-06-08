@@ -58,23 +58,42 @@ def _taste_summary() -> str:
 def build_prompt() -> str:
     return f"""You are the aesthetic judge for a curated gallery of generative particle art \
 (three.js + GLSL). You are watching an ~{WINDOW_S}-second capture of one piece's live loop \
-(early frames may still be settling).
+(the first second or two may still be initializing — judge the settled state).
+
+This is an ABSTRACT, generative gallery. Structured abstraction IS the medium, not a defect: \
+strange attractors (Lorenz/Aizawa butterflies & vortices), differential growth, L-systems, \
+flow/vector fields, point-cloud objects, calligraphic ribbons, and network/vascular forms are \
+all PRIME material here. "Not figurative" is NOT a reason to score low — a Lorenz attractor or \
+a coral-like growth is a strong form even though it depicts no object.
 
 {_taste_summary()}
 
-Judge what you SEE — form, composition, palette, and especially MOTION QUALITY \
-(contemplative and readable = good; jittery, spinning, or shapeless drift = bad). \
-A strong piece has a form readable within 2 seconds, restrained palette, and motion \
-with intent.
+What actually separates good from bad here:
+- GOOD: a coherent form or field that reads as INTENTIONAL within ~2s; restrained / duotone \
+palette; motion that is contemplative and lets you read the form (slow orbit, breathing, growth).
+- BAD: genuinely formless ambient haze with no structure; near-empty / barely-visible renders; \
+illegible mush; blown-out neon; or broken/half-loaded frames.
+
+CALIBRATION — use the FULL 1-10 range; do NOT pile everything at 2-3:
+  9-10 = exceptional, signature wall piece
+  7-8  = clearly good, earns its place
+  5-6  = competent but unremarkable / borderline
+  3-4  = weak: thin structure, muddy, or forgettable
+  1-2  = empty, broken, or pure formless noise
+Most pieces should land 4-7. Reserve 1-2 for genuinely empty/broken renders only.
+
+Do NOT try to detect code-level issues (autoRotate, shaking) from the video — a separate static \
+checker handles those. Judge ONLY the visual & motion result. A slow continuous camera orbit that \
+reads as contemplative is fine; only penalize motion that is jittery, frantic, or dizzying.
 
 Return STRICT JSON only, no prose, no fences:
 {{
-  "score": <int 1-10; ≤4 = should not hang in the main gallery, 5-6 borderline, ≥7 earns its wall>,
+  "score": <int 1-10 per the calibration above>,
   "verdict": "<concise, ≤2 sentences: the decisive reason for the score, naming form AND motion>",
   "resembles": "<ONE specific, well-known reference this piece most evokes — a contemporary \
 artwork/artist (e.g. 'Refik Anadol — Machine Hallucinations'), a building/architect \
 (e.g. 'Calatrava ribbed vault'), or a biomorphic/natural system (e.g. 'physarum plasmodium \
-network', 'murmuration'). Name the closest one even for weak pieces.>"
+network', 'starling murmuration'). Name the closest one even for weak pieces.>"
 }}"""
 
 
@@ -98,6 +117,19 @@ def extract_frames(clip: Path, out_dir: Path) -> list[Path]:
          "-q:v", "4", str(pattern)],
         check=True)
     return sorted(out_dir.glob("f*.jpg"))
+
+
+def frame_montage(clip: Path, out_jpg: Path) -> None:
+    """N_FRAMES sampled across the window, tiled into one labelled grid image.
+    A single image keeps the subscription CLI call light while still conveying
+    motion (time reads left→right, top→bottom)."""
+    cols = 3
+    subprocess.run(
+        [FFMPEG, "-y", "-loglevel", "error", "-sseof", f"-{WINDOW_S}", "-i", str(clip),
+         "-vf", f"fps={N_FRAMES}/{WINDOW_S},scale=400:-1,"
+                f"tile={cols}x{(N_FRAMES + cols - 1)// cols}:padding=4:color=black",
+         "-frames:v", "1", "-q:v", "4", str(out_jpg)],
+        check=True)
 
 
 # ---------------------------------------------------------------- backends
@@ -148,6 +180,36 @@ def judge_claude(clip: Path, prompt: str) -> str:
     return "".join(b.get("text", "") for b in out.get("content", []))
 
 
+def judge_subscription(clip: Path, prompt: str) -> str:
+    """Claude via the `claude` CLI subscription ($0). Vision through
+    --input-format stream-json: one montage image (frames over time) + prompt."""
+    with tempfile.TemporaryDirectory() as td:
+        montage = Path(td) / "m.jpg"
+        frame_montage(clip, montage)
+        img = base64.b64encode(montage.read_bytes()).decode()
+        msg = {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text",
+             "text": f"This is a {N_FRAMES}-frame montage of one piece's loop, "
+                     f"time order left→right, top→bottom (motion reads across the tiles)."},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img}},
+            {"type": "text", "text": prompt},
+        ]}}
+    p = subprocess.run(
+        ["claude", "-p", "--input-format", "stream-json",
+         "--output-format", "stream-json", "--verbose"],
+        input=json.dumps(msg) + "\n", capture_output=True, text=True, timeout=300)
+    if p.returncode != 0:
+        raise RuntimeError(f"claude cli rc={p.returncode}: {p.stderr[:200]}")
+    for line in p.stdout.splitlines():
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        if o.get("type") == "result" and isinstance(o.get("result"), str):
+            return o["result"]
+    raise RuntimeError("no result line from claude cli")
+
+
 def parse_result(text: str) -> dict | None:
     import re
     m = re.search(r"\{.*\}", text, re.S)
@@ -168,9 +230,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("ids", nargs="*")
     ap.add_argument("--ids-file", type=Path)
-    ap.add_argument("--backend", choices=["gemini", "claude"], required=True)
+    ap.add_argument("--backend", choices=["gemini", "claude", "subscription"], required=True)
     ap.add_argument("--clips-dir", type=Path, default=REPO / "clips_judge")
     ap.add_argument("--out", type=Path, help="results jsonl (appends; skips already-judged ids)")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel judge calls (subscription path only)")
     args = ap.parse_args()
 
     ids = list(args.ids)
@@ -188,9 +252,13 @@ def main() -> None:
                 pass
 
     prompt = build_prompt()
-    fn = judge_gemini if args.backend == "gemini" else judge_claude
+    fn = {"gemini": judge_gemini, "claude": judge_claude,
+          "subscription": judge_subscription}[args.backend]
+    model_tag = {"gemini": GEMINI_MODEL, "claude": CLAUDE_MODEL,
+                 "subscription": "claude-cli-subscription"}[args.backend]
     out_f = args.out.open("a") if args.out else None
 
+    todo = []
     for pid in ids:
         if pid in done:
             continue
@@ -198,8 +266,11 @@ def main() -> None:
         if not clip.exists():
             print(f"  ✗ {pid}: no clip", flush=True)
             continue
-        rec = {"id": pid, "backend": args.backend, "model":
-               GEMINI_MODEL if args.backend == "gemini" else CLAUDE_MODEL}
+        todo.append((pid, clip))
+
+    def judge_one(item):
+        pid, clip = item
+        rec = {"id": pid, "backend": args.backend, "model": model_tag}
         for attempt in range(3):
             try:
                 parsed = parse_result(fn(clip, prompt))
@@ -209,12 +280,24 @@ def main() -> None:
             except Exception as e:
                 rec["error"] = str(e)[:200]
                 time.sleep(5 * (attempt + 1))
+        return rec
+
+    def emit(rec):
         marker = "✓" if "score" in rec else "✗"
-        print(f"  {marker} {pid} [{args.backend}] "
+        print(f"  {marker} {rec['id']} [{args.backend}] "
               f"{rec.get('score','—')} {rec.get('verdict', rec.get('error',''))[:90]}", flush=True)
         if out_f:
             out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             out_f.flush()
+
+    if args.workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            for rec in ex.map(judge_one, todo):
+                emit(rec)
+    else:
+        for item in todo:
+            emit(judge_one(item))
     if out_f:
         out_f.close()
 
