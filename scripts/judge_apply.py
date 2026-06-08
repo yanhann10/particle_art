@@ -26,9 +26,13 @@ def main() -> None:
     ap.add_argument("results", type=Path, nargs="+")
     ap.add_argument("--threshold", type=float, default=4.0,
                     help="demote when score ≤ this (default 4)")
-    ap.add_argument("--run-tag", required=True)
+    ap.add_argument("--run-tag", default="")
     ap.add_argument("--require-prior-run", metavar="TAG",
                     help="2-run consistency vs this earlier run (see docstring)")
+    ap.add_argument("--enrich-run", metavar="TAG",
+                    help="pieces already staged under this run: attach video score/verdict/"
+                         "resemblance, and RESTORE to main any scoring > threshold "
+                         "(video judge overrides the static gate, e.g. autoRotate)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -50,11 +54,26 @@ def main() -> None:
     staged = staging["staged"]
     demoted, restored, kept = [], [], []
 
+    enriched = restored_enrich = 0
     for pid, r in results.items():
         if pid in favorites:
             continue
         fails = r["score"] <= args.threshold
         prior = staged.get(pid)
+
+        # enrich mode: pieces demoted by an earlier (static) run get the video
+        # verdict; video judge overrides the static gate when it scores > threshold
+        if args.enrich_run and prior and prior.get("run") == args.enrich_run:
+            if fails:
+                prior.update({"score": r["score"], "verdict": r["verdict"],
+                              "resembles": r.get("resembles"),
+                              "video_judge": r.get("model"),
+                              "static_reason": prior.get("verdict")})
+                enriched += 1
+            else:   # video judge says it's good → restore to main
+                del staged[pid]
+                restored_enrich += 1
+            continue
         if args.require_prior_run and prior and prior.get("run") == args.require_prior_run:
             if fails:   # confirmed by both runs
                 prior.update({"run": f"{args.require_prior_run}+{args.run_tag}",
@@ -73,6 +92,9 @@ def main() -> None:
 
     print(f"{len(results)} judged · threshold ≤{args.threshold:g} · "
           f"{len(demoted)} newly demoted · {len(kept)} confirmed · {len(restored)} restored")
+    if args.enrich_run:
+        print(f"enrich[{args.enrich_run}]: {enriched} kept+enriched · "
+              f"{restored_enrich} restored to main (video judge > threshold)")
     if args.dry_run:
         return
     staging["updated_at"] = now
