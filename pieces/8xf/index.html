@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<title>8xf · silhouette-bound flow · Lucy contour currents</title>
+<style>
+html, body { margin:0; padding:0; height:100%; background:#0b0a0e; overflow:hidden; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+      font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; letter-spacing:0.06em; }
+.loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+           font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:13px;
+           color:#e5dcd2; opacity:0.6; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy …</div>
+<div class="id">8xf</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+// Intent: Lucy's classical figure with visible particle currents tracing her
+// body's natural contours — like slow water reading stone ridgelines.
+// The silhouette stays crisp; the flow is the life inside it.
+
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 500);
+camera.position.set(1.5, 1.0, 22);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0b0a0e, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── atmosphere: warm side-light gradient ── */
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false, depthTest: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.999, 1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      vec2 p = vUv - vec2(0.35, 0.5);
+      float warm = 0.018 * exp(-dot(p * vec2(1.4, 0.9), p * vec2(1.4, 0.9)) * 2.5);
+      float vign = 1.0 - 0.35 * dot(vUv - 0.5, vUv - 0.5) * 2.0;
+      vec3 bg = vec3(0.045, 0.04, 0.052) + vec3(0.14, 0.10, 0.07) * warm;
+      gl_FragColor = vec4(bg * vign, 1.0);
+    }`
+});
+const bgQ = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat);
+bgQ.frustumCulled = false;
+bgQ.renderOrder = -1;
+scene.add(bgQ);
+
+/* ── particles ── */
+const N = 52000;
+const restPos   = new Float32Array(N * 3);
+const tangArr   = new Float32Array(N * 3);
+const bitangArr = new Float32Array(N * 3);
+const normArr   = new Float32Array(N * 3);
+const seedArr   = new Float32Array(N);
+const speedArr  = new Float32Array(N);
+const positions = new Float32Array(N * 3);
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0.0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  depthTest: true,
+  /* Normal alpha blending — preserves shadow in concavities */
+  blending: THREE.CustomBlending,
+  blendEquation: THREE.AddEquation,
+  blendSrc: THREE.SrcAlphaFactor,
+  blendDst: THREE.OneMinusSrcAlphaFactor,
+
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+
+    attribute vec3  rest;
+    attribute vec3  tang;
+    attribute vec3  bitang;
+    attribute vec3  norm;
+    attribute float seed;
+    attribute float fspeed;
+
+    varying vec3  vCol;
+    varying float vAlpha;
+
+    void main(){
+      float t = uTime * 0.12 + seed * 6.2831;
+      float sp = 0.5 + fspeed * 0.5;
+
+      /* ── curvature-following flow ──
+         Primary stream along tangent (biased vertical = drapery ridgelines),
+         secondary meander along bitangent, minimal normal lift.
+         Sawtooth-ish waveform so particles trace longer arcs before returning. */
+      float phase = t * sp;
+
+      /* Primary: longer stroke along principal tangent direction */
+      float wave1 = sin(phase) + 0.3 * sin(phase * 2.3 + seed * 4.0);
+      float primaryD = wave1 * 0.38;
+
+      /* Secondary: gentle cross-contour meander */
+      float secondaryD = sin(phase * 0.55 + seed * 7.0) * 0.10;
+
+      /* Tiny normal breathing — keeps particles on surface envelope */
+      float normalD = sin(t * 0.3 + seed * 2.0) * 0.025;
+
+      vec3 disp = tang * primaryD + bitang * secondaryD + norm * normalD;
+
+      vec3 p = rest + disp;
+
+      /* Assembly: particles spiral inward from a scattered shell */
+      float angle = seed * 6.2831;
+      float radius = 22.0 + seed * 8.0;
+      vec3 entry = vec3(sin(angle) * radius, (seed - 0.5) * 30.0, cos(angle) * radius);
+      float reveal = smoothstep(0.0, 1.0, uReady);
+      p = mix(entry, p, reveal);
+
+      /* ── palette: ash / bone / dusk-rust ── */
+      float energy = abs(wave1) * 0.7 + 0.3;
+
+      vec3 ash  = vec3(0.38, 0.36, 0.35);
+      vec3 bone = vec3(0.78, 0.74, 0.70);
+      vec3 rust = vec3(0.56, 0.38, 0.32);
+
+      /* Concavity darkening: points with normals facing away from camera get ash */
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vec3 viewNorm = normalize(normalMatrix * norm);
+      float facing = dot(viewNorm, vec3(0.0, 0.0, 1.0));
+      float faceFactor = smoothstep(-0.1, 0.6, facing);
+
+      vCol = mix(ash, bone, faceFactor * (0.4 + 0.5 * energy));
+      vCol = mix(vCol, rust, smoothstep(0.6, 1.0, energy) * 0.35 * seed);
+
+      /* Alpha: reduced at convergence zones via facing, preserves anatomical shadow */
+      vAlpha = (0.28 + 0.42 * energy) * (0.4 + 0.6 * faceFactor) * reveal;
+
+      float dist = -mv.z;
+      gl_PointSize = (1.0 + 0.7 * energy) * uPixel * (34.0 / dist) * (0.3 + 0.7 * reveal);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if(r > 0.25) discard;
+      float falloff = exp(-r * 16.0);
+      float a = vAlpha * falloff;
+      gl_FragColor = vec4(vCol, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const cloud = new THREE.Points(geom, mat);
+scene.add(cloud);
+
+const loadingEl = document.getElementById('loading');
+let revealStart = 0;
+let centroid = new THREE.Vector3();
+
+/* ── load Stanford Lucy ── */
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+new PLYLoader().load(PLY_URL,
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const scale = 17 / Math.max(size.x, size.y, size.z);
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmpP = new THREE.Vector3();
+    const tmpN = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+    const right = new THREE.Vector3(1, 0, 0);
+
+    let cx = 0, cy = 0, cz = 0;
+
+    for (let i = 0; i < N; i++) {
+      sampler.sample(tmpP, tmpN);
+      const x = tmpP.x, y = tmpP.y, z = tmpP.z;
+      restPos[i * 3] = x;
+      restPos[i * 3 + 1] = y;
+      restPos[i * 3 + 2] = z;
+      cx += x; cy += y; cz += z;
+
+      const nx = tmpN.x, ny = tmpN.y, nz = tmpN.z;
+      normArr[i * 3] = nx;
+      normArr[i * 3 + 1] = ny;
+      normArr[i * 3 + 2] = nz;
+
+      /* Tangent = cross(normal, reference).
+         Bias reference toward Y so tangent follows vertical ridgelines
+         (drapery folds, limb contours). */
+      const ref = Math.abs(ny) < 0.85 ? up : right;
+      let tx = ny * ref.z - nz * ref.y;
+      let ty = nz * ref.x - nx * ref.z;
+      let tz = nx * ref.y - ny * ref.x;
+      let tl = Math.sqrt(tx * tx + ty * ty + tz * tz) || 1;
+      tx /= tl; ty /= tl; tz /= tl;
+      tangArr[i * 3] = tx;
+      tangArr[i * 3 + 1] = ty;
+      tangArr[i * 3 + 2] = tz;
+
+      /* Bitangent = cross(normal, tangent) */
+      let bx = ny * tz - nz * ty;
+      let by = nz * tx - nx * tz;
+      let bz = nx * ty - ny * tx;
+      let bl = Math.sqrt(bx * bx + by * by + bz * bz) || 1;
+      bitangArr[i * 3] = bx / bl;
+      bitangArr[i * 3 + 1] = by / bl;
+      bitangArr[i * 3 + 2] = bz / bl;
+
+      seedArr[i] = Math.random();
+      speedArr[i] = 0.3 + Math.random() * 0.7;
+    }
+
+    centroid.set(cx / N, cy / N, cz / N);
+
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPos, 3));
+    geom.setAttribute('tang',     new THREE.BufferAttribute(tangArr, 3));
+    geom.setAttribute('bitang',   new THREE.BufferAttribute(bitangArr, 3));
+    geom.setAttribute('norm',     new THREE.BufferAttribute(normArr, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seedArr, 1));
+    geom.setAttribute('fspeed',   new THREE.BufferAttribute(speedArr, 1));
+
+    camera.lookAt(centroid);
+
+    loadingEl.style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      loadingEl.textContent = `loading lucy · ${(xhr.loaded / xhr.total * 100).toFixed(0)}%`;
+    }
+  },
+  () => { loadingEl.textContent = 'load failed — check network'; }
+);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── render loop: fixed contemplative camera, no rotation ── */
+const t0 = performance.now();
+(function loop() {
+  const t = (performance.now() - t0) / 1000;
+  uniforms.uTime.value = t;
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 3200);
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+})();
+</script>
+
+<!-- gallery controls -->
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;">
+<button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button>
+<button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button>
+<input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(201,168,106,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.13)'">
+<button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button>
+</div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim().split(/[\s·]/)[0]||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+<!-- gp: grade panel -->
+<style>
+#gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+  background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+  padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+  font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+#gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+  color:rgba(205,210,220,0.45);margin-bottom:8px;}
+#gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+  letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+#gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+#gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+  background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+#gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+  border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+#gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+  background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+#gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+  border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+  color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+#gp-save:hover{border-color:rgba(201,168,106,0.7);}
+#gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+  border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+  color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+#gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+<div class="gp-h">grade</div>
+<label>hue<span id="gp-v-hue">0°</span></label>
+<input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+<label>saturation<span id="gp-v-sat">1.00</span></label>
+<input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+<label>brightness<span id="gp-v-bri">1.00</span></label>
+<input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+<label>contrast<span id="gp-v-con">1.00</span></label>
+<input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+<button id="gp-save">save config</button>
+<div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId(), KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    document.querySelectorAll('canvas').forEach(function(c){c.style.filter=f;});
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    for(var k in G){document.getElementById('gp-'+k).value=G[k];document.getElementById('gp-v-'+k).textContent=fmt(k,G[k]);}
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(a){try{localStorage.setItem(KEY,JSON.stringify(a));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    load().forEach(function(c,i){
+      var b=document.createElement('button');b.className='gp-cfg';b.textContent='config '+(i+1);
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();arr.push({id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con});store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:arr[arr.length-1]})}).catch(function(){});
+  };
+  renderSaved();
+})();
+</script>
+</body>
+</html>
