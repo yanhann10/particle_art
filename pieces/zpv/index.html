@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: growth, intensity: calm -->
+<title>zpv · brain coral</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#060a10; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">zpv</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── Intent: a brain-coral head whose meandering ridges are grown by
+   Gray-Scott reaction-diffusion. The viewer recognises a living coral
+   form and feels the patience of calcium slowly accreting in dark water.
+   Evokes Maris Wicks' scientific illustration + Andy Goldsworthy's
+   found-form patience. Palette: bone ridge / midnight trough / dusty rose
+   peak — an aged specimen in a natural-history vitrine. ── */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 2, 18);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x060a10, 1);
+document.body.appendChild(renderer.domElement);
+
+// ── Gray-Scott Reaction-Diffusion (CPU, 128²) ──
+const RES = 128, CELLS = RES * RES;
+let gU = new Float32Array(CELLS).fill(1.0);
+let gV = new Float32Array(CELLS).fill(0.0);
+let tU = new Float32Array(CELLS);
+let tV = new Float32Array(CELLS);
+
+// seed circular patches of V chemical
+(function seedRD(){
+  const c = RES/2;
+  const spots = [[c,c,8],[c-20,c+15,6],[c+22,c-10,7],[c+10,c+25,5],[c-15,c-20,6],[c+28,c+20,5],[c-25,c+5,4]];
+  for(const [sx,sy,sr] of spots){
+    for(let y=0;y<RES;y++) for(let x=0;x<RES;x++){
+      if((x-sx)**2+(y-sy)**2 < sr*sr){
+        const i=y*RES+x; gU[i]=0.5; gV[i]=0.25;
+      }
+    }
+  }
+})();
+
+const Du=0.16, Dv=0.08, feed=0.055, kill=0.062; // coral params
+
+function stepRD(){
+  for(let y=0;y<RES;y++){
+    const yp=(y+1)%RES, ym=(y-1+RES)%RES;
+    for(let x=0;x<RES;x++){
+      const xp=(x+1)%RES, xm=(x-1+RES)%RES;
+      const i=y*RES+x;
+      const lU = gU[y*RES+xp]+gU[y*RES+xm]+gU[yp*RES+x]+gU[ym*RES+x]-4*gU[i];
+      const lV = gV[y*RES+xp]+gV[y*RES+xm]+gV[yp*RES+x]+gV[ym*RES+x]-4*gV[i];
+      const uv2 = gU[i]*gV[i]*gV[i];
+      tU[i] = gU[i] + Du*lU - uv2 + feed*(1-gU[i]);
+      tV[i] = gV[i] + Dv*lV + uv2 - (feed+kill)*gV[i];
+    }
+  }
+  [gU,tU]=[tU,gU]; [gV,tV]=[tV,gV];
+}
+
+// pre-evolve so coral ridges are visible on load
+for(let i=0;i<2000;i++) stepRD();
+
+// ── RD data texture ──
+const rdData = new Uint8Array(CELLS*4);
+const rdTex = new THREE.DataTexture(rdData, RES, RES, THREE.RGBAFormat);
+rdTex.magFilter = THREE.LinearFilter;
+rdTex.minFilter = THREE.LinearFilter;
+
+function updateRDTex(){
+  for(let i=0;i<CELLS;i++){
+    const v255 = Math.min(255, Math.max(0, gV[i]*3.0*255));
+    rdData[i*4]   = v255;
+    rdData[i*4+1] = Math.min(255, gU[i]*255);
+    rdData[i*4+2] = 0;
+    rdData[i*4+3] = 255;
+  }
+  rdTex.needsUpdate = true;
+}
+updateRDTex();
+
+// ── Particles on sphere (fibonacci distribution) ──
+const N = 18000, BASE_R = 5.5;
+const positions = new Float32Array(N*3);
+const aUV = new Float32Array(N*2);
+const seeds = new Float32Array(N);
+const PHI = Math.PI*(1+Math.sqrt(5));
+
+for(let i=0;i<N;i++){
+  const phi = Math.acos(1-2*(i+0.5)/N);
+  const theta = PHI*i;
+  const u = ((theta%(2*Math.PI))/(2*Math.PI));
+  const v = phi/Math.PI;
+  aUV[i*2]=u; aUV[i*2+1]=v;
+  positions[i*3]   = BASE_R*Math.sin(phi)*Math.cos(theta);
+  positions[i*3+1] = BASE_R*Math.cos(phi);
+  positions[i*3+2] = BASE_R*Math.sin(phi)*Math.sin(theta);
+  seeds[i] = Math.random();
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions,3));
+geom.setAttribute('aUV', new THREE.BufferAttribute(aUV,2));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds,1));
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime:  {value:0},
+    uPixel: {value:renderer.getPixelRatio()},
+    rdMap:  {value:rdTex},
+    uBaseR: {value:BASE_R}
+  },
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime, uPixel, uBaseR;
+    uniform sampler2D rdMap;
+    attribute vec2 aUV;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec4 rd = texture2D(rdMap, aUV);
+      float vChem = rd.r;              // V chemical mapped 0-1
+      float ridge = smoothstep(0.05, 0.5, vChem);
+
+      // radial displacement: ridges push outward
+      float r = uBaseR + ridge * 1.8;
+      // gentle polyp breathing on ridges
+      r += sin(uTime*0.3 + seed*6.2832 + vChem*4.0)*0.08*ridge;
+
+      // reconstruct sphere position from UV
+      float phi   = aUV.y * 3.14159;
+      float theta = aUV.x * 6.28318;
+      vec3 p = vec3(
+        r*sin(phi)*cos(theta),
+        r*cos(phi),
+        r*sin(phi)*sin(theta)
+      );
+
+      // palette: midnight trough → bone ridge → dusty-rose peak
+      vec3 trough = vec3(0.08, 0.10, 0.16);
+      vec3 bone   = vec3(0.82, 0.76, 0.65);
+      vec3 rose   = vec3(0.72, 0.58, 0.54);
+      float k = smoothstep(0.0, 0.35, vChem);
+      vCol = mix(trough, bone, k);
+      vCol = mix(vCol, rose, smoothstep(0.35, 0.65, vChem)*0.45);
+      vAlpha = 0.25 + 0.75*k;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.5 + 2.8*ridge) * uPixel * (48.0/dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader:`
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r*12.0) * vAlpha;
+      gl_FragColor = vec4(vCol*a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// ── Ambient deep-water dust motes ──
+const DUST = 500;
+const dPos = new Float32Array(DUST*3);
+const dSeed = new Float32Array(DUST);
+for(let i=0;i<DUST;i++){
+  dPos[i*3]   = (Math.random()-0.5)*40;
+  dPos[i*3+1] = (Math.random()-0.5)*30;
+  dPos[i*3+2] = (Math.random()-0.5)*30;
+  dSeed[i] = Math.random();
+}
+const dGeom = new THREE.BufferGeometry();
+dGeom.setAttribute('position', new THREE.BufferAttribute(dPos,3));
+dGeom.setAttribute('seed', new THREE.BufferAttribute(dSeed,1));
+const dMat = new THREE.ShaderMaterial({
+  uniforms:{uTime:{value:0},uPixel:{value:renderer.getPixelRatio()}},
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime, uPixel;
+    attribute float seed;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      p.y += sin(uTime*0.12+seed*20.0)*0.5;
+      p.x += cos(uTime*0.09+seed*15.0)*0.35;
+      vA = 0.08 + 0.06*sin(uTime*0.4+seed*30.0);
+      vec4 mv = modelViewMatrix * vec4(p,1.0);
+      gl_PointSize = uPixel*(10.0/-mv.z);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader:`
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r>0.25) discard;
+      float a = exp(-r*16.0)*vA;
+      gl_FragColor = vec4(vec3(0.45,0.48,0.55)*a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(dGeom, dMat));
+
+// ── Resize ──
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+// ── Loop ──
+const t0 = performance.now();
+let rdFrame = 0;
+function loop(){
+  const t = (performance.now()-t0)/1000;
+  mat.uniforms.uTime.value = t;
+  dMat.uniforms.uTime.value = t;
+
+  // very slow camera drift — gentle arc, NOT rotation
+  camera.position.x = Math.sin(t*0.018)*2.5;
+  camera.position.y = 2 + Math.sin(t*0.013)*1.0;
+  camera.lookAt(0, 0, 0);
+
+  // evolve RD slowly: 4 steps every 3 frames for unhurried growth
+  if(rdFrame++ % 3 === 0){
+    for(let i=0;i<4;i++) stepRD();
+    updateRDTex();
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+<!-- gp: universal grade panel + save/config (injected by scripts/inject_grade_panel.py) -->
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    for(var k in G){
+      document.getElementById('gp-'+k).value=G[k];
+      document.getElementById('gp-v-'+k).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+</body>
+</html>
