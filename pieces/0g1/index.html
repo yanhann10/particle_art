@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0g1 · snow-globe aizawa</title>
+<!-- MOTION: cascade, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#080c12; overflow:hidden;
+               color:#c0ccd4; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+           color:#cdd2dc; letter-spacing:0.06em; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+</style>
+</head>
+<body>
+<div class="id">0g1</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const W = 320, H = 320, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x080c12, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtP = { type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+              minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+              wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+              depthBuffer: false };
+let rtA = new THREE.WebGLRenderTarget(W, H, rtP);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtP);
+
+// seed particles in attractor basin
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++){
+  init[i*4]   = (Math.random()*2-1) * 0.5;
+  init[i*4+1] = (Math.random()*2-1) * 0.5;
+  init[i*4+2] = (Math.random()*2-1) * 0.5;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv;
+    void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camO = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const blitS = new THREE.Scene();
+blitS.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), blitMat));
+renderer.setRenderTarget(rtA); renderer.render(blitS, camO);
+renderer.setRenderTarget(null);
+
+/* ---- GPGPU sim with shake/snow mechanics ---- */
+const simU = {
+  prev:   { value: rtA.texture },
+  uDt:    { value: 0.012 },
+  uA:     { value: 0.95 },
+  uB:     { value: 0.70 },
+  uC:     { value: 0.60 },
+  uD:     { value: 3.50 },
+  uE:     { value: 0.25 },
+  uF:     { value: 0.10 },
+  uShake: { value: 0.0 },
+  uSnow:  { value: 0.0 },
+  uTime:  { value: 0.0 }
+};
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simU,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF;
+    uniform float uShake, uSnow, uTime;
+    varying vec2 vUv;
+
+    float hash(vec2 p){
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    vec3 hash3(vec2 p){
+      return vec3(
+        hash(p),
+        hash(p + vec2(37.0, 91.0)),
+        hash(p + vec2(73.0, 149.0))
+      ) * 2.0 - 1.0;
+    }
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      // aizawa derivatives
+      vec3 dp = vec3(
+        (p.z - uB) * p.x - uD * p.y,
+        uD * p.x + (p.z - uB) * p.y,
+        uC + uA * p.z - (p.z*p.z*p.z)/3.0
+          - (p.x*p.x + p.y*p.y)*(1.0 + uE*p.z)
+          + uF * p.z * p.x*p.x*p.x
+      );
+
+      // shake: outward impulse + upward kick
+      if(uShake > 0.01){
+        vec3 rnd = hash3(vUv + fract(uTime * 0.1));
+        vec3 outward = normalize(p + 0.001) * 2.8;
+        vec3 kick = (outward + vec3(rnd.x * 1.2, 2.5 + rnd.y, rnd.z * 1.2));
+        dp += kick * uShake * 18.0;
+      }
+
+      // snow settling: gentle gravity + slight drift, reduce attractor pull
+      float snowBlend = uSnow;
+      vec3 gravity = vec3(0.0, -0.6, 0.0);
+      vec3 drift = hash3(vUv + 0.5) * 0.15;
+      vec3 snowForce = gravity + drift;
+
+      // blend attractor with snow behavior
+      dp = mix(dp, snowForce, snowBlend * 0.7);
+
+      // keep particles inside globe radius 2.2
+      float r = length(p);
+      if(r > 2.1){
+        dp -= normalize(p) * (r - 2.1) * 8.0;
+      }
+
+      p += dp * uDt;
+      age = mod(age + uDt * 0.06, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), simMat));
+
+/* ---- main scene ---- */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.05, 60);
+camera.position.set(0, 0.6, 5.2);
+camera.lookAt(0, 0.3, 0.8);
+
+// point cloud
+const pGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++){
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pGeom.setAttribute('uvIdx',    new THREE.BufferAttribute(idxArr, 2));
+
+const pMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:  { value: rtB.texture },
+    uPixel: { value: renderer.getPixelRatio() },
+    uSnow:  { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel, uSnow;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vSpeed;
+    varying float vSnow;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float speed = length(p) * 0.4;
+      vSpeed = clamp(speed, 0.0, 1.0);
+      vAge = s.w;
+      vSnow = uSnow;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // slightly larger during snow for flake feel
+      float snowSize = mix(1.0, 1.6, uSnow);
+      gl_PointSize = (1.0 + 1.2 * vSpeed) * snowSize * uPixel * (8.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vSpeed;
+    varying float vSnow;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 14.0);
+
+      // restrained frost palette: slate → bone → pale ice
+      vec3 slate = vec3(0.38, 0.46, 0.52);
+      vec3 bone  = vec3(0.82, 0.78, 0.72);
+      vec3 ice   = vec3(0.72, 0.80, 0.86);
+
+      float k = mod(vAge + vSpeed * 0.3, 1.0);
+      vec3 col = mix(slate, bone, smoothstep(0.0, 0.5, k));
+      col = mix(col, ice, smoothstep(0.5, 1.0, k));
+
+      // during snow: shift whiter
+      vec3 snow = vec3(0.88, 0.90, 0.92);
+      col = mix(col, snow, vSnow * 0.6);
+
+      gl_FragColor = vec4(col * a * (0.4 + vSpeed * 0.7), a);
+    }
+  `
+});
+const pts = new THREE.Points(pGeom, pMat);
+scene.add(pts);
+
+/* ---- glass dome (the surprise reveal) ---- */
+const domeGeom = new THREE.IcosahedronGeometry(2.25, 3);
+const domeMat = new THREE.ShaderMaterial({
+  uniforms: { uOpacity: { value: 0.0 } },
+  transparent: true, depthWrite: false, side: THREE.BackSide,
+  wireframe: true,
+  vertexShader: `
+    varying vec3 vPos;
+    void main(){
+      vPos = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uOpacity;
+    varying vec3 vPos;
+    void main(){
+      float fresnel = 1.0 - abs(normalize(vPos).z);
+      float edge = pow(fresnel, 2.0) * 0.5 + 0.1;
+      vec3 col = vec3(0.55, 0.62, 0.68);
+      gl_FragColor = vec4(col, edge * uOpacity);
+    }
+  `
+});
+const dome = new THREE.Mesh(domeGeom, domeMat);
+dome.position.y = 0.5;
+scene.add(dome);
+
+/* ---- base pedestal (snow globe feel) ---- */
+const baseGeom = new THREE.CylinderGeometry(1.6, 1.8, 0.35, 32);
+const baseMat = new THREE.MeshBasicMaterial({
+  color: 0x2a2520, transparent: true, opacity: 0.0
+});
+const base = new THREE.Mesh(baseGeom, baseMat);
+base.position.y = -2.0;
+scene.add(base);
+
+/* ---- resize ---- */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ---- pointer param nudge (inherit from parent) ---- */
+const target = { a: 0.95, c: 0.60 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth) - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.a = 0.95 + nx * 0.06;
+  target.c = 0.60 + ny * 0.08;
+});
+
+/* ---- animation ---- */
+const t0 = performance.now();
+const CYCLE = 22.0;         // seconds per shake cycle
+const SHAKE_DUR = 0.4;      // shake impulse duration
+const SNOW_RISE = 0.6;      // snow ramp-up after shake
+const SNOW_HOLD = 4.0;      // snow floating time
+const SNOW_FADE = 5.0;      // reconvergence fade
+
+function getShakePhase(t){
+  const ct = t % CYCLE;
+  let shake = 0, snow = 0, domeOp = 0;
+
+  if(ct < SHAKE_DUR){
+    // impulse
+    shake = 1.0 - ct / SHAKE_DUR;
+    domeOp = 0.3;
+  } else if(ct < SHAKE_DUR + SNOW_RISE){
+    // snow ramping up
+    const s = (ct - SHAKE_DUR) / SNOW_RISE;
+    snow = s;
+    domeOp = 0.35;
+  } else if(ct < SHAKE_DUR + SNOW_RISE + SNOW_HOLD){
+    // snow drifting
+    snow = 1.0;
+    const h = (ct - SHAKE_DUR - SNOW_RISE) / SNOW_HOLD;
+    domeOp = 0.35 * (1.0 - h * 0.3);
+  } else if(ct < SHAKE_DUR + SNOW_RISE + SNOW_HOLD + SNOW_FADE){
+    // reconvergence
+    const f = (ct - SHAKE_DUR - SNOW_RISE - SNOW_HOLD) / SNOW_FADE;
+    snow = 1.0 - f;
+    domeOp = 0.25 * (1.0 - f);
+  }
+  return { shake, snow, domeOp };
+}
+
+function loop(){
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  simU.uA.value += (target.a - simU.uA.value) * 0.04;
+  simU.uC.value += (target.c - simU.uC.value) * 0.04;
+  simU.uTime.value = elapsed;
+
+  const phase = getShakePhase(elapsed);
+  simU.uShake.value = phase.shake;
+  simU.uSnow.value = phase.snow;
+  pMat.uniforms.uSnow.value = phase.snow;
+  domeMat.uniforms.uOpacity.value = phase.domeOp;
+  baseMat.opacity = phase.domeOp * 0.5;
+
+  // GPGPU integration steps
+  for (let i = 0; i < 4; i++){
+    simU.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camO);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+  pMat.uniforms.state.value = rtA.texture;
+
+  // single slow camera drift (no rotation), gentle rise during snow
+  const baseY = 0.6 + Math.sin(elapsed * 0.08) * 0.15;
+  const snowLift = phase.snow * 0.4;
+  camera.position.y = baseY + snowLift;
+  camera.position.x = Math.sin(elapsed * 0.02) * 0.3;
+  camera.lookAt(0, 0.3 + snowLift * 0.3, 0.8);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
