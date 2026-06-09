@@ -42,12 +42,9 @@ PERSONAS_POOL = [
      "Speaks for: light AS material, perceptual phenomenology, slow color gradients across vast volumetric space, "
      "geometric primitives at architectural scale, glacial ice / arctic dusk palette. Will object when the work is "
      "screen-flat, color is decorative not phenomenological, or the viewer is observer rather than participant."),
-    ("chiharu_shiota",
-     "Chiharu Shiota — Japanese-Berlin installation artist (b. 1972, Osaka). "
-     "Speaks for: kilometers of TAUT YARN as line-segment material (red=blood, black=universe, white=memory), "
-     "one suspended remembered everyday object as still center of walk-in web, presence-in-absence (Abramović's heir), "
-     "post-illness register, mono no aware. Will object when threads curve instead of tension-straight, when palette "
-     "goes RGB, when there's no anchor object, or when camera views the web from outside instead of inside it."),
+    # chiharu_shiota REMOVED 2026-06-08 — the red-thread/radial-burst aesthetic was
+    # culled by the user (recurring rejection); pulling it from every generator source
+    # so the cron stops resampling it. Do not re-add.
     # ── new mentors (inline briefs only — no SKILL.md needed) ──────────────
     ("vera_molnar",
      "Vera Molnar (1924–2023, Hungarian-French) — granddame of generative art, École des Beaux-Arts, working "

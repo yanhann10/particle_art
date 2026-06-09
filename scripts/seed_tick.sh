@@ -40,7 +40,9 @@ VENV="$REPO/.venv"
 [ -x "$VENV/bin/python3" ] || { log "FATAL: venv missing"; exit 2; }
 
 SEED_DIR="seeds/$SEED"
-[ -f "$REPO/$SEED_DIR/meta.json" ] || { log "FATAL: $SEED_DIR/meta.json missing"; exit 3; }
+# Shiota seed (img9245) was removed 2026-06-08 (culled red-thread aesthetic). With no
+# seeds left, this tick is a clean no-op rather than a cron error. Re-add a seed dir to revive.
+[ -f "$REPO/$SEED_DIR/meta.json" ] || { log "no seed '$SEED' (seeds removed) — skipping"; exit 0; }
 
 # parent picker — descend from the seed branch if any descendants exist
 PARENT=$("$VENV/bin/python3" - <<PYEOF
