@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bz2 · Yayoi-dot-rain · light strings surprised</title>
+<!-- MOTION: cascade, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">bz2</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Gonzalez-Torres strings × Kusama dot obsession</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Intent: tender light strings suddenly blessed by a gentle rain of
+   Kusama-style dots — playful, brief, self-recovering.
+   The surprise beat arrives every ~14s: dots cascade from above,
+   cling to the strings momentarily, then dissolve like dew.
+   Algorithm: parent differential-growth strings + timed dot-rain system.
+   Named reference: Yayoi Kusama's Infinity Nets / dot obsession meets
+   Felix Gonzalez-Torres' light-string vulnerability. */
+
+const BG = 0x0a0807;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 1, 18);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, -0.5, 0);
+
+const MAX_VERTS = 3200;
+const ATTRACT = 0.05, REPEL_R = 0.48, REPEL_STR = 0.10;
+const NOISE = 0.002, PRESSURE = 0.002, GRAVITY = 0.008, MAX_D = 0.36;
+const ANCHOR_N = 4;
+
+const strands = [
+  { verts: [], color: 0, xOffset: -5, severAt: 0.4 },
+  { verts: [], color: 1, xOffset: 0, clusterAt: 0.6 },
+  { verts: [], color: 2, xOffset: 5, gapFrom: 0.35, gapTo: 0.55 }
+];
+
+function initStrand(strand, NV0, xOff) {
+  for (let i = 0; i < NV0; i++) {
+    const t = (i / (NV0 - 1)) * 2 - 1;
+    strand.verts.push({
+      x: t * 4 + xOff, z: 0,
+      y: -Math.abs(t) * 1.0 + Math.sin(t * Math.PI * 2) * 0.25,
+      age: 0, pinY: i < ANCHOR_N || i >= NV0 - ANCHOR_N,
+      original_i: i, original_n: NV0
+    });
+  }
+}
+for (const s of strands) initStrand(s, 40, s.xOffset);
+
+const CELL = REPEL_R;
+function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+
+function stepStrand(strand) {
+  const verts = strand.verts;
+  const n = verts.length;
+  if (n >= MAX_VERTS / 3) return;
+  const grid = new Map();
+  for (let i = 0; i < n; i++) {
+    const k = gridKey(verts[i].x, verts[i].z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+  function nearby(v) {
+    const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL), out = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const arr = grid.get((cx + dx) + ',' + (cz + dz));
+      if (arr) for (const idx of arr) out.push(idx);
+    }
+    return out;
+  }
+  const dx = new Float32Array(n), dz = new Float32Array(n), dy = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j], ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2), f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f; dz[i] += ez * f;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const prev = i > 0 ? verts[i - 1] : null, next = i < n - 1 ? verts[i + 1] : null, v = verts[i];
+    if (prev) { dx[i] += (prev.x - v.x) * ATTRACT; dz[i] += (prev.z - v.z) * ATTRACT; dy[i] += (prev.y - v.y) * ATTRACT; }
+    if (next) { dx[i] += (next.x - v.x) * ATTRACT; dz[i] += (next.z - v.z) * ATTRACT; dy[i] += (next.y - v.y) * ATTRACT; }
+  }
+  let cx = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cz += verts[i].z; }
+  cx /= n; cz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - cx, oz = verts[i].z - cz, d = Math.hypot(ox, oz) + 1e-6;
+    dx[i] += (ox / d) * PRESSURE; dz[i] += (oz / d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++) {
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].y += dy[i] - (verts[i].pinY ? GRAVITY * 0.05 : GRAVITY) + (Math.random() - 0.5) * NOISE * 0.5;
+    verts[i].age += 0.0004;
+  }
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1]; grown.push(a);
+    const pos = a.original_i / a.original_n;
+    let sub = true;
+    if (strand === strands[0] && pos > strand.severAt) sub = Math.random() > 0.7;
+    if (strand === strands[1]) {
+      if (pos > strand.clusterAt && pos < strand.clusterAt + 0.15) sub = true;
+      else if (pos > strand.clusterAt + 0.15) sub = Math.random() > 0.65;
+    }
+    if (strand === strands[2] && pos > strand.gapFrom && pos < strand.gapTo) sub = false;
+    const ex = b.x - a.x, ez = b.z - a.z, ey = b.y - a.y;
+    if (sub && ex * ex + ez * ez + ey * ey > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS / 3) {
+      grown.push({ x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.02, z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.02,
+        y: (a.y + b.y) * 0.5, age: Math.max(a.age, b.age) * 0.7, pinY: false, original_i: a.original_i, original_n: a.original_n });
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+/* ── STRING PARTICLES (parent system) ── */
+const N_RENDER = 30000;
+const rPos = new Float32Array(N_RENDER * 3), rSeeds = new Float32Array(N_RENDER);
+const rAge = new Float32Array(N_RENDER), rStrand = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age', new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('strandId', new THREE.BufferAttribute(rStrand, 1));
+
+const uniforms = {
+  uTime: { value: 0 }, uPixel: { value: renderer.getPixelRatio() },
+  uFogColor: { value: new THREE.Color(BG) }, uFogDensity: { value: 0.035 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uFogDensity;
+    attribute float seed, age, strandId;
+    varying vec3 vCol; varying float vAlpha, vFogFactor;
+    void main() {
+      vec3 p = position;
+      float t = uTime * 0.3 + seed * 6.28;
+      p.x += sin(t) * 0.008 * (1.0 + seed);
+      p.z += cos(t * 0.7) * 0.005;
+      float pulse = 0.85 + 0.15 * sin(uTime * 1.2 + seed * 40.0);
+      vec3 amber = vec3(1.0, 0.72, 0.32), warm = vec3(1.0, 0.88, 0.72);
+      vec3 peach = vec3(1.0, 0.82, 0.68), white = vec3(1.0, 0.96, 0.92);
+      vec3 base = strandId < 0.5 ? mix(amber, warm, age * 1.2)
+                : strandId < 1.5 ? mix(warm, peach, age * 1.2)
+                : mix(peach, white, age * 1.2);
+      vCol = base * pulse;
+      vAlpha = 0.55 + 0.2 * pulse;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 1.8 * uPixel * (45.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+      float fd = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fd * fd);
+    }`,
+  fragmentShader: `
+    varying vec3 vCol; varying float vAlpha, vFogFactor;
+    uniform vec3 uFogColor;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5; float r = dot(d, d);
+      if (r > 0.25) discard;
+      float core = exp(-r * 24.0), halo = exp(-r * 8.0) * 0.35;
+      float a = (core + halo) * vAlpha;
+      vec3 col = mix(vCol, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.8);
+      gl_FragColor = vec4(col * a, a);
+    }`
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── KUSAMA DOT-RAIN (surprise system) ── */
+const DOT_MAX = 800;
+const dotPos = new Float32Array(DOT_MAX * 3);
+const dotPhase = new Float32Array(DOT_MAX);   // lifecycle 0→1
+const dotSeed = new Float32Array(DOT_MAX);
+const dotVy = new Float32Array(DOT_MAX);
+const dotCling = new Float32Array(DOT_MAX);   // 1 = clinging to string
+const dotActive = new Uint8Array(DOT_MAX);
+
+for (let i = 0; i < DOT_MAX; i++) dotSeed[i] = Math.random();
+
+const dotGeom = new THREE.BufferGeometry();
+dotGeom.setAttribute('position', new THREE.BufferAttribute(dotPos, 3));
+dotGeom.setAttribute('phase', new THREE.BufferAttribute(dotPhase, 1));
+dotGeom.setAttribute('seed', new THREE.BufferAttribute(dotSeed, 1));
+dotGeom.setAttribute('cling', new THREE.BufferAttribute(dotCling, 1));
+
+const dotUni = {
+  uTime: uniforms.uTime, uPixel: uniforms.uPixel,
+  uFogColor: uniforms.uFogColor, uFogDensity: uniforms.uFogDensity,
+  uDotAlpha: { value: 0.0 }
+};
+
+const dotMat = new THREE.ShaderMaterial({
+  uniforms: dotUni, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uFogDensity, uDotAlpha;
+    attribute float phase, seed, cling;
+    varying float vAlpha, vFogFactor, vRing;
+    varying vec3 vCol;
+    void main() {
+      vec3 p = position;
+      /* Kusama dots: ivory cream with faint blush, sized like polka dots */
+      vec3 ivory = vec3(0.95, 0.90, 0.82);
+      vec3 blush = vec3(0.88, 0.72, 0.62);
+      vCol = mix(ivory, blush, seed * 0.4);
+      /* fade in/out based on phase */
+      float fadeIn = smoothstep(0.0, 0.15, phase);
+      float fadeOut = 1.0 - smoothstep(0.7, 1.0, phase);
+      vAlpha = fadeIn * fadeOut * uDotAlpha * (0.5 + 0.3 * cling);
+      /* clinging dots pulse gently */
+      float clingPulse = cling * 0.06 * sin(uTime * 2.0 + seed * 20.0);
+      vAlpha += clingPulse;
+      vRing = cling;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      /* dots are larger than string particles — polka-dot scale */
+      float baseSize = mix(4.0, 7.0, seed);
+      gl_PointSize = baseSize * uPixel * (45.0 / max(-mv.z, 0.1));
+      gl_Position = projectionMatrix * mv;
+      float fd = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fd * fd);
+    }`,
+  fragmentShader: `
+    varying float vAlpha, vFogFactor, vRing;
+    varying vec3 vCol;
+    uniform vec3 uFogColor;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+      if (r2 > 0.25) discard;
+      float r = sqrt(r2);
+      /* Kusama dots: flat filled circle with soft edge */
+      float circle = 1.0 - smoothstep(0.35, 0.5, r);
+      /* clinging dots get a subtle ring outline */
+      float ring = smoothstep(0.28, 0.34, r) * (1.0 - smoothstep(0.38, 0.46, r));
+      float shape = circle + ring * vRing * 0.4;
+      float a = shape * vAlpha;
+      vec3 col = mix(vCol, uFogColor, vFogFactor * 0.6);
+      gl_FragColor = vec4(col * a, a);
+    }`
+});
+const dotPoints = new THREE.Points(dotGeom, dotMat);
+scene.add(dotPoints);
+
+/* Dot rain state machine */
+const CYCLE = 14.0;       // seconds between rain bursts
+const RAIN_DUR = 4.5;     // how long rain lasts
+const CLING_DUR = 3.0;    // how long dots cling before dissolving
+let rainPhase = -2.0;     // start quiet for 2s before first rain
+let activeCount = 0;
+let strandBBox = { xMin: -9, xMax: 9, yMin: -4, yMax: 2 };
+
+function spawnDot(idx) {
+  dotPos[idx * 3]     = strandBBox.xMin + Math.random() * (strandBBox.xMax - strandBBox.xMin);
+  dotPos[idx * 3 + 1] = strandBBox.yMax + 2.0 + Math.random() * 3.0;
+  dotPos[idx * 3 + 2] = (Math.random() - 0.5) * 2.0;
+  dotPhase[idx] = 0.0;
+  dotVy[idx] = -0.008 - Math.random() * 0.012; // gentle fall
+  dotCling[idx] = 0.0;
+  dotActive[idx] = 1;
+}
+
+function nearestStringY(x, z) {
+  let bestDist = Infinity, bestY = -10;
+  for (const strand of strands) {
+    for (const v of strand.verts) {
+      const dx = v.x - x, dz = v.z - z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < bestDist) { bestDist = d2; bestY = v.y; }
+    }
+  }
+  return { dist: Math.sqrt(bestDist), y: bestY };
+}
+
+function updateDots(dt, t) {
+  const cycleT = ((t + 2.0) % CYCLE);
+  const raining = cycleT < RAIN_DUR;
+  const dissolving = cycleT >= RAIN_DUR && cycleT < RAIN_DUR + CLING_DUR;
+
+  // Master alpha envelope for the whole system
+  const targetAlpha = (raining || dissolving) ? 1.0 : 0.0;
+  dotUni.uDotAlpha.value += (targetAlpha - dotUni.uDotAlpha.value) * 0.03;
+
+  // Spawn during rain
+  if (raining) {
+    const spawnRate = 12; // dots per frame
+    for (let s = 0; s < spawnRate; s++) {
+      for (let i = 0; i < DOT_MAX; i++) {
+        if (!dotActive[i]) { spawnDot(i); break; }
+      }
+    }
+  }
+
+  activeCount = 0;
+  for (let i = 0; i < DOT_MAX; i++) {
+    if (!dotActive[i]) continue;
+    activeCount++;
+
+    if (dotCling[i] < 0.5) {
+      // Falling
+      dotPos[i * 3 + 1] += dotVy[i];
+      // gentle drift
+      dotPos[i * 3] += Math.sin(t * 0.5 + dotSeed[i] * 10.0) * 0.003;
+
+      // Check proximity to strings
+      const px = dotPos[i * 3], pz = dotPos[i * 3 + 2];
+      const nearest = nearestStringY(px, pz);
+      if (nearest.dist < 0.6 && dotPos[i * 3 + 1] <= nearest.y + 0.15) {
+        // Cling!
+        dotCling[i] = 1.0;
+        dotPos[i * 3 + 1] = nearest.y + (Math.random() - 0.5) * 0.08;
+        dotVy[i] = 0;
+      }
+
+      // Off-screen kill
+      if (dotPos[i * 3 + 1] < strandBBox.yMin - 3.0) {
+        dotPhase[i] = 1.0;
+      }
+    } else {
+      // Clinging — subtle wobble
+      dotPos[i * 3] += Math.sin(t * 0.8 + dotSeed[i] * 15.0) * 0.0004;
+      dotPos[i * 3 + 1] += Math.cos(t * 0.6 + dotSeed[i] * 12.0) * 0.0003;
+    }
+
+    // Phase advance
+    const phaseSpeed = dotCling[i] > 0.5 ? 0.004 : 0.006;
+    dotPhase[i] += phaseSpeed;
+
+    // Dissolving phase accelerates fade
+    if (dissolving && dotCling[i] > 0.5) {
+      dotPhase[i] += 0.008;
+    }
+
+    if (dotPhase[i] >= 1.0) {
+      dotActive[i] = 0;
+      dotPos[i * 3 + 1] = -100; // hide
+    }
+  }
+
+  dotGeom.attributes.position.needsUpdate = true;
+  dotGeom.attributes.phase.needsUpdate = true;
+  dotGeom.attributes.cling.needsUpdate = true;
+}
+
+/* ── WIRE LINES ── */
+const wireLines = [];
+for (let s = 0; s < 3; s++) {
+  const wg = new THREE.BufferGeometry();
+  const wp = new Float32Array(MAX_VERTS * 3);
+  wg.setAttribute('position', new THREE.BufferAttribute(wp, 3));
+  const wl = new THREE.Line(wg, new THREE.LineBasicMaterial({ color: 0x2a2420, transparent: true, opacity: 0.3 }));
+  scene.add(wl);
+  wireLines.push({ geom: wg, positions: wp });
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+for (let pre = 0; pre < 500; pre++) {
+  for (const strand of strands) stepStrand(strand);
+}
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+let lastT = 0;
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  const dt = t - lastT; lastT = t;
+  uniforms.uTime.value = t;
+
+  if (!paused) {
+    for (let s = 0; s < 3; s++) {
+      for (const strand of strands) stepStrand(strand);
+    }
+    updateDots(dt, t);
+  }
+
+  let totalVerts = 0;
+  for (const strand of strands) totalVerts += strand.verts.length;
+
+  // Update bbox for dot spawning
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  for (const strand of strands) {
+    for (const v of strand.verts) {
+      if (v.x < xMin) xMin = v.x; if (v.x > xMax) xMax = v.x;
+      if (v.y < yMin) yMin = v.y; if (v.y > yMax) yMax = v.y;
+    }
+  }
+  strandBBox = { xMin, xMax, yMin, yMax };
+
+  for (let s = 0; s < 3; s++) {
+    const strand = strands[s], n = strand.verts.length, wire = wireLines[s];
+    for (let i = 0; i < n; i++) {
+      wire.positions[i * 3] = strand.verts[i].x;
+      wire.positions[i * 3 + 1] = strand.verts[i].y;
+      wire.positions[i * 3 + 2] = strand.verts[i].z;
+    }
+    wire.geom.setDrawRange(0, n);
+    wire.geom.attributes.position.needsUpdate = true;
+  }
+
+  let cx = 0, cy = 0, cz = 0, count = 0;
+  for (const strand of strands) for (const v of strand.verts) { cx += v.x; cy += v.y; cz += v.z; count++; }
+  if (count > 0) {
+    cx /= count; cy /= count; cz /= count;
+    controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.02);
+  }
+
+  let written = 0;
+  const perStrand = Math.floor(N_RENDER / 3);
+  for (let s = 0; s < 3; s++) {
+    const verts = strands[s].verts, n = verts.length;
+    const lengths = []; let total = 0;
+    for (let i = 0; i < n - 1; i++) {
+      const a = verts[i], b = verts[i + 1];
+      const L = Math.sqrt((b.x - a.x) ** 2 + (b.z - a.z) ** 2 + (b.y - a.y) ** 2);
+      lengths.push(L); total += L;
+    }
+    if (total > 0) {
+      const budget = s === 2 ? N_RENDER - written : perStrand;
+      let sw = 0;
+      for (let i = 0; i < n - 1 && written < N_RENDER; i++) {
+        const share = i === n - 2 ? budget - sw : Math.max(1, Math.floor(budget * lengths[i] / total));
+        const a = verts[i], b = verts[i + 1];
+        for (let k = 0; k < share && written < N_RENDER; k++) {
+          const u = Math.random(), cu = u < 0.5 ? u * u * 2 : 1 - (1 - u) * (1 - u) * 2;
+          const sp = 0.015;
+          rPos[written * 3]     = a.x + (b.x - a.x) * cu + (Math.random() - 0.5) * sp;
+          rPos[written * 3 + 1] = a.y + (b.y - a.y) * cu + (Math.random() - 0.5) * sp * 0.5;
+          rPos[written * 3 + 2] = a.z + (b.z - a.z) * cu + (Math.random() - 0.5) * sp;
+          rAge[written] = Math.max(a.age, b.age);
+          rStrand[written] = s;
+          written++; sw++;
+        }
+      }
+    }
+  }
+
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+  geom.attributes.strandId.needsUpdate = true;
+
+  statEl.textContent = `vertices=${totalVerts} dots=${activeCount}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
