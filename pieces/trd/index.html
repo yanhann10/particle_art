@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>trd · raspberry-pop · differential growth tower</title>
+<!-- MOTION: pulse, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#06080b; overflow:hidden;
+               color:#dde6d8; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4;  font-size: 10px; letter-spacing: 0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size: 10px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+<div class="id">trd</div>
+<div class="hint">drag to orbit · scroll to zoom · click to pause/resume</div>
+<div class="src">descended from 5gm · raspberry-pop surprise</div>
+<div class="stat" id="stat">vertices=0</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// 5gm grew a differential-growth coral tower. This child inherits that form
+// but adds a "raspberry-pop" surprise: every ~12 seconds a cluster of particles
+// at a random height on the tower swells outward into a bumpy berry-like bulge,
+// blushes a dried-raspberry tone, holds for a beat, then gently reabsorbs.
+// The tower fruits, then self-recovers — playful, not chaotic.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x06080b, 0.038);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(8, 8, 14);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x06080b, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 5, 0);
+
+// ─────────────────────────── curve state (full 3D)
+const MAX_VERTS = 4000;
+const ATTRACT  = 0.06;
+const REPEL_R  = 0.42;
+const REPEL_STR= 0.12;
+const NOISE    = 0.003;
+const PRESSURE = 0.0028;
+const RISE     = 0.0045;
+const MAX_D    = 0.32;
+let paused = false;
+
+const verts = [];
+for (let i = 0; i < 24; i++){
+  const th = i / 24 * Math.PI * 2;
+  const r = 1.4 + (Math.random() - 0.5) * 0.1;
+  verts.push({ x: Math.cos(th)*r, y: 0, z: Math.sin(th)*r, age: 0 });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function gkey(x, y, z){
+  return Math.floor(x/CELL)+','+Math.floor(y/CELL)+','+Math.floor(z/CELL);
+}
+function rebuildGrid(){
+  grid.clear();
+  for (let i = 0; i < verts.length; i++){
+    const v = verts[i]; const k = gkey(v.x, v.y, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+function neighbors(v){
+  const cx = Math.floor(v.x/CELL), cy = Math.floor(v.y/CELL), cz = Math.floor(v.z/CELL);
+  const out = [];
+  for (let dx=-1; dx<=1; dx++)
+    for (let dy=-1; dy<=1; dy++)
+      for (let dz=-1; dz<=1; dz++){
+        const arr = grid.get((cx+dx)+','+(cy+dy)+','+(cz+dz));
+        if (arr) for (const idx of arr) out.push(idx);
+      }
+  return out;
+}
+
+function step(){
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+  rebuildGrid();
+  const dx = new Float32Array(n), dy = new Float32Array(n), dz = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const v = verts[i];
+    const cands = neighbors(v);
+    for (const j of cands){
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ey = v.y - u.y, ez = v.z - u.z;
+      const d2 = ex*ex + ey*ey + ez*ez;
+      if (d2 > REPEL_R*REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex*f; dy[i] += ey*f; dz[i] += ez*f;
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[(i-1+n)%n], b = verts[(i+1)%n], v = verts[i];
+    dx[i] += (a.x + b.x - 2*v.x) * ATTRACT;
+    dy[i] += (a.y + b.y - 2*v.y) * ATTRACT;
+    dz[i] += (a.z + b.z - 2*v.z) * ATTRACT;
+  }
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++){ cx += verts[i].x; cy += verts[i].y; cz += verts[i].z; }
+  cx /= n; cy /= n; cz /= n;
+  for (let i = 0; i < n; i++){
+    const ox = verts[i].x - cx, oy = verts[i].y - cy, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oy, oz) + 1e-6;
+    dx[i] += (ox/d) * PRESSURE;
+    dy[i] += (oy/d) * PRESSURE * 0.4;
+    dz[i] += (oz/d) * PRESSURE;
+  }
+  for (let i = 0; i < n; i++){
+    const a = verts[i].age;
+    const upward = RISE * (0.3 + 1.2 * Math.min(a * 1.5, 1.0));
+    verts[i].x += dx[i] + (Math.random()-0.5)*NOISE;
+    verts[i].y += dy[i] + (Math.random()-0.5)*NOISE * 0.5 + upward;
+    verts[i].z += dz[i] + (Math.random()-0.5)*NOISE;
+    verts[i].age += 0.0012;
+  }
+  const grown = [];
+  for (let i = 0; i < n; i++){
+    const a = verts[i], b = verts[(i+1)%n];
+    grown.push(a);
+    const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+    if (ex*ex + ey*ey + ez*ez > MAX_D*MAX_D && verts.length + grown.length < MAX_VERTS){
+      grown.push({
+        x: (a.x+b.x)*0.5,
+        y: (a.y+b.y)*0.5 - 0.05,
+        z: (a.z+b.z)*0.5,
+        age: Math.max(a.age, b.age) * 0.5
+      });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+for (let s = 0; s < 800; s++) step();
+addEventListener('click', () => { paused = !paused; });
+
+// ─────────────────────────── raspberry-pop state
+// A pop has: targetY (height on tower), phase (0→1 over ~4s), angle seed
+const pop = { active: false, y: 0, phase: 0, angle: 0, lastTrigger: -8 };
+const POP_INTERVAL = 12;   // seconds between pops
+const POP_DURATION = 4.0;  // seconds each pop lasts
+const POP_RADIUS = 1.8;    // how far the berry-band extends vertically
+const POP_BULGE = 1.6;     // max radial displacement at peak
+
+// ─────────────────────────── rendering
+const N_RENDER = 50000;
+const rPos = new Float32Array(N_RENDER * 3);
+const rSeed = new Float32Array(N_RENDER);
+const rAge = new Float32Array(N_RENDER);
+const rHeight = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeed[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeed, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('hgt',      new THREE.BufferAttribute(rHeight, 1));
+
+const uniforms = {
+  uTime:      { value: 0 },
+  uPixel:     { value: renderer.getPixelRatio() },
+  uYMax:      { value: 1 },
+  uPopY:      { value: 0 },
+  uPopPhase:  { value: 0 },    // 0 = inactive, >0 = swell/hold/reabsorb
+  uPopBulge:  { value: POP_BULGE },
+  uPopRadius: { value: POP_RADIUS }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uYMax;
+    uniform float uPopY;
+    uniform float uPopPhase;
+    uniform float uPopBulge;
+    uniform float uPopRadius;
+    attribute float seed;
+    attribute float age;
+    attribute float hgt;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = position;
+      // tiny shimmer
+      float t = uTime * 0.5 + seed * 6.28;
+      p.x += 0.005 * sin(t);
+      p.z += 0.005 * cos(t);
+
+      float normH = clamp(hgt / max(uYMax, 0.5), 0.0, 1.0);
+
+      // ── muted earth-tone palette (critic-adjusted) ──
+      // mossy base → dried terracotta mid → warm bone top
+      vec3 mossy      = vec3(0.38, 0.52, 0.42);
+      vec3 terracotta = vec3(0.72, 0.44, 0.40);
+      vec3 bone       = vec3(0.91, 0.88, 0.80);
+      vec3 col = mix(mossy, terracotta, smoothstep(0.0, 0.55, normH));
+      col = mix(col, bone, smoothstep(0.55, 1.0, normH));
+
+      float popAlpha = 1.0;
+
+      // ── raspberry-pop displacement ──
+      if (uPopPhase > 0.0) {
+        float dy = abs(p.y - uPopY);
+        float band = 1.0 - smoothstep(0.0, uPopRadius, dy);
+        // swell envelope: ease-in for first 30%, hold 30%, ease-out last 40%
+        float env;
+        if (uPopPhase < 0.3) {
+          env = smoothstep(0.0, 0.3, uPopPhase);
+        } else if (uPopPhase < 0.6) {
+          env = 1.0;
+        } else {
+          env = 1.0 - smoothstep(0.6, 1.0, uPopPhase);
+        }
+        float bulge = band * env * uPopBulge;
+        // displace radially outward from Y axis with berry-lobe bumps
+        float angle = atan(p.z, p.x);
+        // 5 lobes for raspberry-like bumpiness
+        float lobe = 0.7 + 0.3 * sin(angle * 5.0 + seed * 3.14);
+        float radial = length(p.xz) + 0.001;
+        vec2 dir = p.xz / radial;
+        p.xz += dir * bulge * lobe;
+        // subtle upward lift at peak — berries round upward
+        p.y += bulge * 0.15 * (0.5 - abs(dy / max(uPopRadius, 0.1) - 0.5));
+
+        // tint toward dried raspberry in the pop zone
+        vec3 raspberry = vec3(0.58, 0.28, 0.32);  // dried, dusky raspberry
+        float tint = band * env * 0.7;
+        col = mix(col, raspberry, tint);
+        // slightly larger particles in the pop
+        popAlpha = 1.0 + band * env * 0.4;
+      }
+
+      vCol = col;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 1.4 * uPixel * popAlpha * (40.0 / -mv.z);
+      gl_Position = projectionMatrix * mv;
+      vAlpha = popAlpha;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 18.0) * 0.58;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+const startT = performance.now();
+
+function loop(){
+  const elapsed = (performance.now() - startT) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  for (let s = 0; s < 3; s++) step();
+
+  // ── raspberry-pop timing ──
+  const sincePop = elapsed - pop.lastTrigger;
+  if (!pop.active && sincePop > POP_INTERVAL && verts.length > 100) {
+    // trigger a new pop at a random height within the current tower
+    let yMin = Infinity, yMax = -Infinity;
+    for (let i = 0; i < verts.length; i++) {
+      if (verts[i].y < yMin) yMin = verts[i].y;
+      if (verts[i].y > yMax) yMax = verts[i].y;
+    }
+    // pick a height in the middle 60% of the tower (not at very base or tip)
+    pop.y = yMin + (yMax - yMin) * (0.2 + Math.random() * 0.6);
+    pop.active = true;
+    pop.lastTrigger = elapsed;
+    pop.angle = Math.random() * Math.PI * 2;
+  }
+  if (pop.active) {
+    pop.phase = (elapsed - pop.lastTrigger) / POP_DURATION;
+    if (pop.phase >= 1.0) {
+      pop.active = false;
+      pop.phase = 0;
+    }
+  }
+  uniforms.uPopY.value = pop.y;
+  uniforms.uPopPhase.value = pop.active ? pop.phase : 0;
+
+  // ── distribute render particles ──
+  const n = verts.length;
+  let yMax = 0;
+  if (n > 1){
+    const lengths = []; let total = 0;
+    for (let i = 0; i < n; i++){
+      const a = verts[i], b = verts[(i+1)%n];
+      const ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
+      const L = Math.sqrt(ex*ex + ey*ey + ez*ez);
+      lengths.push(L); total += L;
+      if (a.y > yMax) yMax = a.y;
+    }
+    if (total > 0){
+      let written = 0;
+      for (let i = 0; i < n; i++){
+        const share = (i === n - 1) ? N_RENDER - written : Math.max(1, Math.floor(N_RENDER * lengths[i] / total));
+        const a = verts[i], b = verts[(i+1)%n];
+        for (let k = 0; k < share && written < N_RENDER; k++){
+          const u = Math.random();
+          rPos[written*3]   = a.x + (b.x-a.x)*u + (Math.random()-0.5)*0.018;
+          rPos[written*3+1] = a.y + (b.y-a.y)*u + (Math.random()-0.5)*0.018;
+          rPos[written*3+2] = a.z + (b.z-a.z)*u + (Math.random()-0.5)*0.018;
+          rAge[written]    = Math.max(a.age, b.age);
+          rHeight[written] = a.y + (b.y-a.y)*u;
+          written++;
+        }
+      }
+      geom.attributes.position.needsUpdate = true;
+      geom.attributes.age.needsUpdate = true;
+      geom.attributes.hgt.needsUpdate = true;
+    }
+  }
+  uniforms.uYMax.value = Math.max(yMax, 1.0);
+
+  // ── camera follows tower centroid ──
+  let yMean = 0;
+  if (n > 0){ for (let i = 0; i < n; i++) yMean += verts[i].y; yMean /= n; }
+  const targetY = Math.max(yMean, 2.0);
+  controls.target.y += (targetY - controls.target.y) * 0.04;
+  const desiredCamY = targetY + 4;
+  camera.position.y += (desiredCamY - camera.position.y) * 0.04;
+
+  const popLabel = pop.active ? ' · POP' : '';
+  statEl.textContent = `vertices=${n} · height=${yMax.toFixed(1)}${popLabel}${paused ? ' · paused' : ''}`;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
