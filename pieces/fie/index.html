@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: expand, intensity: calm -->
+<title>fie · monumental void</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#050403; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; color:#cdd2dc; letter-spacing:0.06em; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">fie</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">anish kapoor · differential growth · descent into limbo</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/*
+  INTENT: The viewer looks into a monumental concave vessel — an Anish Kapoor
+  void whose rim writhes with differential growth coral. The interior surface
+  curves inward toward absolute darkness. The center holds nothing — pure
+  absence rendered as physical form. The growth is the only motion: slow,
+  inexorable, contemplative.
+
+  Evokes: Kapoor's "Descent into Limbo" (1992) — a hole so dark the floor
+  appears to contain genuine absence. Here the rim is alive, growing,
+  organic — but the void it encircles is still and absolute.
+
+  Algorithm: differential growth (parent 7ea) + concave paraboloid projection
+  Palette: bone (#c4b090) → rust (#3d2218) → abyss (#0a0806)
+  Constraint: void center contains zero particles — absence is the subject
+*/
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(3, 16, 18);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x050403, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.035;
+controls.target.set(0, -3, 0);
+controls.autoRotate = false;
+controls.minPolarAngle = 0.25;
+controls.maxPolarAngle = Math.PI * 0.52;
+
+/* ── Differential growth simulation ── */
+const MAX_VERTS = 4000;
+const ATTRACT   = 0.05;
+const REPEL_R   = 0.44;
+const REPEL_STR = 0.11;
+const NOISE     = 0.002;
+const PRESSURE  = 0.003;
+const MAX_D     = 0.34;
+
+const BOWL_DEPTH = 11.0;
+const BOWL_SCALE = 1.9;
+
+const verts = [];
+const NV0 = 24;
+for (let i = 0; i < NV0; i++) {
+  const th = i / NV0 * Math.PI * 2;
+  const r  = 1.2 + (Math.random() - 0.5) * 0.08;
+  verts.push({ x: Math.cos(th) * r, z: Math.sin(th) * r, age: 0 });
+}
+
+const CELL = REPEL_R;
+const grid = new Map();
+function hk(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+
+function rebuildGrid() {
+  grid.clear();
+  for (let i = 0; i < verts.length; i++) {
+    const v = verts[i], k = hk(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+}
+
+function nearby(v) {
+  const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const arr = grid.get((cx + dx) + ',' + (cz + dz));
+    if (arr) for (const idx of arr) out.push(idx);
+  }
+  return out;
+}
+
+let paused = false;
+addEventListener('click', (e) => {
+  if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') return;
+  paused = !paused;
+});
+
+function step() {
+  if (paused) return;
+  const n = verts.length;
+  if (n >= MAX_VERTS) return;
+
+  rebuildGrid();
+  const fx = new Float32Array(n);
+  const fz = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      fx[i] += ex * f;
+      fz[i] += ez * f;
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    const a = verts[(i - 1 + n) % n], b = verts[(i + 1) % n], v = verts[i];
+    fx[i] += (a.x + b.x - 2 * v.x) * ATTRACT;
+    fz[i] += (a.z + b.z - 2 * v.z) * ATTRACT;
+  }
+
+  let cx = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cz += verts[i].z; }
+  cx /= n; cz /= n;
+  for (let i = 0; i < n; i++) {
+    const ox = verts[i].x - cx, oz = verts[i].z - cz;
+    const d = Math.hypot(ox, oz) + 1e-6;
+    fx[i] += (ox / d) * PRESSURE;
+    fz[i] += (oz / d) * PRESSURE;
+  }
+
+  for (let i = 0; i < n; i++) {
+    verts[i].x += fx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].z += fz[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].age += 0.0005;
+  }
+
+  const grown = [];
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    grown.push(a);
+    const ex = b.x - a.x, ez = b.z - a.z;
+    if (ex * ex + ez * ez > MAX_D * MAX_D && verts.length + grown.length < MAX_VERTS) {
+      grown.push({ x: (a.x + b.x) * 0.5, z: (a.z + b.z) * 0.5,
+                   age: Math.max(a.age, b.age) * 0.85 });
+    }
+  }
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+/* ── Rendering: 50k particles on concave bowl surface ── */
+const N_RENDER = 50000;
+const rPos   = new Float32Array(N_RENDER * 3);
+const rDepth = new Float32Array(N_RENDER);
+const rSeeds = new Float32Array(N_RENDER);
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('depth',    new THREE.BufferAttribute(rDepth, 1));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, -3, 0), 40);
+
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime:  { value: 0 },
+    uPixel: { value: renderer.getPixelRatio() }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float depth;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      vec3 p = position;
+      // subtle organic breathing
+      float t = uTime * 0.25 + seed * 6.2831;
+      p += 0.003 * vec3(sin(t), cos(t * 0.6) * 0.4, cos(t));
+
+      // palette: bone (rim) → rust (mid) → abyss (deep)
+      vec3 bone  = vec3(0.76, 0.69, 0.56);
+      vec3 rust  = vec3(0.25, 0.14, 0.10);
+      vec3 ember = vec3(0.40, 0.18, 0.10);
+      vec3 abyss = vec3(0.04, 0.025, 0.018);
+
+      float d = clamp(depth, 0.0, 1.0);
+      // warm ember glow at the transition zone
+      vec3 c = mix(bone, ember, smoothstep(0.0, 0.25, d));
+      c = mix(c, rust, smoothstep(0.15, 0.50, d));
+      c = mix(c, abyss, smoothstep(0.40, 1.0, d));
+
+      // directional warmth — light from upper-left
+      float side = (p.x * 0.3 + p.z * 0.15) * 0.04;
+      c *= 1.0 + clamp(side, -0.15, 0.15);
+
+      vCol = c;
+      // deeper particles dimmer — void swallows light
+      vAlpha = mix(0.72, 0.04, d * d);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sz = mix(1.8, 0.7, d);
+      gl_PointSize = sz * uPixel * (48.0 / max(dist, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+      if (r2 > 0.25) discard;
+      float a = exp(-r2 * 18.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+/* ── Distribute particles onto concave bowl each frame ── */
+function distributeParticles() {
+  const n = verts.length;
+  if (n < 3) return;
+
+  let cx = 0, cz = 0;
+  for (let i = 0; i < n; i++) { cx += verts[i].x; cz += verts[i].z; }
+  cx /= n; cz /= n;
+
+  const lengths = [];
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    const L = Math.hypot(b.x - a.x, b.z - a.z);
+    lengths.push(L); total += L;
+  }
+  if (total === 0) return;
+
+  let written = 0;
+  for (let i = 0; i < n; i++) {
+    const share = (i === n - 1)
+      ? N_RENDER - written
+      : Math.max(1, Math.floor(N_RENDER * lengths[i] / total));
+    const a = verts[i], b = verts[(i + 1) % n];
+    const nx = -(b.z - a.z), nz = (b.x - a.x);
+    const nl = Math.hypot(nx, nz) + 1e-6;
+
+    for (let k = 0; k < share && written < N_RENDER; k++) {
+      const u = Math.random();
+      const ex = a.x + (b.x - a.x) * u;
+      const ez = a.z + (b.z - a.z) * u;
+
+      // depth fraction: power bias → most particles on rim
+      const frac = Math.pow(Math.random(), 2.8) * 0.82;
+
+      // project toward centroid by frac
+      const px = ex + (cx - ex) * frac;
+      const pz = ez + (cz - ez) * frac;
+
+      // parabolic bowl depth
+      const py = -BOWL_DEPTH * frac * frac;
+
+      // slight rim spread, thinning toward center
+      const spread = (Math.random() - 0.5) * 0.05 * (1 - frac);
+
+      rPos[written * 3]     = (px + nx / nl * spread) * BOWL_SCALE;
+      rPos[written * 3 + 1] = py;
+      rPos[written * 3 + 2] = (pz + nz / nl * spread) * BOWL_SCALE;
+      rDepth[written] = frac;
+      written++;
+    }
+  }
+
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.depth.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-grow so piece opens with substantial coral rim
+for (let s = 0; s < 600; s++) step();
+
+const statEl = document.getElementById('stat');
+const t0 = performance.now();
+
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+  mat.uniforms.uTime.value = t;
+
+  // 2 sim steps per frame — contemplative growth pace
+  for (let s = 0; s < 2; s++) step();
+
+  distributeParticles();
+
+  // track centroid so the void stays centered as growth shifts
+  const n = verts.length;
+  if (n > 0) {
+    let mx = 0, mz = 0;
+    for (let i = 0; i < n; i++) { mx += verts[i].x; mz += verts[i].z; }
+    mx /= n; mz /= n;
+    controls.target.x += (mx * BOWL_SCALE - controls.target.x) * 0.01;
+    controls.target.z += (mz * BOWL_SCALE - controls.target.z) * 0.01;
+  }
+
+  statEl.textContent = `vertices=${n}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;">
+<button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button>
+<button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button>
+<input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(201,168,106,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.13)'">
+<button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button>
+</div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+
+</body>
+</html>
