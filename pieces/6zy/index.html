@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: settle, intensity: gentle -->
+<title>6zy · mono no aware — fern shed</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f0ece4; overflow:hidden;
+               color:#333; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size: 10px; letter-spacing: 0.04em; color:#666; }
+</style>
+</head>
+<body>
+<div class="id">6zy</div>
+<div class="hint">click to regenerate · orbit drag</div>
+<div class="src">mono no aware · fern shed · Barnsley IFS · 80k leaves</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 200);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xf0ece4, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 80000;
+let geom, pts, morphStart = performance.now();
+
+const uniforms = {
+  uTime:   { value: 0 },
+  uGrow:   { value: 0 },
+  uBreeze: { value: 0 },
+  uShed:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    uniform float uTime, uGrow, uBreeze, uShed, uPixel;
+    attribute float birthOrder, leafAngle, leafSize, isRachis;
+    varying float vAlpha, vAngle, vDepth, vIsRachis, vFallen;
+
+    /* simple hash for per-particle variation */
+    float hash(float n){ return fract(sin(n)*43758.5453); }
+
+    void main(){
+      float appear = smoothstep(birthOrder - 0.025, birthOrder, uGrow);
+      if(appear < 0.001){ gl_Position = vec4(2.,2.,2.,1.); gl_PointSize = 0.; return; }
+
+      vec3 p = position;
+
+      /* --- shedding: tips fall first (high birthOrder sheds first) --- */
+      float shedThreshold = 1.0 - uShed;  /* 1→0 as shed progresses */
+      float isShedding = (1.0 - isRachis) * smoothstep(shedThreshold, shedThreshold + 0.08, birthOrder);
+
+      /* fallen progress: 0 = still on fern, 1 = fully on ground */
+      float pid = birthOrder * 80000.0;
+      float fallDelay = hash(pid + 7.3) * 0.15; /* stagger */
+      float fallProg = clamp((isShedding - fallDelay) / (1.0 - fallDelay), 0.0, 1.0);
+      fallProg = fallProg * fallProg; /* ease-in: slow detach, accelerating fall */
+
+      /* breeze on attached leaves */
+      float attached = 1.0 - fallProg;
+      float sw  = sin(uTime * 0.35 + p.y * 0.28) * 0.18 * birthOrder * uBreeze * attached;
+      float sw2 = sin(uTime * 0.22 + p.y * 0.45 + 1.7) * 0.10 * birthOrder * uBreeze * attached;
+      p.x += sw;
+      p.z += sw2;
+      p.y += sin(uTime * 0.18 + birthOrder * 6.28) * 0.04 * birthOrder * uBreeze * attached;
+
+      /* falling motion: gentle wobble + gravity + lateral scatter */
+      if(fallProg > 0.0){
+        float origY = p.y;
+        /* ground target: spread carpet between y=-0.8 and y=1.2 */
+        float groundY = -0.8 + hash(pid + 1.1) * 2.0;
+        p.y = mix(origY, groundY, fallProg);
+
+        /* gentle wobble during fall — slow frequencies, restrained amplitude */
+        float wobblePhase = uTime * 2.2 + hash(pid + 3.3) * 6.28;
+        float wobbleAmt = sin(fallProg * 3.14159) * 0.6; /* peaks mid-fall, zero at ends */
+        p.x += sin(wobblePhase) * wobbleAmt * (1.0 - fallProg);
+        p.z += cos(wobblePhase * 0.7 + 1.9) * wobbleAmt * 0.5 * (1.0 - fallProg);
+
+        /* lateral drift — gentle, capped */
+        float driftX = (hash(pid + 5.5) - 0.5) * 1.4;
+        float driftZ = (hash(pid + 9.9) - 0.5) * 1.4;
+        p.x += driftX * fallProg;
+        p.z += driftZ * fallProg;
+      }
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      /* rachis particles: smaller, persist */
+      float baseSize = isRachis > 0.5 ? 1.8 : (3.8 + leafSize * 1.8);
+      gl_PointSize = uPixel * max(1.5, baseSize - dist * 0.07);
+      gl_Position  = projectionMatrix * mv;
+
+      /* fallen leaves fade more */
+      float fallenAlpha = mix(1.0, 0.25 + hash(pid + 2.2) * 0.2, fallProg);
+      vAlpha = appear * fallenAlpha;
+      vAngle = leafAngle + fallProg * (hash(pid + 4.4) - 0.5) * 3.0; /* tumble rotation */
+      vDepth = birthOrder;
+      vIsRachis = isRachis;
+      vFallen = fallProg;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha, vAngle, vDepth, vIsRachis, vFallen;
+
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      float ca = cos(vAngle), sa = sin(vAngle);
+      vec2 r = vec2(uv.x*ca - uv.y*sa, uv.x*sa + uv.y*ca);
+
+      /* leaf silhouette */
+      float ex = r.x * 2.0;
+      float ey = r.y * 3.0;
+      float d = ex*ex + ey*ey;
+      if(d > 0.25) discard;
+
+      float vein = smoothstep(0.025, 0.0, abs(r.y)) * 0.12;
+
+      /* palette: living moss → autumn umber/rust/amber as leaves shed */
+      vec3 darkMoss   = vec3(0.10, 0.14, 0.09);
+      vec3 oliveGreen = vec3(0.20, 0.26, 0.14);
+      vec3 dryLeaf    = vec3(0.30, 0.28, 0.19);
+
+      /* autumn tones for falling/fallen */
+      vec3 umber  = vec3(0.28, 0.18, 0.11);
+      vec3 rust   = vec3(0.38, 0.22, 0.12);
+      vec3 amber  = vec3(0.42, 0.32, 0.16);
+      vec3 bone   = vec3(0.52, 0.46, 0.36);
+
+      vec3 col;
+      if(vIsRachis > 0.5){
+        /* rachis/stem: dark umber, persists */
+        col = vec3(0.14, 0.11, 0.08);
+      } else {
+        /* living color */
+        vec3 living = mix(darkMoss, oliveGreen, vDepth * 0.7);
+        living = mix(living, dryLeaf, vDepth * vDepth * 0.35);
+
+        /* autumn color — varies per depth */
+        vec3 autumn = mix(umber, rust, vDepth * 0.6);
+        autumn = mix(autumn, amber, vDepth * vDepth * 0.4);
+        autumn = mix(autumn, bone, vFallen * 0.3);
+
+        col = mix(living, autumn, vFallen);
+      }
+      col -= vein * (1.0 - vFallen * 0.5);
+
+      float alpha = vAlpha * (1.0 - smoothstep(0.14, 0.25, d)) * 0.88;
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+/* ── seeded RNG ─────────────────────────────────────────── */
+function makeRng(s){
+  s = s >>> 0;
+  return () => {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ── IFS Barnsley fern + rachis extraction ──────────────── */
+function generateFern(seed){
+  const rng = makeRng(seed);
+  const v = () => 1.0 + (rng() - 0.5) * 0.08;
+
+  const T = [
+    { a:0,          b:0,          c:0,          d:0.16*v(), e:0,    f:0,    p:0.01 },
+    { a:0.85*v(),   b:0.04*v(),   c:-0.04*v(),  d:0.85*v(), e:0,    f:1.6,  p:0.85 },
+    { a:0.20*v(),   b:-0.26*v(),  c:0.23*v(),   d:0.22*v(), e:0,    f:1.6,  p:0.07 },
+    { a:-0.15*v(),  b:0.28*v(),   c:0.26*v(),   d:0.24*v(), e:0,    f:0.44, p:0.07 },
+  ];
+
+  const raw = new Float32Array(N * 2);
+  const tIdx = new Uint8Array(N); // which transform was used
+  let x = 0, y = 0;
+
+  for(let i = 0; i < 80; i++){
+    const r = rng();
+    const t = r<0.01?T[0] : r<0.86?T[1] : r<0.93?T[2] : T[3];
+    x = t.a*x + t.b*y + t.e;
+    y = t.c*x + t.d*y + t.f;
+  }
+
+  for(let i = 0; i < N; i++){
+    const r = rng();
+    const ti = r<0.01?0 : r<0.86?1 : r<0.93?2 : 3;
+    const t = T[ti];
+    const nx = t.a*x + t.b*y + t.e;
+    const ny = t.c*x + t.d*y + t.f;
+    x = nx; y = ny;
+    raw[i*2] = x;
+    raw[i*2+1] = y;
+    tIdx[i] = ti;
+  }
+
+  let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+  for(let i=0;i<N;i++){
+    const px=raw[i*2], py=raw[i*2+1];
+    if(px<minX) minX=px; if(px>maxX) maxX=px;
+    if(py<minY) minY=py; if(py>maxY) maxY=py;
+  }
+  const rangeY = (maxY-minY) || 1;
+  const scale  = 13.0 / rangeY;
+  const cx = (minX+maxX)*0.5;
+
+  const idx = Array.from({length:N}, (_,i)=>i);
+  idx.sort((a,b)=> raw[a*2+1] - raw[b*2+1]);
+
+  const positions   = new Float32Array(N*3);
+  const birthOrders = new Float32Array(N);
+  const leafAngles  = new Float32Array(N);
+  const leafSizes   = new Float32Array(N);
+  const isRachis    = new Float32Array(N);
+
+  for(let rank=0; rank<N; rank++){
+    const i  = idx[rank];
+    const px = (raw[i*2] - cx) * scale;
+    const py = (raw[i*2+1] - minY) * scale;
+    positions[i*3]   = px;
+    positions[i*3+1] = py;
+    positions[i*3+2] = (rng()-0.5)*0.35;
+    birthOrders[i]   = rank / N;
+    leafAngles[i]    = (rng()-0.5)*1.6;
+    leafSizes[i]     = rng();
+
+    /* rachis: stem transform (T0) or very close to center line */
+    const isOnStem = tIdx[i] === 0 || Math.abs(raw[i*2] - cx) < (maxX-minX)*0.015;
+    isRachis[i] = isOnStem ? 1.0 : 0.0;
+  }
+  return { positions, birthOrders, leafAngles, leafSizes, isRachis };
+}
+
+/* ── build / rebuild ────────────────────────────────────── */
+function regenerate(){
+  const seed = Math.floor(Math.random()*1e9);
+  const data = generateFern(seed);
+
+  morphStart = performance.now();
+  uniforms.uGrow.value   = 0;
+  uniforms.uBreeze.value = 0;
+  uniforms.uShed.value   = 0;
+
+  if(!geom){
+    geom = new THREE.BufferGeometry();
+    geom.setAttribute('position',   new THREE.BufferAttribute(data.positions,   3));
+    geom.setAttribute('birthOrder', new THREE.BufferAttribute(data.birthOrders, 1));
+    geom.setAttribute('leafAngle',  new THREE.BufferAttribute(data.leafAngles,  1));
+    geom.setAttribute('leafSize',   new THREE.BufferAttribute(data.leafSizes,   1));
+    geom.setAttribute('isRachis',   new THREE.BufferAttribute(data.isRachis,    1));
+    pts = new THREE.Points(geom, mat);
+    scene.add(pts);
+  } else {
+    geom.attributes.position.array.set(data.positions);    geom.attributes.position.needsUpdate   = true;
+    geom.attributes.birthOrder.array.set(data.birthOrders);geom.attributes.birthOrder.needsUpdate = true;
+    geom.attributes.leafAngle.array.set(data.leafAngles);  geom.attributes.leafAngle.needsUpdate  = true;
+    geom.attributes.leafSize.array.set(data.leafSizes);    geom.attributes.leafSize.needsUpdate   = true;
+    geom.attributes.isRachis.array.set(data.isRachis);     geom.attributes.isRachis.needsUpdate   = true;
+  }
+  geom.computeBoundingSphere();
+}
+
+regenerate();
+addEventListener('click', e => { if(e.target.tagName==='CANVAS') regenerate(); });
+
+/* ── orbit drag ─────────────────────────────────────────── */
+let isDragging = false, prevX = 0, prevY = 0;
+let orbitTheta = 0, orbitPhi = 0;
+const canvas = renderer.domElement;
+
+canvas.addEventListener('pointerdown', e => {
+  isDragging = true; prevX = e.clientX; prevY = e.clientY; e.preventDefault();
+});
+addEventListener('pointermove', e => {
+  if(!isDragging) return;
+  orbitTheta -= (e.clientX - prevX) * 0.005;
+  orbitPhi   -= (e.clientY - prevY) * 0.005;
+  prevX = e.clientX; prevY = e.clientY;
+});
+addEventListener('pointerup', () => { isDragging = false; });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  uniforms.uPixel.value = renderer.getPixelRatio();
+});
+
+/* ── render loop ────────────────────────────────────────── */
+function smoothJS(a,b,x){ const t=Math.max(0,Math.min(1,(x-a)/(b-a))); return t*t*(3-2*t); }
+
+function loop(){
+  const now     = performance.now();
+  const elapsed = (now - morphStart) / 1000;
+
+  /* Phase 1: growth (0–20s) — fern unfurls from base to tip */
+  const growTarget = Math.min(1.0, elapsed / 20.0);
+  uniforms.uGrow.value += (growTarget - uniforms.uGrow.value) * 0.025;
+
+  /* Phase 2: breeze (grows in once fern is mostly complete, 15–25s) */
+  const breezeTarget = smoothJS(0.75, 1.0, uniforms.uGrow.value);
+  uniforms.uBreeze.value += (breezeTarget - uniforms.uBreeze.value) * 0.008;
+
+  /* Phase 3: shedding begins at 28s, completes ~55s — slow, resigned */
+  const shedStart = 28.0;
+  const shedDuration = 27.0;
+  const shedTarget = Math.max(0, Math.min(1.0, (elapsed - shedStart) / shedDuration));
+  uniforms.uShed.value += (shedTarget - uniforms.uShed.value) * 0.012;
+
+  /* breeze diminishes as shedding progresses — the air goes still */
+  if(uniforms.uShed.value > 0.1){
+    const breezeDecay = 1.0 - smoothJS(0.1, 0.7, uniforms.uShed.value);
+    uniforms.uBreeze.value *= breezeDecay;
+  }
+
+  uniforms.uTime.value = elapsed;
+
+  /* camera: fixed contemplative, slightly above center, NO auto-rotation */
+  const centroidY  = 6.5;
+  const radius     = 19;
+  const theta      = orbitTheta;
+  const phi        = Math.max(0.25, Math.min(2.4, 1.25 + orbitPhi));
+
+  camera.position.set(
+    radius * Math.sin(phi) * Math.sin(theta),
+    centroidY + radius * Math.cos(phi),
+    radius * Math.sin(phi) * Math.cos(theta)
+  );
+  camera.lookAt(0, centroidY, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<!-- piece controls (gallery shell) -->
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;">
+  <button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button>
+  <button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button>
+  <input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(201,168,106,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.13)'">
+  <button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button>
+</div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+<!-- gp: universal grade panel (injected by scripts/inject_grade_panel.py) -->
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    for(var k in G){
+      document.getElementById('gp-'+k).value=G[k];
+      document.getElementById('gp-v-'+k).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    load().forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+</body>
+</html>
