@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wk3 · scrimshaw · etched ivory lucy</title>
+<!-- MOTION: emerge, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0b0908; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+</style>
+</head>
+<body>
+<div class="id">wk3</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(0, 1, 32);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0b0908, 1);
+document.body.appendChild(renderer.domElement);
+
+const N = 60000;
+const positions = new Float32Array(N * 3);
+const restPositions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const normals = new Float32Array(N * 3);
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0.0 },
+  uEtch: { value: 0.0 }
+};
+
+// Scrimshaw palette: whale ivory, aged bone, lamp-black ink in grooves
+// NormalBlending for crisp bone-surface read
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform float uEtch;
+    attribute vec3 rest;
+    attribute vec3 norm;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vGroove;
+
+    // Scrimshaw line pattern — parallel hatching + crosshatch
+    float scrimLines(vec3 p, float t) {
+      // Primary hatching — fine parallel lines wrapping the form
+      float line1 = sin(p.y * 18.0 + p.x * 6.0) * 0.5 + 0.5;
+      // Secondary crosshatch at angle
+      float line2 = sin(p.y * 12.0 - p.z * 8.0 + 1.5) * 0.5 + 0.5;
+      // Tertiary fine detail — stipple dots for shading
+      float stipple = sin(p.x * 25.0) * sin(p.y * 25.0) * sin(p.z * 25.0);
+      stipple = smoothstep(0.2, 0.5, stipple) * 0.3;
+
+      // Combine: narrow grooves where lines are sharp
+      float groove = smoothstep(0.35, 0.45, line1) * 0.6;
+      groove += smoothstep(0.38, 0.48, line2) * 0.35;
+      groove += stipple;
+
+      // Reveal wave — engravings appear from bottom to top over time
+      float reveal = smoothstep(-10.0, 8.0, p.y - 10.0 + t * 3.5);
+      return groove * reveal;
+    }
+
+    void main(){
+      vec3 p = rest;
+      float t = uTime;
+
+      // Gentle breath — ivory expanding as if held warm
+      float breath = 1.0 + 0.015 * sin(t * 0.28);
+      p *= breath;
+
+      // Scrimshaw groove calculation on rest position
+      float groove = scrimLines(rest, uEtch);
+
+      // Groove particles sink slightly inward along normal
+      // Like the engraver's needle pressing into bone
+      p -= norm * groove * 0.12;
+
+      // Minimal surface tremor — the hand-feel of carved bone
+      // Much subtler than parent's vibratory; bone is still
+      float tremor = sin(t * 3.0 + seed * 40.0) * 0.008 * (1.0 - groove * 0.7);
+      p += norm * tremor;
+
+      // Assembly reveal — particles drift in from scattered positions
+      vec3 entry = vec3(sin(seed*40.0), cos(seed*30.0), sin(seed*22.0)) * 20.0;
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      // Scrimshaw palette
+      // Whale ivory: warm yellowish white
+      vec3 ivory   = vec3(0.91, 0.87, 0.78);
+      // Aged bone: slightly darker, greyer
+      vec3 bone    = vec3(0.82, 0.78, 0.70);
+      // Lamp-black ink rubbed into grooves
+      vec3 inkBlk  = vec3(0.12, 0.10, 0.08);
+      // Warm patina on old scrimshaw
+      vec3 patina  = vec3(0.85, 0.80, 0.65);
+
+      // Base surface color varies subtly with position
+      float band = fract(rest.y * 0.06 + seed * 0.15);
+      vec3 surface = mix(ivory, bone, smoothstep(0.3, 0.7, band));
+      surface = mix(surface, patina, smoothstep(0.6, 0.9, band) * 0.3);
+
+      // Groove darkening — ink fills the carved lines
+      vec3 col = mix(surface, inkBlk, groove * 0.85);
+
+      // Slight warm highlight on upper surfaces (museum case lighting)
+      float topLight = smoothstep(-2.0, 8.0, rest.y) * 0.12;
+      col += vec3(0.08, 0.06, 0.03) * topLight;
+
+      vCol = col;
+      vGroove = groove;
+
+      // Groove particles slightly more transparent (deeper = thinner)
+      float baseAlpha = 0.6 + 0.2 * (1.0 - smoothstep(-8.0, 8.0, rest.y));
+      vAlpha = mix(baseAlpha, baseAlpha * 0.7, groove) * uReady;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      // Groove particles slightly smaller — incised, not raised
+      float sizeScale = mix(1.4, 0.9, groove);
+      gl_PointSize = sizeScale * uPixel * (38.0 / dist) * (0.3 + 0.7 * uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vGroove;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      // Tight falloff — bone surface, not glow
+      // Grooved particles slightly sharper-edged (ink sits crisp)
+      float sharpness = mix(20.0, 28.0, vGroove);
+      float a = exp(-r * sharpness) * vAlpha;
+      gl_FragColor = vec4(vCol, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Atmospheric background — museum vitrine warmth
+// Dark case interior with warm downlight reflection on glass shelf
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false, depthTest: false, transparent: true,
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, -1.0, 1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      // Museum case: dark felt with warm overhead spot
+      float spot = 1.0 - smoothstep(0.0, 0.55, length(vUv - vec2(0.5, 0.6)));
+      vec3 dark = vec3(0.04, 0.035, 0.03);
+      vec3 warm = vec3(0.14, 0.10, 0.06);
+      vec3 col = mix(dark, warm, spot * 0.35);
+      // Vignette
+      float vig = 1.0 - smoothstep(0.3, 0.9, length(vUv - 0.5));
+      gl_FragColor = vec4(col, 0.55 * vig + 0.12);
+    }
+  `
+});
+const bgQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat);
+bgQuad.frustumCulled = false;
+bgQuad.renderOrder = -1;
+scene.add(bgQuad);
+
+// Load Lucy — the ivory form
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+const loader = new PLYLoader();
+let revealStart = 0;
+
+loader.load(PLY_URL, (geometry) => {
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  const bb = geometry.boundingBox;
+  const center = bb.getCenter(new THREE.Vector3());
+  const size = bb.getSize(new THREE.Vector3());
+  const maxAxis = Math.max(size.x, size.y, size.z);
+  const scale = 16 / maxAxis;
+  geometry.translate(-center.x, -center.y, -center.z);
+  geometry.scale(scale, scale, scale);
+
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+  const sampler = new MeshSurfaceSampler(mesh).build();
+  const tmpPos = new THREE.Vector3();
+  const tmpNorm = new THREE.Vector3();
+
+  for (let i = 0; i < N; i++){
+    sampler.sample(tmpPos, tmpNorm);
+    restPositions[i*3]   = tmpPos.x;
+    restPositions[i*3+1] = tmpPos.y;
+    restPositions[i*3+2] = tmpPos.z;
+    normals[i*3]   = tmpNorm.x;
+    normals[i*3+1] = tmpNorm.y;
+    normals[i*3+2] = tmpNorm.z;
+    seeds[i] = Math.random();
+  }
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('rest', new THREE.BufferAttribute(restPositions, 3));
+  geom.setAttribute('norm', new THREE.BufferAttribute(normals, 3));
+  geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+
+  revealStart = performance.now();
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (revealStart > 0) {
+    const elapsed = (performance.now() - revealStart) / 1000;
+    uniforms.uReady.value = Math.min(1.0, elapsed / 3.0);
+    // Etch reveal begins after form assembles, takes ~8s to fully engrave
+    uniforms.uEtch.value = Math.min(1.0, Math.max(0.0, (elapsed - 2.5) / 8.0));
+  }
+
+  // Fixed contemplative camera — slight vertical breath
+  const breathY = Math.sin(t * 0.28) * 0.2;
+  camera.position.y = 1 + breathY;
+  camera.lookAt(0, -0.3, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
