@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6el · sdf glyph field</title>
+<!-- MOTION: flow, intensity: calm -->
+<!-- INTENT: The viewer sees 永 (eternity) as a living ink field — particles breathe along calligraphic strokes, denser at the center, dissolving at edges like ink seeping through rice paper. Technique: SDF glyph field. Reference: Xu Bing's Book from the Sky — language as pure visual material. Algorithm: signed-distance-field particle sampling. -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#e5ddd0; overflow:hidden;
+               color:#3a332a; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">6el</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0.5, 14);
+camera.lookAt(0, 0.5, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xe5ddd0, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── 永 (eternity) — stroke definitions as line segments ── */
+/* Each stroke: start/end in 2D, width (controls particle spread) */
+const strokes = [
+  { a:[0.15, 3.8],  b:[0.50, 3.20], w:0.28 },   // 点 dot
+  { a:[-2.0, 2.10], b:[2.00, 2.10], w:0.36 },    // 横 horizontal
+  { a:[0.00, 2.10], b:[0.00,-1.20], w:0.32 },    // 竖 vertical
+  { a:[0.00,-1.20], b:[-0.90,-2.20],w:0.28 },    // 钩 hook
+  { a:[-0.05,1.40], b:[-2.30,-2.30],w:0.44 },    // 撇 left-falling
+  { a:[0.10, 0.70], b:[1.00, 1.70], w:0.22 },    // 提 upward flick
+  { a:[0.10, 0.40], b:[2.60,-3.20], w:0.52 },    // 捺 right-falling press
+];
+
+const sLen = strokes.map(s => {
+  const dx = s.b[0]-s.a[0], dy = s.b[1]-s.a[1];
+  return Math.sqrt(dx*dx + dy*dy);
+});
+const totalLen = sLen.reduce((a,b) => a+b, 0);
+
+/* ── particle generation — SDF-weighted sampling ── */
+const N = 22000;
+const aStartArr = new Float32Array(N * 3);
+const aEndArr   = new Float32Array(N * 3);
+const aParamArr = new Float32Array(N * 4); // t, perpOffset, phase, size
+
+function gaussRand() {
+  let u, v, s;
+  do { u = Math.random()*2-1; v = Math.random()*2-1; s = u*u+v*v; } while(s>=1||s===0);
+  return u * Math.sqrt(-2 * Math.log(s) / s);
+}
+
+for (let i = 0; i < N; i++) {
+  /* pick stroke weighted by length */
+  let r = Math.random() * totalLen, si = 0;
+  for (; si < strokes.length - 1; si++) { r -= sLen[si]; if (r <= 0) break; }
+  const st = strokes[si];
+
+  const t = Math.random();
+  /* 80 % tight (ink core), 20 % diffuse (field halo) */
+  const field = Math.random() < 0.20;
+  const sigma = field ? st.w * 2.6 : st.w * 0.65;
+  const perpOff = gaussRand() * sigma;
+  const z = (Math.random() - 0.5) * 0.6;
+  const sz = field ? 1.4 + Math.random() * 0.8 : 2.2 + Math.random() * 2.2;
+
+  aStartArr[i*3]   = st.a[0]; aStartArr[i*3+1] = st.a[1]; aStartArr[i*3+2] = z;
+  aEndArr[i*3]     = st.b[0]; aEndArr[i*3+1]   = st.b[1]; aEndArr[i*3+2]   = z;
+  aParamArr[i*4]   = t;
+  aParamArr[i*4+1] = perpOff;
+  aParamArr[i*4+2] = Math.random() * Math.PI * 2;
+  aParamArr[i*4+3] = sz;
+}
+
+/* ── geometry + shader material ── */
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('aStart', new THREE.BufferAttribute(aStartArr, 3));
+geom.setAttribute('aEnd',   new THREE.BufferAttribute(aEndArr, 3));
+geom.setAttribute('aParam', new THREE.BufferAttribute(aParamArr, 4));
+
+const mat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  uniforms: {
+    uTime:  { value: 0 },
+    uPR:    { value: Math.min(devicePixelRatio, 2) },
+    uInk:   { value: new THREE.Color(0x2a2218) },   // warm near-black
+    uDilute:{ value: new THREE.Color(0x9a8b78) },   // diluted sepia
+  },
+  vertexShader: /* glsl */`
+    attribute vec3 aStart;
+    attribute vec3 aEnd;
+    attribute vec4 aParam;          // t, perpOff, phase, size
+
+    uniform float uTime;
+    uniform float uPR;
+
+    varying float vAlpha;
+    varying float vField;
+
+    void main(){
+      float t       = aParam.x;
+      float perpOff = aParam.y;
+      float phase   = aParam.z;
+      float sz      = aParam.w;
+
+      vec3 dir = aEnd - aStart;
+      float len = length(dir.xy);
+      vec2 tang = len > 0.001 ? normalize(dir.xy) : vec2(1.0, 0.0);
+      vec2 perp = vec2(-tang.y, tang.x);
+
+      /* breathing — gentle perpendicular oscillation */
+      float breathe = 1.0 + 0.18 * sin(uTime * 0.32 + phase);
+
+      /* very slow tangent drift (contemplative, not mechanical) */
+      float drift = sin(uTime * 0.10 + phase * 1.7) * 0.12;
+      float tA = clamp(t + drift / max(len, 0.5), 0.0, 1.0);
+
+      vec3 pos = aStart + dir * tA;
+      pos.xy += perp * perpOff * breathe;
+
+      /* faint vertical float */
+      pos.y += sin(uTime * 0.18 + phase * 2.7) * 0.04;
+
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      gl_Position = projectionMatrix * mv;
+
+      float absDist = abs(perpOff);
+      float core = smoothstep(2.4, 0.0, absDist);
+      gl_PointSize = sz * uPR * core * (7.5 / -mv.z);
+
+      vAlpha = smoothstep(2.8, 0.0, absDist) * (0.45 + 0.55 * core);
+      vField = smoothstep(0.0, 1.6, absDist);
+    }
+  `,
+  fragmentShader: /* glsl */`
+    precision mediump float;
+    uniform vec3 uInk;
+    uniform vec3 uDilute;
+    varying float vAlpha;
+    varying float vField;
+
+    void main(){
+      float d = length(gl_PointCoord - 0.5);
+      float disc = smoothstep(0.50, 0.16, d);
+      if(disc < 0.01) discard;
+
+      vec3 col = mix(uInk, uDilute, vField);
+      gl_FragColor = vec4(col, disc * vAlpha * 0.72);
+    }
+  `,
+});
+
+scene.add(new THREE.Points(geom, mat));
+
+/* ── paper-grain + vignette overlay ── */
+const grainMat = new THREE.ShaderMaterial({
+  transparent: true, depthTest: false, depthWrite: false,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+  `,
+  fragmentShader: `
+    precision mediump float;
+    varying vec2 vUv;
+    uniform float uTime;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+    void main(){
+      float grain = hash(vUv * 900.0 + floor(uTime * 0.4)) * 0.035;
+      float vig = smoothstep(0.95, 0.35, length(vUv - 0.5) * 1.35);
+      gl_FragColor = vec4(vec3(0.0), grain + (1.0 - vig) * 0.12);
+    }
+  `,
+});
+const grainScene = new THREE.Scene();
+const grainCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+grainScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), grainMat));
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  mat.uniforms.uPR.value = Math.min(devicePixelRatio, 2);
+});
+
+/* ── loop — still camera, breathing particles ── */
+const t0 = performance.now();
+function loop(){
+  const elapsed = (performance.now() - t0) * 0.001;
+  mat.uniforms.uTime.value = elapsed;
+  grainMat.uniforms.uTime.value = elapsed;
+
+  renderer.autoClear = true;
+  renderer.render(scene, camera);
+  renderer.autoClear = false;
+  renderer.render(grainScene, grainCam);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<!-- piece-ctrl (inherited from parent) -->
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+<!-- gp: universal grade panel + save/config -->
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+
+</body>
+</html>
