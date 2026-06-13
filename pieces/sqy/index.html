@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>sqy · ta-da</title>
+<style>
+html, body { margin:0; padding:0; height:100%; background:#0a0d0f; overflow:hidden;
+             font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+canvas { display:block; }
+.id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; }
+.hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px;
+        letter-spacing:0.04em; color:#cad6c0; }
+</style>
+</head>
+<body>
+<div class="id">sqy</div>
+<div class="hint">drag to orbit · scroll to zoom</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+/* ── Intent ──
+   Aizawa strange attractor — a recognizable toroidal orbit in sage/violet.
+   Every ~30s the attractor's d-parameter drops (bifurcation), particles
+   bloom outward in a "ta-da" scatter, hold the looser topology, then
+   smoothly reconverge. The surprise is structural: the math itself stumbles.
+   Palette crossfades sage→rust during the bloom. A brief scale pulse and
+   FOV dip mark the onset — the gasp before the flourish.
+   Evokes: Reuben Margolin's wave kinetic sculptures — orderly mechanics
+   that suddenly reveal a second, hidden behavior.
+*/
+
+const N = 70000;
+const CYCLE = 30;          // seconds per full ta-da cycle
+const SWERVE_IN  = 0.42;   // phase: ramp-in starts
+const SWERVE_PEAK = 0.54;  // phase: full bloom
+const SWERVE_OUT = 0.80;   // phase: recovery complete
+const SCALE = 3.6;
+
+/* Aizawa parameters — base (orderly torus) and swerve (bifurcated bloom) */
+const P0 = { a:0.95, b:0.7, c:0.6, d:3.5, e:0.25, f:0.1 };
+const P1 = { a:1.08, b:0.7, c:0.6, d:1.4, e:0.25, f:0.1 };
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+const BASE_FOV = 42;
+const camera = new THREE.PerspectiveCamera(BASE_FOV, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 3.5, 21);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0d0f, 1);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.04;
+controls.target.set(0, 0, 0);
+
+/* ── Bloom ── */
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(innerWidth, innerHeight), 0.45, 0.85, 0.7
+);
+composer.addPass(bloomPass);
+
+/* ── CPU-side Aizawa state ── */
+const px = new Float32Array(N);
+const py = new Float32Array(N);
+const pz = new Float32Array(N);
+const sd = new Float32Array(N); // per-particle seed
+
+function aizawaStep(x, y, z, dt, P) {
+  const dx = (z - P.b) * x - P.d * y;
+  const dy = P.d * x + (z - P.b) * y;
+  const dz = P.c + P.a * z - z*z*z/3 - (x*x + y*y)*(1 + P.e*z) + P.f*z*x*x*x;
+  return [x + dx*dt, y + dy*dt, z + dz*dt];
+}
+
+function initParticles() {
+  let x = 0.1, y = 0.0, z = 0.0;
+  const dt = 0.005;
+  /* warm up to get onto the attractor */
+  for (let i = 0; i < 5000; i++) {
+    [x, y, z] = aizawaStep(x, y, z, dt, P0);
+  }
+  /* distribute particles along the trajectory with slight jitter */
+  for (let i = 0; i < N; i++) {
+    const steps = 1 + (i & 3);
+    for (let s = 0; s < steps; s++) {
+      [x, y, z] = aizawaStep(x, y, z, dt, P0);
+    }
+    const j = 0.05;
+    px[i] = x + (Math.random() - 0.5) * j;
+    py[i] = y + (Math.random() - 0.5) * j;
+    pz[i] = z + (Math.random() - 0.5) * j;
+    sd[i] = Math.random();
+  }
+}
+initParticles();
+
+/* ── Geometry ── */
+const positions = new Float32Array(N * 3);
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(sd, 1));
+
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uSwerve: { value: 0 },
+  uPulse:  { value: 0 },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime, uPixel, uSwerve, uPulse;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      vec3 p = position;
+
+      /* scale pulse at swerve onset — the gasp */
+      p *= 1.0 + uPulse * 0.18;
+
+      /* ── palette ── */
+      vec3 sage   = vec3(0.40, 0.48, 0.36);
+      vec3 ash    = vec3(0.50, 0.48, 0.46);
+      vec3 violet = vec3(0.36, 0.28, 0.44);
+      vec3 rust   = vec3(0.58, 0.32, 0.20);
+      vec3 ochre  = vec3(0.68, 0.54, 0.28);
+
+      float yN = clamp((p.y + 5.0) / 10.0, 0.0, 1.0);
+      float rN = length(p.xz) / 18.0;
+
+      vec3 bCol = mix(sage, violet, yN);
+      bCol = mix(bCol, ash, seed * 0.2);
+      /* radial warmth gradient — center darker, edge lighter */
+      bCol *= 0.85 + 0.15 * rN;
+
+      vec3 sCol = mix(rust, ochre, yN);
+
+      vCol = mix(bCol, sCol, uSwerve);
+      /* luminance lift during ta-da + pulse flash */
+      vCol *= 1.0 + uSwerve * 0.18 + uPulse * 0.35;
+
+      float t = uTime * 0.3 + seed * 6.28;
+      float energy = 0.5 + 0.5 * sin(t);
+      vAlpha = 0.56 + 0.30 * energy + uSwerve * 0.08;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(1.0, -mv.z);
+      float sz = (1.0 + 0.4 * energy) * (1.0 + uSwerve * 0.2);
+      gl_PointSize = sz * uPixel * (42.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 22.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const pts = new THREE.Points(geom, mat);
+scene.add(pts);
+
+/* ── Resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+
+/* ── Helpers ── */
+function smoothstep(lo, hi, x) {
+  const t = Math.max(0, Math.min(1, (x - lo) / (hi - lo)));
+  return t * t * (3 - 2 * t);
+}
+
+function lerpParams(s) {
+  return {
+    a: P0.a + (P1.a - P0.a) * s,
+    b: P0.b,
+    c: P0.c,
+    d: P0.d + (P1.d - P0.d) * s,
+    e: P0.e,
+    f: P0.f,
+  };
+}
+
+function reseed(i) {
+  /* place back on the attractor — a known-good ring */
+  const ang = Math.random() * 6.283;
+  const r = 0.6 + Math.random() * 0.5;
+  px[i] = r * Math.cos(ang);
+  py[i] = r * Math.sin(ang);
+  pz[i] = 0.4 + Math.random() * 0.6;
+}
+
+/* ── Centroid tracking ── */
+let cx = 0, cy = 0, cz = 0;
+
+const t0 = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - t0) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  /* cycle phase */
+  const phase = (elapsed % CYCLE) / CYCLE;
+
+  /* swerve envelope — asymmetric: quicker onset, gentle recovery */
+  let swerve = 0;
+  if (phase >= SWERVE_IN && phase < SWERVE_PEAK) {
+    swerve = smoothstep(SWERVE_IN, SWERVE_PEAK, phase);
+  } else if (phase >= SWERVE_PEAK && phase < SWERVE_OUT) {
+    swerve = 1.0 - smoothstep(SWERVE_PEAK + 0.04, SWERVE_OUT, phase);
+  }
+  uniforms.uSwerve.value = swerve;
+
+  /* scale pulse: gaussian bump centered just after swerve onset */
+  const onsetPhase = SWERVE_IN + 0.04;
+  uniforms.uPulse.value = Math.exp(-Math.pow((phase - onsetPhase) / 0.022, 2));
+
+  /* FOV: dips 2.5° during swerve (zoom-in = intimacy with the bloom) */
+  camera.fov = BASE_FOV - swerve * 2.5;
+  camera.updateProjectionMatrix();
+
+  /* bloom strengthens during swerve */
+  bloomPass.strength = 0.4 + swerve * 0.5;
+
+  /* ── Integrate Aizawa (CPU, 2 substeps) ── */
+  const dt = 0.003;
+  const P = lerpParams(swerve);
+  let sumX = 0, sumY = 0, sumZ = 0;
+
+  for (let sub = 0; sub < 2; sub++) {
+    for (let i = 0; i < N; i++) {
+      const x = px[i], y = py[i], z = pz[i];
+      const dx = (z - P.b) * x - P.d * y;
+      const dy = P.d * x + (z - P.b) * y;
+      const dz = P.c + P.a * z - z*z*z/3.0
+               - (x*x + y*y) * (1.0 + P.e * z)
+               + P.f * z * x*x*x;
+      px[i] = x + dx * dt;
+      py[i] = y + dy * dt;
+      pz[i] = z + dz * dt;
+
+      /* re-seed if escaped */
+      const r2 = px[i]*px[i] + py[i]*py[i] + pz[i]*pz[i];
+      if (r2 > 28 || !isFinite(r2)) reseed(i);
+    }
+  }
+
+  /* write to position buffer + accumulate centroid */
+  const arr = geom.attributes.position.array;
+  for (let i = 0; i < N; i++) {
+    const sx = px[i] * SCALE;
+    const sy = py[i] * SCALE;
+    const sz2 = pz[i] * SCALE;
+    arr[i*3]   = sx;
+    arr[i*3+1] = sy;
+    arr[i*3+2] = sz2;
+    sumX += sx; sumY += sy; sumZ += sz2;
+  }
+  geom.attributes.position.needsUpdate = true;
+
+  /* centroid tracking — smooth follow */
+  const invN = 1.0 / N;
+  cx += (sumX * invN - cx) * 0.02;
+  cy += (sumY * invN - cy) * 0.02;
+  cz += (sumZ * invN - cz) * 0.02;
+  controls.target.set(cx, cy, cz);
+
+  /* gentle camera drift — single slow pass, no Y-axis rotation */
+  const driftX = cx + Math.sin(elapsed * 0.035) * 1.2;
+  const driftY = cy + 3.5 + Math.cos(elapsed * 0.05) * 0.5;
+  camera.position.x += (driftX - camera.position.x) * 0.003;
+  camera.position.y += (driftY - camera.position.y) * 0.003;
+
+  controls.update();
+  composer.render();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<!-- piece-ctrl: inherited UI (injected by pipeline) -->
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;">
+  <button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button>
+  <button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button>
+  <input id="pc-input" type="text" maxlength="200" placeholder="What to change…"
+    style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"
+    onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"
+    onblur="this.style.borderColor='rgba(255,255,255,0.13)'">
+  <button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button>
+</div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+<!-- gp: universal grade panel (injected by scripts/inject_grade_panel.py) -->
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+
+</body>
+</html>
