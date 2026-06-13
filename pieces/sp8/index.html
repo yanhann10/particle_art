@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sp8 · boomerang désordres · Vera Molnár</title>
+<!-- MOTION: pulse, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#f4ede3; overflow:hidden;
+               color:#3a3832; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#3a3832; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">sp8</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf4ede3);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 28);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const ROWS = 32;
+const COLS = 32;
+const CELL_SIZE = 0.7;
+
+// Seeded random
+let seed = 12345;
+function random(){
+  seed = (seed * 16807) % 2147483647;
+  return (seed - 1) / 2147483646;
+}
+function gaussian(mean=0, std=1){
+  const u1 = random(), u2 = random();
+  return mean + Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2) * std;
+}
+
+// Pre-generate random seeds per cell so animation is deterministic
+const cellSeeds = [];
+for (let row = 0; row < ROWS; row++){
+  for (let col = 0; col < COLS; col++){
+    cellSeeds.push({
+      ox: gaussian(), oy: gaussian(),
+      rot: gaussian(), sizeNoise: gaussian(),
+      innerRot: gaussian(),
+    });
+  }
+}
+
+// Each cell = outer square (4 edges = 8 vertices) + inner square (4 edges = 8 vertices)
+// Using LineSegments: each edge = 2 vertices
+// Outer: 4 edges × 2 = 8 verts; Inner: 4 edges × 2 = 8 verts; total per cell = 16
+const VERTS_PER_CELL = 16;
+const totalVerts = ROWS * COLS * VERTS_PER_CELL;
+const positions = new Float32Array(totalVerts * 3);
+
+const geom = new THREE.BufferGeometry();
+const posAttr = new THREE.BufferAttribute(positions, 3);
+posAttr.setUsage(THREE.DynamicDrawUsage);
+geom.setAttribute('position', posAttr);
+
+const lineMat = new THREE.LineBasicMaterial({ color: 0x1a1816 });
+const lines = new THREE.LineSegments(geom, lineMat);
+scene.add(lines);
+
+function computeSquareEdges(cx, cy, halfSize, rot, offset){
+  // 4 corners
+  const cosR = Math.cos(rot), sinR = Math.sin(rot);
+  const corners = [];
+  const signs = [[-1,-1],[1,-1],[1,1],[-1,1]];
+  for (const [sx, sy] of signs){
+    const x = halfSize * sx, y = halfSize * sy;
+    corners.push(x * cosR - y * sinR + cx, x * sinR + y * cosR + cy);
+  }
+  // 4 edges as line segments: 0-1, 1-2, 2-3, 3-0
+  for (let i = 0; i < 4; i++){
+    const j = (i + 1) % 4;
+    positions[offset]     = corners[i*2];
+    positions[offset + 1] = corners[i*2+1];
+    positions[offset + 2] = 0;
+    positions[offset + 3] = corners[j*2];
+    positions[offset + 4] = corners[j*2+1];
+    positions[offset + 5] = 0;
+    offset += 6;
+  }
+  return offset;
+}
+
+function updateGrid(chaosMap){
+  let offset = 0;
+  let idx = 0;
+  for (let row = 0; row < ROWS; row++){
+    const chaos = chaosMap(row);
+    for (let col = 0; col < COLS; col++){
+      const s = cellSeeds[idx++];
+      const baseX = (col - COLS/2) * CELL_SIZE + CELL_SIZE/2;
+      const baseY = (ROWS/2 - row) * CELL_SIZE - CELL_SIZE/2;
+
+      const cx = baseX + s.ox * chaos * 0.30;
+      const cy = baseY + s.oy * chaos * 0.30;
+      const rotNoise = s.rot * chaos * 0.70;
+
+      const baseSize = 0.32;
+      const sizeNoise = 1.0 + s.sizeNoise * chaos * 0.12;
+      const halfSize = baseSize * sizeNoise * 0.5;
+
+      // Outer square
+      offset = computeSquareEdges(cx, cy, halfSize, rotNoise, offset);
+
+      // Inner square
+      if (chaos < 0.85){
+        const innerSize = halfSize * 0.55;
+        const innerRot = rotNoise + s.innerRot * chaos * 0.30;
+        offset = computeSquareEdges(cx, cy, innerSize, innerRot, offset);
+      } else {
+        // Zero out inner square vertices
+        for (let k = 0; k < 24; k++) positions[offset + k] = 0;
+        offset += 24;
+      }
+    }
+  }
+  posAttr.needsUpdate = true;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const start = performance.now();
+
+function loop(){
+  const t = (performance.now() - start) / 1000;
+
+  // Boomerang wave: chaos sweeps from top to bottom, then reverses back
+  // Full cycle ~12 seconds
+  const cycle = 14;
+  const phase = (t % cycle) / cycle; // 0..1
+
+  // Phase 0..0.4: static gradient (original Molnár)
+  // Phase 0.4..0.7: chaos wave sweeps down (boomerang throw)
+  // Phase 0.7..1.0: chaos wave sweeps back up (boomerang return)
+
+  updateGrid(function(row){
+    const yNorm = row / (ROWS - 1); // 0 at top, 1 at bottom
+    const baseGradient = Math.pow(yNorm, 1.8);
+
+    if (phase < 0.35){
+      // Static original gradient
+      return baseGradient;
+    } else if (phase < 0.65){
+      // Chaos wave sweeps downward
+      const waveProgress = (phase - 0.35) / 0.30; // 0..1
+      const waveFront = waveProgress; // row position of wave front
+      const dist = Math.abs(yNorm - waveFront);
+      const waveWidth = 0.18;
+      const waveStrength = Math.max(0, 1 - dist / waveWidth);
+      // Wave injects chaos — peak chaos = 1.0 everywhere it touches
+      return Math.min(1, baseGradient + waveStrength * (1.0 - baseGradient) * 1.8);
+    } else {
+      // Chaos wave sweeps back upward (the boomerang return)
+      const waveProgress = (phase - 0.65) / 0.35; // 0..1
+      const waveFront = 1.0 - waveProgress; // sweeps from bottom to top
+      const dist = Math.abs(yNorm - waveFront);
+      const waveWidth = 0.18;
+      const waveStrength = Math.max(0, 1 - dist / waveWidth);
+      // On return, the wave RESTORES order — subtracts chaos
+      // But also leaves a brief shattering wake
+      const restoring = waveProgress > 0.3;
+      if (restoring){
+        // Behind the returning wave: order is restored
+        const restored = yNorm > waveFront;
+        if (restored){
+          // Smoothly settle back to base gradient
+          const settleT = Math.min(1, (yNorm - waveFront) / 0.4);
+          return baseGradient * (1 - settleT * 0.0); // back to base
+        }
+      }
+      return Math.min(1, baseGradient + waveStrength * (1.0 - baseGradient) * 1.8);
+    }
+  });
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
