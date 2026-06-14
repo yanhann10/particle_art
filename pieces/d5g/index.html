@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>d5g · Penrose Stratum</title>
+<!-- MOTION: breathe, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+  body {
+    background: #0d1117;
+    color: #cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background: radial-gradient(ellipse 120% 50% at 50% -8%, rgba(160,175,170,0.06), transparent 50%);
+    mix-blend-mode: screen;
+  }
+  canvas { display:block; position:relative; z-index:0; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; font-family: ui-monospace; color:#cdd2dc; }
+</style>
+</head>
+<body>
+<div class="id">d5g · Penrose Stratum — quasicrystal bedrock beneath speculative cartography</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// INTENT: Excavating beneath x82's courier-mapped city reveals an impossible
+// geological stratum — an aperiodic Penrose crystal bedrock that breathes
+// with tectonic slowness. City wireframe floats above as ghost archaeology;
+// building sites seed elevation peaks in the crystal below.
+// TECHNIQUE: Penrose P3 via Robinson triangle deflation (6 levels),
+// InstancedMesh with per-instance color/phase for tectonic breathing.
+// EVOKES: Olafur Eliasson's crystal grotto installations — ordered yet
+// never repeating, geological yet impossible.
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0d1117, 0.032);
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 15, 10.5);
+camera.lookAt(0, -0.5, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0d1117);
+document.body.appendChild(renderer.domElement);
+
+/* ──────────────── PENROSE TILING — Robinson triangle deflation ──────────── */
+const PHI = (1 + Math.sqrt(5)) / 2;
+const lerp2 = (a, b, t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t];
+
+// Sun decagon: 10 golden triangles (type 0)
+let tris = [];
+for (let i = 0; i < 10; i++) {
+  const a1 = (2*Math.PI*i)/10, a2 = (2*Math.PI*(i+1))/10;
+  const B = [Math.cos(a1), Math.sin(a1)];
+  const C = [Math.cos(a2), Math.sin(a2)];
+  tris.push(i%2===0 ? [0,[0,0],C,B] : [0,[0,0],B,C]);
+}
+
+for (let lvl = 0; lvl < 6; lvl++) {
+  const out = [];
+  for (const [type, a, b, c] of tris) {
+    if (type === 0) {
+      const p = lerp2(a, b, 1/PHI);
+      out.push([0, c, p, b], [1, p, c, a]);
+    } else {
+      const q = lerp2(b, a, 1/PHI);
+      const r = lerp2(b, c, 1/PHI);
+      out.push([1, q, r, b], [0, r, q, a], [1, r, c, a]);
+    }
+  }
+  tris = out;
+}
+
+const SCALE = 12;
+const tileCount = tris.length;
+
+/* ──────────────── CITY SITES — parent x82 DNA, elevation seed ──────────── */
+const rng = (function(s){return function(){s=(s*16807)%2147483647;return(s-1)/2147483646;};})(42);
+const N_BUILDINGS = 50, CITY_RADIUS = 9;
+const sites = [];
+for (let i = 0; i < N_BUILDINGS; i++) {
+  const r = Math.sqrt(rng())*CITY_RADIUS, th = rng()*Math.PI*2;
+  sites.push({ x: r*Math.cos(th), z: r*Math.sin(th), h: 0.3+rng()*1.4 });
+}
+
+function elevation(x, z) {
+  let e = 0;
+  for (const s of sites) {
+    const dx = x-s.x, dz = z-s.z;
+    e += 0.45*Math.exp(-(dx*dx+dz*dz)/5.5);
+  }
+  return Math.min(e, 1.0);
+}
+
+/* ──────────────── INSTANCED PENROSE TILES ──────────────────────────────── */
+// Unit triangle with barycentric coords for edge shading
+const triGeom = new THREE.BufferGeometry();
+triGeom.setAttribute('position', new THREE.Float32BufferAttribute([
+  0,0,0, 1,0,0, 0,0,1
+], 3));
+triGeom.setAttribute('bary', new THREE.Float32BufferAttribute([
+  1,0,0, 0,1,0, 0,0,1
+], 3));
+triGeom.computeVertexNormals();
+
+const phases = new Float32Array(tileCount);
+const types = new Float32Array(tileCount);
+
+const tileMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uColA: { value: new THREE.Color(0xbfb49e) }, // warm bone — golden triangle
+    uColB: { value: new THREE.Color(0x687868) }, // cool sage — gnomon
+    uEdge: { value: new THREE.Color(0x0a0e14) }, // dark edge
+    uFogCol: { value: new THREE.Color(0x0d1117) },
+    uFogD: { value: 0.032 }
+  },
+  vertexShader: `
+    attribute float aPhase;
+    attribute float aType;
+    attribute vec3 bary;
+    varying float vType, vFog, vElev;
+    varying vec3 vBary;
+    uniform float uTime, uFogD;
+    void main(){
+      vType = aType;
+      vBary = bary;
+      vec4 wp = instanceMatrix * vec4(position, 1.0);
+      float d = length(wp.xz);
+      float wave = sin(d*0.32 - uTime*0.22 + aPhase*3.0) * 0.10;
+      wp.y += wave;
+      vElev = wp.y;
+      vec4 mv = viewMatrix * wp;
+      float fd = length(mv.xyz);
+      vFog = 1.0 - exp(-uFogD*uFogD*fd*fd);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColA, uColB, uEdge, uFogCol;
+    varying float vType, vFog, vElev;
+    varying vec3 vBary;
+    void main(){
+      vec3 col = mix(uColA, uColB, step(0.5, vType));
+      col += vec3(0.03, 0.015, -0.01) * clamp(vElev*2.5, 0.0, 1.0);
+      float e = min(vBary.x, min(vBary.y, vBary.z));
+      float edge = 1.0 - smoothstep(0.0, 0.04, e);
+      col = mix(col, uEdge, edge*0.55);
+      col = mix(col, uFogCol, vFog);
+      gl_FragColor = vec4(col, 0.88 - vFog*0.35);
+    }
+  `,
+  transparent: true, side: THREE.DoubleSide, depthWrite: true
+});
+
+const tiles = new THREE.InstancedMesh(triGeom, tileMat, tileCount);
+const m4 = new THREE.Matrix4();
+
+for (let i = 0; i < tileCount; i++) {
+  const [type, a, b, c] = tris[i];
+  const ax = a[0]*SCALE, az = a[1]*SCALE;
+  const bx = b[0]*SCALE, bz = b[1]*SCALE;
+  const cx2 = c[0]*SCALE, cz2 = c[1]*SCALE;
+  const cenX = (ax+bx+cx2)/3, cenZ = (az+bz+cz2)/3;
+  const y = elevation(cenX, cenZ);
+
+  const e = m4.elements;
+  e[0]=bx-ax; e[1]=0; e[2]=bz-az; e[3]=0;
+  e[4]=0;     e[5]=1; e[6]=0;     e[7]=0;
+  e[8]=cx2-ax;e[9]=0; e[10]=cz2-az;e[11]=0;
+  e[12]=ax;   e[13]=y;e[14]=az;   e[15]=1;
+  tiles.setMatrixAt(i, m4);
+
+  types[i] = type;
+  phases[i] = Math.sqrt(cenX*cenX+cenZ*cenZ)*0.08 + type*1.2;
+}
+
+triGeom.setAttribute('aPhase', new THREE.InstancedBufferAttribute(phases, 1));
+triGeom.setAttribute('aType', new THREE.InstancedBufferAttribute(types, 1));
+tiles.instanceMatrix.needsUpdate = true;
+scene.add(tiles);
+
+/* ──────────────── GHOST CITY — parent wireframe floating above ─────────── */
+const cityGroup = new THREE.Group();
+cityGroup.position.y = 2.8;
+
+sites.forEach(s => {
+  const h = s.h, w = 0.22+rng()*0.28;
+  const geom = new THREE.BoxGeometry(w, h, w);
+  const eg = new THREE.EdgesGeometry(geom);
+  const mat = new THREE.LineBasicMaterial({ color: 0x4a5a6a, transparent: true, opacity: 0.16 });
+  const mesh = new THREE.LineSegments(eg, mat);
+  mesh.position.set(s.x, h*0.5, s.z);
+  cityGroup.add(mesh);
+});
+
+// Ghost street graph
+const streetPos = [];
+for (let i = 0; i < sites.length; i++) {
+  for (let j = i+1; j < sites.length; j++) {
+    const dx = sites[i].x-sites[j].x, dz = sites[i].z-sites[j].z;
+    if (Math.sqrt(dx*dx+dz*dz) < 3.2) {
+      streetPos.push(sites[i].x, 0.01, sites[i].z, sites[j].x, 0.01, sites[j].z);
+    }
+  }
+}
+const stGeom = new THREE.BufferGeometry();
+stGeom.setAttribute('position', new THREE.Float32BufferAttribute(streetPos, 3));
+cityGroup.add(new THREE.LineSegments(stGeom,
+  new THREE.LineBasicMaterial({ color: 0x3a4a5a, transparent: true, opacity: 0.10 })));
+scene.add(cityGroup);
+
+/* ──────────────── DUST MOTES — atmospheric continuity ──────────────────── */
+const N_MOTES = 280;
+const mGeom = new THREE.BufferGeometry();
+const mP = new Float32Array(N_MOTES*3), mS = new Float32Array(N_MOTES);
+for (let i = 0; i < N_MOTES; i++) {
+  mP[i*3]=(rng()-0.5)*CITY_RADIUS*2.2;
+  mP[i*3+1]=rng()*7;
+  mP[i*3+2]=(rng()-0.5)*CITY_RADIUS*2.2;
+  mS[i]=rng();
+}
+mGeom.setAttribute('position', new THREE.BufferAttribute(mP, 3));
+mGeom.setAttribute('seed', new THREE.BufferAttribute(mS, 1));
+
+const mU = { uTime:{value:0}, uPR:{value:renderer.getPixelRatio()} };
+scene.add(new THREE.Points(mGeom, new THREE.ShaderMaterial({
+  uniforms: mU, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader:`
+    uniform float uTime, uPR; attribute float seed; varying float vA;
+    void main(){
+      vec3 p=position; float t=uTime*0.07+seed*6.28;
+      p.x+=sin(t*1.1+seed*20.0)*0.22;
+      p.z+=cos(t*0.85+seed*14.0)*0.22;
+      p.y-=mod(uTime*0.035+seed*7.0,7.0);
+      vA=0.08+0.18*sin(t*1.8);
+      vec4 mv=modelViewMatrix*vec4(p,1.0);
+      gl_PointSize=(0.5+0.4*vA)*uPR*(2.2/-mv.z);
+      gl_Position=projectionMatrix*mv;
+    }`,
+  fragmentShader:`
+    varying float vA; void main(){
+      vec2 d=gl_PointCoord-0.5; float r=dot(d,d);
+      if(r>0.25)discard;
+      gl_FragColor=vec4(0.62,0.72,0.68,exp(-r*18.0)*vA*0.35);
+    }`
+})));
+
+/* ──────────────── ANIMATION ───────────────────────────────────────────── */
+addEventListener('resize', () => {
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const t0 = performance.now();
+(function loop(now){
+  const t = (now-t0)/1000;
+  tileMat.uniforms.uTime.value = t;
+  mU.uTime.value = t;
+
+  // Gentle lateral drift — no Y-axis rotation
+  camera.position.x = 1.8*Math.sin(t*0.016);
+  camera.position.z = 10.5 + 1.2*Math.cos(t*0.012);
+  camera.position.y = 15 + 0.4*Math.sin(t*0.009);
+  camera.lookAt(0, -0.5, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+})(t0);
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim().split(/[\s·]/)[0]||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+</body>
+</html>
