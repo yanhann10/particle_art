@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<!-- technique: rare attractor (Thomas attractor, b=0.208186) -->
+<!-- parent: 8ug · audio-reactive shells -->
+<title>6nl · thomas basin</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0b09; overflow:hidden;
+               color:#c8bfae; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px;
+        letter-spacing:0.06em; color:#cdd2dc; font-family:ui-monospace,"SF Mono",Menlo,monospace; }
+</style>
+</head>
+<body>
+<div class="id">6nl</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ── scene ─────────────────────────────────────────────── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(14, 9, 18);
+camera.lookAt(0, 0, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0d0b09, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── Thomas attractor ──────────────────────────────────── */
+const B = 0.208186;
+const DT = 0.04;
+const TEX_W = 256, TEX_H = 64;
+const TRAIL_LEN = TEX_W * TEX_H; // 16384
+const raw = [];
+let tx = 1.1, ty = 1.1, tz = -0.01;
+
+// settle into the attractor
+for (let i = 0; i < 8000; i++) {
+  const dx = Math.sin(ty) - B * tx;
+  const dy = Math.sin(tz) - B * ty;
+  const dz = Math.sin(tx) - B * tz;
+  tx += dx * DT; ty += dy * DT; tz += dz * DT;
+}
+
+let mnX=1e9, mxX=-1e9, mnY=1e9, mxY=-1e9, mnZ=1e9, mxZ=-1e9;
+for (let i = 0; i < TRAIL_LEN; i++) {
+  raw.push(tx, ty, tz);
+  if (tx < mnX) mnX = tx; if (tx > mxX) mxX = tx;
+  if (ty < mnY) mnY = ty; if (ty > mxY) mxY = ty;
+  if (tz < mnZ) mnZ = tz; if (tz > mxZ) mxZ = tz;
+  const dx = Math.sin(ty) - B * tx;
+  const dy = Math.sin(tz) - B * ty;
+  const dz = Math.sin(tx) - B * tz;
+  tx += dx * DT; ty += dy * DT; tz += dz * DT;
+}
+
+// center & scale to ±10
+const cx = (mnX + mxX) * 0.5, cy = (mnY + mxY) * 0.5, cz = (mnZ + mxZ) * 0.5;
+const span = Math.max(mxX - mnX, mxY - mnY, mxZ - mnZ);
+const sc = 18.0 / span;
+const trailData = new Float32Array(TRAIL_LEN * 4);
+for (let i = 0; i < TRAIL_LEN; i++) {
+  trailData[i * 4]     = (raw[i * 3]     - cx) * sc;
+  trailData[i * 4 + 1] = (raw[i * 3 + 1] - cy) * sc;
+  trailData[i * 4 + 2] = (raw[i * 3 + 2] - cz) * sc;
+  trailData[i * 4 + 3] = 1.0;
+}
+const trailTex = new THREE.DataTexture(trailData, TEX_W, TEX_H,
+  THREE.RGBAFormat, THREE.FloatType);
+trailTex.minFilter = THREE.NearestFilter;
+trailTex.magFilter = THREE.NearestFilter;
+trailTex.needsUpdate = true;
+
+/* ── particles ─────────────────────────────────────────── */
+const N = 24000;
+const phases = new Float32Array(N);
+const seedArr = new Float32Array(N);
+for (let i = 0; i < N; i++) {
+  phases[i] = Math.random();
+  seedArr[i] = Math.random();
+}
+const geom = new THREE.BufferGeometry();
+// dummy positions — vertex shader overwrites
+geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+geom.setAttribute('aPhase', new THREE.BufferAttribute(phases, 1));
+geom.setAttribute('aSeed',  new THREE.BufferAttribute(seedArr, 1));
+
+const uniforms = {
+  uTime:     { value: 0 },
+  uTrail:    { value: trailTex },
+  uPixel:    { value: renderer.getPixelRatio() },
+  uTexW:     { value: TEX_W },
+  uTexH:     { value: TEX_H },
+  uTrailLen: { value: TRAIL_LEN }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform sampler2D uTrail;
+    uniform float uTexW;
+    uniform float uTexH;
+    uniform float uTrailLen;
+    attribute float aPhase;
+    attribute float aSeed;
+    varying vec3 vCol;
+    varying float vAlpha;
+
+    void main() {
+      // advance phase slowly — particles drift along the attractor
+      float phase = fract(aPhase + uTime * 0.008);
+      float idx = phase * uTrailLen;
+
+      // sample trail texture (nearest)
+      float u = (mod(idx, uTexW) + 0.5) / uTexW;
+      float v = (floor(idx / uTexW) + 0.5) / uTexH;
+      vec3 pos = texture2D(uTrail, vec2(u, v)).xyz;
+
+      // give each particle a small unique offset for thickness
+      float ang = aSeed * 6.2832;
+      float rad = 0.08 + 0.06 * sin(aSeed * 37.0);
+      // offset perpendicular — roughly in a disc around the trail
+      float angZ = aSeed * 19.7;
+      pos += vec3(cos(ang) * rad, sin(ang) * rad, sin(angZ) * rad * 0.7);
+
+      // subtle breathing
+      float breath = 1.0 + 0.015 * sin(uTime * 0.4 + aSeed * 12.0);
+      pos *= breath;
+
+      // palette: rust → bone → dusk-slate by height
+      vec3 rust  = vec3(0.52, 0.28, 0.16);
+      vec3 bone  = vec3(0.74, 0.69, 0.61);
+      vec3 slate = vec3(0.32, 0.35, 0.40);
+      float h = (pos.y + 9.0) / 18.0;
+      h = clamp(h, 0.0, 1.0);
+      vCol = mix(rust, bone, smoothstep(0.15, 0.45, h));
+      vCol = mix(vCol, slate, smoothstep(0.55, 0.85, h));
+      // warm inner glow for dense regions
+      vCol += vec3(0.06, 0.03, 0.01) * (1.0 - h);
+
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = max(1.0, 1.8 * uPixel * (42.0 / dist));
+      gl_Position = projectionMatrix * mv;
+
+      vAlpha = smoothstep(90.0, 15.0, dist) * 0.55;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+      if (r2 > 0.25) discard;
+      float a = exp(-r2 * 12.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const pts = new THREE.Points(geom, mat);
+scene.add(pts);
+
+/* ── atmosphere: faint dust overlay ────────────────────── */
+const dustN = 600;
+const dustPos = new Float32Array(dustN * 3);
+const dustSeed = new Float32Array(dustN);
+for (let i = 0; i < dustN; i++) {
+  dustPos[i * 3]     = (Math.random() - 0.5) * 50;
+  dustPos[i * 3 + 1] = (Math.random() - 0.5) * 40;
+  dustPos[i * 3 + 2] = (Math.random() - 0.5) * 50;
+  dustSeed[i] = Math.random();
+}
+const dustGeom = new THREE.BufferGeometry();
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('aSeed', new THREE.BufferAttribute(dustSeed, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: uniforms.uTime },
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    attribute float aSeed;
+    varying float vA;
+    void main() {
+      vec3 p = position;
+      p.y += sin(uTime * 0.07 + aSeed * 20.0) * 0.4;
+      p.x += cos(uTime * 0.05 + aSeed * 14.0) * 0.3;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = 1.2;
+      gl_Position = projectionMatrix * mv;
+      vA = 0.12 * smoothstep(60.0, 10.0, -mv.z);
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      if (dot(d,d) > 0.25) discard;
+      gl_FragColor = vec4(0.65, 0.60, 0.52, vA);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+/* ── resize ────────────────────────────────────────────── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── render loop ───────────────────────────────────────── */
+const t0 = performance.now();
+function loop() {
+  const t = (performance.now() - t0) / 1000;
+  uniforms.uTime.value = t;
+
+  // very slow lateral drift — not Y-rotate, single direction
+  camera.position.x = 14 + t * 0.015;
+  camera.position.y = 9 + Math.sin(t * 0.03) * 0.6;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<!-- piece-ctrl (inherited boilerplate) -->
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;">
+  <button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button>
+  <button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button>
+  <input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(201,168,106,0.6)'" onblur="this.style.borderColor='rgba(255,255,255,0.13)'">
+  <button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button>
+</div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+<!-- gp: universal grade panel + save/config -->
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+</body>
+</html>
