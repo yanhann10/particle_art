@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4sh · truchet labyrinth · routed strands</title>
+<!-- MOTION: flow, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0807; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">4sh</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Truchet routing · Sébastien Truchet 1704 · particle labyrinth</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Intent: A labyrinthine network visible as continuous winding paths —
+   particle strands routed along truchet-tile quarter-circle arcs.
+   The viewer should recognize a maze/circuit, like neural vasculature
+   or ancient city irrigation channels seen from above.
+   Palette: aged parchment, burnt sienna, charcoal trace. */
+
+const BG = 0x0a0807;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 12, 8);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+// --- Truchet tile grid ---
+const GRID = 12;
+const TILE_SIZE = 1.0;
+const HALF = TILE_SIZE * 0.5;
+const RADIUS = HALF;
+const ARC_STEPS = 16;
+
+// Each tile: 0 = arcs connect (top→left, bottom→right)
+//            1 = arcs connect (top→right, bottom→left)
+const tiles = [];
+for (let i = 0; i < GRID * GRID; i++) {
+  tiles.push(Math.random() < 0.5 ? 0 : 1);
+}
+
+// Sample a point on an arc within a tile
+// type 0: arc A center at bottom-left corner, arc B center at top-right corner
+// type 1: arc A center at bottom-right corner, arc B center at top-left corner
+function arcPoint(tileX, tileZ, tileType, arcIdx, t) {
+  const ox = (tileX - GRID * 0.5) * TILE_SIZE;
+  const oz = (tileZ - GRID * 0.5) * TILE_SIZE;
+
+  let cx, cz, startAngle;
+  if (tileType === 0) {
+    if (arcIdx === 0) {
+      cx = ox; cz = oz + TILE_SIZE;
+      startAngle = -Math.PI * 0.5;
+    } else {
+      cx = ox + TILE_SIZE; cz = oz;
+      startAngle = Math.PI * 0.5;
+    }
+  } else {
+    if (arcIdx === 0) {
+      cx = ox + TILE_SIZE; cz = oz + TILE_SIZE;
+      startAngle = Math.PI;
+    } else {
+      cx = ox; cz = oz;
+      startAngle = 0;
+    }
+  }
+
+  const angle = startAngle + t * Math.PI * 0.5;
+  return {
+    x: cx + RADIUS * Math.cos(angle),
+    z: cz + RADIUS * Math.sin(angle)
+  };
+}
+
+// Trace continuous paths through the grid
+function tracePaths() {
+  const paths = [];
+  const visited = new Set();
+
+  for (let gz = 0; gz < GRID; gz++) {
+    for (let gx = 0; gx < GRID; gx++) {
+      const idx = gz * GRID + gx;
+      const type = tiles[idx];
+      for (let arc = 0; arc < 2; arc++) {
+        const key = `${gx},${gz},${arc}`;
+        if (visited.has(key)) continue;
+        visited.add(key);
+
+        const path = [];
+        for (let s = 0; s <= ARC_STEPS; s++) {
+          const t = s / ARC_STEPS;
+          const p = arcPoint(gx, gz, type, arc, t);
+          path.push(p);
+        }
+        paths.push(path);
+      }
+    }
+  }
+  return paths;
+}
+
+const allPaths = tracePaths();
+
+// --- Particles flowing along paths ---
+const N_PARTICLES = 36000;
+const positions = new Float32Array(N_PARTICLES * 3);
+const seeds = new Float32Array(N_PARTICLES);
+const pathIds = new Float32Array(N_PARTICLES);
+const phases = new Float32Array(N_PARTICLES);
+const depths = new Float32Array(N_PARTICLES);
+
+// Assign particles to paths
+for (let i = 0; i < N_PARTICLES; i++) {
+  const pi = Math.floor(Math.random() * allPaths.length);
+  pathIds[i] = pi;
+  phases[i] = Math.random();
+  seeds[i] = Math.random();
+  // Slight depth variation per path for layered feel
+  depths[i] = (Math.random() - 0.5) * 0.15;
+}
+
+function updatePositions(time) {
+  const speed = 0.012;
+  for (let i = 0; i < N_PARTICLES; i++) {
+    const path = allPaths[pathIds[i]];
+    const n = path.length;
+
+    // Advance phase
+    let ph = (phases[i] + time * speed * (0.6 + seeds[i] * 0.8)) % 1.0;
+    const fi = ph * (n - 1);
+    const idx0 = Math.floor(fi);
+    const frac = fi - idx0;
+    const idx1 = Math.min(idx0 + 1, n - 1);
+
+    const p0 = path[idx0];
+    const p1 = path[idx1];
+    const x = p0.x + (p1.x - p0.x) * frac;
+    const z = p0.z + (p1.z - p0.z) * frac;
+
+    // Gentle breathing in Y
+    const y = depths[i] + Math.sin(time * 0.4 + seeds[i] * 6.28) * 0.03;
+
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+  }
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(seeds, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uFogColor: { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.025 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uFogDensity;
+    attribute float seed;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+
+    void main() {
+      vec3 p = position;
+
+      // Restrained palette: burnt sienna, aged parchment, ash
+      vec3 sienna   = vec3(0.62, 0.34, 0.18);
+      vec3 parchment= vec3(0.88, 0.78, 0.62);
+      vec3 ash      = vec3(0.52, 0.48, 0.44);
+      vec3 charcoal = vec3(0.28, 0.24, 0.22);
+
+      float blend = seed;
+      vec3 base;
+      if (blend < 0.33) {
+        base = mix(sienna, parchment, blend * 3.0);
+      } else if (blend < 0.66) {
+        base = mix(parchment, ash, (blend - 0.33) * 3.0);
+      } else {
+        base = mix(ash, charcoal, (blend - 0.66) * 3.0);
+      }
+
+      float pulse = 0.8 + 0.2 * sin(uTime * 0.8 + seed * 20.0);
+      vCol = base * pulse;
+      vAlpha = 0.45 + 0.2 * pulse * (0.5 + seed * 0.5);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.4 + seed * 0.8) * uPixel * (40.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      float core = exp(-r * 20.0);
+      float halo = exp(-r * 6.0) * 0.3;
+      float a = (core + halo) * vAlpha;
+
+      vec3 col = vCol;
+      col = mix(col, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.85);
+
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Subtle grid lines showing tile boundaries (very faint)
+const gridLinePositions = [];
+const gridExtent = GRID * TILE_SIZE * 0.5;
+for (let i = 0; i <= GRID; i++) {
+  const v = i * TILE_SIZE - gridExtent;
+  gridLinePositions.push(v, -0.05, -gridExtent, v, -0.05, gridExtent);
+  gridLinePositions.push(-gridExtent, -0.05, v, gridExtent, -0.05, v);
+}
+const gridGeom = new THREE.BufferGeometry();
+gridGeom.setAttribute('position', new THREE.Float32BufferAttribute(gridLinePositions, 3));
+const gridMat = new THREE.LineBasicMaterial({ color: 0x2a2420, transparent: true, opacity: 0.08 });
+const gridLines = new THREE.LineSegments(gridGeom, gridMat);
+scene.add(gridLines);
+
+// Arc wireframe guides (faint)
+const arcWirePositions = [];
+for (let gz = 0; gz < GRID; gz++) {
+  for (let gx = 0; gx < GRID; gx++) {
+    const idx = gz * GRID + gx;
+    const type = tiles[idx];
+    for (let arc = 0; arc < 2; arc++) {
+      for (let s = 0; s < ARC_STEPS; s++) {
+        const t0 = s / ARC_STEPS;
+        const t1 = (s + 1) / ARC_STEPS;
+        const p0 = arcPoint(gx, gz, type, arc, t0);
+        const p1 = arcPoint(gx, gz, type, arc, t1);
+        arcWirePositions.push(p0.x, -0.02, p0.z, p1.x, -0.02, p1.z);
+      }
+    }
+  }
+}
+const arcGeom = new THREE.BufferGeometry();
+arcGeom.setAttribute('position', new THREE.Float32BufferAttribute(arcWirePositions, 3));
+const arcMat = new THREE.LineBasicMaterial({ color: 0x3d3228, transparent: true, opacity: 0.12 });
+const arcLines = new THREE.LineSegments(arcGeom, arcMat);
+scene.add(arcLines);
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  if (!paused) {
+    updatePositions(t);
+    geom.attributes.position.needsUpdate = true;
+  }
+
+  statEl.textContent = `paths=${allPaths.length} · particles=${N_PARTICLES}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
