@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qe4 · haunted cell · bourgeois</title>
+<!-- MOTION: pulse, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#060504; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">qe4</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Louise Bourgeois · spider / cell · haunted</div>
+<div class="stat" id="stat">N=0</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Intent: A tall spindly spider-form hovers over a cage/cell beneath.
+   Eight legs curve from an elevated body down to ground anchors via
+   differential growth. The body is a dense suspended cluster that breathes.
+   Beneath: vertical cage bars implied by thin descending threads.
+   Haunted = slow pulse, dripping particles, dark bronze palette.
+   The viewer should feel the protective/predatory ambiguity of Bourgeois's Maman. */
+
+const BG = 0x060504;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 4, 22);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 2, 0);
+
+const N_LEGS = 8;
+const MAX_VERTS_PER_LEG = 280;
+const BODY_Y = 7.5;
+const GROUND_Y = -3.0;
+const BODY_RADIUS = 0.6;
+const ANCHOR_RADIUS = 5.5;
+
+const ATTRACT   = 0.04;
+const REPEL_R   = 0.42;
+const REPEL_STR = 0.08;
+const NOISE     = 0.0015;
+const GRAVITY   = 0.003;
+const MAX_D     = 0.32;
+
+// Initialize legs — each curves from body center down to a ground anchor
+const legs = [];
+for (let l = 0; l < N_LEGS; l++) {
+  const angle = (l / N_LEGS) * Math.PI * 2 + 0.2;
+  const ax = Math.cos(angle) * ANCHOR_RADIUS;
+  const az = Math.sin(angle) * ANCHOR_RADIUS;
+  const verts = [];
+  const NV0 = 24;
+  for (let i = 0; i < NV0; i++) {
+    const t = i / (NV0 - 1);
+    // Catenary-like curve: rise to peak then descend
+    const peak = 0.3 + (l % 2) * 0.05;
+    let y;
+    if (t < peak) {
+      const s = t / peak;
+      y = BODY_Y + s * 2.2; // rise slightly above body
+    } else {
+      const s = (t - peak) / (1 - peak);
+      y = BODY_Y + 2.2 * (1 - peak) - s * (BODY_Y + 2.2 * (1 - peak) - GROUND_Y);
+      y = BODY_Y + 2.2 - (BODY_Y + 2.2 - GROUND_Y) * Math.pow(s, 0.7);
+    }
+    const x = ax * t;
+    const z = az * t;
+    verts.push({
+      x, y, z,
+      age: 0,
+      pinned: i < 2 || i >= NV0 - 2
+    });
+  }
+  legs.push({ verts, angle });
+}
+
+// Cage bars — vertical threads beneath the body
+const cageBars = [];
+const N_BARS = 12;
+for (let b = 0; b < N_BARS; b++) {
+  const angle = (b / N_BARS) * Math.PI * 2;
+  const r = 1.8 + Math.sin(b * 2.7) * 0.3;
+  const cx = Math.cos(angle) * r;
+  const cz = Math.sin(angle) * r;
+  const verts = [];
+  const NV = 16;
+  for (let i = 0; i < NV; i++) {
+    const t = i / (NV - 1);
+    verts.push({
+      x: cx + Math.sin(t * 3 + b) * 0.08,
+      y: BODY_Y - 2 - t * (BODY_Y - 2 - GROUND_Y + 1),
+      z: cz + Math.cos(t * 2.5 + b) * 0.08,
+      age: 0,
+      pinned: i < 1 || i >= NV - 1
+    });
+  }
+  cageBars.push({ verts });
+}
+
+const CELL = REPEL_R;
+function gridKey(x, z) { return Math.floor(x / CELL) + ',' + Math.floor(z / CELL); }
+
+function stepLeg(leg) {
+  const verts = leg.verts;
+  const n = verts.length;
+  if (n >= MAX_VERTS_PER_LEG) return;
+
+  const grid = new Map();
+  for (let i = 0; i < n; i++) {
+    const v = verts[i], k = gridKey(v.x, v.z);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+
+  function nearby(v) {
+    const cx = Math.floor(v.x / CELL), cz = Math.floor(v.z / CELL);
+    const out = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const arr = grid.get((cx + dx) + ',' + (cz + dz));
+      if (arr) for (const idx of arr) out.push(idx);
+    }
+    return out;
+  }
+
+  const dx = new Float32Array(n);
+  const dy = new Float32Array(n);
+  const dz = new Float32Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    for (const j of nearby(v)) {
+      if (j === i) continue;
+      const u = verts[j];
+      const ex = v.x - u.x, ez = v.z - u.z;
+      const d2 = ex * ex + ez * ez;
+      if (d2 > REPEL_R * REPEL_R || d2 < 1e-6) continue;
+      const d = Math.sqrt(d2);
+      const f = REPEL_STR * (1 - d / REPEL_R) / d;
+      dx[i] += ex * f;
+      dz[i] += ez * f;
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    const v = verts[i];
+    const prev = i > 0 ? verts[i - 1] : null;
+    const next = i < n - 1 ? verts[i + 1] : null;
+    if (prev) {
+      dx[i] += (prev.x - v.x) * ATTRACT;
+      dy[i] += (prev.y - v.y) * ATTRACT;
+      dz[i] += (prev.z - v.z) * ATTRACT;
+    }
+    if (next) {
+      dx[i] += (next.x - v.x) * ATTRACT;
+      dy[i] += (next.y - v.y) * ATTRACT;
+      dz[i] += (next.z - v.z) * ATTRACT;
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    if (verts[i].pinned) continue;
+    verts[i].x += dx[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].y += dy[i] - GRAVITY * 0.3 + (Math.random() - 0.5) * NOISE * 0.3;
+    verts[i].z += dz[i] + (Math.random() - 0.5) * NOISE;
+    verts[i].age += 0.0003;
+  }
+
+  // Subdivide
+  const grown = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = verts[i], b = verts[i + 1];
+    grown.push(a);
+    const ex = b.x - a.x, ey = b.y - a.y, ez = b.z - a.z;
+    if (ex * ex + ey * ey + ez * ez > MAX_D * MAX_D && n + grown.length < MAX_VERTS_PER_LEG) {
+      grown.push({
+        x: (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 0.01,
+        y: (a.y + b.y) * 0.5,
+        z: (a.z + b.z) * 0.5 + (Math.random() - 0.5) * 0.01,
+        age: Math.max(a.age, b.age) * 0.7,
+        pinned: false
+      });
+    }
+  }
+  grown.push(verts[n - 1]);
+  verts.length = 0;
+  for (const v of grown) verts.push(v);
+}
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+
+// Particles
+const N_RENDER = 40000;
+const rPos   = new Float32Array(N_RENDER * 3);
+const rSeeds = new Float32Array(N_RENDER);
+const rAge   = new Float32Array(N_RENDER);
+const rType  = new Float32Array(N_RENDER); // 0=leg, 1=body, 2=cage, 3=drip
+for (let i = 0; i < N_RENDER; i++) rSeeds[i] = Math.random();
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('seed',     new THREE.BufferAttribute(rSeeds, 1));
+geom.setAttribute('age',      new THREE.BufferAttribute(rAge, 1));
+geom.setAttribute('type',     new THREE.BufferAttribute(rType, 1));
+
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uFogColor:   { value: new THREE.Color(BG) },
+  uFogDensity: { value: 0.028 },
+  uBreath: { value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uBreath;
+    uniform float uFogDensity;
+    attribute float seed;
+    attribute float age;
+    attribute float type;
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+
+    void main() {
+      vec3 p = position;
+
+      // Subtle breathing sway
+      float t = uTime * 0.2 + seed * 6.28;
+      float sway = sin(t) * 0.004 * (1.0 + seed * 0.5);
+      p.x += sway;
+      p.z += cos(t * 0.6) * 0.003;
+
+      // Body particles pulse with breath
+      if (type > 0.5 && type < 1.5) {
+        float expand = 1.0 + uBreath * 0.08;
+        p.x *= expand;
+        p.z *= expand;
+      }
+
+      // Drip particles fall
+      if (type > 2.5) {
+        p.y -= mod(uTime * 0.4 + seed * 8.0, 6.0) * 0.8;
+      }
+
+      // Palette: dark bronze, bone, dried blood, charcoal
+      vec3 bronze  = vec3(0.45, 0.32, 0.18);
+      vec3 bone    = vec3(0.72, 0.68, 0.58);
+      vec3 blood   = vec3(0.38, 0.14, 0.10);
+      vec3 charcoal = vec3(0.22, 0.20, 0.18);
+
+      vec3 base;
+      if (type < 0.5) {
+        // Legs: bronze → bone
+        base = mix(bronze, bone, age * 1.5 + seed * 0.2);
+      } else if (type < 1.5) {
+        // Body: blood → bronze (darker, more intimate)
+        base = mix(blood, bronze, seed * 0.6);
+      } else if (type < 2.5) {
+        // Cage: charcoal → bone (ghostly)
+        base = mix(charcoal, bone, age + seed * 0.3);
+      } else {
+        // Drips: blood
+        base = blood * (0.7 + seed * 0.3);
+      }
+
+      float pulse = 0.88 + 0.12 * sin(uTime * 0.8 + seed * 20.0);
+      vCol = base * pulse;
+
+      // Legs and body brighter, cage dimmer
+      vAlpha = type < 1.5 ? 0.6 + 0.15 * pulse : 0.35 + 0.1 * pulse;
+      if (type > 2.5) vAlpha = 0.5 * pulse; // drips fade
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sz = type < 1.5 ? 2.0 : (type < 2.5 ? 1.4 : 1.6);
+      gl_PointSize = sz * uPixel * (42.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      float fogDepth = length(mv.xyz);
+      vFogFactor = 1.0 - exp(-uFogDensity * uFogDensity * fogDepth * fogDepth);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vAlpha;
+    varying float vFogFactor;
+    uniform vec3 uFogColor;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      float core = exp(-r * 28.0);
+      float halo = exp(-r * 7.0) * 0.3;
+      float a = (core + halo) * vAlpha;
+
+      vec3 col = vCol;
+      col = mix(col, uFogColor, vFogFactor);
+      a *= (1.0 - vFogFactor * 0.85);
+
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+// Wire lines for legs
+const legWires = [];
+for (let l = 0; l < N_LEGS; l++) {
+  const wGeom = new THREE.BufferGeometry();
+  const wPos = new Float32Array(MAX_VERTS_PER_LEG * 3);
+  wGeom.setAttribute('position', new THREE.BufferAttribute(wPos, 3));
+  const wMat = new THREE.LineBasicMaterial({ color: 0x1a1612, transparent: true, opacity: 0.25 });
+  const line = new THREE.Line(wGeom, wMat);
+  scene.add(line);
+  legWires.push({ geom: wGeom, positions: wPos });
+}
+
+// Cage wires
+const cageWires = [];
+for (let b = 0; b < N_BARS; b++) {
+  const wGeom = new THREE.BufferGeometry();
+  const wPos = new Float32Array(100 * 3);
+  wGeom.setAttribute('position', new THREE.BufferAttribute(wPos, 3));
+  const wMat = new THREE.LineBasicMaterial({ color: 0x12100e, transparent: true, opacity: 0.18 });
+  const line = new THREE.Line(wGeom, wMat);
+  scene.add(line);
+  cageWires.push({ geom: wGeom, positions: wPos });
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Pre-grow
+for (let pre = 0; pre < 400; pre++) {
+  for (const leg of legs) stepLeg(leg);
+}
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+  // Slow breath cycle — Bourgeois's body-as-architecture
+  const breath = Math.sin(t * 0.3) * 0.5 + 0.5;
+  uniforms.uBreath.value = breath;
+
+  if (!paused) {
+    for (const leg of legs) stepLeg(leg);
+  }
+
+  // Update leg wires
+  let totalVerts = 0;
+  for (let l = 0; l < N_LEGS; l++) {
+    const verts = legs[l].verts;
+    const n = verts.length;
+    totalVerts += n;
+    const wire = legWires[l];
+    for (let i = 0; i < n; i++) {
+      wire.positions[i * 3]     = verts[i].x;
+      wire.positions[i * 3 + 1] = verts[i].y;
+      wire.positions[i * 3 + 2] = verts[i].z;
+    }
+    wire.geom.setDrawRange(0, n);
+    wire.geom.attributes.position.needsUpdate = true;
+  }
+
+  // Update cage wires
+  for (let b = 0; b < N_BARS; b++) {
+    const verts = cageBars[b].verts;
+    const n = verts.length;
+    const wire = cageWires[b];
+    for (let i = 0; i < n; i++) {
+      wire.positions[i * 3]     = verts[i].x;
+      wire.positions[i * 3 + 1] = verts[i].y;
+      wire.positions[i * 3 + 2] = verts[i].z;
+    }
+    wire.geom.setDrawRange(0, n);
+    wire.geom.attributes.position.needsUpdate = true;
+  }
+
+  // Track centroid
+  let cx = 0, cy = 0, cz = 0, count = 0;
+  for (const leg of legs) {
+    for (const v of leg.verts) { cx += v.x; cy += v.y; cz += v.z; count++; }
+  }
+  if (count > 0) {
+    cx /= count; cy /= count; cz /= count;
+    controls.target.lerp(new THREE.Vector3(cx, cy, cz), 0.015);
+  }
+
+  // Distribute particles
+  let written = 0;
+  const legBudget = Math.floor(N_RENDER * 0.55 / N_LEGS);
+  const bodyBudget = Math.floor(N_RENDER * 0.2);
+  const cageBudget = Math.floor(N_RENDER * 0.15 / N_BARS);
+  const dripBudget = N_RENDER - legBudget * N_LEGS - bodyBudget - cageBudget * N_BARS;
+
+  // Leg particles
+  for (let l = 0; l < N_LEGS; l++) {
+    const verts = legs[l].verts;
+    const n = verts.length;
+    if (n < 2) continue;
+    for (let k = 0; k < legBudget && written < N_RENDER; k++) {
+      const fi = Math.random() * (n - 1);
+      const i = Math.floor(fi);
+      const frac = fi - i;
+      const a = verts[i], b = verts[Math.min(i + 1, n - 1)];
+      const spread = 0.02;
+      rPos[written * 3]     = a.x + (b.x - a.x) * frac + (Math.random() - 0.5) * spread;
+      rPos[written * 3 + 1] = a.y + (b.y - a.y) * frac + (Math.random() - 0.5) * spread * 0.5;
+      rPos[written * 3 + 2] = a.z + (b.z - a.z) * frac + (Math.random() - 0.5) * spread;
+      rAge[written] = a.age;
+      rType[written] = 0;
+      written++;
+    }
+  }
+
+  // Body cluster — dense egg-sac at the top
+  for (let k = 0; k < bodyBudget && written < N_RENDER; k++) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    const r = BODY_RADIUS * Math.pow(Math.random(), 0.4);
+    // Elongate vertically — egg shape
+    const stretch = 1.0 + breath * 0.06;
+    rPos[written * 3]     = Math.sin(phi) * Math.cos(theta) * r * 0.8;
+    rPos[written * 3 + 1] = BODY_Y + Math.cos(phi) * r * 1.4 * stretch;
+    rPos[written * 3 + 2] = Math.sin(phi) * Math.sin(theta) * r * 0.8;
+    rAge[written] = Math.random() * 0.3;
+    rType[written] = 1;
+    written++;
+  }
+
+  // Cage particles
+  for (let b = 0; b < N_BARS; b++) {
+    const verts = cageBars[b].verts;
+    const n = verts.length;
+    if (n < 2) continue;
+    for (let k = 0; k < cageBudget && written < N_RENDER; k++) {
+      const fi = Math.random() * (n - 1);
+      const i = Math.floor(fi);
+      const frac = fi - i;
+      const a = verts[i], b2 = verts[Math.min(i + 1, n - 1)];
+      rPos[written * 3]     = a.x + (b2.x - a.x) * frac + (Math.random() - 0.5) * 0.015;
+      rPos[written * 3 + 1] = a.y + (b2.y - a.y) * frac + (Math.random() - 0.5) * 0.01;
+      rPos[written * 3 + 2] = a.z + (b2.z - a.z) * frac + (Math.random() - 0.5) * 0.015;
+      rAge[written] = a.age;
+      rType[written] = 2;
+      written++;
+    }
+  }
+
+  // Drip particles — falling from body
+  for (let k = 0; k < dripBudget && written < N_RENDER; k++) {
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.random() * BODY_RADIUS * 0.5;
+    rPos[written * 3]     = Math.cos(angle) * r;
+    rPos[written * 3 + 1] = BODY_Y - 1.5;
+    rPos[written * 3 + 2] = Math.sin(angle) * r;
+    rAge[written] = 0;
+    rType[written] = 3;
+    written++;
+  }
+
+  geom.setDrawRange(0, written);
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.age.needsUpdate = true;
+  geom.attributes.type.needsUpdate = true;
+
+  statEl.textContent = `vertices=${totalVerts}${paused ? ' · paused' : ''}`;
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
