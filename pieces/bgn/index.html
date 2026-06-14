@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: gentle -->
+<title>bgn · psithurism · the tree that writes in wind</title>
+<style>
+html,body{margin:0;padding:0;height:100%;overflow:hidden;
+  font-family:ui-monospace,"SF Mono",Menlo,monospace}
+body{background:linear-gradient(165deg,#ede4d0 0%,#e8dcca 30%,#e3d5c0 60%,#dfd0b8 100%)}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;
+  letter-spacing:0.06em;color:#cdd2dc;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+.hint{position:fixed;left:14px;top:14px;opacity:0.35;font-size:10px;
+  letter-spacing:0.04em;color:#8a7e6e}
+.arc{position:fixed;right:14px;bottom:12px;opacity:0.45;font-size:10px;
+  letter-spacing:0.06em;color:#9a7a5a}
+</style>
+</head>
+<body>
+<div class="id">bgn</div>
+<div class="hint">psithurism · after Twombly · the leaves remember the wind</div>
+<div class="arc" id="arc">still · 100%</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// Intent: Psithurism — the sound of wind through leaves — as a continuous morph
+// of yml's Twombly chalk-boids. The flock becomes a canopy of leaf-particles
+// clinging to an invisible tree. Wind arrives in slow tidal breaths; leaves
+// rustle, a few detach and spiral down, then drift back. The chalk trails
+// become the scratchy arcs of rustling — Twombly's scribbles as wind-writing.
+// The straggler is the one leaf that falls furthest before returning.
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 1.5, 28);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+const N = 481, STRAGGLER = 0;
+const pos = new Float32Array(N * 3);
+const vel = new Float32Array(N * 3);
+const home = new Float32Array(N * 3); // each leaf's resting spot on the tree
+
+// Tree silhouette: trunk + canopy
+// Canopy: oblate ellipsoid centered at (0, 3.5, 0), radii (4, 3, 3.5)
+// Trunk: narrow cylinder from (0, -2, 0) to (0, 1.5, 0)
+function treePoint(i) {
+  if (i < 24) {
+    // trunk leaves (bark-clinging)
+    const y = -2.0 + Math.random() * 3.8;
+    const a = Math.random() * Math.PI * 2;
+    const r = 0.25 + Math.random() * 0.35;
+    return [Math.cos(a)*r, y, Math.sin(a)*r];
+  }
+  // canopy — oblate sphere with more density toward surface
+  const u = Math.random() * Math.PI * 2;
+  const v = Math.acos(2 * Math.random() - 1);
+  const rBase = 0.6 + Math.pow(Math.random(), 0.4) * 0.4; // bias toward surface
+  const rx = 4.0, ry = 3.0, rz = 3.5;
+  return [
+    Math.sin(v) * Math.cos(u) * rx * rBase,
+    3.5 + Math.cos(v) * ry * rBase,
+    Math.sin(v) * Math.sin(u) * rz * rBase
+  ];
+}
+
+for (let i = 0; i < N; i++) {
+  const [hx, hy, hz] = treePoint(i);
+  home[i*3] = hx; home[i*3+1] = hy; home[i*3+2] = hz;
+  // start at home with small offset
+  pos[i*3]   = hx + (Math.random()-0.5)*0.3;
+  pos[i*3+1] = hy + (Math.random()-0.5)*0.3;
+  pos[i*3+2] = hz + (Math.random()-0.5)*0.2;
+  vel[i*3]   = (Math.random()-0.5)*0.1;
+  vel[i*3+1] = (Math.random()-0.5)*0.1;
+  vel[i*3+2] = (Math.random()-0.5)*0.1;
+}
+// straggler starts slightly detached
+pos[0] = home[0] + 2.0; pos[1] = home[1] - 1.5; pos[2] = home[2];
+
+// Boid / wind parameters
+const PR = 3.2, SR = 0.7, WC = 0.012, WA = 0.045, WS = 0.070, MS = 0.9, MF = 0.022;
+let windPhase = 0, windStr = 0, arcStage = 'still';
+const arcEl = document.getElementById('arc');
+let simTime = 0;
+
+function windForce(t) {
+  // tidal wind — slow crescendo and decrescendo, like breath
+  const base = Math.sin(t * 0.15) * 0.5 + 0.5; // 0-1 over ~42s
+  const gust = Math.max(0, Math.sin(t * 0.7) * Math.sin(t * 0.31)) * 0.4;
+  return base * 0.6 + gust;
+}
+
+function step(dt) {
+  simTime += dt;
+  windStr = windForce(simTime);
+  const wx = Math.sin(simTime * 0.08) * windStr * 0.025;
+  const wy = -windStr * 0.004; // leaves sag in wind
+  const wz = Math.cos(simTime * 0.11) * windStr * 0.012;
+
+  // arc stage from wind
+  if (windStr < 0.12) arcStage = 'still';
+  else if (windStr < 0.35) arcStage = 'whisper';
+  else if (windStr < 0.65) arcStage = 'rustle';
+  else arcStage = 'gust';
+  arcEl.textContent = `${arcStage} · ${Math.round((1-windStr)*100)}%`;
+
+  const acc = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    let chX=0,chY=0,chZ=0,chN=0, alX=0,alY=0,alZ=0,alN=0, spX=0,spY=0,spZ=0;
+    const px = pos[i*3], py = pos[i*3+1], pz = pos[i*3+2];
+    const isS = i === STRAGGLER;
+
+    for (let j = 0; j < N; j++) {
+      if (i === j) continue;
+      const dx = pos[j*3]-px, dy = pos[j*3+1]-py, dz = pos[j*3+2]-pz;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 > PR*PR || d2 < 1e-6) continue;
+      chX += pos[j*3]; chY += pos[j*3+1]; chZ += pos[j*3+2]; chN++;
+      alX += vel[j*3]; alY += vel[j*3+1]; alZ += vel[j*3+2]; alN++;
+      if (d2 < SR*SR) { const inv = 1/Math.sqrt(d2); spX -= dx*inv; spY -= dy*inv; spZ -= dz*inv; }
+    }
+
+    // home attraction — stronger when wind is low, weaker in gusts
+    const homeK = isS ? 0.006 : (0.018 - windStr * 0.012);
+    const hx = home[i*3]-px, hy = home[i*3+1]-py, hz = home[i*3+2]-pz;
+    acc[i*3] += hx * homeK; acc[i*3+1] += hy * homeK; acc[i*3+2] += hz * homeK;
+
+    // wind
+    const windMult = isS ? 2.2 : 1.0;
+    acc[i*3]   += wx * windMult;
+    acc[i*3+1] += wy * windMult;
+    acc[i*3+2] += wz * windMult;
+
+    // rustle: small lateral oscillation unique to each leaf
+    const rustleAmp = windStr * 0.008;
+    const rustleFreq = 2.0 + (i % 7) * 0.3;
+    acc[i*3]   += Math.sin(simTime * rustleFreq + i * 1.7) * rustleAmp;
+    acc[i*3+1] += Math.cos(simTime * rustleFreq * 0.7 + i * 2.3) * rustleAmp * 0.5;
+
+    // straggler: drifts further in gusts, gravity pulls it down
+    if (isS) {
+      acc[i*3+1] -= 0.003; // gentle gravity
+      // extra wind susceptibility already handled by windMult
+    }
+
+    if (chN > 0) { acc[i*3] += (chX/chN-px)*WC; acc[i*3+1] += (chY/chN-py)*WC; acc[i*3+2] += (chZ/chN-pz)*WC; }
+    if (alN > 0) { acc[i*3] += (alX/alN-vel[i*3])*WA; acc[i*3+1] += (alY/alN-vel[i*3+1])*WA; acc[i*3+2] += (alZ/alN-vel[i*3+2])*WA; }
+    acc[i*3] += spX*WS; acc[i*3+1] += spY*WS; acc[i*3+2] += spZ*WS;
+
+    // soft boundary
+    const d2c = px*px + (py-2)*(py-2) + pz*pz;
+    if (d2c > 120) { const inv = 0.015/Math.sqrt(d2c); acc[i*3] -= px*inv; acc[i*3+1] -= (py-2)*inv; acc[i*3+2] -= pz*inv; }
+  }
+
+  for (let i = 0; i < N; i++) {
+    let ax = acc[i*3], ay = acc[i*3+1], az = acc[i*3+2];
+    const af = Math.sqrt(ax*ax + ay*ay + az*az);
+    if (af > MF) { ax *= MF/af; ay *= MF/af; az *= MF/af; }
+    vel[i*3] += ax; vel[i*3+1] += ay; vel[i*3+2] += az;
+    // damping
+    vel[i*3] *= 0.985; vel[i*3+1] *= 0.985; vel[i*3+2] *= 0.985;
+    let vx = vel[i*3], vy = vel[i*3+1], vz = vel[i*3+2];
+    const sp = Math.sqrt(vx*vx + vy*vy + vz*vz);
+    if (sp > MS) { vx *= MS/sp; vy *= MS/sp; vz *= MS/sp; vel[i*3]=vx; vel[i*3+1]=vy; vel[i*3+2]=vz; }
+    pos[i*3] += vx * dt; pos[i*3+1] += vy * dt; pos[i*3+2] += vz * dt;
+  }
+}
+
+// ── trail system: wind-writing marks ──
+const TRAIL = 28;
+const TRAIL_SKIP = 2;
+const TPTS = N * TRAIL;
+const tPos = new Float32Array(TPTS * 3);
+const tBirth = new Float32Array(TPTS);
+const tStrag = new Float32Array(TPTS);
+const tSeed = new Float32Array(TPTS);
+const tHead = new Uint8Array(N);
+let frame = 0;
+
+for (let i = 0; i < N; i++) {
+  for (let t = 0; t < TRAIL; t++) {
+    const idx = i * TRAIL + t;
+    tPos[idx*3]   = pos[i*3];
+    tPos[idx*3+1] = pos[i*3+1];
+    tPos[idx*3+2] = pos[i*3+2];
+    tBirth[idx] = 0;
+    tStrag[idx] = i === STRAGGLER ? 1.0 : 0.0;
+    tSeed[idx] = Math.random();
+  }
+  tHead[i] = 0;
+}
+
+function updateTrails() {
+  if (frame % TRAIL_SKIP !== 0) return;
+  for (let i = 0; i < N; i++) {
+    tHead[i] = (tHead[i] + 1) % TRAIL;
+    const slot = i * TRAIL + tHead[i];
+    const isS = i === STRAGGLER;
+    const jit = isS ? 0.10 : 0.04;
+    tPos[slot*3]   = pos[i*3]   + (Math.random()-0.5)*jit;
+    tPos[slot*3+1] = pos[i*3+1] + (Math.random()-0.5)*jit;
+    tPos[slot*3+2] = pos[i*3+2] + (Math.random()-0.5)*jit*0.3;
+    tBirth[slot] = frame;
+  }
+}
+
+// ── rendering: leaf-chalk shader ──
+const tGeom = new THREE.BufferGeometry();
+tGeom.setAttribute('position', new THREE.BufferAttribute(tPos, 3));
+tGeom.setAttribute('birth',    new THREE.BufferAttribute(tBirth, 1));
+tGeom.setAttribute('strag',    new THREE.BufferAttribute(tStrag, 1));
+tGeom.setAttribute('seed',     new THREE.BufferAttribute(tSeed, 1));
+
+const MAX_AGE = (TRAIL * TRAIL_SKIP).toFixed(1);
+
+const tMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uFrame: { value: 0 },
+    uPx:    { value: renderer.getPixelRatio() },
+    uWind:  { value: 0 }
+  },
+  transparent: true, depthWrite: false, fog: false,
+  vertexShader: `
+    uniform float uFrame;
+    uniform float uPx;
+    uniform float uWind;
+    attribute float birth;
+    attribute float strag;
+    attribute float seed;
+    varying float vAlpha;
+    varying vec3  vCol;
+    varying float vRough;
+    varying float vStrag;
+
+    void main() {
+      float age = clamp((uFrame - birth) / ${MAX_AGE}, 0.0, 1.0);
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+
+      float sz = mix(3.5, 0.8, age * age) * (0.5 + seed * 0.9);
+      sz += strag * 2.0 * (1.0 - age);
+      gl_PointSize = sz * uPx * (18.0 / max(dist, 1.0));
+
+      // Palette: dried leaves on parchment
+      // canopy: olive, sage, dried green-brown
+      // straggler: amber, sienna — the fallen leaf
+      vec3 olive    = vec3(0.30, 0.28, 0.16);
+      vec3 sage     = vec3(0.34, 0.32, 0.22);
+      vec3 dryGreen = vec3(0.26, 0.25, 0.18);
+      vec3 bark     = vec3(0.28, 0.20, 0.14);
+      vec3 amber    = vec3(0.48, 0.30, 0.14);
+      vec3 sienna   = vec3(0.42, 0.22, 0.12);
+
+      vec3 fCol = mix(olive, sage, seed * 0.7);
+      fCol = mix(fCol, dryGreen, smoothstep(0.3, 0.8, seed));
+      // wind shifts palette cooler (more grey-green)
+      fCol = mix(fCol, bark, uWind * 0.3);
+      vec3 sCol = mix(amber, sienna, seed);
+      vCol = mix(fCol, sCol, strag);
+
+      vAlpha = mix(0.48, 0.02, age * age);
+      vAlpha *= (1.0 - smoothstep(38.0, 58.0, dist));
+      vAlpha *= (1.0 + strag * 0.4);
+      vRough = seed;
+      vStrag = strag;
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying vec3  vCol;
+    varying float vRough;
+    varying float vStrag;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      // leaf shape: elongated oval, rotated by seed
+      float ang = vRough * 3.14159;
+      float ca = cos(ang), sa = sin(ang);
+      vec2 rd = vec2(ca*d.x + sa*d.y, -sa*d.x + ca*d.y);
+      rd.x *= 1.8; // elongate
+      float r = length(rd);
+
+      // chalky edge
+      float pAng = atan(rd.y, rd.x);
+      float n = fract(sin(pAng * 6.1 + vRough * 27.3) * 3917.545);
+      float edge = 0.30 + n * 0.14;
+      if (r > edge) discard;
+
+      float a = smoothstep(edge, edge * 0.2, r) * vAlpha;
+      // midrib vein — subtle darker line
+      float vein = smoothstep(0.03, 0.0, abs(rd.y)) * 0.08;
+      vec3 c = vCol - vec3(vein);
+      gl_FragColor = vec4(c, a);
+    }
+  `
+});
+
+const pts = new THREE.Points(tGeom, tMat);
+scene.add(pts);
+
+// ── head marks: current leaf positions, bolder ──
+const headPos = new Float32Array(N * 3);
+const headStrag = new Float32Array(N);
+const headSeed = new Float32Array(N);
+for (let i = 0; i < N; i++) {
+  headPos[i*3]=pos[i*3]; headPos[i*3+1]=pos[i*3+1]; headPos[i*3+2]=pos[i*3+2];
+  headStrag[i] = i === STRAGGLER ? 1.0 : 0.0;
+  headSeed[i] = Math.random();
+}
+const hGeom = new THREE.BufferGeometry();
+hGeom.setAttribute('position', new THREE.BufferAttribute(headPos, 3));
+hGeom.setAttribute('strag', new THREE.BufferAttribute(headStrag, 1));
+hGeom.setAttribute('seed', new THREE.BufferAttribute(headSeed, 1));
+
+const hMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uPx: { value: renderer.getPixelRatio() },
+    uWind: { value: 0 },
+    uTime: { value: 0 }
+  },
+  transparent: true, depthWrite: false, fog: false,
+  vertexShader: `
+    uniform float uPx;
+    uniform float uWind;
+    uniform float uTime;
+    attribute float strag;
+    attribute float seed;
+    varying float vAlpha;
+    varying vec3  vCol;
+    varying float vRough;
+    varying float vFlutter;
+    void main() {
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+      float sz = (3.0 + seed * 2.0 + strag * 3.5) * uPx * (18.0 / max(dist, 1.0));
+      gl_PointSize = sz;
+
+      vec3 olive = vec3(0.28, 0.26, 0.14);
+      vec3 sage  = vec3(0.32, 0.30, 0.20);
+      vec3 bark  = vec3(0.26, 0.19, 0.13);
+      vec3 amber = vec3(0.46, 0.28, 0.12);
+
+      vec3 fCol = mix(olive, sage, seed * 0.6 + 0.2);
+      fCol = mix(fCol, bark, uWind * 0.25);
+      vCol = mix(fCol, amber, strag);
+
+      vAlpha = 0.72 + strag * 0.18;
+      vAlpha *= (1.0 - smoothstep(38.0, 58.0, dist));
+      vRough = seed;
+      // flutter rotation angle changes with wind
+      vFlutter = seed * 3.14159 + uWind * sin(uTime * 1.5 + seed * 17.0) * 0.6;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying vec3  vCol;
+    varying float vRough;
+    varying float vFlutter;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      // leaf shape with wind-flutter rotation
+      float ca = cos(vFlutter), sa = sin(vFlutter);
+      vec2 rd = vec2(ca*d.x + sa*d.y, -sa*d.x + ca*d.y);
+      rd.x *= 1.7;
+      float r = length(rd);
+
+      float pAng = atan(rd.y, rd.x);
+      float n = fract(sin(pAng * 5.3 + vRough * 21.7) * 3421.545);
+      float edge = 0.28 + n * 0.18;
+      if (r > edge) discard;
+
+      float a = smoothstep(edge, edge * 0.15, r) * vAlpha;
+      // midrib
+      float vein = smoothstep(0.025, 0.0, abs(rd.y)) * 0.10;
+      vec3 c = vCol - vec3(vein * 0.8, vein, vein * 0.6);
+      gl_FragColor = vec4(c, a);
+    }
+  `
+});
+const headPts = new THREE.Points(hGeom, hMat);
+scene.add(headPts);
+
+// ── trunk: faint vertical strokes suggesting bark ──
+const trunkGeo = new THREE.BufferGeometry();
+const TN = 60;
+const trunkPos = new Float32Array(TN * 3);
+const trunkSeed = new Float32Array(TN);
+for (let i = 0; i < TN; i++) {
+  const y = -2.5 + (i / TN) * 4.5;
+  const a = Math.random() * Math.PI * 2;
+  const r = 0.2 + Math.random() * 0.25 + Math.sin(y * 1.5) * 0.08;
+  trunkPos[i*3] = Math.cos(a) * r;
+  trunkPos[i*3+1] = y;
+  trunkPos[i*3+2] = Math.sin(a) * r * 0.6;
+  trunkSeed[i] = Math.random();
+}
+trunkGeo.setAttribute('position', new THREE.BufferAttribute(trunkPos, 3));
+trunkGeo.setAttribute('seed', new THREE.BufferAttribute(trunkSeed, 1));
+
+const trunkMat = new THREE.ShaderMaterial({
+  uniforms: { uPx: { value: renderer.getPixelRatio() } },
+  transparent: true, depthWrite: false, fog: false,
+  vertexShader: `
+    uniform float uPx;
+    attribute float seed;
+    varying float vAlpha;
+    varying vec3 vCol;
+    varying float vSeed;
+    void main() {
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (2.5 + seed * 2.5) * uPx * (18.0 / max(dist, 1.0));
+      vCol = mix(vec3(0.24, 0.18, 0.12), vec3(0.30, 0.22, 0.15), seed);
+      vAlpha = 0.30 + seed * 0.15;
+      vAlpha *= (1.0 - smoothstep(38.0, 58.0, dist));
+      vSeed = seed;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying vec3 vCol;
+    varying float vSeed;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      // vertical bark stroke
+      d.y *= 0.5;
+      float r = length(d);
+      float n = fract(sin(d.y * 11.0 + vSeed * 43.7) * 2917.0);
+      float edge = 0.28 + n * 0.18;
+      if (r > edge) discard;
+      float a = smoothstep(edge, edge * 0.2, r) * vAlpha;
+      gl_FragColor = vec4(vCol, a);
+    }
+  `
+});
+scene.add(new THREE.Points(trunkGeo, trunkMat));
+
+// ── camera: contemplative, tracks canopy centroid ──
+const camTarget = new THREE.Vector3(0, 2.5, 0);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pre-warm
+for (let s = 0; s < 400; s++) {
+  step(0.04);
+  frame++;
+  updateTrails();
+}
+
+let lastT = performance.now();
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.06, (now - lastT) / 1000);
+  lastT = now;
+  frame++;
+
+  step(dt);
+  updateTrails();
+
+  tMat.uniforms.uFrame.value = frame;
+  tMat.uniforms.uWind.value = windStr;
+  hMat.uniforms.uWind.value = windStr;
+  hMat.uniforms.uTime.value = simTime;
+  tGeom.attributes.position.needsUpdate = true;
+  tGeom.attributes.birth.needsUpdate = true;
+
+  for (let i = 0; i < N; i++) {
+    headPos[i*3]=pos[i*3]; headPos[i*3+1]=pos[i*3+1]; headPos[i*3+2]=pos[i*3+2];
+  }
+  hGeom.attributes.position.needsUpdate = true;
+
+  // gentle camera follow — tracks canopy centroid
+  let cx = 0, cy = 0;
+  for (let i = 0; i < N; i++) { cx += pos[i*3]; cy += pos[i*3+1]; }
+  cx /= N; cy /= N;
+  camTarget.lerp(new THREE.Vector3(cx, cy, 0), 0.008);
+  camera.position.set(camTarget.x, camTarget.y + 0.6, 28);
+  camera.lookAt(camTarget.x, camTarget.y, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+</body>
+</html>
