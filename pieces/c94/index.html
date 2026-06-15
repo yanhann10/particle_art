@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>c94 · (Dés)Ordres des Feuilles — Molnar leaf grid</title>
+<!-- MOTION: settling, intensity: gentle -->
+<style>
+html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+body {
+  background:
+    radial-gradient(ellipse at 50% 45%, #f0e8d8 0%, #e8dfcc 35%, #ddd2ba 70%, #cfc4a8 100%);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.78' numOctaves='4' stitchTiles='stitch'/><feColorMatrix values='0.05 0.04 0.03 0 0  0.04 0.04 0.03 0 0  0.03 0.02 0.01 0 0  0 0 0 0.20 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.45'/></svg>");
+  mix-blend-mode: multiply; opacity: 0.35;
+}
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 2;
+  background: radial-gradient(ellipse at 52% 42%, rgba(255,245,220,0.12), transparent 55%);
+}
+canvas { display: block; position: relative; z-index: 0; }
+.id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:5; color:#6a5f50; }
+.hint { position:fixed; left:14px; top:14px; opacity:0.45; font-size:10px; letter-spacing:0.04em; z-index:5; color:#7a6f5e; }
+.src  { position:fixed; right:14px; top:14px; opacity:0.35; font-size:10px; letter-spacing:0.04em; z-index:5; color:#7a6f5e; }
+</style>
+</head>
+<body>
+<div class="id">c94</div>
+<div class="hint">click to reseed · hover to disturb — order settles, chaos visits</div>
+<div class="src">Vera Molnar · (Dés)Ordres 1974 · leaf as computational glyph</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// INTENT: A grid of leaf-forms undergoes Vera Molnar's (Dés)Ordres perturbation —
+// the viewer recognizes leaves held in a computational grid, slowly released into
+// organic disorder, then settling back. The grid's pencil-lines remain visible beneath.
+// Technique: Molnar parametric grid perturbation (1974) × leaf-as-basic-unit.
+// Evokes: Molnar's (Dés)Ordres meets Goldsworthy's leaf arrangements on stone.
+// Palette: charcoal ink on warm parchment — aged, restrained, deliberate.
+
+const scene = new THREE.Scene();
+
+const FRUSTUM = 6.8;
+let aspect = innerWidth / innerHeight;
+const camera = new THREE.OrthographicCamera(
+  -FRUSTUM * aspect, FRUSTUM * aspect, FRUSTUM, -FRUSTUM, 0.1, 50
+);
+camera.position.z = 10;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ─── Grid parameters
+const COLS = 20, ROWS = 26, N = COLS * ROWS;
+const SPACING = 0.50;
+const LEAF_W = 0.25, LEAF_H = 0.40;
+
+// ─── Leaf geometry: quad, silhouette cut in fragment shader
+const baseGeo = new THREE.PlaneGeometry(LEAF_W, LEAF_H, 1, 1);
+const geo = new THREE.InstancedBufferGeometry();
+geo.index = baseGeo.index;
+geo.attributes.position = baseGeo.attributes.position;
+geo.attributes.uv = baseGeo.attributes.uv;
+geo.instanceCount = N;
+
+const aOffset = new Float32Array(N * 2);
+const aSeed = new Float32Array(N);
+const aDistC = new Float32Array(N);
+
+let _s = 42;
+function rng() {
+  _s |= 0; _s = _s + 0x6d2b79f5 | 0;
+  let t = Math.imul(_s ^ _s >>> 15, 1 | _s);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}
+
+const maxDist = Math.sqrt((COLS / 2) ** 2 + (ROWS / 2) ** 2) * SPACING;
+
+function reseed() {
+  _s = Math.floor(Math.random() * 1e9);
+  for (let row = 0; row < ROWS; row++) {
+    for (let col = 0; col < COLS; col++) {
+      const i = row * COLS + col;
+      const x = (col - COLS / 2 + 0.5) * SPACING;
+      const y = (row - ROWS / 2 + 0.5) * SPACING;
+      aOffset[i * 2] = x;
+      aOffset[i * 2 + 1] = y;
+      aSeed[i] = rng();
+      aDistC[i] = Math.sqrt(x * x + y * y) / maxDist;
+    }
+  }
+}
+reseed();
+
+geo.setAttribute('aOffset', new THREE.InstancedBufferAttribute(aOffset, 2));
+geo.setAttribute('aSeed', new THREE.InstancedBufferAttribute(aSeed, 1));
+geo.setAttribute('aDistC', new THREE.InstancedBufferAttribute(aDistC, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPointer: { value: new THREE.Vector2(99, 99) }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  vertexShader: `
+    attribute vec2 aOffset;
+    attribute float aSeed;
+    attribute float aDistC;
+    uniform float uTime;
+    uniform vec2 uPointer;
+    varying vec2 vUv;
+    varying float vSeed;
+    varying float vDisorder;
+
+    void main() {
+      vUv = uv;
+      vSeed = aSeed;
+
+      // Disorder envelope — long settled periods, brief chaos peaks
+      float phase = mod(uTime * 0.12, 6.2832);
+      float gd = pow(max(0.0, sin(phase)), 3.0);
+
+      // Molnar spatial gradient: edges more disordered than center
+      float spatial = 0.08 + 0.92 * aDistC;
+      float disorder = gd * spatial;
+
+      // Pointer proximity adds local disorder
+      float pDist = length(aOffset - uPointer);
+      float pInfluence = 0.22 * exp(-pDist * pDist * 0.12);
+      disorder = min(disorder + pInfluence, 1.0);
+      vDisorder = disorder;
+
+      // Deterministic per-leaf perturbation
+      float s1 = sin(aSeed * 127.1 + 311.7);
+      float s2 = sin(aSeed * 269.5 + 183.3);
+      float s3 = cos(aSeed * 419.2 + 371.9);
+
+      float rot = s1 * 1.5708 * disorder;            // up to ±90°
+      float dx  = s2 * disorder * 0.22;
+      float dy  = s3 * disorder * 0.20;
+      float sc  = 1.0 + (aSeed - 0.5) * 0.4 * disorder; // scale varies with disorder
+
+      // Rotate vertex around leaf center
+      vec2 p = position.xy * sc;
+      float c = cos(rot), s = sin(rot);
+      vec2 rp = vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+
+      vec3 pos = vec3(rp + aOffset + vec2(dx, dy), 0.0);
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    varying float vSeed;
+    varying float vDisorder;
+
+    void main() {
+      vec2 p = vUv - 0.5;
+
+      // Leaf silhouette: pointed top & bottom, widest at middle
+      float ny = p.y * 2.0;
+      float halfW = 0.44 * (1.0 - ny * ny) * (1.0 + 0.1 * ny);
+      float nx = abs(p.x * 2.0);
+      if (nx > halfW) discard;
+
+      // Soft edge
+      float edgeDist = halfW - nx;
+      float tipDist = 1.0 - abs(ny);
+      float edgeA = smoothstep(0.0, 0.05, edgeDist) * smoothstep(0.0, 0.08, tipDist);
+
+      // Central vein — slightly lighter
+      float vein = smoothstep(0.03, 0.008, abs(p.x * 2.0));
+
+      // Two pairs of lateral veins
+      float lat = 0.0;
+      for (int i = 1; i <= 3; i++) {
+        float vy = float(i) * 0.22 - 0.11;
+        float lp = p.y - vy * 0.5;
+        float lx = abs(p.x * 2.0);
+        float branch = abs(lp - lx * 0.55);
+        float l = smoothstep(0.025, 0.006, branch);
+        l *= smoothstep(0.0, 0.04, lx) * smoothstep(halfW * 0.8, 0.0, lx);
+        l *= smoothstep(0.18, 0.0, abs(lp));
+        lat = max(lat, l * 0.35);
+      }
+
+      float veins = max(vein, lat);
+
+      // Charcoal ink palette — warm, aged
+      vec3 leafDark = vec3(0.15, 0.13, 0.11);   // deep charcoal
+      vec3 leafWarm = vec3(0.21, 0.17, 0.13);   // warm sepia
+      vec3 veinTone = vec3(0.28, 0.23, 0.17);   // lighter vein
+
+      vec3 col = mix(leafDark, leafWarm, vSeed * 0.5 + 0.1);
+      col = mix(col, veinTone, veins * 0.45);
+
+      float alpha = (0.80 + 0.15 * vSeed) * edgeA;
+      alpha *= 1.0 - vDisorder * 0.12;
+
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+
+const leaves = new THREE.Mesh(geo, mat);
+scene.add(leaves);
+
+// ─── Grid guidelines: Molnar's visible computational skeleton
+const gridLinePts = [];
+const gw = COLS * SPACING, gh = ROWS * SPACING;
+const ox = -gw / 2 + SPACING * 0.5, oy = -gh / 2 + SPACING * 0.5;
+for (let c = 0; c < COLS; c++) {
+  const x = ox + c * SPACING;
+  gridLinePts.push(x, oy - SPACING * 0.3, -0.01, x, oy + (ROWS - 1) * SPACING + SPACING * 0.3, -0.01);
+}
+for (let r = 0; r < ROWS; r++) {
+  const y = oy + r * SPACING;
+  gridLinePts.push(ox - SPACING * 0.3, y, -0.01, ox + (COLS - 1) * SPACING + SPACING * 0.3, y, -0.01);
+}
+const gridGeo = new THREE.BufferGeometry();
+gridGeo.setAttribute('position', new THREE.Float32BufferAttribute(gridLinePts, 3));
+const gridMat = new THREE.LineBasicMaterial({ color: 0xb5a88e, transparent: true, opacity: 0.10 });
+scene.add(new THREE.LineSegments(gridGeo, gridMat));
+
+// ─── Small grid-intersection dots: pencil marks at each node
+const dotN = COLS * ROWS;
+const dotPos = new Float32Array(dotN * 3);
+for (let r = 0; r < ROWS; r++) {
+  for (let c = 0; c < COLS; c++) {
+    const i = r * COLS + c;
+    dotPos[i * 3] = ox + c * SPACING;
+    dotPos[i * 3 + 1] = oy + r * SPACING;
+    dotPos[i * 3 + 2] = -0.005;
+  }
+}
+const dotGeo = new THREE.BufferGeometry();
+dotGeo.setAttribute('position', new THREE.Float32BufferAttribute(dotPos, 3));
+const dotMat = new THREE.PointsMaterial({ color: 0xa09480, size: 1.8, transparent: true, opacity: 0.14, sizeAttenuation: false });
+scene.add(new THREE.Points(dotGeo, dotMat));
+
+// ─── Interaction
+addEventListener('pointermove', (e) => {
+  const a = innerWidth / innerHeight;
+  uniforms.uPointer.value.set(
+    ((e.clientX / innerWidth) * 2 - 1) * FRUSTUM * a,
+    (1 - (e.clientY / innerHeight) * 2) * FRUSTUM
+  );
+});
+
+addEventListener('pointerleave', () => {
+  uniforms.uPointer.value.set(99, 99);
+});
+
+addEventListener('click', () => {
+  reseed();
+  geo.attributes.aSeed.needsUpdate = true;
+});
+
+addEventListener('resize', () => {
+  aspect = innerWidth / innerHeight;
+  camera.left = -FRUSTUM * aspect;
+  camera.right = FRUSTUM * aspect;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─── Loop
+const t0 = performance.now();
+(function loop() {
+  uniforms.uTime.value = (performance.now() - t0) / 1000;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+})();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;">
+<button id="pc-like" title="keep this direction" style="background:rgba(240,232,216,0.7);border:1px solid rgba(100,90,70,0.2);border-radius:3px;padding:4px 8px;color:rgba(120,100,70,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button>
+<button id="pc-dismiss" title="drop from pool" style="background:rgba(240,232,216,0.7);border:1px solid rgba(100,90,70,0.2);border-radius:3px;padding:4px 8px;color:rgba(160,100,80,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button>
+<input id="pc-input" type="text" maxlength="200" placeholder="What to change…" style="width:160px;background:rgba(240,232,216,0.8);color:rgba(60,50,40,0.85);border:1px solid rgba(100,90,70,0.2);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none" onfocus="this.style.borderColor='rgba(120,100,70,0.5)'" onblur="this.style.borderColor='rgba(100,90,70,0.2)'">
+<button id="pc-submit" title="Generate iteration" style="background:rgba(240,232,216,0.7);border:1px solid rgba(120,100,70,0.35);border-radius:3px;padding:4px 10px;color:rgba(100,80,50,0.9);cursor:pointer;font-size:11px;line-height:1">→</button>
+</div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#8a7050';};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#a06450';this.style.borderColor='rgba(160,100,80,0.4)';goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>
