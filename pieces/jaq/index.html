@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jaq · petal-volley · lucy exhales</title>
+<!-- MOTION: shatter, intensity: gentle -->
+<!-- INTENT: Lucy stands serene, then every 12s a third of her particles lift off as a volley of petal-motes — rising, fluttering, hovering — then gently drift back to reform her figure. A stone angel shedding cherry blossoms. -->
+<!-- CREATIVE CONSTRAINT: leaf-as-petal — detached particles become leaf-petals mid-flight -->
+<!-- ALGO PATTERN: surface sampling + periodic impulse burst with eased return -->
+<!-- EVOKES: Chiharu Shiota's absence/presence but with PETALS not threads; Cai Guo-Qiang's momentary eruption frozen in drift -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a080c; overflow:hidden;
+               color:#e5dcd2; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.5; font-size:10px; letter-spacing:0.04em; }
+  .loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+             font-size:13px; opacity:0.6; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="loading" id="loading">loading lucy · stanford 3d scanning repo …</div>
+<div class="id">jaq</div>
+<div class="hint" id="hint">lucy exhales</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+/* ── scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 500);
+camera.position.set(0, 0, 30);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a080c, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── constants ── */
+const N = 60000;
+const positions     = new Float32Array(N * 3);
+const restPositions = new Float32Array(N * 3);
+const normals       = new Float32Array(N * 3);
+const seeds         = new Float32Array(N);
+
+/* ── uniforms ── */
+const uniforms = {
+  uTime:  { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() },
+  uReady: { value: 0.0 }
+};
+
+/* ── shader material ── */
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: /* glsl */ `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    attribute vec3  rest;
+    attribute vec3  norm;
+    attribute float seed;
+    varying vec3  vCol;
+    varying float vAlpha;
+    varying float vInFlight;
+
+    /* smoothed step for volley timing */
+    float ease(float a, float b, float t) {
+      float x = clamp((t - a) / (b - a), 0.0, 1.0);
+      return x * x * (3.0 - 2.0 * x);
+    }
+
+    void main() {
+      vec3 p = rest;
+      float t = uTime;
+
+      /* ── breathing: subtle radial pulse ── */
+      vec3 dir = normalize(p);
+      float breathe = sin(t * 0.4 + seed * 6.28) * 0.05 * (1.0 + 0.4 * sin(seed * 9.0));
+      p += dir * breathe;
+
+      /* ── petal volley cycle ── */
+      /* 12s cycle: 0-0.33 still, 0.33-0.54 launch, 0.54-0.68 hover, 0.68-0.93 return, 0.93-1.0 settle */
+      float CYCLE = 12.0;
+      /* first volley delayed to 6s so viewer absorbs the form */
+      float cycleTime = max(t - 6.0, 0.0);
+      float phase = fract(cycleTime / CYCLE);
+
+      /* which particles volley? ~30% per cycle, rotating groups */
+      float volleyWave = floor(cycleTime / CYCLE);
+      float groupSeed = fract(seed + volleyWave * 0.618);
+      float isVolley = step(0.70, groupSeed);
+
+      /* volley arc: launch → hover → return */
+      float launch  = ease(0.33, 0.54, phase);
+      float rtn     = ease(0.68, 0.93, phase);
+      float volleyT = launch * (1.0 - rtn);
+
+      /* petal flight direction: outward + upward + slight tangent twist */
+      vec3 outDir = normalize(norm + vec3(0.0, 0.6, 0.0));
+      /* add per-particle tangent variation */
+      float ang = seed * 6.2831 + volleyWave * 2.4;
+      outDir += vec3(sin(ang), 0.0, cos(ang)) * 0.4;
+      outDir = normalize(outDir);
+
+      float flightDist = (3.5 + seed * 4.0);
+      vec3 petalOff = outDir * flightDist * volleyT * isVolley;
+
+      /* flutter during flight */
+      float flutter = volleyT * isVolley;
+      petalOff.x += sin(t * 2.8 + seed * 20.0) * 0.35 * flutter;
+      petalOff.z += cos(t * 2.2 + seed * 15.0) * 0.35 * flutter;
+      petalOff.y += sin(t * 1.5 + seed * 12.0) * 0.18 * flutter;
+
+      p += petalOff;
+
+      /* ── assembly reveal: particles fly in from scattered sphere ── */
+      vec3 entry = vec3(sin(seed * 40.0), cos(seed * 30.0), sin(seed * 22.0)) * 18.0;
+      float reveal = smoothstep(0.0, 1.0, uReady);
+      p = mix(entry, p, reveal);
+
+      /* ── color ── */
+      float energy = 0.4 + 0.6 * sin(t * 0.35 + seed * 6.28);
+      /* bone-warm base: ivory → amber → ember */
+      vec3 ivory = vec3(0.92, 0.89, 0.83);
+      vec3 amber = vec3(0.90, 0.73, 0.52);
+      vec3 ember = vec3(0.72, 0.30, 0.22);
+      vec3 col = mix(ivory, amber, energy);
+      col = mix(col, ember, smoothstep(0.78, 1.0, energy) * 0.5);
+
+      /* airborne petals shift to dusty rose */
+      vec3 rose  = vec3(0.85, 0.62, 0.58);
+      vec3 blush = vec3(0.78, 0.55, 0.50);
+      float inFlight = volleyT * isVolley;
+      col = mix(col, mix(rose, blush, seed), inFlight * 0.7);
+
+      vCol = col;
+      vInFlight = inFlight;
+
+      /* ── size + projection ── */
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      /* airborne petals grow slightly larger */
+      float sizeBoost = 1.0 + inFlight * 1.2;
+      float baseSize = (1.0 + 1.4 * energy) * sizeBoost;
+      gl_PointSize = baseSize * uPixel * (45.0 / dist) * (0.4 + 0.6 * reveal);
+
+      /* alpha: strong on form, slightly softer in flight */
+      vAlpha = (0.6 + 0.4 * energy) * (1.0 - inFlight * 0.15);
+      vAlpha *= (0.4 + 0.6 * reveal);
+
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    varying vec3  vCol;
+    varying float vAlpha;
+    varying float vInFlight;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+
+      /* in-flight particles: slightly elongated (leaf/petal shape) */
+      vec2 dd = d;
+      dd.y *= mix(1.0, 0.65, vInFlight); /* squash vertically → wider petal */
+      float r = dot(dd, dd);
+      if (r > 0.25) discard;
+
+      /* sharp core (exponent ≥ 20 per bug.md) */
+      float a = exp(-r * 22.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+/* ── geometry ── */
+const geom = new THREE.BufferGeometry();
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+const loadingEl = document.getElementById('loading');
+
+/* ── load Stanford Lucy ── */
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+const loader = new PLYLoader();
+let revealStart = 0;
+
+loader.load(PLY_URL,
+  (geometry) => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const center = bb.getCenter(new THREE.Vector3());
+    const size = bb.getSize(new THREE.Vector3());
+    const maxAxis = Math.max(size.x, size.y, size.z);
+    const scale = 15 / maxAxis;
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.scale(scale, scale, scale);
+
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(mesh).build();
+    const tmp = new THREE.Vector3();
+    const nrm = new THREE.Vector3();
+    for (let i = 0; i < N; i++) {
+      sampler.sample(tmp, nrm);
+      restPositions[i * 3]     = tmp.x;
+      restPositions[i * 3 + 1] = tmp.y;
+      restPositions[i * 3 + 2] = tmp.z;
+      normals[i * 3]     = nrm.x;
+      normals[i * 3 + 1] = nrm.y;
+      normals[i * 3 + 2] = nrm.z;
+      seeds[i] = Math.random();
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+    geom.setAttribute('norm',     new THREE.BufferAttribute(normals, 3));
+    geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+
+    loadingEl.style.display = 'none';
+    revealStart = performance.now();
+  },
+  (xhr) => {
+    if (xhr.lengthComputable) {
+      const pct = (xhr.loaded / xhr.total * 100).toFixed(0);
+      loadingEl.textContent = `loading lucy · ${pct}% · stanford 3d scanning repo`;
+    }
+  },
+  (err) => {
+    loadingEl.textContent = 'load failed — check network';
+    console.error(err);
+  }
+);
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── render loop ── */
+const start = performance.now();
+function loop() {
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  /* reveal over 2.5s after model loads */
+  if (revealStart > 0) {
+    uniforms.uReady.value = Math.min(1.0, (performance.now() - revealStart) / 2500);
+  }
+
+  /* very slow camera drift in X — no Y-axis rotation */
+  camera.position.x = Math.sin(t * 0.015) * 1.5;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
