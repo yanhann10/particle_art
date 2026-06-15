@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kf8 · mischief shells</title>
+<!-- MOTION: scatter, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0410; overflow:hidden;
+               color:#e5d6f0; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.7; font-size: 11px; letter-spacing: 0.04em; }
+  button.start { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+                 background: #150a25; color:#e5d6f0; border:1px solid #4a2a6a;
+                 padding: 12px 22px; border-radius: 4px; cursor: pointer;
+                 font-family: inherit; font-size: 13px; letter-spacing: 0.06em; }
+  button.start:hover { background:#22113a; }
+</style>
+</head>
+<body>
+<button class="start" id="startBtn">grant mic · clap, sing, hum</button>
+<div class="id">kf8</div>
+<div class="hint" id="hint"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 0, 26);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0410, 1);
+document.body.appendChild(renderer.domElement);
+
+const SHELLS = 5;
+const PER_SHELL = 4000;
+const N = SHELLS * PER_SHELL;
+const positions = new Float32Array(N * 3);
+const shellIdx  = new Float32Array(N);
+const seeds     = new Float32Array(N);
+const angles    = new Float32Array(N * 2); // theta, phi for each particle
+for (let s = 0; s < SHELLS; s++) {
+  for (let i = 0; i < PER_SHELL; i++) {
+    const idx = s * PER_SHELL + i;
+    const r = 4 + s * 2.4;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2*Math.random()-1);
+    positions[idx*3]   = r * Math.sin(phi) * Math.cos(theta);
+    positions[idx*3+1] = r * Math.sin(phi) * Math.sin(theta);
+    positions[idx*3+2] = r * Math.cos(phi);
+    shellIdx[idx] = s;
+    seeds[idx]    = Math.random();
+    angles[idx*2]   = theta;
+    angles[idx*2+1] = phi;
+  }
+}
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geom.setAttribute('shellIdx', new THREE.BufferAttribute(shellIdx, 1));
+geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+geom.setAttribute('angles',   new THREE.BufferAttribute(angles, 2));
+
+const uBands = new THREE.Vector4(0,0,0,0);
+const uniforms = {
+  uTime:   { value: 0 },
+  uPixel:  { value: renderer.getPixelRatio() },
+  uBands:  { value: uBands },
+  uTreble: { value: 0 },
+  uMischief:      { value: 0 },
+  uMischiefShell: { value: 0 },
+  uMischiefPhase: { value: 0 }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform vec4  uBands;
+    uniform float uTreble;
+    uniform float uMischief;
+    uniform float uMischiefShell;
+    uniform float uMischiefPhase;
+    attribute float shellIdx;
+    attribute float seed;
+    attribute vec2 angles;
+    varying vec3 vCol;
+    varying float vEnergy;
+    varying float vMis;
+
+    void main(){
+      float e;
+      if (shellIdx < 0.5)      e = uBands.x;
+      else if (shellIdx < 1.5) e = uBands.y;
+      else if (shellIdx < 2.5) e = uBands.z;
+      else if (shellIdx < 3.5) e = uBands.w;
+      else                     e = uTreble;
+      vEnergy = e;
+
+      vec3 p = position;
+      float r = length(p);
+      vec3 dir = p / max(r, 0.001);
+
+      // radial pulse driven by band energy
+      float pulse = 1.0 + e * 0.7;
+      p = dir * r * pulse;
+
+      // gentle tangential drift (not rotation)
+      float t = uTime * 0.3 + seed * 6.28 + shellIdx * 0.7;
+      vec3 perp = normalize(cross(dir, vec3(0.0, 1.0, 0.0) + 0.1*sin(seed*9.0)));
+      p += perp * sin(t) * (0.3 + e * 0.8);
+
+      // --- mischief: chosen shell scatters outward in spiral ---
+      float isTarget = step(abs(shellIdx - uMischiefShell), 0.5);
+      float mis = uMischief * isTarget;
+      vMis = mis;
+
+      if (mis > 0.01) {
+        // scatter direction: spiral outward from shell center
+        float spiralAngle = angles.x + uMischiefPhase * 3.0 + seed * 2.0;
+        float scatterR = mis * (3.5 + seed * 4.5);
+        // particles flee outward in a loose spiral
+        vec3 flee = vec3(
+          cos(spiralAngle) * sin(angles.y + mis * 0.5),
+          cos(angles.y + mis * 0.3) * (0.5 + seed * 0.5),
+          sin(spiralAngle) * sin(angles.y + mis * 0.5)
+        );
+        p += normalize(flee) * scatterR;
+        // also spin tangentially during flight
+        float spin = mis * (1.5 + seed);
+        vec3 tangent = normalize(cross(flee, vec3(0.0, 1.0, 0.0)));
+        p += tangent * sin(uMischiefPhase * 5.0 + seed * 6.28) * mis * 1.2;
+      }
+
+      // palette: warm amber → dusty teal, muted
+      vec3 amber = vec3(0.88, 0.62, 0.24);
+      vec3 teal  = vec3(0.42, 0.58, 0.62);
+      float k = clamp(shellIdx / 4.0 + e * 0.3, 0.0, 1.0);
+      vCol = mix(amber, teal, k);
+
+      // mischievous particles blush warmer / brighter
+      vec3 blush = vec3(0.95, 0.50, 0.20);
+      vCol = mix(vCol, blush, mis * 0.6);
+      vCol *= (0.55 + e * 1.1);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float size = (1.0 + 2.0 * e + mis * 1.5) * uPixel * (50.0 / dist);
+      gl_PointSize = size;
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vCol;
+    varying float vEnergy;
+    varying float vMis;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 14.0) * (0.4 + 0.5 * vEnergy + 0.3 * vMis);
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+const points = new THREE.Points(geom, mat);
+scene.add(points);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// audio
+const hint = document.getElementById('hint');
+const startBtn = document.getElementById('startBtn');
+let analyser = null, freqData = null;
+async function startAudio(){
+  startBtn.style.display = 'none';
+  hint.textContent = 'requesting mic…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.7;
+    src.connect(analyser);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    hint.textContent = 'live · 5 shells · watch for mischief';
+  } catch (e) {
+    hint.textContent = 'mic denied — passive synthetic mode';
+  }
+}
+startBtn.addEventListener('click', startAudio);
+
+function bandEnergy(arr, lo, hi){
+  let s = 0;
+  for (let i = lo; i < hi; i++) s += arr[i];
+  return (s / (hi-lo)) / 255;
+}
+
+// mischief state machine
+const MISCHIEF_CYCLE  = 24;   // seconds between events
+const MISCHIEF_RISE   = 2.5;  // ramp up
+const MISCHIEF_HOLD   = 3.0;  // scattered hold
+const MISCHIEF_FALL   = 4.0;  // gentle return
+const MISCHIEF_TOTAL  = MISCHIEF_RISE + MISCHIEF_HOLD + MISCHIEF_FALL;
+let mischiefShell = Math.floor(Math.random() * SHELLS);
+let nextMischiefTime = 8; // first event after 8 seconds
+
+function smoothstep(a, b, x) {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+const start = performance.now();
+function loop(){
+  const t = (performance.now() - start) / 1000;
+  uniforms.uTime.value = t;
+
+  // slow camera drift on XZ plane (not Y rotation)
+  camera.position.x = Math.sin(t * 0.02) * 3.0;
+  camera.position.z = 26 + Math.cos(t * 0.015) * 2.0;
+  camera.lookAt(0, 0, 0);
+
+  // mischief timing
+  let misVal = 0;
+  let misPhase = 0;
+  if (t >= nextMischiefTime) {
+    const elapsed = t - nextMischiefTime;
+    if (elapsed < MISCHIEF_TOTAL) {
+      if (elapsed < MISCHIEF_RISE) {
+        misVal = smoothstep(0, MISCHIEF_RISE, elapsed);
+      } else if (elapsed < MISCHIEF_RISE + MISCHIEF_HOLD) {
+        misVal = 1.0;
+      } else {
+        misVal = 1.0 - smoothstep(MISCHIEF_RISE + MISCHIEF_HOLD, MISCHIEF_TOTAL, elapsed);
+      }
+      misPhase = elapsed / MISCHIEF_TOTAL;
+    } else {
+      // event done, schedule next
+      mischiefShell = (mischiefShell + 1 + Math.floor(Math.random() * (SHELLS - 1))) % SHELLS;
+      nextMischiefTime = t + MISCHIEF_CYCLE - MISCHIEF_TOTAL + Math.random() * 6;
+    }
+  }
+  uniforms.uMischief.value = misVal;
+  uniforms.uMischiefShell.value = mischiefShell;
+  uniforms.uMischiefPhase.value = misPhase;
+
+  if (analyser){
+    analyser.getByteFrequencyData(freqData);
+    const n = freqData.length;
+    uBands.x = bandEnergy(freqData, 0, Math.floor(n*0.04));
+    uBands.y = bandEnergy(freqData, Math.floor(n*0.04), Math.floor(n*0.12));
+    uBands.z = bandEnergy(freqData, Math.floor(n*0.12), Math.floor(n*0.30));
+    uBands.w = bandEnergy(freqData, Math.floor(n*0.30), Math.floor(n*0.55));
+    uniforms.uTreble.value = bandEnergy(freqData, Math.floor(n*0.55), n);
+  } else {
+    uBands.x = 0.35 + 0.35 * Math.sin(t*1.3);
+    uBands.y = 0.30 + 0.30 * Math.sin(t*2.1 + 1.1);
+    uBands.z = 0.25 + 0.25 * Math.sin(t*3.0 + 2.0);
+    uBands.w = 0.20 + 0.20 * Math.sin(t*4.7 + 0.4);
+    uniforms.uTreble.value = 0.18 + 0.18 * Math.sin(t*7.0);
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+</body>
+</html>
