@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lu3 · tsundoku</title>
+<!-- MOTION: settle, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0908; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; font-family:ui-monospace,"SF Mono",Menlo,monospace; color:#cdd2dc; z-index:10; }
+  .vig { position:fixed; inset:0; pointer-events:none;
+         background:radial-gradient(ellipse at 50% 45%, transparent 35%, rgba(8,7,5,0.55) 100%); }
+</style>
+</head>
+<body>
+<div class="id">lu3</div>
+<div class="vig"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* --- GPGPU setup (inherited from ool) --- */
+const W = 320, H = 320;
+const N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtParams = {
+  type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+  depthBuffer: false
+};
+let rtA = new THREE.WebGLRenderTarget(W, H, rtParams);
+let rtB = new THREE.WebGLRenderTarget(W, H, rtParams);
+
+/* seed particles in Aizawa basin */
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  init[i * 4]     = (Math.random() * 2 - 1) * 0.5;
+  init[i * 4 + 1] = (Math.random() * 2 - 1) * 0.5;
+  init[i * 4 + 2] = (Math.random() * 2 - 1) * 0.5;
+  init[i * 4 + 3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv;
+    void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), blitMat));
+renderer.setRenderTarget(rtA);
+renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+/* --- Simulation: Aizawa attractor + tsundoku shelf-settling --- */
+const simUniforms = {
+  prev:    { value: rtA.texture },
+  uDt:     { value: 0.011 },
+  uA:      { value: 0.95 },
+  uB:      { value: 0.70 },
+  uC:      { value: 0.60 },
+  uD:      { value: 3.50 },
+  uE:      { value: 0.25 },
+  uF:      { value: 0.10 },
+  uSettle: { value: 0.0 }
+};
+
+const simMat = new THREE.ShaderMaterial({
+  uniforms: simUniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF, uSettle;
+    varying vec2 vUv;
+
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz;
+      float age = s.w;
+
+      /* Aizawa field — fades as settle dominates */
+      float af = 1.0 - uSettle * 0.72;
+      vec3 dp = vec3(
+        (p.z - uB) * p.x - uD * p.y,
+        uD * p.x + (p.z - uB) * p.y,
+        uC + uA * p.z - (p.z*p.z*p.z) / 3.0
+          - (p.x*p.x + p.y*p.y) * (1.0 + uE * p.z)
+          + uF * p.z * p.x*p.x*p.x
+      ) * af;
+
+      /* Shelf quantization — tsundoku stacking */
+      float shelfH = 0.28;
+      float shelfIdx = floor(p.y / shelfH + 0.5);
+      float nearestY = shelfIdx * shelfH;
+      float dy = nearestY - p.y;
+
+      /* Pull toward nearest shelf plane */
+      dp.y += dy * uSettle * 5.5;
+
+      /* Per-shelf character: slight offset & width via hash */
+      float h1 = fract(sin(shelfIdx * 127.1) * 43758.5);
+      float h2 = fract(sin(shelfIdx * 311.7) * 21345.2);
+      float offX = (h2 - 0.5) * 0.14;
+
+      /* On-shelf: flatten + contain horizontally (book pages lying flat) */
+      float onShelf = smoothstep(0.09, 0.0, abs(dy));
+      dp.x += (offX - p.x * 0.08) * onShelf * uSettle * 1.2;
+      dp.z += (-p.z * 0.10) * onShelf * uSettle * 1.2;
+
+      /* Gentle gravity bias */
+      dp.y -= uSettle * 0.06;
+
+      /* Contain stack bounds */
+      float yMin = -0.3, yMax = 1.8;
+      if (p.y < yMin) dp.y += (yMin - p.y) * 2.0;
+      if (p.y > yMax) dp.y += (yMax - p.y) * 2.0;
+
+      /* Horizontal damping when on-shelf (pages resting) */
+      float damp = 1.0 - onShelf * uSettle * 0.28;
+      dp.x *= damp;
+      dp.z *= damp;
+
+      p += dp * uDt;
+      age = mod(age + uDt * 0.048, 1.0);
+      gl_FragColor = vec4(p, age);
+    }
+  `
+});
+const simScene = new THREE.Scene();
+simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), simMat));
+
+/* --- Points rendering --- */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.05, 50);
+camera.position.set(0.0, 0.6, 4.6);
+camera.lookAt(0, 0.5, 0.8);
+
+const pointsGeom = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = y * W + x;
+  idxArr[i * 2]     = (x + 0.5) / W;
+  idxArr[i * 2 + 1] = (y + 0.5) / H;
+}
+pointsGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+pointsGeom.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:   { value: rtB.texture },
+    uPixel:  { value: renderer.getPixelRatio() },
+    uSettle: { value: 0.0 }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vSpeed;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      float speed = length(p) * 0.35;
+      vSpeed = clamp(speed, 0.0, 1.0);
+      vAge = s.w;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = (1.1 + 1.2 * vSpeed) * uPixel * (7.5 / dist);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vAge;
+    varying float vSpeed;
+    uniform float uSettle;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      /* Slightly rectangular — page/leaf-like */
+      float rect = max(abs(d.x) / 0.36, abs(d.y) / 0.48);
+      if (rect > 1.0) discard;
+      float a = 1.0 - smoothstep(0.55, 1.0, rect);
+
+      /* Parchment palette: foxing → bone → aged cream */
+      vec3 foxing = vec3(0.50, 0.36, 0.21);
+      vec3 bone   = vec3(0.76, 0.72, 0.63);
+      vec3 cream  = vec3(0.84, 0.79, 0.66);
+      vec3 ink    = vec3(0.20, 0.16, 0.12);
+
+      float k = mod(vAge + vSpeed * 0.28, 1.0);
+      vec3 col = mix(foxing, bone, smoothstep(0.0, 0.45, k));
+      col = mix(col, cream, smoothstep(0.45, 0.88, k));
+
+      /* When settled: faint ink-stain darkening on lower-age particles */
+      col = mix(col, ink, uSettle * (1.0 - smoothstep(0.0, 0.35, k)) * 0.30);
+
+      /* When stirring: warm amber memory of the attractor */
+      vec3 amber = vec3(0.68, 0.46, 0.24);
+      col = mix(col, amber, (1.0 - uSettle) * smoothstep(0.3, 0.8, k) * 0.45);
+
+      float lum = 0.36 + vSpeed * 0.52 + (1.0 - uSettle) * 0.10;
+      gl_FragColor = vec4(col * a * lum, a);
+    }
+  `
+});
+const points = new THREE.Points(pointsGeom, pointsMat);
+scene.add(points);
+
+/* --- Dust motes: sparse floating particles for atmosphere --- */
+const dustCount = 200;
+const dustGeom = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustCount * 3);
+const dustSeed = new Float32Array(dustCount);
+for (let i = 0; i < dustCount; i++) {
+  dustPos[i * 3]     = (Math.random() - 0.5) * 5.0;
+  dustPos[i * 3 + 1] = Math.random() * 3.0 - 0.5;
+  dustPos[i * 3 + 2] = (Math.random() - 0.5) * 4.0;
+  dustSeed[i] = Math.random() * 6.28;
+}
+dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeom.setAttribute('seed', new THREE.BufferAttribute(dustSeed, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float seed;
+    uniform float uTime;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      p.y += sin(uTime * 0.07 + seed) * 0.15;
+      p.x += cos(uTime * 0.05 + seed * 1.3) * 0.08;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      gl_PointSize = 1.8 * (5.0 / max(dist, 1.0));
+      vA = 0.12 + 0.08 * sin(uTime * 0.12 + seed * 2.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+      float a = exp(-r * 16.0) * vA;
+      gl_FragColor = vec4(vec3(0.72, 0.68, 0.58), a);
+    }
+  `
+});
+scene.add(new THREE.Points(dustGeom, dustMat));
+
+/* --- Resize --- */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* pointer: subtle Aizawa parameter nudge */
+const target = { a: 0.95, c: 0.60 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth) - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.a = 0.95 + nx * 0.04;
+  target.c = 0.60 + ny * 0.05;
+});
+
+/*
+ * Settle cycle (tsundoku rhythm):
+ *   0–22 s : settled — books piled, pages at rest, faint breathing
+ *  22–26 s : stirring — new-book impulse, attractor resurfaces briefly
+ *  26–34 s : resettling — the pile reforms, knowledge unread again
+ *
+ * First 8 s: warm-up ramp so attractor gathers particles before settling.
+ */
+const CYCLE = 34.0;
+const t0 = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  simUniforms.uA.value += (target.a - simUniforms.uA.value) * 0.025;
+  simUniforms.uC.value += (target.c - simUniforms.uC.value) * 0.025;
+
+  /* settle envelope */
+  const phase = elapsed % CYCLE;
+  let settle;
+  if (phase < 22.0) {
+    settle = 0.82 + 0.03 * Math.sin(phase * 0.22);
+  } else if (phase < 26.0) {
+    const t = (phase - 22.0) / 4.0;
+    settle = 0.82 - 0.58 * Math.sin(t * Math.PI);
+  } else {
+    const t = Math.min((phase - 26.0) / 8.0, 1.0);
+    settle = 0.24 + 0.58 * t * t * (3.0 - 2.0 * t);
+  }
+
+  /* warm-up: let attractor gather before settling */
+  const warmup = Math.min(elapsed / 10.0, 1.0);
+  settle *= warmup;
+
+  simUniforms.uSettle.value = settle;
+  pointsMat.uniforms.uSettle.value = settle;
+  dustMat.uniforms.uTime.value = elapsed;
+
+  /* simulation substeps */
+  for (let i = 0; i < 4; i++) {
+    simUniforms.prev.value = rtA.texture;
+    renderer.setRenderTarget(rtB);
+    renderer.render(simScene, camOrtho);
+    const tmp = rtA; rtA = rtB; rtB = tmp;
+  }
+  renderer.setRenderTarget(null);
+  pointsMat.uniforms.state.value = rtA.texture;
+
+  /* slow vertical scan — reading up the stack, then back */
+  const scanT = elapsed * 0.015;
+  const scanY = 0.55 + Math.sin(scanT) * 0.30;
+  camera.position.set(
+    0.10 + Math.sin(scanT * 0.41) * 0.06,
+    scanY + 0.20,
+    4.5 - Math.sin(scanT * 0.18) * 0.12
+  );
+  camera.lookAt(0.0, scanY - 0.08, 0.75);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
