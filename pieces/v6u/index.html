@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<!-- MOTION: burst, intensity: explosive -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v6u · gunpowder vessel burst</title>
+<!-- Intent: a vascular sphere detonates in slow-motion — vessel fragments become
+     charred leaf-embers tracing gunpowder arcs outward, cooling from amber to ash.
+     Cai Guo-Qiang's controlled pyrotechnics in particle form.
+     Palette: #0a0604 deep char, #c27f40 amber vessel, #804019 sienna,
+     #381a0a char, #120803 ash. Gunpowder on rice paper.
+     Algo: differential-growth vessels + radial detonation-wave burst
+     Evokes: Cai Guo-Qiang "Sky Ladder" (2015) — controlled upward detonation
+     Constraint: leaf-shaped ember fragments as debris -->
+<style>
+  html, body { margin:0; padding:0; height:100%;
+    background: radial-gradient(ellipse at center, #120a06 0%, #0a0604 70%);
+    overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px;
+    font-family:ui-monospace,"SF Mono",Menlo,monospace;
+    color:#cdd2dc; opacity:0.55; font-size:11px;
+    letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">v6u</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.167.0/build/three.module.min.js",
+    "three/addons/": "https://unpkg.com/three@0.167.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* Gunpowder Vessel Burst — Cai Guo-Qiang sensibility
+   Phase 0 (0-4.2s): vascular sphere pulses, heartbeat accelerating
+   Phase 1 (4.2-4.5s): freeze — total stillness, darkness
+   Phase 2 (4.5s+): detonation wave ripples center→surface,
+     vessel fragments fly outward as leaf-embers, leaving char marks */
+
+// ── seeded RNG for reproducibility ──
+let _s = 91;
+function rand() { _s = (_s * 1664525 + 1013904223) & 0x7FFFFFFF; return _s / 0x7FFFFFFF; }
+
+const PR = Math.min(devicePixelRatio, 2);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(56, innerWidth / innerHeight, 0.1, 80);
+camera.position.set(0, 0.6, 9.8);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(PR);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0604, 1);
+document.body.appendChild(renderer.domElement);
+
+// ── lighting ──
+const ambient = new THREE.AmbientLight(0x2a1408, 0.7);
+scene.add(ambient);
+const keyLight = new THREE.DirectionalLight(0xc09060, 0.5);
+keyLight.position.set(3, 4, 5);
+scene.add(keyLight);
+const innerGlow = new THREE.PointLight(0xb07040, 0.6, 12, 1.5);
+scene.add(innerGlow);
+const flashLight = new THREE.PointLight(0xc09060, 0, 30, 1.2);
+scene.add(flashLight);
+
+// ── vessel path generation (differential growth, surface→center) ──
+const SPHERE_R = 3.8;
+const N_SEEDS = 45;
+const vesselPts = []; // { pos:Vec3, dir:Vec3, seed:int }
+
+for (let i = 0; i < N_SEEDS; i++) {
+  const theta = rand() * Math.PI * 2;
+  const phi = Math.acos(2 * rand() - 1);
+  let pos = new THREE.Vector3(
+    SPHERE_R * Math.sin(phi) * Math.cos(theta),
+    SPHERE_R * Math.sin(phi) * Math.sin(theta),
+    SPHERE_R * Math.cos(phi)
+  );
+  let dir = pos.clone().negate().normalize();
+  const nSteps = 50 + Math.floor(rand() * 40);
+  for (let j = 0; j < nSteps; j++) {
+    dir.x += (rand() - 0.5) * 0.14;
+    dir.y += (rand() - 0.5) * 0.14;
+    dir.z += (rand() - 0.5) * 0.14;
+    dir.normalize();
+    dir.lerp(pos.clone().negate().normalize(), 0.1).normalize();
+    const np = pos.clone().addScaledVector(dir, 0.07);
+    if (np.length() < 0.15 || np.length() > SPHERE_R) break;
+    vesselPts.push({ pos: np.clone(), dir: dir.clone(), seed: i });
+    pos = np;
+  }
+}
+
+const N_EMBERS = vesselPts.length;
+
+// ── vessel line segments (phase 0 visual) ──
+const lineArr = [];
+let prevSeed = -1, prevPos = null;
+for (const vp of vesselPts) {
+  if (vp.seed === prevSeed && prevPos) {
+    lineArr.push(prevPos.x, prevPos.y, prevPos.z, vp.pos.x, vp.pos.y, vp.pos.z);
+  }
+  prevSeed = vp.seed;
+  prevPos = vp.pos;
+}
+const lineGeo = new THREE.BufferGeometry();
+lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(lineArr, 3));
+const lineMat = new THREE.LineBasicMaterial({
+  color: 0xa06838, transparent: true, opacity: 0.55
+});
+const vesselLines = new THREE.LineSegments(lineGeo, lineMat);
+scene.add(vesselLines);
+
+// ghost sphere wireframe
+const ghostSphere = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(SPHERE_R, 2)),
+  new THREE.LineBasicMaterial({ color: 0x2a1a10, transparent: true, opacity: 0.06 })
+);
+scene.add(ghostSphere);
+
+// ── ember particle system ──
+const positions = new Float32Array(N_EMBERS * 3);
+const initialPos = new Float32Array(N_EMBERS * 3);
+const initialDist = new Float32Array(N_EMBERS);
+const velocities = new Float32Array(N_EMBERS * 3);
+const life = new Float32Array(N_EMBERS);
+const seeds = new Float32Array(N_EMBERS);
+const sizes = new Float32Array(N_EMBERS);
+
+for (let i = 0; i < N_EMBERS; i++) {
+  const p = vesselPts[i].pos;
+  positions[i * 3] = initialPos[i * 3] = p.x;
+  positions[i * 3 + 1] = initialPos[i * 3 + 1] = p.y;
+  positions[i * 3 + 2] = initialPos[i * 3 + 2] = p.z;
+  initialDist[i] = p.length();
+  life[i] = -1.0; // negative = vessel mode
+  seeds[i] = rand();
+  sizes[i] = 3.0 + (initialDist[i] / SPHERE_R) * 5.0 + rand() * 3.0;
+}
+
+const emberGeo = new THREE.BufferGeometry();
+emberGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+emberGeo.setAttribute('aLife', new THREE.Float32BufferAttribute(life, 1));
+emberGeo.setAttribute('aSeed', new THREE.Float32BufferAttribute(seeds, 1));
+emberGeo.setAttribute('aSize', new THREE.Float32BufferAttribute(sizes, 1));
+
+const emberVS = `
+attribute float aLife;
+attribute float aSeed;
+attribute float aSize;
+varying float vLife;
+varying float vSeed;
+uniform float uPR;
+void main() {
+  vLife = aLife;
+  vSeed = aSeed;
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  if (aLife < 0.0) {
+    gl_PointSize = (1.5 + aSeed * 1.5) * uPR;
+  } else {
+    float s = aSize * max(aLife, 0.12) * (140.0 / max(-mv.z, 1.0));
+    gl_PointSize = s * uPR;
+  }
+  gl_Position = projectionMatrix * mv;
+}`;
+
+const emberFS = `
+varying float vLife;
+varying float vSeed;
+void main() {
+  vec2 uv = gl_PointCoord * 2.0 - 1.0;
+  if (vLife < 0.0) {
+    float r = length(uv);
+    float a = (1.0 - smoothstep(0.2, 1.0, r)) * 0.45;
+    if (a < 0.01) discard;
+    gl_FragColor = vec4(0.62, 0.38, 0.20, a);
+    return;
+  }
+  float ang = vSeed * 6.2832;
+  float ca = cos(ang), sa = sin(ang);
+  vec2 rv = vec2(uv.x*ca - uv.y*sa, uv.x*sa + uv.y*ca);
+  float rx = rv.x * 1.5, ry = rv.y;
+  float r = sqrt(rx*rx + ry*ry);
+  float rough = 0.7 + 0.3 * sin(atan(rv.y, rv.x) * (3.0 + floor(vSeed*4.0)) + vSeed*17.0);
+  float alpha = 1.0 - smoothstep(rough*0.45, rough*0.85, r);
+  if (alpha < 0.04) discard;
+
+  vec3 hot  = vec3(0.76, 0.50, 0.25);
+  vec3 warm = vec3(0.50, 0.25, 0.10);
+  vec3 cool = vec3(0.22, 0.10, 0.04);
+  vec3 ash  = vec3(0.07, 0.03, 0.01);
+  float l = vLife;
+  vec3 col;
+  if (l > 0.7) col = mix(warm, hot, (l-0.7)/0.3);
+  else if (l > 0.3) col = mix(cool, warm, (l-0.3)/0.4);
+  else col = mix(ash, cool, l/0.3);
+
+  float glow = exp(-r*3.0) * l * 0.35;
+  col += vec3(glow*0.5, glow*0.18, glow*0.03);
+  alpha *= 0.25 + 0.55 * max(l, 0.08);
+  gl_FragColor = vec4(col, alpha);
+}`;
+
+const emberMat = new THREE.ShaderMaterial({
+  vertexShader: emberVS, fragmentShader: emberFS,
+  uniforms: { uPR: { value: PR } },
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+const emberMesh = new THREE.Points(emberGeo, emberMat);
+scene.add(emberMesh);
+
+// ── char mark trail system ──
+const MAX_CHARS = 22000;
+const charPos = new Float32Array(MAX_CHARS * 3);
+const charAlpha = new Float32Array(MAX_CHARS);
+const charSize = new Float32Array(MAX_CHARS);
+let nChars = 0;
+
+const charGeo = new THREE.BufferGeometry();
+charGeo.setAttribute('position', new THREE.Float32BufferAttribute(charPos, 3));
+charGeo.setAttribute('aAlpha', new THREE.Float32BufferAttribute(charAlpha, 1));
+charGeo.setAttribute('aSize', new THREE.Float32BufferAttribute(charSize, 1));
+charGeo.setDrawRange(0, 0);
+
+const charVS = `
+attribute float aAlpha;
+attribute float aSize;
+varying float vAlpha;
+uniform float uPR;
+void main() {
+  vAlpha = aAlpha;
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_PointSize = aSize * (120.0 / max(-mv.z, 1.0)) * uPR;
+  gl_Position = projectionMatrix * mv;
+}`;
+
+const charFS = `
+varying float vAlpha;
+void main() {
+  float r = length(gl_PointCoord * 2.0 - 1.0);
+  float a = (1.0 - smoothstep(0.2, 1.0, r)) * vAlpha;
+  if (a < 0.008) discard;
+  gl_FragColor = vec4(0.14, 0.07, 0.03, a);
+}`;
+
+const charMat = new THREE.ShaderMaterial({
+  vertexShader: charVS, fragmentShader: charFS,
+  uniforms: { uPR: { value: PR } },
+  transparent: true, depthWrite: false,
+});
+const charMesh = new THREE.Points(charGeo, charMat);
+scene.add(charMesh);
+
+function addChar(x, y, z, a, s) {
+  if (nChars >= MAX_CHARS) return;
+  const i3 = nChars * 3;
+  charPos[i3] = x; charPos[i3 + 1] = y; charPos[i3 + 2] = z;
+  charAlpha[nChars] = a;
+  charSize[nChars] = s;
+  nChars++;
+}
+
+// ── animation state ──
+const DET_TIME = 4.5;   // detonation start
+const FREEZE_T = 4.2;   // freeze starts
+const WAVE_SPD = 2.2;   // detonation wave units/sec
+const DRAG = 0.997;
+let phase = 0, t0 = null, burstAge = 0, charTimer = 0;
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function animate(ts) {
+  requestAnimationFrame(animate);
+  if (t0 === null) t0 = ts;
+  const t = (ts - t0) * 0.001;
+  const dt = Math.min(1 / 60, 0.033);
+  const posA = emberGeo.attributes.position.array;
+  const lifeA = emberGeo.attributes.aLife.array;
+
+  // ── phase 0: accelerating heartbeat ──
+  if (phase === 0) {
+    if (t < FREEZE_T) {
+      const rate = 1.4 + (t / FREEZE_T) * 2.8;
+      const pulse = Math.sin(t * rate * Math.PI * 2);
+      lineMat.opacity = 0.45 + 0.2 * pulse;
+      innerGlow.intensity = 0.5 + 0.35 * pulse;
+    } else if (t < DET_TIME) {
+      // freeze: total stillness, darkness
+      lineMat.opacity = 0.15;
+      innerGlow.intensity = 0.1;
+    } else {
+      phase = 1;
+      flashLight.intensity = 10.0;
+      innerGlow.intensity = 4.0;
+    }
+  }
+
+  // ── phase 1: detonation wave ──
+  if (phase === 1) {
+    burstAge += dt;
+    const waveR = burstAge * WAVE_SPD;
+
+    // flash decay
+    if (flashLight.intensity > 0.01) flashLight.intensity *= 0.955;
+    else flashLight.intensity = 0;
+    innerGlow.intensity = Math.max(0.2, innerGlow.intensity * 0.992);
+
+    // fade vessel lines
+    lineMat.opacity = Math.max(0, 0.45 * (1.0 - burstAge / 2.5));
+    if (lineMat.opacity <= 0.001) vesselLines.visible = false;
+
+    // fade ghost sphere
+    ghostSphere.material.opacity = Math.max(0, 0.06 * (1.0 - burstAge / 4.0));
+
+    charTimer += dt;
+    const dropChar = charTimer > 0.12;
+    if (dropChar) charTimer = 0;
+
+    for (let i = 0; i < N_EMBERS; i++) {
+      if (lifeA[i] < -0.5) {
+        // check if detonation wave has reached this particle
+        if (initialDist[i] > waveR) continue;
+        // DETONATE — compute velocity
+        lifeA[i] = 1.0;
+        const px = initialPos[i * 3], py = initialPos[i * 3 + 1], pz = initialPos[i * 3 + 2];
+        const d = Math.sqrt(px * px + py * py + pz * pz) || 0.01;
+        const spd = 0.3 + (d / SPHERE_R) * 1.4 + rand() * 0.25;
+        velocities[i * 3]     = (px / d) * spd + (rand() - 0.5) * 0.25;
+        velocities[i * 3 + 1] = (py / d) * spd + (rand() - 0.5) * 0.25;
+        velocities[i * 3 + 2] = (pz / d) * spd + (rand() - 0.5) * 0.25;
+        continue;
+      }
+      if (lifeA[i] <= 0) continue;
+
+      // apply drag + position update
+      velocities[i * 3]     *= DRAG;
+      velocities[i * 3 + 1] *= DRAG;
+      velocities[i * 3 + 2] *= DRAG;
+      posA[i * 3]     += velocities[i * 3] * dt;
+      posA[i * 3 + 1] += velocities[i * 3 + 1] * dt;
+      posA[i * 3 + 2] += velocities[i * 3 + 2] * dt;
+
+      lifeA[i] -= dt * 0.028;
+      if (lifeA[i] < 0) lifeA[i] = 0;
+
+      // drop char marks
+      if (dropChar && lifeA[i] > 0.06 && rand() < 0.04) {
+        addChar(
+          posA[i * 3], posA[i * 3 + 1], posA[i * 3 + 2],
+          0.12 + 0.14 * lifeA[i],
+          1.2 + rand() * 2.2
+        );
+      }
+    }
+
+    emberGeo.attributes.position.needsUpdate = true;
+    emberGeo.attributes.aLife.needsUpdate = true;
+
+    if (nChars > 0) {
+      charGeo.attributes.position.needsUpdate = true;
+      charGeo.attributes.aAlpha.needsUpdate = true;
+      charGeo.attributes.aSize.needsUpdate = true;
+      charGeo.setDrawRange(0, nChars);
+    }
+  }
+
+  // slow contemplative camera drift (NOT rotation)
+  camera.position.x = 0.25 * Math.sin(t * 0.028);
+  camera.position.y = 0.6 + 0.15 * Math.sin(t * 0.022);
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+}
+
+requestAnimationFrame(animate);
+</script>
+
+<!-- gp: universal grade panel + save/config (injected by scripts/inject_grade_panel.py) -->
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId(), KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    document.querySelectorAll('canvas').forEach(function(c){c.style.filter=f;});
+  }
+  var tries=0;
+  (function w(){if(document.querySelector('canvas')||tries++>80){applyFilter();return;}setTimeout(w,100);})();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    for(var k in G){document.getElementById('gp-'+k).value=G[k];document.getElementById('gp-v-'+k).textContent=fmt(k,G[k]);}
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(a){try{localStorage.setItem(KEY,JSON.stringify(a));}catch(e){}}
+  function renderSaved(){
+    var w=document.getElementById('gp-saved');w.innerHTML='';
+    load().forEach(function(c,i){
+      var b=document.createElement('button');b.className='gp-cfg';b.textContent='config '+(i+1);
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      w.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var a=load();a.push({id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con});store(a);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:a[a.length-1]})}).catch(function(){});
+  };
+  renderSaved();
+})();
+</script>
+</body>
+</html>
