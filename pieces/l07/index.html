@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: converge, intensity: gentle -->
+<title>l07 · parliament of geometry · absurdist boids</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#0d0b0f;overflow:hidden;
+  color:#cdd2dc;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;letter-spacing:0.06em;color:#cdd2dc}
+.hint{position:fixed;left:14px;top:14px;opacity:0.6;font-size:11px;letter-spacing:0.04em;
+  transition:opacity 0.8s}
+</style>
+</head>
+<body>
+<div class="id">l07</div>
+<div class="hint" id="hint">murmuration · cohesion + alignment + separation</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50,innerWidth/innerHeight,0.1,500);
+camera.position.set(8,10,48);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.setClearColor(0x0d0b0f,1);
+document.body.appendChild(renderer.domElement);
+
+const N=3200;
+const pos=new Float32Array(N*3);
+const vel=new Float32Array(N*3);
+const seeds=new Float32Array(N);
+const trails=new Float32Array(N);
+
+for(let i=0;i<N;i++){
+  const th=Math.random()*Math.PI*2,ph=Math.acos(2*Math.random()-1);
+  const r=8+Math.random()*12;
+  pos[i*3]=r*Math.sin(ph)*Math.cos(th);
+  pos[i*3+1]=r*Math.sin(ph)*Math.sin(th);
+  pos[i*3+2]=r*Math.cos(ph);
+  const vt=Math.random()*Math.PI*2,vp=Math.acos(2*Math.random()-1);
+  const sp=0.8+Math.random()*0.4;
+  vel[i*3]=sp*Math.sin(vp)*Math.cos(vt);
+  vel[i*3+1]=sp*Math.sin(vp)*Math.sin(vt);
+  vel[i*3+2]=sp*Math.cos(vp);
+  seeds[i]=Math.random();
+  trails[i]=Math.random()*0.3;
+}
+
+/* ---------- target shapes ---------- */
+function genCube(n,s){
+  const t=new Float32Array(n*3);
+  for(let i=0;i<n;i++){
+    const f=Math.floor(Math.random()*6),u=(Math.random()-0.5)*s,v=(Math.random()-0.5)*s,h=s/2;
+    if(f<1){t[i*3]=h;t[i*3+1]=u;t[i*3+2]=v;}
+    else if(f<2){t[i*3]=-h;t[i*3+1]=u;t[i*3+2]=v;}
+    else if(f<3){t[i*3]=u;t[i*3+1]=h;t[i*3+2]=v;}
+    else if(f<4){t[i*3]=u;t[i*3+1]=-h;t[i*3+2]=v;}
+    else if(f<5){t[i*3]=u;t[i*3+1]=v;t[i*3+2]=h;}
+    else{t[i*3]=u;t[i*3+1]=v;t[i*3+2]=-h;}
+  }return t;
+}
+function genTorus(n,R,r){
+  const t=new Float32Array(n*3);
+  for(let i=0;i<n;i++){
+    const u=Math.random()*Math.PI*2,v=Math.random()*Math.PI*2;
+    t[i*3]=(R+r*Math.cos(v))*Math.cos(u);
+    t[i*3+1]=r*Math.sin(v);
+    t[i*3+2]=(R+r*Math.cos(v))*Math.sin(u);
+  }return t;
+}
+function genGrid(n,s){
+  const t=new Float32Array(n*3),side=Math.ceil(Math.sqrt(n));
+  for(let i=0;i<n;i++){
+    t[i*3]=((i%side)/side-0.5)*s;
+    t[i*3+1]=0;
+    t[i*3+2]=(Math.floor(i/side)/side-0.5)*s;
+  }return t;
+}
+
+const shapes=[genCube(N,18),genTorus(N,9,3.5),genGrid(N,28)];
+const motions=[
+  'motion 12: become a cube — carried unanimously',
+  'motion 47: become a torus — one abstention',
+  'motion 83: flatten to 2D — no discussion needed'
+];
+
+/* ---------- phase state ---------- */
+const T_FLOCK=14,T_CRYSTAL=3,T_INSPECT=3.5,T_SCATTER=2.5,CYCLE=T_FLOCK+T_CRYSTAL+T_INSPECT+T_SCATTER;
+let shapeIdx=0,phaseStart=0,curPhase=0,inspIdx=0;
+const cCenter=new THREE.Vector3(),scatterO=new THREE.Vector3();
+
+function advancePhase(t){
+  const ct=t-phaseStart;
+  if(curPhase===0&&ct>=T_FLOCK){
+    curPhase=1;phaseStart=t;
+    cCenter.set(0,0,0);
+    for(let i=0;i<N;i++){cCenter.x+=pos[i*3];cCenter.y+=pos[i*3+1];cCenter.z+=pos[i*3+2];}
+    cCenter.multiplyScalar(1/N);
+    inspIdx=Math.floor(Math.random()*N);
+  } else if(curPhase===1&&ct>=T_CRYSTAL){
+    curPhase=2;phaseStart=t;
+  } else if(curPhase===2&&ct>=T_INSPECT){
+    curPhase=3;phaseStart=t;
+    scatterO.set(pos[inspIdx*3],pos[inspIdx*3+1],pos[inspIdx*3+2]);
+  } else if(curPhase===3&&ct>=T_SCATTER){
+    curPhase=0;phaseStart=t;
+    shapeIdx=(shapeIdx+1)%shapes.length;
+  }
+  const dur=[T_FLOCK,T_CRYSTAL,T_INSPECT,T_SCATTER][curPhase];
+  return{phase:curPhase,pT:Math.min(1,(t-phaseStart)/dur)};
+}
+
+/* ---------- shader ---------- */
+const uniforms={uTime:{value:0},uPx:{value:renderer.getPixelRatio()},uCrys:{value:0}};
+const mat=new THREE.ShaderMaterial({
+  uniforms,transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,
+  vertexShader:`
+uniform float uTime,uPx,uCrys;
+attribute float seed,trail;
+varying vec3 vCol;varying float vAlpha;
+void main(){
+  float ph=seed*6.28+uTime*0.3,pulse=0.5+0.5*sin(ph);
+  vec3 c0=vec3(0.22,0.18,0.38),c1=vec3(0.72,0.42,0.48),c2=vec3(0.88,0.72,0.44);
+  float bl=smoothstep(0.3,0.7,pulse);
+  vec3 warm=mix(c0,c1,bl);warm=mix(warm,c2,smoothstep(0.7,1.0,pulse)*0.55);
+  vec3 cool=mix(vec3(0.30,0.33,0.42),vec3(0.48,0.50,0.55),pulse*0.3);
+  vCol=mix(warm,cool,uCrys);
+  bool ins=trail>1.5;
+  if(ins)vCol=vec3(0.90,0.76,0.38);
+  float t=min(trail,1.0);
+  vAlpha=0.5+0.5*pulse+t*0.4;
+  if(ins)vAlpha=1.0;
+  vec4 mv=modelViewMatrix*vec4(position,1.0);
+  float d=-mv.z;
+  float sz=1.8+1.2*pulse+t*2.0;
+  if(ins)sz=5.0;
+  gl_PointSize=sz*uPx*(60.0/max(d,1.0));
+  gl_Position=projectionMatrix*mv;
+}`,
+  fragmentShader:`
+varying vec3 vCol;varying float vAlpha;
+void main(){
+  vec2 d=gl_PointCoord-0.5;float r=dot(d,d);
+  if(r>0.25)discard;
+  float a=exp(-r*16.0)*vAlpha;
+  gl_FragColor=vec4(vCol*a,a);
+}`
+});
+
+const geom=new THREE.BufferGeometry();
+geom.setAttribute('position',new THREE.BufferAttribute(pos,3));
+geom.setAttribute('seed',new THREE.BufferAttribute(seeds,1));
+geom.setAttribute('trail',new THREE.BufferAttribute(trails,1));
+const pts=new THREE.Points(geom,mat);
+scene.add(pts);
+
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+
+/* ---------- boids ---------- */
+const PERCEP=3.5,SEP_D=1.2,COH=0.02,ALI=0.08,SEP=0.15,BF=0.25;
+const MXS=1.8,MNS=0.6,BND=25,CSZ=PERCEP*1.5;
+let grid=new Map();
+const _aP=new THREE.Vector3(),_aV=new THREE.Vector3(),_st=new THREE.Vector3();
+
+function gk(x,y,z){return`${Math.floor(x/CSZ)},${Math.floor(y/CSZ)},${Math.floor(z/CSZ)}`;}
+function rebuildGrid(){grid.clear();for(let i=0;i<N;i++){const k=gk(pos[i*3],pos[i*3+1],pos[i*3+2]);if(!grid.has(k))grid.set(k,[]);grid.get(k).push(i);}}
+function nbs(x,y,z){
+  const r=[],cx=Math.floor(x/CSZ),cy=Math.floor(y/CSZ),cz=Math.floor(z/CSZ);
+  for(let a=-1;a<=1;a++)for(let b=-1;b<=1;b++)for(let c=-1;c<=1;c++){
+    const k=`${cx+a},${cy+b},${cz+c}`;if(grid.has(k)){const arr=grid.get(k);for(let j=0;j<arr.length;j++)r.push(arr[j]);}}
+  return r;
+}
+
+function updateBoids(dt,pi){
+  const{phase,pT}=pi;
+  const shape=shapes[shapeIdx];
+  let cB=0;
+  if(phase===1)cB=pT*pT;
+  else if(phase===2)cB=1;
+  else if(phase===3)cB=Math.max(0,1-pT*pT);
+  uniforms.uCrys.value=cB;
+
+  for(let i=0;i<N;i++) if(trails[i]>1.5) trails[i]=0.5;
+  if(phase===2) trails[inspIdx]=2.0;
+
+  rebuildGrid();
+  for(let i=0;i<N;i++){
+    if(phase===2&&i===inspIdx){
+      const a=pT*Math.PI*3,r=14-pT*10;
+      pos[i*3]=cCenter.x+Math.cos(a)*r;
+      pos[i*3+1]=cCenter.y+Math.sin(a*0.7)*4;
+      pos[i*3+2]=cCenter.z+Math.sin(a)*r;
+      vel[i*3]=vel[i*3+1]=vel[i*3+2]=0;
+      continue;
+    }
+    const px=pos[i*3],py=pos[i*3+1],pz=pos[i*3+2];
+    _aP.set(0,0,0);_aV.set(0,0,0);_st.set(0,0,0);
+    let cC=0,aC=0;
+    const nb=nbs(px,py,pz);
+    for(let ni=0;ni<nb.length;ni++){
+      const j=nb[ni];if(i===j)continue;
+      const dx=pos[j*3]-px,dy=pos[j*3+1]-py,dz=pos[j*3+2]-pz;
+      const dS=dx*dx+dy*dy+dz*dz;
+      if(dS<PERCEP*PERCEP&&dS>0.01){
+        const d=Math.sqrt(dS);
+        _aP.x+=pos[j*3];_aP.y+=pos[j*3+1];_aP.z+=pos[j*3+2];cC++;
+        _aV.x+=vel[j*3];_aV.y+=vel[j*3+1];_aV.z+=vel[j*3+2];aC++;
+        if(d<SEP_D){const f=(SEP_D-d)/SEP_D;_st.x-=(dx/d)*f*SEP;_st.y-=(dy/d)*f*SEP;_st.z-=(dz/d)*f*SEP;}
+      }
+    }
+    if(cC>0){_aP.multiplyScalar(1/cC);_st.x+=(_aP.x-px)*COH;_st.y+=(_aP.y-py)*COH;_st.z+=(_aP.z-pz)*COH;}
+    if(aC>0){_aV.multiplyScalar(1/aC);_st.x+=(_aV.x-vel[i*3])*ALI;_st.y+=(_aV.y-vel[i*3+1])*ALI;_st.z+=(_aV.z-vel[i*3+2])*ALI;}
+    const dFC=Math.sqrt(px*px+py*py+pz*pz);
+    if(dFC>BND*0.7){const f=Math.pow((dFC-BND*0.7)/(BND*0.3),2);_st.x-=(px/dFC)*f*BF;_st.y-=(py/dFC)*f*BF;_st.z-=(pz/dFC)*f*BF;}
+
+    let lB=cB;
+    if(phase===3){
+      const sx=px-scatterO.x,sy=py-scatterO.y,sz=px-scatterO.z;
+      const sD=Math.sqrt(sx*sx+sy*sy+sz*sz);
+      const wT=pT-sD/35;
+      lB=wT<0?1:Math.max(0,1-wT*6);
+    }
+
+    const flockW=1-lB;
+    _st.x*=flockW;_st.y*=flockW;_st.z*=flockW;
+
+    if(lB>0.01){
+      const tx=shape[i*3]+cCenter.x,ty=shape[i*3+1]+cCenter.y,tz=shape[i*3+2]+cCenter.z;
+      const pull=lB*0.04;
+      pos[i*3]+=(tx-px)*pull;
+      pos[i*3+1]+=(ty-py)*pull;
+      pos[i*3+2]+=(tz-pz)*pull;
+      const damp=1-lB*0.08;
+      vel[i*3]*=damp;vel[i*3+1]*=damp;vel[i*3+2]*=damp;
+    }
+
+    vel[i*3]+=_st.x*dt;vel[i*3+1]+=_st.y*dt;vel[i*3+2]+=_st.z*dt;
+    const sp=Math.sqrt(vel[i*3]*vel[i*3]+vel[i*3+1]*vel[i*3+1]+vel[i*3+2]*vel[i*3+2]);
+    if(sp>MXS){vel[i*3]*=MXS/sp;vel[i*3+1]*=MXS/sp;vel[i*3+2]*=MXS/sp;}
+    else if(sp<MNS&&sp>0.01&&lB<0.3){vel[i*3]*=MNS/sp;vel[i*3+1]*=MNS/sp;vel[i*3+2]*=MNS/sp;}
+    pos[i*3]+=vel[i*3]*dt;pos[i*3+1]+=vel[i*3+1]*dt;pos[i*3+2]+=vel[i*3+2]*dt;
+    trails[i]=THREE.MathUtils.lerp(trails[i],sp/MXS,0.1);
+  }
+  geom.attributes.position.needsUpdate=true;
+  geom.attributes.trail.needsUpdate=true;
+  geom.computeBoundingSphere();
+}
+
+/* ---------- camera ---------- */
+const centroid=new THREE.Vector3();
+function updateCam(){
+  centroid.set(0,0,0);
+  for(let i=0;i<N;i++){centroid.x+=pos[i*3];centroid.y+=pos[i*3+1];centroid.z+=pos[i*3+2];}
+  centroid.multiplyScalar(1/N);
+  const t=performance.now()*0.00007;
+  camera.position.x=centroid.x+7+Math.sin(t*0.6)*2.5;
+  camera.position.y=centroid.y+9+Math.sin(t)*1.8;
+  camera.position.z=centroid.z+46;
+  camera.lookAt(centroid);
+}
+
+/* ---------- loop ---------- */
+const hintEl=document.getElementById('hint');
+let lastPhase=-1,lastT=performance.now();
+const t0=performance.now();
+
+function loop(){
+  const now=performance.now();
+  const dt=Math.min((now-lastT)/1000,0.05);
+  lastT=now;
+  const t=(now-t0)/1000;
+  uniforms.uTime.value=t;
+  const pi=advancePhase(t);
+
+  if(pi.phase!==lastPhase){
+    lastPhase=pi.phase;
+    if(pi.phase===0) hintEl.textContent='murmuration · cohesion + alignment + separation';
+    else if(pi.phase===1) hintEl.textContent='the flock considers…';
+    else if(pi.phase===2) hintEl.textContent=motions[shapeIdx];
+    else hintEl.textContent='motion overruled — resume chaos';
+  }
+
+  updateBoids(dt*60,pi);
+  updateCam();
+  renderer.render(scene,camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+</body>
+</html>
