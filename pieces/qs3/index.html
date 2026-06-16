@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: pulse, intensity: calm -->
+<title>qs3 · patterned wave-field · riley</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0c0b09; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">qs3</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0c0b09, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.1, 120);
+camera.position.set(0, 0, 28);
+camera.lookAt(0, 0, 0);
+
+// Grid dimensions — dense field of small squares
+const COLS = 140;
+const ROWS = 70;
+const COUNT = COLS * ROWS;
+const CELL = 0.18;
+const GAP = 0.015;
+const STEP = CELL + GAP;
+
+// Palette: charcoal to bone (Riley B&W but warmed through parent's umber)
+const colDark = new THREE.Color(0.09, 0.08, 0.065);
+const colLight = new THREE.Color(0.82, 0.79, 0.74);
+const colMid = new THREE.Color(0.38, 0.33, 0.28);
+
+const planeGeom = new THREE.PlaneGeometry(CELL, CELL);
+
+// Store grid coords as custom attributes for the shader
+const gridX = new Float32Array(COUNT);
+const gridY = new Float32Array(COUNT);
+
+const mesh = new THREE.InstancedMesh(planeGeom, new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uColDark: { value: colDark },
+    uColLight: { value: colLight },
+    uColMid: { value: colMid }
+  },
+  transparent: true,
+  depthWrite: false,
+  vertexShader: `
+    attribute float aGridX;
+    attribute float aGridY;
+    uniform float uTime;
+    varying float vWave;
+    varying float vEdge;
+    varying vec2 vLocalUV;
+
+    void main() {
+      vLocalUV = uv - 0.5;
+
+      // Normalised grid coords
+      float gx = aGridX;
+      float gy = aGridY;
+
+      // === Riley wave interference ===
+      // Primary wave: horizontal undulation (like "Fall")
+      float w1 = sin(gy * 0.42 + gx * 0.08 + uTime * 0.18) * 0.5 + 0.5;
+      // Secondary wave: diagonal ripple (like "Movement in Squares")
+      float w2 = sin((gx + gy) * 0.25 - uTime * 0.12) * 0.5 + 0.5;
+      // Tertiary: slow breathing across the whole field
+      float w3 = sin(gx * 0.06 - uTime * 0.07) * 0.5 + 0.5;
+
+      // Interference combination — creates moiré-like bands
+      vWave = w1 * 0.5 + w2 * 0.3 + w3 * 0.2;
+
+      // Sharpen the wave into bands (Riley's crisp edges)
+      vWave = smoothstep(0.32, 0.52, vWave);
+
+      // Scale modulation — squares compress in wave troughs (Movement in Squares)
+      float scaleMod = 0.6 + 0.4 * (1.0 - abs(vWave - 0.5) * 1.2);
+
+      vec4 instPos = instanceMatrix * vec4(position * scaleMod, 1.0);
+      vec4 mvPos = modelViewMatrix * instPos;
+      gl_Position = projectionMatrix * mvPos;
+
+      // Edge proximity for vignette
+      float ex = abs(gx / 140.0 - 0.5) * 2.0;
+      float ey = abs(gy / 70.0 - 0.5) * 2.0;
+      vEdge = max(ex, ey);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColDark;
+    uniform vec3 uColLight;
+    uniform vec3 uColMid;
+    uniform float uTime;
+    varying float vWave;
+    varying float vEdge;
+    varying vec2 vLocalUV;
+
+    void main() {
+      // Square shape — soft edges
+      float edgeDist = max(abs(vLocalUV.x), abs(vLocalUV.y));
+      float squareAlpha = 1.0 - smoothstep(0.42, 0.50, edgeDist);
+
+      // Wave-driven color: dark ↔ light with mid-tone pass-through
+      vec3 col;
+      if (vWave < 0.5) {
+        col = mix(uColDark, uColMid, vWave * 2.0);
+      } else {
+        col = mix(uColMid, uColLight, (vWave - 0.5) * 2.0);
+      }
+
+      // Subtle warm tint shift in the light bands (parent's umber heritage)
+      col += vec3(0.03, 0.01, -0.01) * vWave;
+
+      // Vignette: fade at edges of the field
+      float vignette = 1.0 - smoothstep(0.75, 1.0, vEdge);
+
+      float alpha = squareAlpha * vignette * 0.92;
+
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+}), COUNT);
+
+// Position instances in grid
+const dummy = new THREE.Object3D();
+const offsetX = (COLS - 1) * STEP * 0.5;
+const offsetY = (ROWS - 1) * STEP * 0.5;
+
+let idx = 0;
+for (let row = 0; row < ROWS; row++) {
+  for (let col = 0; col < COLS; col++) {
+    const x = col * STEP - offsetX;
+    const y = row * STEP - offsetY;
+    dummy.position.set(x, y, 0);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(idx, dummy.matrix);
+    gridX[idx] = col;
+    gridY[idx] = row;
+    idx++;
+  }
+}
+
+// Attach grid coordinates as instanced attributes
+const geom = mesh.geometry;
+geom.setAttribute('aGridX', new THREE.InstancedBufferAttribute(gridX, 1));
+geom.setAttribute('aGridY', new THREE.InstancedBufferAttribute(gridY, 1));
+
+scene.add(mesh);
+
+// Subtle atmospheric haze — a faint gradient quad behind the grid
+const hazeGeom = new THREE.PlaneGeometry(60, 30);
+const hazeMat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uTime;
+    void main() {
+      // Warm glow from below, cool from above (Riley's gallery lighting)
+      vec3 warm = vec3(0.14, 0.10, 0.07);
+      vec3 cool = vec3(0.07, 0.08, 0.10);
+      vec3 col = mix(warm, cool, vUv.y);
+
+      // Subtle breathing
+      float alpha = 0.12 + 0.02 * sin(uTime * 0.1);
+
+      // Radial falloff
+      float d = length(vUv - 0.5) * 2.0;
+      alpha *= 1.0 - smoothstep(0.5, 1.0, d);
+
+      gl_FragColor = vec4(col, alpha);
+    }
+  `
+});
+const hazeMesh = new THREE.Mesh(hazeGeom, hazeMat);
+hazeMesh.position.z = -2;
+scene.add(hazeMesh);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function loop(t) {
+  const seconds = t * 0.001;
+
+  mesh.material.uniforms.uTime.value = seconds;
+  hazeMat.uniforms.uTime.value = seconds;
+
+  // Very slow camera drift — not rotation, just a gentle lateral shift
+  camera.position.x = Math.sin(seconds * 0.025) * 0.6;
+  camera.position.y = Math.sin(seconds * 0.018 + 1.0) * 0.4;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+loop(0);
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+</body>
+</html>
