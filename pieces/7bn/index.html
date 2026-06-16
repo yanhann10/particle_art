@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- MOTION: transformation, intensity: gentle -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7bn · bistre</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#1a1510;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;opacity:0.55;font-size:11px;letter-spacing:0.06em}
+</style>
+</head>
+<body>
+<div class="id">7bn</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {GPUComputationRenderer} from 'three/addons/misc/GPUComputationRenderer.js';
+import {EffectComposer} from 'three/addons/postprocessing/EffectComposer.js';
+import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
+import {UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+/* ── 7bn · Bistre ─────────────────────────────────────
+   Intent: the viewer sees multilingual glyphs drifting in a
+   loose vascular column — as if written in bistre ink on aged
+   vellum — that periodically condenses into a giant '!'. The
+   palette is soot-brown, raw umber, burnt paper. Chain-morph
+   of y5m: same attractor + snap mechanic, but the word "bistre"
+   has stained everything — additive glow replaced by ink-wash
+   opacity, the background warms to parchment, the palette
+   darkens to the exact hue of beechwood soot dissolved in water.
+   Hybrid: Sasha Stiles × ancient manuscript marginalia.
+   ──────────────────────────────────────────────────────────── */
+
+const W = 100, H = 100, N = W * H;
+const CYCLE = 32.0;
+
+/* ── Glyph atlas: 8×4 = 32 cells ── */
+const AC = 8, AR = 4, CELL = 64;
+const glyphs = [
+  '!','W','O','R','D','S','語','言',
+  '文','字','詩','夢','अ','आ','इ','ई',
+  'ا','ب','ت','ث','△','○','□','◇',
+  'E','Y','記','憶','उ','ऊ','◎','◐'
+];
+const aCvs = document.createElement('canvas');
+aCvs.width = AC * CELL; aCvs.height = AR * CELL;
+const ax = aCvs.getContext('2d');
+ax.fillStyle = '#000';
+ax.fillRect(0, 0, aCvs.width, aCvs.height);
+ax.textAlign = 'center'; ax.textBaseline = 'middle';
+for (let r = 0; r < AR; r++) for (let c = 0; c < AC; c++) {
+  const i = r * AC + c;
+  const fs = i === 0 ? CELL * 0.88 : CELL * 0.62;
+  ax.font = `bold ${fs}px ui-monospace,"SF Mono",Menlo,monospace`;
+  ax.fillStyle = `rgba(255,255,255,${0.82 + Math.sin(i * 3.7) * 0.18})`;
+  ax.fillText(glyphs[i], c * CELL + CELL / 2, r * CELL + CELL / 2);
+}
+const atlasTex = new THREE.CanvasTexture(aCvs);
+atlasTex.minFilter = THREE.LinearFilter;
+atlasTex.magFilter = THREE.LinearFilter;
+
+/* ── Renderer ── */
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x1a1510, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── Target '!' positions ── */
+const targetData = new Float32Array(N * 4);
+const shaftN = Math.floor(N * 0.78);
+for (let i = 0; i < N; i++) {
+  if (i < shaftN) {
+    const t = i / shaftN;
+    const y = -0.3 + t * 2.4;
+    const taper = 0.24 + (1.0 - t) * 0.10;
+    targetData[i * 4]     = (Math.random() * 2 - 1) * taper;
+    targetData[i * 4 + 1] = y + (Math.random() - 0.5) * 0.05;
+    targetData[i * 4 + 2] = (Math.random() * 2 - 1) * 0.09;
+  } else {
+    const ang = Math.random() * Math.PI * 2;
+    const phi = Math.acos(Math.random() * 2 - 1);
+    const r = Math.cbrt(Math.random()) * 0.26;
+    targetData[i * 4]     = Math.cos(ang) * Math.sin(phi) * r;
+    targetData[i * 4 + 1] = -1.05 + Math.cos(phi) * r;
+    targetData[i * 4 + 2] = Math.sin(ang) * Math.sin(phi) * r;
+  }
+  targetData[i * 4 + 3] = 0;
+}
+const targetTex = new THREE.DataTexture(targetData, W, H, THREE.RGBAFormat, THREE.FloatType);
+targetTex.needsUpdate = true;
+
+/* ── Column guide positions (loose vertical drift structure) ── */
+const columnData = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  const col = (i % 5);
+  const cx = (col - 2) * 0.55;
+  const t = i / N;
+  columnData[i * 4]     = cx + (Math.random() - 0.5) * 0.4;
+  columnData[i * 4 + 1] = (t * 4.0 - 2.0) + (Math.random() - 0.5) * 0.3;
+  columnData[i * 4 + 2] = (Math.random() - 0.5) * 0.25;
+  columnData[i * 4 + 3] = 0;
+}
+const columnTex = new THREE.DataTexture(columnData, W, H, THREE.RGBAFormat, THREE.FloatType);
+columnTex.needsUpdate = true;
+
+/* ── GPGPU ── */
+const gpuCompute = new GPUComputationRenderer(W, H, renderer);
+const dtPos = gpuCompute.createTexture();
+const dd = dtPos.image.data;
+for (let i = 0; i < N; i++) {
+  dd[i * 4]     = (Math.random() * 2 - 1) * 0.5;
+  dd[i * 4 + 1] = (Math.random() * 2 - 1) * 0.5;
+  dd[i * 4 + 2] = (Math.random() * 2 - 1) * 0.5;
+  dd[i * 4 + 3] = Math.random();
+}
+
+const simFrag = `
+  uniform float uDt, uA, uB, uC, uD, uE, uF;
+  uniform float uSnap, uPreDamp, uColumnPull;
+  uniform sampler2D tTarget, tColumn;
+  void main(){
+    vec2 uv = gl_FragCoord.xy / resolution.xy;
+    vec4 s = texture2D(texturePosition, uv);
+    vec3 p = s.xyz; float age = s.w;
+
+    vec3 dp = vec3(
+      (p.z - uB) * p.x - uD * p.y,
+      uD * p.x + (p.z - uB) * p.y,
+      uC + uA * p.z - p.z*p.z*p.z / 3.0
+        - (p.x*p.x + p.y*p.y) * (1.0 + uE * p.z)
+        + uF * p.z * p.x*p.x*p.x
+    );
+
+    float damping = 1.0 - max(uSnap, uPreDamp) * 0.97;
+    vec3 newP = p + dp * uDt * damping;
+
+    /* Gentle column guide — keeps wander phase legible */
+    vec3 colPos = texture2D(tColumn, uv).xyz;
+    newP = mix(newP, colPos, uColumnPull * 0.012);
+
+    /* Snap to '!' target */
+    vec3 tgt = texture2D(tTarget, uv).xyz;
+    newP = mix(newP, tgt, uSnap * 0.08);
+
+    age = mod(age + uDt * 0.03, 1.0);
+    gl_FragColor = vec4(newP, age);
+  }
+`;
+
+const posVar = gpuCompute.addVariable('texturePosition', simFrag, dtPos);
+gpuCompute.setVariableDependencies(posVar, [posVar]);
+const su = posVar.material.uniforms;
+su.uDt         = { value: 0.006 };
+su.uA          = { value: 0.95 };
+su.uB          = { value: 0.70 };
+su.uC          = { value: 0.60 };
+su.uD          = { value: 3.50 };
+su.uE          = { value: 0.25 };
+su.uF          = { value: 0.10 };
+su.uSnap       = { value: 0.0 };
+su.uPreDamp    = { value: 0.0 };
+su.uColumnPull = { value: 0.0 };
+su.tTarget     = { value: targetTex };
+su.tColumn     = { value: columnTex };
+
+const err = gpuCompute.init();
+if (err) console.error(err);
+
+/* ── Scene ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.05, 60);
+camera.position.set(0, 0.3, 6.2);
+
+/* ── Point cloud ── */
+const geom = new THREE.BufferGeometry();
+const uvIdx = new Float32Array(N * 2);
+const aGlyph = new Float32Array(N);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = y * W + x;
+  uvIdx[i * 2]     = (x + 0.5) / W;
+  uvIdx[i * 2 + 1] = (y + 0.5) / H;
+  aGlyph[i] = 1 + Math.floor(Math.random() * (AC * AR - 1));
+}
+geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+geom.setAttribute('uvIdx', new THREE.BufferAttribute(uvIdx, 2));
+geom.setAttribute('aGlyph', new THREE.BufferAttribute(aGlyph, 1));
+
+const pMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:   { value: null },
+    uAtlas:  { value: atlasTex },
+    uTime:   { value: 0 },
+    uPx:     { value: renderer.getPixelRatio() },
+    uACols:  { value: AC },
+    uARows:  { value: AR },
+    uSnap:   { value: 0 },
+    uFlash:  { value: 0 }
+  },
+  transparent: true, depthWrite: false,
+  /* NormalBlending for ink-wash opacity instead of additive glow */
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPx, uSnap;
+    attribute vec2 uvIdx;
+    attribute float aGlyph;
+    varying float vAge, vGlyphIdx, vDepth;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      vGlyphIdx = mix(aGlyph, 0.0, step(0.5, uSnap));
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      float snapScale = 1.0 + uSnap * 0.3;
+      gl_PointSize = 5.2 * uPx * snapScale * (11.0 / max(vDepth, 0.6));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uAtlas;
+    uniform float uACols, uARows, uTime, uSnap, uFlash;
+    varying float vAge, vGlyphIdx, vDepth;
+    void main(){
+      float c = mod(vGlyphIdx, uACols);
+      float r = floor(vGlyphIdx / uACols);
+      vec2 atlasUV = vec2((c + gl_PointCoord.x) / uACols,
+                          (r + gl_PointCoord.y) / uARows);
+      float g = texture2D(uAtlas, atlasUV).r;
+
+      /* Bistre palette — soot-brown, raw umber, burnt paper */
+      vec3 bistre    = vec3(0.24, 0.18, 0.12);  /* dark soot */
+      vec3 umber     = vec3(0.38, 0.28, 0.18);  /* raw umber */
+      vec3 sienna    = vec3(0.44, 0.32, 0.22);  /* burnt sienna muted */
+      vec3 vellum    = vec3(0.58, 0.50, 0.38);  /* aged parchment ink */
+
+      float depthMix = smoothstep(12.0, 2.0, vDepth);
+      vec3 col = mix(bistre, umber, depthMix);
+      col = mix(col, sienna, vAge * 0.3);
+
+      /* During snap, ink darkens and concentrates */
+      vec3 snapCol = mix(col, vellum, uFlash * 0.35);
+      col = mix(col, snapCol, uSnap);
+
+      float depthFade = smoothstep(14.0, 1.5, vDepth);
+      float shimmer = 0.65 + 0.35 * sin(vAge * 6.2832 + uTime * 0.14);
+      float a = g * depthFade * shimmer * 0.68;
+      a *= 1.0 + uFlash * 0.3;
+      if (a < 0.015) discard;
+      gl_FragColor = vec4(col, a);
+    }
+  `
+});
+
+const pts = new THREE.Points(geom, pMat);
+scene.add(pts);
+
+/* ── Background — warm parchment vignette ── */
+const bgScene = new THREE.Scene();
+const camO = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const bgMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  uniforms: { uFlash: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.); }`,
+  fragmentShader: `
+    varying vec2 vUv;
+    uniform float uFlash;
+    void main(){
+      vec2 c = vUv - 0.5;
+      float d = length(c);
+      /* Parchment-tone vignette */
+      float vig = 1.0 - smoothstep(0.2, 0.85, d);
+      vec3 parchment = vec3(0.14, 0.11, 0.08);
+      vec3 edge = vec3(0.06, 0.05, 0.04);
+      vec3 col = mix(edge, parchment, vig);
+      /* Subtle warm center glow */
+      float glow = exp(-d * d * 4.0) * 0.04;
+      col += vec3(0.08, 0.06, 0.03) * glow * 4.0;
+      /* Warm bloom on snap */
+      col += vec3(0.04, 0.03, 0.015) * uFlash * glow * 6.0;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+bgScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat));
+
+/* ── Post-processing: very restrained bloom ── */
+const composer = new EffectComposer(renderer);
+const renderPass = new RenderPass(scene, camera);
+renderPass.clear = false;
+composer.addPass(renderPass);
+const bloom = new UnrealBloomPass(
+  new THREE.Vector2(innerWidth, innerHeight), 0.25, 0.8, 0.92
+);
+composer.addPass(bloom);
+
+/* ── Resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+
+/* ── Snap timing (tighter 32s cycle) ── */
+function smootherstep(x) { return x * x * x * (x * (x * 6 - 15) + 10); }
+
+function getSnap(t) {
+  /*  0-22  wander (column-guided)
+     22-24  pre-damp
+     24-26  converge to '!'
+     26-29  hold
+     29-31  release
+     31-32  free */
+  if (t < 22) return { snap: 0, preDamp: 0, colPull: 1 };
+  if (t < 24) return { snap: 0, preDamp: smootherstep((t - 22) / 2), colPull: 1.0 - (t - 22) / 2 };
+  if (t < 26) return { snap: smootherstep((t - 24) / 2), preDamp: 1, colPull: 0 };
+  if (t < 29) return { snap: 1, preDamp: 1, colPull: 0 };
+  if (t < 31) { const s = smootherstep(1 - (t - 29) / 2); return { snap: s, preDamp: s, colPull: 1.0 - s }; }
+  return { snap: 0, preDamp: 0, colPull: 1 };
+}
+
+/* ── Animation loop ── */
+const t0 = performance.now();
+(function loop() {
+  const t = (performance.now() - t0) * 0.001;
+  const cycleT = t % CYCLE;
+  const { snap, preDamp, colPull } = getSnap(cycleT);
+
+  su.uSnap.value = snap;
+  su.uPreDamp.value = preDamp;
+  su.uColumnPull.value = colPull;
+  for (let i = 0; i < 3; i++) gpuCompute.compute();
+
+  const posTex = gpuCompute.getCurrentRenderTarget(posVar).texture;
+  pMat.uniforms.state.value = posTex;
+  pMat.uniforms.uTime.value = t;
+  pMat.uniforms.uSnap.value = snap;
+
+  const flash = snap * (0.8 + 0.2 * Math.sin(t * 1.8));
+  pMat.uniforms.uFlash.value = flash;
+  bgMat.uniforms.uFlash.value = flash;
+
+  /* Camera — contemplative breathing, no rotation */
+  const breath = Math.sin(t * 0.06) * 0.2;
+  camera.position.set(
+    Math.sin(t * 0.025) * 0.12,
+    0.35 + Math.sin(t * 0.04) * 0.1,
+    6.0 + breath
+  );
+  camera.lookAt(0, 0.25, 0);
+
+  /* Render background, then particles with bloom */
+  renderer.clear();
+  renderer.render(bgScene, camO);
+  renderer.autoClear = false;
+  composer.render();
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+})();
+</script>
+<script src="/audio-reactive.js" defer></script>
+</body>
+</html>
