@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- MOTION: transformation, intensity: gentle -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>y5m · ta-da</title>
+<style>
+html,body{margin:0;padding:0;height:100%;background:#0a0908;overflow:hidden}
+canvas{display:block}
+.id{position:fixed;left:14px;bottom:12px;font-family:ui-monospace,"SF Mono",Menlo,monospace;color:#cdd2dc;opacity:0.55;font-size:11px;letter-spacing:0.06em}
+</style>
+</head>
+<body>
+<div class="id">y5m</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {GPUComputationRenderer} from 'three/addons/misc/GPUComputationRenderer.js';
+
+/* ── y5m · Ta-Da ──────────────────────────────────────────
+   Intent: the viewer should see a contemplative swarm of
+   multilingual glyphs tracing an Aizawa attractor — then every
+   50 seconds the entire cloud SNAPS into a giant '!' while every
+   glyph morphs to an exclamation mark. Semiotic collapse becomes
+   semiotic SHOUT, then dissolves back to polyglot drift.
+   Hybrid: Sasha Stiles (language-as-form) × Zimoun (synchronised
+   snap installations). Technique: strange attractor + snap morph.
+   ────────────────────────────────────────────────────────────── */
+
+const W = 100, H = 100, N = W * H;
+const CYCLE = 50.0;
+
+/* ── Single glyph atlas: 8×4 = 32 cells ── */
+const AC = 8, AR = 4, CELL = 64;
+const glyphs = [
+  '!','W','O','R','D','S','語','言',
+  '文','字','詩','夢','अ','आ','इ','ई',
+  'ا','ب','ت','ث','△','○','□','◇',
+  'E','Y','記','憶','उ','ऊ','◎','◐'
+];
+const aCvs = document.createElement('canvas');
+aCvs.width = AC * CELL; aCvs.height = AR * CELL;
+const ax = aCvs.getContext('2d');
+ax.fillStyle = '#000';
+ax.fillRect(0, 0, aCvs.width, aCvs.height);
+ax.textAlign = 'center'; ax.textBaseline = 'middle';
+for (let r = 0; r < AR; r++) for (let c = 0; c < AC; c++) {
+  const i = r * AC + c;
+  const fs = i === 0 ? CELL * 0.88 : CELL * 0.62;
+  ax.font = `bold ${fs}px ui-monospace,"SF Mono",Menlo,monospace`;
+  ax.fillStyle = `rgba(255,255,255,${0.78 + Math.sin(i * 3.7) * 0.22})`;
+  ax.fillText(glyphs[i], c * CELL + CELL / 2, r * CELL + CELL / 2);
+}
+const atlasTex = new THREE.CanvasTexture(aCvs);
+atlasTex.minFilter = THREE.LinearFilter;
+atlasTex.magFilter = THREE.LinearFilter;
+
+/* ── Renderer ── */
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0908, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── Target '!' positions ── */
+const targetData = new Float32Array(N * 4);
+const shaftN = Math.floor(N * 0.78);
+for (let i = 0; i < N; i++) {
+  if (i < shaftN) {
+    /* Shaft — slight taper, wider at base */
+    const t = i / shaftN;
+    const y = -0.3 + t * 2.4;
+    const taper = 0.24 + (1.0 - t) * 0.10;
+    targetData[i * 4]     = (Math.random() * 2 - 1) * taper;
+    targetData[i * 4 + 1] = y + (Math.random() - 0.5) * 0.05;
+    targetData[i * 4 + 2] = (Math.random() * 2 - 1) * 0.09;
+  } else {
+    /* Dot — small sphere below shaft */
+    const ang = Math.random() * Math.PI * 2;
+    const phi = Math.acos(Math.random() * 2 - 1);
+    const r = Math.cbrt(Math.random()) * 0.26;
+    targetData[i * 4]     = Math.cos(ang) * Math.sin(phi) * r;
+    targetData[i * 4 + 1] = -1.05 + Math.cos(phi) * r;
+    targetData[i * 4 + 2] = Math.sin(ang) * Math.sin(phi) * r;
+  }
+  targetData[i * 4 + 3] = 0;
+}
+const targetTex = new THREE.DataTexture(targetData, W, H, THREE.RGBAFormat, THREE.FloatType);
+targetTex.needsUpdate = true;
+
+/* ── GPGPU (GPUComputationRenderer) ── */
+const gpuCompute = new GPUComputationRenderer(W, H, renderer);
+const dtPos = gpuCompute.createTexture();
+const dd = dtPos.image.data;
+for (let i = 0; i < N; i++) {
+  dd[i * 4]     = (Math.random() * 2 - 1) * 0.5;
+  dd[i * 4 + 1] = (Math.random() * 2 - 1) * 0.5;
+  dd[i * 4 + 2] = (Math.random() * 2 - 1) * 0.5;
+  dd[i * 4 + 3] = Math.random();
+}
+
+const simFrag = `
+  uniform float uDt, uA, uB, uC, uD, uE, uF;
+  uniform float uSnap, uPreDamp;
+  uniform sampler2D tTarget;
+  void main(){
+    vec2 uv = gl_FragCoord.xy / resolution.xy;
+    vec4 s = texture2D(texturePosition, uv);
+    vec3 p = s.xyz; float age = s.w;
+
+    vec3 dp = vec3(
+      (p.z - uB) * p.x - uD * p.y,
+      uD * p.x + (p.z - uB) * p.y,
+      uC + uA * p.z - p.z*p.z*p.z / 3.0
+        - (p.x*p.x + p.y*p.y) * (1.0 + uE * p.z)
+        + uF * p.z * p.x*p.x*p.x
+    );
+
+    /* Pre-damp slows attractor before snap begins */
+    float damping = 1.0 - max(uSnap, uPreDamp) * 0.97;
+    vec3 newP = p + dp * uDt * damping;
+
+    /* Lerp toward target only when snapping */
+    vec3 tgt = texture2D(tTarget, uv).xyz;
+    newP = mix(newP, tgt, uSnap * 0.07);
+
+    age = mod(age + uDt * 0.03, 1.0);
+    gl_FragColor = vec4(newP, age);
+  }
+`;
+
+const posVar = gpuCompute.addVariable('texturePosition', simFrag, dtPos);
+gpuCompute.setVariableDependencies(posVar, [posVar]);
+const su = posVar.material.uniforms;
+su.uDt      = { value: 0.006 };
+su.uA       = { value: 0.95 };
+su.uB       = { value: 0.70 };
+su.uC       = { value: 0.60 };
+su.uD       = { value: 3.50 };
+su.uE       = { value: 0.25 };
+su.uF       = { value: 0.10 };
+su.uSnap    = { value: 0.0 };
+su.uPreDamp = { value: 0.0 };
+su.tTarget  = { value: targetTex };
+
+const err = gpuCompute.init();
+if (err) console.error(err);
+
+/* ── Point cloud ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.05, 60);
+camera.position.set(0, 0.3, 6.2);
+
+const geom = new THREE.BufferGeometry();
+const uvIdx = new Float32Array(N * 2);
+const aGlyph = new Float32Array(N);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = y * W + x;
+  uvIdx[i * 2]     = (x + 0.5) / W;
+  uvIdx[i * 2 + 1] = (y + 0.5) / H;
+  aGlyph[i] = 1 + Math.floor(Math.random() * (AC * AR - 1));
+}
+geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+geom.setAttribute('uvIdx', new THREE.BufferAttribute(uvIdx, 2));
+geom.setAttribute('aGlyph', new THREE.BufferAttribute(aGlyph, 1));
+
+const pMat = new THREE.ShaderMaterial({
+  uniforms: {
+    state:   { value: null },
+    uAtlas:  { value: atlasTex },
+    uTime:   { value: 0 },
+    uPx:     { value: renderer.getPixelRatio() },
+    uACols:  { value: AC },
+    uARows:  { value: AR },
+    uSnap:   { value: 0 },
+    uFlash:  { value: 0 }
+  },
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D state;
+    uniform float uPx, uSnap;
+    attribute vec2 uvIdx;
+    attribute float aGlyph;
+    varying float vAge, vGlyphIdx, vDepth;
+    void main(){
+      vec4 s = texture2D(state, uvIdx);
+      vec3 p = s.xyz;
+      vAge = s.w;
+      /* During snap every glyph becomes '!' (index 0) */
+      vGlyphIdx = mix(aGlyph, 0.0, step(0.5, uSnap));
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      vDepth = -mv.z;
+      float snapScale = 1.0 + uSnap * 0.35;
+      gl_PointSize = 5.6 * uPx * snapScale * (11.0 / max(vDepth, 0.6));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D uAtlas;
+    uniform float uACols, uARows, uTime, uSnap, uFlash;
+    varying float vAge, vGlyphIdx, vDepth;
+    void main(){
+      float c = mod(vGlyphIdx, uACols);
+      float r = floor(vGlyphIdx / uACols);
+      vec2 atlasUV = vec2((c + gl_PointCoord.x) / uACols,
+                          (r + gl_PointCoord.y) / uARows);
+      float g = texture2D(uAtlas, atlasUV).r;
+
+      /* Restrained earth palette */
+      vec3 cream = vec3(0.90, 0.84, 0.74);
+      vec3 amber = vec3(0.82, 0.70, 0.48);
+      vec3 ochre = vec3(0.74, 0.60, 0.40);
+      vec3 gold  = vec3(0.88, 0.76, 0.50);
+
+      vec3 normalCol = mix(amber, cream, smoothstep(7.0, 1.5, vDepth));
+      vec3 col = mix(normalCol, gold, uFlash * 0.55);
+
+      float depthFade = smoothstep(14.0, 1.5, vDepth);
+      float shimmer = 0.62 + 0.38 * sin(vAge * 6.2832 + uTime * 0.18);
+      float a = g * depthFade * shimmer * 0.72;
+      a *= 1.0 + uFlash * 0.45;
+      if (a < 0.012) discard;
+      gl_FragColor = vec4(col * a, a);
+    }
+  `
+});
+
+const pts = new THREE.Points(geom, pMat);
+scene.add(pts);
+
+/* ── Background atmosphere ── */
+const bgScene = new THREE.Scene();
+const camO = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+bgScene.add(new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2),
+  new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false,
+    uniforms: { uFlash: { value: 0 } },
+    vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.); }`,
+    fragmentShader: `
+      varying vec2 vUv;
+      uniform float uFlash;
+      void main(){
+        vec2 c = vUv - 0.5;
+        float d = length(c);
+        float glow = exp(-d * d * 3.0) * 0.035;
+        vec3 warm = vec3(0.11, 0.09, 0.06);
+        vec3 cool = vec3(0.05, 0.06, 0.08);
+        vec3 base = mix(cool, warm, vUv.y) * glow * 6.0;
+        base += vec3(glow * 0.45, glow * 0.38, glow * 0.25);
+        /* Subtle warm bloom during ta-da */
+        base += vec3(0.06, 0.04, 0.02) * uFlash * glow * 8.0;
+        gl_FragColor = vec4(base, glow);
+      }
+    `
+  })
+));
+const bgMat = bgScene.children[0].material;
+
+/* ── Resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── Snap timing ── */
+function smootherstep(x) { return x * x * x * (x * (x * 6 - 15) + 10); }
+
+function getSnap(t) {
+  /*  0-36  free flow
+     36-38  pre-damp (slow attractor, no target lerp)
+     38-40  converge to '!'
+     40-44  hold
+     44-46  release
+     46-50  free flow */
+  if (t < 36) return { snap: 0, preDamp: 0 };
+  if (t < 38) return { snap: 0, preDamp: smootherstep((t - 36) / 2) };
+  if (t < 40) return { snap: smootherstep((t - 38) / 2), preDamp: 1 };
+  if (t < 44) return { snap: 1, preDamp: 1 };
+  if (t < 46) { const s = smootherstep(1 - (t - 44) / 2); return { snap: s, preDamp: s }; }
+  return { snap: 0, preDamp: 0 };
+}
+
+/* ── Animation loop ── */
+const t0 = performance.now();
+(function loop() {
+  const t = (performance.now() - t0) * 0.001;
+  const cycleT = t % CYCLE;
+  const { snap, preDamp } = getSnap(cycleT);
+
+  /* GPGPU step (3 sub-steps) */
+  su.uSnap.value = snap;
+  su.uPreDamp.value = preDamp;
+  for (let i = 0; i < 3; i++) gpuCompute.compute();
+
+  const posTex = gpuCompute.getCurrentRenderTarget(posVar).texture;
+  pMat.uniforms.state.value = posTex;
+  pMat.uniforms.uTime.value = t;
+  pMat.uniforms.uSnap.value = snap;
+
+  /* Flash peaks during hold with a gentle pulse */
+  const flash = snap * (0.82 + 0.18 * Math.sin(t * 2.0));
+  pMat.uniforms.uFlash.value = flash;
+  bgMat.uniforms.uFlash.value = flash;
+
+  /* Camera — contemplative: gentle breathing only, no rotation */
+  const breath = Math.sin(t * 0.07) * 0.25;
+  camera.position.set(
+    Math.sin(t * 0.03) * 0.15,
+    0.35 + Math.sin(t * 0.045) * 0.12,
+    6.0 + breath
+  );
+  camera.lookAt(0, 0.25, 0);
+
+  /* Render */
+  renderer.render(bgScene, camO);
+  renderer.autoClear = false;
+  renderer.render(scene, camera);
+  renderer.autoClear = true;
+
+  requestAnimationFrame(loop);
+})();
+</script>
+<script src="/audio-reactive.js" defer></script>
+</body>
+</html>
