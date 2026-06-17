@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nmm · squeegee eigenmode (Gerhard Richter)</title>
+<!-- MOTION: organizing, intensity: calm -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0d0b09; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  canvas { display:block; }
+  .id   { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size:11px; letter-spacing:0.06em; color:#cdd2dc; }
+  .hint { position:fixed; left:14px; top:14px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+  .src  { position:fixed; right:14px; top:14px; opacity:0.4; font-size:10px; letter-spacing:0.04em; }
+  .stat { position:fixed; right:14px; bottom:12px; opacity:0.55; font-size:10px; letter-spacing:0.04em; }
+</style>
+</head>
+<body>
+<div class="id">nmm</div>
+<div class="hint">drag to orbit · click to pause/resume</div>
+<div class="src">Gerhard Richter · chromatic squeegee · layered Chladni eigenmodes</div>
+<div class="stat" id="stat">mode=(1,1)</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* Squeegee eigenmode — Gerhard Richter working in cymatic sand.
+   Intent: viewer sees Chladni nodal figures rendered as layered
+   chromatic paint passes. Five color layers each follow a slightly
+   offset eigenmode, so nodal lines separate at their edges into
+   muted color fringes — like Richter's squeegee dragging pigment
+   across canvas, revealing and concealing layers beneath.
+   Palette: ash, olive, ochre, dusty rose, slate — all < 50% sat.
+   Named pattern: Chladni eigenmodes + color-field layering.
+   Evokes: Richter's Abstrakte Bilder (Abstract Paintings) series. */
+
+const BG = 0x0d0b09;
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(BG, 0.015);
+const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 18, 26);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(BG, 1);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.target.set(0, 0, 0);
+
+// plate — dark warm surface like stretched canvas
+const L = 10;
+const plate = new THREE.Mesh(
+  new THREE.PlaneGeometry(L, L, 1, 1),
+  new THREE.MeshStandardMaterial({
+    color: 0x141110,
+    metalness: 0.3,
+    roughness: 0.9
+  })
+);
+scene.add(plate);
+
+const borderGeom = new THREE.EdgesGeometry(plate.geometry);
+const borderMat = new THREE.LineBasicMaterial({ color: 0x2a2520, transparent: true, opacity: 0.3 });
+scene.add(new THREE.LineSegments(borderGeom, borderMat));
+
+// lighting: cool side, warm fill — studio light on a painting
+const ambient = new THREE.AmbientLight(0x1e1c1a, 0.5);
+scene.add(ambient);
+const key = new THREE.DirectionalLight(0xf0e4d4, 0.6);
+key.position.set(6, 14, 5);
+scene.add(key);
+const rim = new THREE.DirectionalLight(0xc0c8d4, 0.25);
+rim.position.set(-6, 3, -7);
+scene.add(rim);
+
+// Richter palette — 5 restrained colors, each a squeegee layer
+// ash grey, muted olive, dark ochre, dusty rose, cool slate
+const LAYER_COLORS = [
+  new THREE.Color(0.54, 0.55, 0.56),  // ash
+  new THREE.Color(0.42, 0.45, 0.35),  // olive
+  new THREE.Color(0.62, 0.54, 0.37),  // ochre
+  new THREE.Color(0.61, 0.48, 0.48),  // dusty rose
+  new THREE.Color(0.37, 0.42, 0.45),  // slate
+];
+const N_LAYERS = 5;
+
+// mode sequence
+const modes = [
+  [1,1],[2,1],[2,2],[3,2],[3,3],[4,2],[4,3],[5,3],[4,4],[5,4],[6,3],[5,5]
+];
+let modeIdx = 0;
+let modeLerp = 0;
+
+// per-layer mode offset — each layer sees a slightly different eigenmode
+// creating chromatic separation at nodal boundaries
+const LAYER_OFFSETS = [
+  { dm: 0.0,  dn: 0.0  },  // ash — true mode
+  { dm: 0.12, dn:-0.08 },  // olive — slight positive shift
+  { dm:-0.10, dn: 0.12 },  // ochre — slight negative shift
+  { dm: 0.08, dn: 0.15 },  // rose — warm offset
+  { dm:-0.15, dn:-0.10 },  // slate — cool offset
+];
+
+function eigenmode(x, y, m, n) {
+  const mx = Math.cos(m * Math.PI * x / L);
+  const my = Math.cos(m * Math.PI * y / L);
+  const nx = Math.cos(n * Math.PI * x / L);
+  const ny = Math.cos(n * Math.PI * y / L);
+  return mx * ny - nx * my;
+}
+
+function gradient(x, y, m, n, eps = 0.01) {
+  const u0 = eigenmode(x, y, m, n);
+  const ux = eigenmode(x + eps, y, m, n);
+  const uy = eigenmode(x, y + eps, m, n);
+  return { dx: (ux - u0) / eps, dy: (uy - u0) / eps };
+}
+
+// particles — 10k per layer, 50k total
+const PER_LAYER = 10000;
+const N_PARTICLES = PER_LAYER * N_LAYERS;
+const particles = [];
+for (let layer = 0; layer < N_LAYERS; layer++) {
+  for (let i = 0; i < PER_LAYER; i++) {
+    particles.push({
+      x: (Math.random() - 0.5) * L * 0.96,
+      y: (Math.random() - 0.5) * L * 0.96,
+      vx: 0, vy: 0,
+      layer,
+      seed: Math.random(),
+      settled: 0  // accumulates when near nodal line — thickens paint
+    });
+  }
+}
+
+// buffers
+const rPos = new Float32Array(N_PARTICLES * 3);
+const rColor = new Float32Array(N_PARTICLES * 3);
+const rSeed = new Float32Array(N_PARTICLES);
+const rSettled = new Float32Array(N_PARTICLES);
+
+for (let i = 0; i < N_PARTICLES; i++) {
+  const p = particles[i];
+  rSeed[i] = p.seed;
+  const c = LAYER_COLORS[p.layer];
+  // per-particle color variation within layer — Richter's imperfect mixing
+  const drift = (p.seed - 0.5) * 0.08;
+  rColor[i * 3]     = c.r + drift;
+  rColor[i * 3 + 1] = c.g + drift * 0.7;
+  rColor[i * 3 + 2] = c.b - drift * 0.3;
+}
+
+const geom = new THREE.BufferGeometry();
+geom.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+geom.setAttribute('color', new THREE.BufferAttribute(rColor, 3));
+geom.setAttribute('seed', new THREE.BufferAttribute(rSeed, 1));
+geom.setAttribute('settled', new THREE.BufferAttribute(rSettled, 1));
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixel: { value: renderer.getPixelRatio() }
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute vec3 color;
+    attribute float seed;
+    attribute float settled;
+    varying float vAlpha;
+    varying vec3 vCol;
+
+    void main() {
+      vec3 p = position;
+
+      // gentle hover — paint grains vibrate on the surface
+      float hover = sin(uTime * 1.4 + seed * 30.0) * 0.004;
+      p.z += hover + 0.012;
+
+      // settled particles rise slightly — paint impasto thickness
+      p.z += settled * 0.015;
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+
+      // size varies with settled-ness: thick paint = larger dot
+      float baseSize = 1.0 + settled * 0.6;
+      gl_PointSize = baseSize * uPixel * (55.0 / dist);
+      gl_Position = projectionMatrix * mv;
+
+      // color with subtle warm/cool temperature shift over time
+      float tempShift = sin(uTime * 0.08 + seed * 6.0) * 0.03;
+      vCol = color + vec3(tempShift, 0.0, -tempShift);
+
+      // shimmer — slow, like oil paint catching gallery light
+      float shimmer = 0.88 + 0.12 * sin(uTime * 0.7 + seed * 20.0);
+      vCol *= shimmer;
+
+      // alpha: settled particles are more opaque (layered paint)
+      vAlpha = 0.45 + settled * 0.35;
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying vec3 vCol;
+
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if (r > 0.25) discard;
+
+      // slightly softer falloff than parent — paint has body
+      float core = exp(-r * 14.0);
+      float soft = exp(-r * 4.0) * 0.2;
+      float a = (core + soft) * vAlpha;
+
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const points = new THREE.Points(geom, mat);
+points.position.z = 0.01;
+scene.add(points);
+
+let paused = false;
+addEventListener('click', () => { paused = !paused; });
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const statEl = document.getElementById('stat');
+const start = performance.now();
+
+function step() {
+  if (paused) return;
+
+  // cycle modes — 14 seconds per mode (unhurried)
+  const modeT = (performance.now() - start) / 1000 / 14;
+  const newIdx = Math.floor(modeT) % modes.length;
+  if (newIdx !== modeIdx) {
+    modeIdx = newIdx;
+    modeLerp = 0;
+  }
+  modeLerp = Math.min(1, modeLerp + 0.004);
+
+  const [m0, n0] = modes[modeIdx];
+  const [m1, n1] = modes[(modeIdx + 1) % modes.length];
+  const t = modeLerp * modeLerp * (3 - 2 * modeLerp);
+
+  const DAMPING = 0.91;
+  const FORCE = 0.014;
+  const BROWNIAN = 0.004;
+  const BOUNDARY = L * 0.48;
+
+  for (let i = 0; i < N_PARTICLES; i++) {
+    const p = particles[i];
+    const off = LAYER_OFFSETS[p.layer];
+
+    // this layer's mode — slightly offset from base
+    const cm = m0 + (m1 - m0) * t + off.dm;
+    const cn = n0 + (n1 - n0) * t + off.dn;
+
+    const grad = gradient(p.x, p.y, cm, cn);
+    const u = eigenmode(p.x, p.y, cm, cn);
+    const mag = Math.abs(u);
+
+    const fx = -grad.dx * mag * FORCE;
+    const fy = -grad.dy * mag * FORCE;
+
+    p.vx = (p.vx + fx) * DAMPING;
+    p.vy = (p.vy + fy) * DAMPING;
+    p.vx += (Math.random() - 0.5) * BROWNIAN;
+    p.vy += (Math.random() - 0.5) * BROWNIAN;
+
+    p.x += p.vx;
+    p.y += p.vy;
+
+    // settled metric — how long near a nodal line
+    if (mag < 0.08) {
+      p.settled = Math.min(1.0, p.settled + 0.003);
+    } else {
+      p.settled = Math.max(0.0, p.settled - 0.001);
+    }
+
+    if (Math.abs(p.x) > BOUNDARY) { p.x = Math.sign(p.x) * BOUNDARY; p.vx *= -0.5; }
+    if (Math.abs(p.y) > BOUNDARY) { p.y = Math.sign(p.y) * BOUNDARY; p.vy *= -0.5; }
+  }
+
+  // update buffers
+  for (let i = 0; i < N_PARTICLES; i++) {
+    rPos[i * 3]     = particles[i].x;
+    rPos[i * 3 + 1] = particles[i].y;
+    rPos[i * 3 + 2] = 0;
+    rSettled[i]      = particles[i].settled;
+  }
+  geom.attributes.position.needsUpdate = true;
+  geom.attributes.settled.needsUpdate = true;
+}
+
+function loop() {
+  const elapsed = (performance.now() - start) / 1000;
+  uniforms.uTime.value = elapsed;
+
+  for (let s = 0; s < 2; s++) step();
+
+  const [m, n] = modes[modeIdx];
+  statEl.textContent = `mode=(${m},${n})${paused ? ' · paused' : ''}`;
+
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+// pre-settle: 500 steps so layers separate before first frame
+for (let s = 0; s < 500; s++) step();
+
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+<!-- gp: universal grade panel + save/config (injected by scripts/inject_grade_panel.py) -->
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+
+</body>
+</html>
