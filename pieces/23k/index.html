@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: drift, intensity: calm -->
+<!-- Intent: Lucy as glacial ice sublimating into still air — Eliasson's Ice Watch in particle-light.
+     The viewer sees a frost figure lit by a single warm sun, perpetually losing and reforming
+     itself. Slow upward vapor drift. Impermanence made visible. -->
+<!-- Technique: flow field (sublimation drift) × Olafur Eliasson "Ice Watch" (2014) palette/pacing -->
+<title>23k · elemental · ice-watch lucy</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0b0d11; overflow:hidden; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace;
+        color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; z-index:10; }
+</style>
+</head>
+<body>
+<div class="id">23k</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 500);
+camera.position.set(4, 2, 28);
+camera.lookAt(0, 1, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0b0d11, 1);
+document.body.appendChild(renderer.domElement);
+
+/* ── background glow: Eliasson's sun — a single warm disc behind the figure ── */
+const bgMat = new THREE.ShaderMaterial({
+  depthWrite: false, depthTest: false, transparent: true,
+  uniforms: {},
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+  `,
+  fragmentShader: `
+    varying vec2 vUv;
+    void main(){
+      vec2 sun = vUv - vec2(0.28, 0.62);
+      float d = length(sun);
+      vec3 warm = vec3(0.68, 0.45, 0.20);
+      float g = exp(-d * d * 4.2) * 0.16;
+      vec3 cool = vec3(0.28, 0.34, 0.44);
+      float r = exp(-d * d * 1.0) * 0.05;
+      vec3 col = warm * g + cool * r;
+      gl_FragColor = vec4(col, g + r);
+    }
+  `
+});
+const bgPlane = new THREE.Mesh(new THREE.PlaneGeometry(140, 90), bgMat);
+bgPlane.position.z = -45;
+bgPlane.position.y = 3;
+bgPlane.renderOrder = -1;
+scene.add(bgPlane);
+
+/* ── Lucy particles ── */
+const N = 60000;
+const restPositions = new Float32Array(N * 3);
+const seeds = new Float32Array(N);
+const phases = new Float32Array(N);
+
+const uTime  = { value: 0 };
+const uPixel = { value: renderer.getPixelRatio() };
+const uReady = { value: 0.0 };
+const uSunDir = { value: new THREE.Vector3(-0.6, 0.3, 0.7).normalize() };
+
+const lucyMat = new THREE.ShaderMaterial({
+  uniforms: { uTime, uPixel, uReady, uSunDir },
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    uniform float uReady;
+    uniform vec3  uSunDir;
+    attribute vec3  rest;
+    attribute float seed;
+    attribute float phase;
+    varying vec3  vCol;
+    varying float vAlpha;
+
+    void main(){
+      vec3 p = rest;
+      float t = uTime;
+
+      /* sublimation cycle — staggered so the figure stays mostly intact */
+      float cycle = 26.0;
+      float localT = mod(t + phase * cycle, cycle);
+      float attachEnd = cycle * 0.68;
+      float detachDur = cycle * 0.32;
+
+      float sublimate = 0.0;
+      float drift = 0.0;
+      if(localT > attachEnd){
+        float st = (localT - attachEnd) / detachDur;
+        sublimate = smoothstep(0.0, 0.25, st) * smoothstep(1.0, 0.65, st);
+        drift = st;
+      }
+
+      /* breathing while attached — tiny surface-normal pulse */
+      vec3 norm = normalize(p);
+      float breath = sin(t * 0.28 + seed * 6.28) * 0.04 * (1.0 - sublimate);
+      p += norm * breath;
+
+      /* sublimation drift: upward + gentle horizontal wander */
+      vec3 wander = vec3(
+        sin(seed * 13.7 + t * 0.18) * 0.35,
+        0.0,
+        cos(seed * 17.3 + t * 0.13) * 0.35
+      );
+      p += (vec3(0.0, 3.8, 0.0) + wander) * drift * sublimate;
+
+      /* reveal: frost coalesces from scattered crystal cloud */
+      vec3 entry = rest + vec3(
+        sin(seed * 40.0) * 9.0,
+        cos(seed * 30.0) * 8.0 + 7.0,
+        sin(seed * 22.0) * 9.0
+      );
+      p = mix(entry, p, smoothstep(0.0, 1.0, uReady));
+
+      /* directional light: sun-facing → warm bone, shadow → deep ice */
+      float sunFace = dot(norm, uSunDir) * 0.5 + 0.5;
+
+      vec3 iceDeep  = vec3(0.42, 0.50, 0.58);
+      vec3 iceMid   = vec3(0.60, 0.67, 0.74);
+      vec3 iceBone  = vec3(0.84, 0.80, 0.72);
+      vec3 col = mix(iceDeep, iceMid, sunFace * 0.6 + 0.4);
+      col = mix(col, iceBone, sunFace * sunFace * 0.65);
+
+      /* sublimating → whiter, more ethereal */
+      col = mix(col, vec3(0.74, 0.76, 0.80), sublimate * 0.55);
+
+      vCol = col;
+      float baseA = 0.55 + 0.45 * (1.0 - sublimate * 0.6);
+      vAlpha = baseA * uReady * mix(1.0, 0.12, sublimate * drift);
+
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = -mv.z;
+      float sizeBoost = 1.0 + sublimate * 0.9;
+      gl_PointSize = sizeBoost * uPixel * (40.0 / dist) * (0.25 + 0.75 * uReady);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vAlpha;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 15.0) * vAlpha;
+      gl_FragColor = vec4(vCol * a, a);
+    }
+  `
+});
+
+const geom = new THREE.BufferGeometry();
+const lucyPts = new THREE.Points(geom, lucyMat);
+scene.add(lucyPts);
+
+/* ── ambient frost motes (Eliasson atmosphere) ── */
+const MOTES = 2800;
+const motePos = new Float32Array(MOTES * 3);
+const moteSd  = new Float32Array(MOTES);
+for(let i = 0; i < MOTES; i++){
+  motePos[i*3]   = (Math.random() - 0.5) * 55;
+  motePos[i*3+1] = (Math.random() - 0.2) * 40;
+  motePos[i*3+2] = (Math.random() - 0.5) * 55;
+  moteSd[i] = Math.random();
+}
+const moteGeo = new THREE.BufferGeometry();
+moteGeo.setAttribute('position', new THREE.BufferAttribute(motePos, 3));
+moteGeo.setAttribute('seed', new THREE.BufferAttribute(moteSd, 1));
+const moteMat = new THREE.ShaderMaterial({
+  uniforms: { uTime, uPixel },
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      p.y += sin(uTime * 0.06 + seed * 43.0) * 0.6;
+      p.x += cos(uTime * 0.04 + seed * 31.0) * 0.4;
+      vA = 0.10 + 0.08 * sin(uTime * 0.35 + seed * 6.28);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = uPixel * (10.0 / max(-mv.z, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 22.0) * vA;
+      vec3 c = vec3(0.50, 0.56, 0.64);
+      gl_FragColor = vec4(c * a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(moteGeo, moteMat));
+
+/* ── ground frost shimmer (thin layer of reflective motes at y ≈ -8) ── */
+const GFROST = 1200;
+const gfPos = new Float32Array(GFROST * 3);
+const gfSd  = new Float32Array(GFROST);
+for(let i = 0; i < GFROST; i++){
+  gfPos[i*3]   = (Math.random() - 0.5) * 40;
+  gfPos[i*3+1] = -7.5 + Math.random() * 0.4;
+  gfPos[i*3+2] = (Math.random() - 0.5) * 30 - 2;
+  gfSd[i] = Math.random();
+}
+const gfGeo = new THREE.BufferGeometry();
+gfGeo.setAttribute('position', new THREE.BufferAttribute(gfPos, 3));
+gfGeo.setAttribute('seed', new THREE.BufferAttribute(gfSd, 1));
+const gfMat = new THREE.ShaderMaterial({
+  uniforms: { uTime, uPixel },
+  transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    uniform float uPixel;
+    attribute float seed;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      /* occasional glint */
+      float glint = pow(max(0.0, sin(uTime * 0.5 + seed * 80.0)), 24.0);
+      vA = 0.04 + glint * 0.22;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = uPixel * (8.0 + glint * 6.0) / max(-mv.z, 1.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d,d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 18.0) * vA;
+      vec3 c = vec3(0.62, 0.66, 0.72);
+      gl_FragColor = vec4(c * a, a);
+    }
+  `
+});
+scene.add(new THREE.Points(gfGeo, gfMat));
+
+/* ── load Lucy ── */
+const PLY_URL = 'https://threejs.org/examples/models/ply/binary/Lucy100k.ply';
+let revealStart = 0;
+
+new PLYLoader().load(PLY_URL, (geometry) => {
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  const bb = geometry.boundingBox;
+  const center = bb.getCenter(new THREE.Vector3());
+  const size = bb.getSize(new THREE.Vector3());
+  const scale = 15 / Math.max(size.x, size.y, size.z);
+  geometry.translate(-center.x, -center.y, -center.z);
+  geometry.scale(scale, scale, scale);
+
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+  const sampler = new MeshSurfaceSampler(mesh).build();
+  const tmp = new THREE.Vector3();
+  for(let i = 0; i < N; i++){
+    sampler.sample(tmp);
+    restPositions[i*3]   = tmp.x;
+    restPositions[i*3+1] = tmp.y;
+    restPositions[i*3+2] = tmp.z;
+    seeds[i] = Math.random();
+    phases[i] = Math.random();
+  }
+
+  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+  geom.setAttribute('rest',     new THREE.BufferAttribute(restPositions, 3));
+  geom.setAttribute('seed',     new THREE.BufferAttribute(seeds, 1));
+  geom.setAttribute('phase',    new THREE.BufferAttribute(phases, 1));
+  geom.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 20);
+
+  revealStart = performance.now();
+});
+
+/* ── resize ── */
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ── animation loop ── */
+const clock = new THREE.Clock();
+function loop(){
+  const t = clock.getElapsedTime();
+  uTime.value = t;
+
+  if(revealStart > 0){
+    uReady.value = Math.min(1.0, (performance.now() - revealStart) / 3500);
+  }
+
+  /* single slow lateral drift — not rotation, just a contemplative pass
+     moves ~2 units over 90s then holds still */
+  const driftT = Math.min(t / 90.0, 1.0);
+  const ease = driftT * (2.0 - driftT);
+  camera.position.x = 4 - ease * 2.0;
+  camera.position.y = 2 + ease * 0.4;
+  camera.lookAt(0, 1, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
