@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>el2 · lion confetti · surprise×mane</title>
+<!-- MOTION: burst, intensity: gentle -->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#0a0a0a; overflow:hidden;
+               color:#cdd2dc; font-family: ui-monospace, "SF Mono", Menlo, monospace; cursor:none; }
+  canvas { display:block; }
+  .id { position:fixed; left:14px; bottom:12px; opacity:0.55; font-size: 11px; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="id">el2</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// el2 — surprise fork of uv7 (lion bloom)
+// The lion blooms from amber rails as before, but every ~14 seconds the mane
+// "shakes" — particles in the outer mane ring scatter outward in a brief
+// confetti burst, each taking a slightly different warm tone, tumbling with
+// a leaf-flutter, then drifting gently back to reform the lion. The surprise
+// is a single beat: majestic stillness → playful scatter → quiet return.
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0a0a0a, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0, 18);
+camera.lookAt(0, 0, 0);
+
+const RAIL_COUNT = 110;
+const PARTICLES_PER_RAIL = 150;
+const TOTAL = RAIL_COUNT * PARTICLES_PER_RAIL;
+
+const railBaseX = [];
+for (let i = 0; i < RAIL_COUNT; i++) {
+  railBaseX.push(-10 + (i / (RAIL_COUNT - 1)) * 20);
+}
+
+function lionField(rx, ry) {
+  const cx = rx;
+  const cy = ry - 0.3;
+  const ang = Math.atan2(cy, cx);
+
+  const maneR = Math.sqrt((cx / 8.4) ** 2 + (cy / 7.6) ** 2);
+  const tuft  = 0.86 + 0.075 * Math.sin(ang * 9.0) + 0.04 * Math.sin(ang * 21.0 + 1.3);
+  const maneOuter = Math.exp(-((maneR - tuft) ** 2) / 0.010) * 3.4;
+  const maneInner = Math.exp(-((maneR - 0.58) ** 2) / 0.020) * 1.8;
+
+  const faceR  = Math.sqrt((cx / 4.0) ** 2 + ((cy - 0.2) / 4.4) ** 2);
+  const faceRim = Math.exp(-((faceR - 0.86) ** 2) / 0.013) * 2.8;
+
+  const lEar = Math.sqrt(((cx + 2.9) / 1.05) ** 2 + ((cy - 4.4) / 1.15) ** 2);
+  const rEar = Math.sqrt(((cx - 2.9) / 1.05) ** 2 + ((cy - 4.4) / 1.15) ** 2);
+  const ears = (Math.exp(-((lEar - 0.65) ** 2) / 0.02) +
+                Math.exp(-((rEar - 0.65) ** 2) / 0.02)) * 2.6;
+
+  const leD = Math.sqrt(((cx + 1.95) / 1.15) ** 2 + ((cy - 2.2) / 0.6) ** 2);
+  const reD = Math.sqrt(((cx - 1.95) / 1.15) ** 2 + ((cy - 2.2) / 0.6) ** 2);
+  const eyes = (Math.exp(-((leD - 0.5) ** 2) / 0.012) +
+                Math.exp(-((reD - 0.5) ** 2) / 0.012)) * 4.2;
+
+  let nose = 0;
+  const ny = cy + 0.4;
+  if (ny < 0.5 && ny > -1.1) {
+    const tt = (0.5 - ny) / 1.6;
+    const halfW = 0.95 * (1 - tt) + 0.12;
+    nose = Math.exp(-((Math.abs(cx) - halfW) ** 2) / 0.02) * 2.6;
+  }
+
+  const lpD = Math.sqrt(((cx + 1.25) / 1.25) ** 2 + ((cy + 2.5) / 1.0) ** 2);
+  const rpD = Math.sqrt(((cx - 1.25) / 1.25) ** 2 + ((cy + 2.5) / 1.0) ** 2);
+  const pads = (Math.exp(-((lpD - 0.7) ** 2) / 0.02) +
+                Math.exp(-((rpD - 0.7) ** 2) / 0.02)) * 2.2;
+
+  const phil = Math.exp(-(cx ** 2) / 0.05) * Math.exp(-((cy + 1.9) ** 2) / 0.5) * 2.0;
+
+  return (maneOuter + maneInner + faceRim + ears + eyes + nose + pads + phil) * 1.4;
+}
+
+// Mane-region test: is this particle in the outer mane halo?
+function isManeRegion(rx, ry) {
+  const cx = rx;
+  const cy = ry - 0.3;
+  const maneR = Math.sqrt((cx / 8.4) ** 2 + (cy / 7.6) ** 2);
+  return maneR > 0.55 && maneR < 1.15;
+}
+
+const particles = [];
+// Confetti palette: gold, copper, rust, cream, warm ash
+const confettiColors = [
+  [0.80, 0.65, 0.20],  // gold
+  [0.72, 0.45, 0.22],  // copper
+  [0.65, 0.30, 0.18],  // rust
+  [0.88, 0.82, 0.70],  // cream
+  [0.55, 0.50, 0.45],  // warm ash
+  [0.78, 0.55, 0.15],  // amber deep
+];
+
+for (let r = 0; r < RAIL_COUNT; r++) {
+  for (let p = 0; p < PARTICLES_PER_RAIL; p++) {
+    const y0 = -8 + (p / (PARTICLES_PER_RAIL - 1)) * 16;
+    const isMane = isManeRegion(railBaseX[r], y0);
+    const cIdx = Math.floor(Math.random() * confettiColors.length);
+    particles.push({
+      rail: r,
+      pIdx: p,
+      y: y0,
+      vy: 0.25 + Math.random() * 0.45,
+      phase: Math.random() * Math.PI * 2,
+      isMane: isMane,
+      // confetti scatter state per particle
+      scatterVx: 0, scatterVy: 0,
+      scatterX: 0, scatterY: 0,
+      scatterPhase: Math.random() * Math.PI * 2,
+      confettiColor: confettiColors[cIdx],
+      tumbleSpeed: 1.5 + Math.random() * 2.5,
+    });
+  }
+}
+
+const railBloom = new Float32Array(RAIL_COUNT).fill(0);
+const railBloomVel = new Float32Array(RAIL_COUNT).fill(0);
+
+// ── Confetti surprise state ─────────────────────────────────────────────
+// States: 'bloom' (building up), 'shake' (confetti burst), 'return' (drifting back)
+let surpriseState = 'bloom';
+let surpriseTimer = 0;
+const BLOOM_DURATION = 5.0;   // seconds of lion forming
+const SHAKE_DURATION = 2.2;   // seconds of confetti scatter
+const RETURN_DURATION = 4.0;  // seconds of gentle return
+const CYCLE_TOTAL = BLOOM_DURATION + SHAKE_DURATION + RETURN_DURATION + 3.0; // +3s rest
+let shakeTriggered = false;
+
+const segmentGeom = new THREE.BufferGeometry();
+const segY = 0.34;
+segmentGeom.setAttribute('position', new THREE.Float32BufferAttribute([
+  0, -segY, 0,
+  0,  segY, 0
+], 3));
+
+const instancedGeom = new THREE.InstancedBufferGeometry();
+instancedGeom.index = segmentGeom.index;
+instancedGeom.attributes.position = segmentGeom.attributes.position;
+
+const offsets = new Float32Array(TOTAL * 3);
+const opacities = new Float32Array(TOTAL);
+const bloomFactors = new Float32Array(TOTAL);
+const skinFactors = new Float32Array(TOTAL);
+const colorTints = new Float32Array(TOTAL * 3); // per-particle color override
+instancedGeom.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
+instancedGeom.setAttribute('opacity', new THREE.InstancedBufferAttribute(opacities, 1));
+instancedGeom.setAttribute('bloom', new THREE.InstancedBufferAttribute(bloomFactors, 1));
+instancedGeom.setAttribute('skin', new THREE.InstancedBufferAttribute(skinFactors, 1));
+instancedGeom.setAttribute('colorTint', new THREE.InstancedBufferAttribute(colorTints, 3));
+instancedGeom.instanceCount = TOTAL;
+
+const lineMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uAmberColor: { value: new THREE.Color(0.789, 0.522, 0.039) },
+    uSkinColor:  { value: new THREE.Color(0.910, 0.753, 0.565) },
+    uConfettiMix: { value: 0 },
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute vec3 offset;
+    attribute float opacity;
+    attribute float bloom;
+    attribute float skin;
+    attribute vec3 colorTint;
+    varying float vOpacity;
+    varying float vBloom;
+    varying float vSkin;
+    varying vec3 vTint;
+    uniform float uTime;
+    void main(){
+      vOpacity = opacity;
+      vBloom = bloom;
+      vSkin = skin;
+      vTint = colorTint;
+      vec3 pos = position + offset;
+      float swayAmt = mix(0.035, 0.004, bloom);
+      float sway = sin(uTime * 0.6 + offset.y * 0.3 + offset.x * 0.2) * swayAmt;
+      pos.x += sway;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uAmberColor;
+    uniform vec3 uSkinColor;
+    uniform float uConfettiMix;
+    varying float vOpacity;
+    varying float vBloom;
+    varying float vSkin;
+    varying vec3 vTint;
+    void main(){
+      vec3 baseCol = mix(uAmberColor, uSkinColor, vSkin * vBloom);
+      // When confetti is active, blend toward per-particle tint
+      vec3 col = mix(baseCol, vTint, uConfettiMix * vBloom);
+      gl_FragColor = vec4(col, vOpacity);
+    }
+  `
+});
+
+const lines = new THREE.LineSegments(instancedGeom, lineMat);
+scene.add(lines);
+
+// ── Mouse tracking ──────────────────────────────────────────────────────
+let mouseNDC = new THREE.Vector2(9999, 9999);
+let mouseWorldX = 0, mouseWorldY = 0;
+let mousePresent = false;
+let lastMouseMove = 0;
+
+addEventListener('mousemove', (e) => {
+  const x = (e.clientX / innerWidth) * 2 - 1;
+  const y = -(e.clientY / innerHeight) * 2 + 1;
+  mouseNDC.set(x, y);
+  mousePresent = true;
+  lastMouseMove = performance.now();
+});
+
+const cursorGeom = new THREE.BufferGeometry();
+cursorGeom.setAttribute('position', new THREE.Float32BufferAttribute([
+  -0.2, 0, 0,  0.2, 0, 0,
+   0, -0.2, 0,  0, 0.2, 0
+], 3));
+const cursorMat = new THREE.LineBasicMaterial({ color: 0xff9922, transparent: true, opacity: 0.35 });
+const cursor = new THREE.LineSegments(cursorGeom, cursorMat);
+scene.add(cursor);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Main loop ───────────────────────────────────────────────────────────
+let lastT = performance.now();
+const startTime = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  const time = now / 1000;
+  lineMat.uniforms.uTime.value = time;
+
+  if (now - lastMouseMove > 3000) mousePresent = false;
+
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(mouseNDC, camera);
+  const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  const isect = new THREE.Vector3();
+  if (raycaster.ray.intersectPlane(plane, isect)) {
+    mouseWorldX = isect.x;
+    mouseWorldY = isect.y;
+  }
+  cursor.position.set(mouseWorldX, mouseWorldY, 0);
+  cursor.visible = mousePresent;
+
+  // ── Surprise cycle ────────────────────────────────────────────────────
+  surpriseTimer += dt;
+  const cycleT = surpriseTimer % CYCLE_TOTAL;
+
+  let confettiIntensity = 0; // 0–1 how scattered the mane is
+  let autoBloom = 0;
+
+  if (cycleT < BLOOM_DURATION) {
+    // Building up — auto-bloom rises
+    surpriseState = 'bloom';
+    const t = cycleT / BLOOM_DURATION;
+    autoBloom = Math.sin(t * Math.PI * 0.5) ** 2; // 0 → 1
+    shakeTriggered = false;
+  } else if (cycleT < BLOOM_DURATION + SHAKE_DURATION) {
+    // Confetti burst!
+    surpriseState = 'shake';
+    autoBloom = 1.0;
+    const shakeT = (cycleT - BLOOM_DURATION) / SHAKE_DURATION;
+    // Quick onset, sustain, then start to fade
+    confettiIntensity = shakeT < 0.15 ? shakeT / 0.15 : (shakeT < 0.7 ? 1.0 : 1.0 - (shakeT - 0.7) / 0.3);
+
+    // Trigger scatter velocities once at shake start
+    if (!shakeTriggered) {
+      shakeTriggered = true;
+      for (let i = 0; i < TOTAL; i++) {
+        const p = particles[i];
+        if (p.isMane || isManeRegion(railBaseX[p.rail], p.y)) {
+          const rx = railBaseX[p.rail];
+          const ang = Math.atan2(p.y - 0.3, rx) + (Math.random() - 0.5) * 0.8;
+          const speed = 1.8 + Math.random() * 3.5;
+          p.scatterVx = Math.cos(ang) * speed;
+          p.scatterVy = Math.sin(ang) * speed + Math.random() * 1.5;
+          p.scatterX = 0;
+          p.scatterY = 0;
+          // Reassign a random confetti color for this burst
+          const cIdx = Math.floor(Math.random() * confettiColors.length);
+          p.confettiColor = confettiColors[cIdx];
+        }
+      }
+    }
+  } else if (cycleT < BLOOM_DURATION + SHAKE_DURATION + RETURN_DURATION) {
+    // Gentle return
+    surpriseState = 'return';
+    const retT = (cycleT - BLOOM_DURATION - SHAKE_DURATION) / RETURN_DURATION;
+    autoBloom = 1.0 - retT * 0.6; // bloom gently fades
+    confettiIntensity = 0;
+  } else {
+    // Rest — rails only
+    surpriseState = 'rest';
+    autoBloom = Math.max(0, 0.4 - (cycleT - BLOOM_DURATION - SHAKE_DURATION - RETURN_DURATION) * 0.2);
+    confettiIntensity = 0;
+  }
+
+  lineMat.uniforms.uConfettiMix.value = confettiIntensity;
+
+  // Update scatter positions
+  if (surpriseState === 'shake') {
+    for (let i = 0; i < TOTAL; i++) {
+      const p = particles[i];
+      if (p.scatterVx !== 0 || p.scatterVy !== 0) {
+        // Gravity-like settling and flutter
+        p.scatterVy -= 1.2 * dt; // gentle gravity
+        p.scatterX += p.scatterVx * dt;
+        p.scatterY += p.scatterVy * dt;
+        // Drag
+        p.scatterVx *= 0.985;
+        p.scatterVy *= 0.985;
+      }
+    }
+  } else if (surpriseState === 'return') {
+    const retT = (cycleT - BLOOM_DURATION - SHAKE_DURATION) / RETURN_DURATION;
+    const springBack = retT * retT; // ease-in return
+    for (let i = 0; i < TOTAL; i++) {
+      const p = particles[i];
+      p.scatterX *= (1.0 - springBack * 0.08);
+      p.scatterY *= (1.0 - springBack * 0.08);
+      if (Math.abs(p.scatterX) < 0.01 && Math.abs(p.scatterY) < 0.01) {
+        p.scatterX = 0; p.scatterY = 0;
+        p.scatterVx = 0; p.scatterVy = 0;
+      }
+    }
+  } else if (surpriseState === 'rest' || surpriseState === 'bloom') {
+    for (let i = 0; i < TOTAL; i++) {
+      const p = particles[i];
+      p.scatterX *= 0.92;
+      p.scatterY *= 0.92;
+      if (Math.abs(p.scatterX) < 0.005) { p.scatterX = 0; p.scatterVx = 0; }
+      if (Math.abs(p.scatterY) < 0.005) { p.scatterY = 0; p.scatterVy = 0; }
+    }
+  }
+
+  // Update bloom per rail
+  for (let r = 0; r < RAIL_COUNT; r++) {
+    const baseX = railBaseX[r];
+    const dx = mouseWorldX - baseX;
+    const distX = Math.abs(dx);
+    const sigma = 3.5;
+    let mouseBloom = mousePresent
+      ? Math.exp(-(distX * distX) / (2 * sigma * sigma))
+      : 0;
+
+    const bloomTarget = Math.max(mouseBloom, autoBloom);
+    const k = 5.0;
+    const damping = 0.85;
+    const force = (bloomTarget - railBloom[r]) * k;
+    railBloomVel[r] += force * dt;
+    railBloomVel[r] *= damping;
+    railBloom[r] = Math.max(0, Math.min(1, railBloom[r] + railBloomVel[r] * dt));
+
+    if (!mousePresent && autoBloom < 0.01) {
+      railBloom[r] *= 0.97;
+      railBloomVel[r] *= 0.9;
+    }
+  }
+
+  // Update particles
+  for (let i = 0; i < TOTAL; i++) {
+    const p = particles[i];
+    p.y += p.vy * dt;
+    if (p.y > 8) p.y -= 16;
+    if (p.y < -8) p.y += 16;
+
+    const bloom = railBloom[p.rail];
+    const railX = railBaseX[p.rail];
+    const faceD = lionField(railX, p.y);
+
+    const sign = railX < 0 ? -1 : (railX > 0 ? 1 : 0);
+    let worldX = railX + faceD * bloom * sign;
+    let worldY = p.y;
+
+    // Apply confetti scatter offset
+    const scatterAmt = confettiIntensity;
+    if (scatterAmt > 0 && (p.scatterX !== 0 || p.scatterY !== 0)) {
+      // Tumble flutter during scatter
+      const flutter = Math.sin(time * p.tumbleSpeed + p.scatterPhase) * 0.3 * scatterAmt;
+      worldX += p.scatterX * scatterAmt + flutter;
+      worldY += p.scatterY * scatterAmt;
+    } else if (surpriseState === 'return' && (p.scatterX !== 0 || p.scatterY !== 0)) {
+      worldX += p.scatterX;
+      worldY += p.scatterY;
+    }
+
+    const skinFactor = Math.min(1.0, Math.max(0, (faceD - 2.0) / 2.0));
+
+    const edgeFade = 1.0 - Math.abs(p.y) / 8.5;
+    const featureGlow = Math.min(1.0, (faceD * bloom) / 3.0);
+    let opacity = Math.max(0.5, edgeFade) * (1.0 - 0.35 * bloom)
+                + featureGlow * 1.4;
+    const dyMouse = Math.abs(p.y - mouseWorldY);
+    if (mousePresent && dyMouse < 3.0) {
+      opacity += (1.0 - dyMouse / 3.0) * 0.35;
+    }
+    opacity = Math.min(1.0, opacity);
+
+    // During confetti, scattered mane particles get brighter
+    if (scatterAmt > 0 && (p.scatterX !== 0 || p.scatterY !== 0)) {
+      opacity = Math.min(1.0, opacity + scatterAmt * 0.4);
+    }
+
+    const pulse = 0.88 + 0.12 * Math.sin(time + p.phase);
+    opacity *= pulse;
+
+    offsets[i * 3]     = worldX;
+    offsets[i * 3 + 1] = worldY;
+    offsets[i * 3 + 2] = 0;
+    opacities[i] = opacity;
+    bloomFactors[i] = bloom;
+    skinFactors[i] = skinFactor;
+
+    // Per-particle confetti tint
+    colorTints[i * 3]     = p.confettiColor[0];
+    colorTints[i * 3 + 1] = p.confettiColor[1];
+    colorTints[i * 3 + 2] = p.confettiColor[2];
+  }
+
+  instancedGeom.attributes.offset.needsUpdate = true;
+  instancedGeom.attributes.opacity.needsUpdate = true;
+  instancedGeom.attributes.bloom.needsUpdate = true;
+  instancedGeom.attributes.skin.needsUpdate = true;
+  instancedGeom.attributes.colorTint.needsUpdate = true;
+
+  // Slow camera drift — single pass, no Y-axis rotation
+  const ang = now * 0.00008;
+  camera.position.x = Math.sin(ang) * 1.5;
+  camera.position.y = Math.sin(ang * 0.7) * 1.0;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+</body>
+</html>
