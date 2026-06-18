@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: breathe, intensity: calm -->
+<title>sfi · aizawa advected</title>
+<style>
+html, body { margin:0; padding:0; height:100%; background:#080c12; overflow:hidden; }
+canvas { display:block; }
+.id { position:fixed; left:14px; bottom:12px; font-family:ui-monospace,"SF Mono",Menlo,monospace;
+      color:#cdd2dc; opacity:0.55; font-size:11px; letter-spacing:0.06em; }
+</style>
+</head>
+<body>
+<div class="id">sfi</div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ─── intent ───
+   The Aizawa attractor's vortex-disk-and-spike topology becomes a vessel
+   for stable-fluids advection: point vortices slowly orbit the structure,
+   pulling ribbons of particles outward like ink in still water, while
+   springs preserve the attractor silhouette so the viewer always reads
+   the Aizawa double-loop ancestry. Evokes Memo Akten's "Learning to See"
+   — familiar structure made liquid, half-remembered.
+   Named technique: stable-fluids (Stam 1999) point-vortex advection.
+   Algo pattern: strange attractor + flow field hybrid.
+   ─────────── */
+
+const W = 320, H = 320, N = W * H;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x080c12, 1);
+document.body.appendChild(renderer.domElement);
+
+const rtOpts = {
+  type: THREE.HalfFloatType, format: THREE.RGBAFormat,
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  depthBuffer: false
+};
+
+let homeA = new THREE.WebGLRenderTarget(W, H, rtOpts);
+let homeB = new THREE.WebGLRenderTarget(W, H, rtOpts);
+let dispA = new THREE.WebGLRenderTarget(W, H, rtOpts);
+let dispB = new THREE.WebGLRenderTarget(W, H, rtOpts);
+
+const init = new Float32Array(N * 4);
+for (let i = 0; i < N; i++) {
+  init[i*4]   = (Math.random()*2-1) * 0.5;
+  init[i*4+1] = (Math.random()*2-1) * 0.5;
+  init[i*4+2] = (Math.random()*2-1) * 0.5;
+  init[i*4+3] = Math.random();
+}
+const initTex = new THREE.DataTexture(init, W, H, THREE.RGBAFormat, THREE.FloatType);
+initTex.needsUpdate = true;
+
+const camOrtho = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const quad = () => new THREE.PlaneGeometry(2, 2);
+
+const blitMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: initTex } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `uniform sampler2D tex; varying vec2 vUv;
+    void main(){ gl_FragColor=texture2D(tex,vUv); }`
+});
+const blitScene = new THREE.Scene();
+blitScene.add(new THREE.Mesh(quad(), blitMat));
+
+renderer.setRenderTarget(homeA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(dispA); renderer.render(blitScene, camOrtho);
+renderer.setRenderTarget(null);
+
+/* ── Aizawa attractor integration (home positions) ── */
+const aizawaMat = new THREE.ShaderMaterial({
+  uniforms: {
+    prev: { value: null },
+    uDt: { value: 0.012 },
+    uA: { value: 0.95 }, uB: { value: 0.70 }, uC: { value: 0.60 },
+    uD: { value: 3.50 }, uE: { value: 0.25 }, uF: { value: 0.10 }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prev;
+    uniform float uDt, uA, uB, uC, uD, uE, uF;
+    varying vec2 vUv;
+    void main(){
+      vec4 s = texture2D(prev, vUv);
+      vec3 p = s.xyz; float age = s.w;
+      vec3 dp = vec3(
+        (p.z - uB)*p.x - uD*p.y,
+        uD*p.x + (p.z - uB)*p.y,
+        uC + uA*p.z - p.z*p.z*p.z/3.0
+          - (p.x*p.x + p.y*p.y)*(1.0 + uE*p.z)
+          + uF*p.z*p.x*p.x*p.x
+      );
+      p += dp * uDt;
+      age = mod(age + uDt*0.06, 1.0);
+      gl_FragColor = vec4(p, age);
+    }`
+});
+const aizawaScene = new THREE.Scene();
+aizawaScene.add(new THREE.Mesh(quad(), aizawaMat));
+
+/* ── Stable-fluids advection via point vortices + spring to home ── */
+const advectMat = new THREE.ShaderMaterial({
+  uniforms: {
+    prevDisp: { value: null },
+    homeTex:  { value: null },
+    uTime:    { value: 0 },
+    uDt:      { value: 0.016 }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`,
+  fragmentShader: `
+    uniform sampler2D prevDisp, homeTex;
+    uniform float uTime, uDt;
+    varying vec2 vUv;
+
+    /* Point-vortex velocity: Γ × cross(axis, r) / (|r|² + ε²)
+       — Stam's stable fluids reduced to its Biot-Savart skeleton:
+       a handful of vortex filaments induce a divergence-free velocity
+       field that advects particles along curl lines. */
+    vec3 vortexVel(vec3 pos, vec3 center, vec3 axis, float gamma, float eps){
+      vec3 r = pos - center;
+      float r2 = dot(r, r) + eps*eps;
+      return gamma * cross(axis, r) / r2;
+    }
+
+    void main(){
+      vec4 sd = texture2D(prevDisp, vUv);
+      vec4 sh = texture2D(homeTex, vUv);
+      vec3 pos  = sd.xyz;
+      vec3 home = sh.xyz;
+      float fAge = sd.w;
+
+      float t = uTime * 0.12;
+
+      /* 5 vortex filaments orbiting the Aizawa basin —
+         placed at different radii and heights to create
+         layered rotational currents through the disk and spike */
+      vec3 v1 = vec3(sin(t)*1.4, 0.6, cos(t)*1.4);
+      vec3 v2 = vec3(-sin(t*0.73)*1.1, -0.2, -cos(t*0.73)*1.1);
+      vec3 v3 = vec3(cos(t*0.51)*0.9, sin(t*0.31)*1.6, 0.3);
+      vec3 v4 = vec3(0.2, cos(t*0.43)*0.7, sin(t*0.62)*1.2);
+      vec3 v5 = vec3(-cos(t*0.37)*0.7, 1.2, -sin(t*0.55)*0.8);
+
+      vec3 vel = vec3(0.0);
+      vel += vortexVel(pos, v1, normalize(vec3(0.2, 1.0, 0.1)),  0.30, 0.55);
+      vel += vortexVel(pos, v2, normalize(vec3(-0.1, 0.8, 0.3)),-0.24, 0.55);
+      vel += vortexVel(pos, v3, normalize(vec3(0.0, 0.5, 1.0)),  0.20, 0.6);
+      vel += vortexVel(pos, v4, normalize(vec3(1.0, 0.2,-0.3)),-0.16, 0.6);
+      vel += vortexVel(pos, v5, normalize(vec3(-0.3, 0.9, 0.4)), 0.18, 0.65);
+
+      // advect
+      pos += vel * uDt * 0.5;
+
+      // spring back to Aizawa home — preserves topology
+      vec3 toHome = home - pos;
+      float dist = length(toHome);
+      float springK = 1.0 + 0.6 * smoothstep(0.0, 1.2, dist);
+      pos += toHome * springK * uDt;
+
+      fAge = mod(fAge + uDt * 0.035, 1.0);
+      gl_FragColor = vec4(pos, fAge);
+    }`
+});
+const advectScene = new THREE.Scene();
+advectScene.add(new THREE.Mesh(quad(), advectMat));
+
+/* ── render ── */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(36, innerWidth/innerHeight, 0.05, 60);
+camera.position.set(2.2, 1.8, 3.8);
+camera.lookAt(0, 0.5, 0.5);
+
+// atmosphere: dark gradient sphere
+const bgMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide,
+  vertexShader: `varying vec3 vP; void main(){ vP=position;
+    gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  fragmentShader: `
+    varying vec3 vP;
+    void main(){
+      float y = normalize(vP).y;
+      vec3 lo = vec3(0.032, 0.038, 0.055);
+      vec3 hi = vec3(0.055, 0.050, 0.065);
+      gl_FragColor = vec4(mix(lo, hi, smoothstep(-1.0,1.0,y)), 1.0);
+    }`
+});
+scene.add(new THREE.Mesh(new THREE.SphereGeometry(22,24,24), bgMat));
+
+// dust motes — sparse ambient particles for atmosphere
+const dustN = 600;
+const dustGeo = new THREE.BufferGeometry();
+const dustPos = new Float32Array(dustN * 3);
+const dustAlpha = new Float32Array(dustN);
+for (let i = 0; i < dustN; i++) {
+  dustPos[i*3]   = (Math.random()-0.5) * 8;
+  dustPos[i*3+1] = (Math.random()-0.5) * 6;
+  dustPos[i*3+2] = (Math.random()-0.5) * 8;
+  dustAlpha[i]   = Math.random();
+}
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeo.setAttribute('alpha', new THREE.BufferAttribute(dustAlpha, 1));
+const dustMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 }, uPx: { value: renderer.getPixelRatio() } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float alpha;
+    uniform float uTime, uPx;
+    varying float vA;
+    void main(){
+      vec3 p = position;
+      p.y += sin(uTime*0.08 + p.x*0.5)*0.15;
+      vA = alpha;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = uPx * (2.0 / max(-mv.z, 1.0));
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying float vA;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      if(dot(d,d)>0.25) discard;
+      float a = 0.06 * vA;
+      gl_FragColor = vec4(vec3(0.55, 0.52, 0.50), a);
+    }`
+});
+scene.add(new THREE.Points(dustGeo, dustMat));
+
+// main particle cloud
+const pGeo = new THREE.BufferGeometry();
+const idxArr = new Float32Array(N * 2);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+  const i = y * W + x;
+  idxArr[i*2]   = (x + 0.5) / W;
+  idxArr[i*2+1] = (y + 0.5) / H;
+}
+pGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N*3), 3));
+pGeo.setAttribute('uvIdx', new THREE.BufferAttribute(idxArr, 2));
+
+const pMat = new THREE.ShaderMaterial({
+  uniforms: {
+    dispTex: { value: null },
+    homeTex: { value: null },
+    uPixel:  { value: renderer.getPixelRatio() }
+  },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform sampler2D dispTex, homeTex;
+    uniform float uPixel;
+    attribute vec2 uvIdx;
+    varying float vAge;
+    varying float vDisp;
+    void main(){
+      vec4 sd = texture2D(dispTex, uvIdx);
+      vec4 sh = texture2D(homeTex, uvIdx);
+      vec3 p = sd.xyz;
+      vAge  = sd.w;
+      vDisp = clamp(length(p - sh.xyz) * 2.5, 0.0, 1.0);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      float dist = max(-mv.z, 0.5);
+      gl_PointSize = (0.9 + vDisp * 1.0) * uPixel * (7.0 / dist);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying float vAge;
+    varying float vDisp;
+    void main(){
+      vec2 d = gl_PointCoord - 0.5;
+      float r = dot(d, d);
+      if(r > 0.25) discard;
+      float a = exp(-r * 16.0);
+
+      // smoke → rust → bone → ash   (earth-tone, restrained)
+      vec3 smoke = vec3(0.40, 0.42, 0.46);
+      vec3 rust  = vec3(0.52, 0.27, 0.17);
+      vec3 bone  = vec3(0.76, 0.72, 0.63);
+      vec3 ash   = vec3(0.34, 0.32, 0.31);
+
+      float k = mod(vAge + vDisp * 0.25, 1.0);
+      vec3 col = mix(smoke, rust, smoothstep(0.0, 0.3, k));
+      col = mix(col, bone, smoothstep(0.3, 0.65, k));
+      col = mix(col, ash,  smoothstep(0.65, 1.0, k));
+
+      // displaced particles warm slightly — ink bleeding outward
+      col = mix(col, rust * 1.2, vDisp * 0.25);
+
+      float alpha = a * (0.30 + vDisp * 0.45);
+      gl_FragColor = vec4(col * alpha, alpha);
+    }`
+});
+const pts = new THREE.Points(pGeo, pMat);
+scene.add(pts);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// pointer interaction: nudge Aizawa params (inherited from parent)
+const target = { a: 0.95, c: 0.60 };
+addEventListener('pointermove', (e) => {
+  const nx = (e.clientX / innerWidth) - 0.5;
+  const ny = (e.clientY / innerHeight) - 0.5;
+  target.a = 0.95 + nx * 0.06;
+  target.c = 0.60 + ny * 0.08;
+});
+
+const t0 = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const elapsed = (now - t0) * 0.001;
+
+  // nudge Aizawa params
+  aizawaMat.uniforms.uA.value += (target.a - aizawaMat.uniforms.uA.value) * 0.03;
+  aizawaMat.uniforms.uC.value += (target.c - aizawaMat.uniforms.uC.value) * 0.03;
+
+  // integrate Aizawa home positions (4 substeps)
+  for (let i = 0; i < 4; i++) {
+    aizawaMat.uniforms.prev.value = homeA.texture;
+    renderer.setRenderTarget(homeB);
+    renderer.render(aizawaScene, camOrtho);
+    [homeA, homeB] = [homeB, homeA];
+  }
+
+  // advect displaced positions through vortex field
+  advectMat.uniforms.prevDisp.value = dispA.texture;
+  advectMat.uniforms.homeTex.value  = homeA.texture;
+  advectMat.uniforms.uTime.value    = elapsed;
+  renderer.setRenderTarget(dispB);
+  renderer.render(advectScene, camOrtho);
+  [dispA, dispB] = [dispB, dispA];
+
+  renderer.setRenderTarget(null);
+
+  pMat.uniforms.dispTex.value = dispA.texture;
+  pMat.uniforms.homeTex.value = homeA.texture;
+  dustMat.uniforms.uTime.value = elapsed;
+
+  // single slow lateral drift — no Y-axis rotation
+  const drift = elapsed * 0.018;
+  camera.position.x = 2.2 + Math.sin(drift) * 0.35;
+  camera.position.y = 1.8 + Math.sin(drift * 0.6) * 0.12;
+  camera.position.z = 3.8 + Math.cos(drift * 0.4) * 0.15;
+  camera.lookAt(0, 0.5, 0.5);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
