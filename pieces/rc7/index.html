@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MOTION: pulse, intensity: gentle -->
+<!-- Chain-morph on p1q calyx: "tambour"
+     The calyx becomes a flower embroidered on a taut drum-skin frame.
+     Particles along petal veins form visible chain-stitch lines (tambour
+     embroidery). Every ~28s the drum skin tautens — cup flattens, stitch
+     lines glow copper — then relaxes back to its cupped resting state.
+     Named technique: tambour embroidery chain-stitch + differential brightness
+     Evokes: El Anatsui's draped metal tapestries — visible seams in soft form -->
+<title>rc7 · tambour</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#1a1714}
+  canvas{display:block}
+  .id{position:fixed;left:14px;bottom:12px;opacity:0.55;font-size:11px;
+      letter-spacing:0.06em;color:#cdd2dc;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+</style>
+</head>
+<body>
+<div class="id">rc7</div>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {EffectComposer} from 'three/addons/postprocessing/EffectComposer.js';
+import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
+import {UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38,innerWidth/innerHeight,0.1,200);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+/* ── background: linen-toned gallery wall ── */
+const bgScene = new THREE.Scene();
+const bgCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+bgScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2), new THREE.ShaderMaterial({
+  depthWrite:false,
+  vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0,1);}`,
+  fragmentShader:`varying vec2 vUv;void main(){
+    vec2 uv=vUv;
+    vec3 top=vec3(.20,.17,.15),mid=vec3(.17,.14,.12),bot=vec3(.12,.10,.09);
+    vec3 col=mix(bot,mid,smoothstep(0.,.5,uv.y));
+    col=mix(col,top,smoothstep(.5,1.,uv.y));
+    col*=1.-.32*pow(length((uv-.5)*vec2(1.,.8)),2.);
+    /* linen weave texture */
+    float wx=sin(uv.x*820.)*.5+.5, wy=sin(uv.y*820.)*.5+.5;
+    float weave=wx*wy*.015;
+    col+=weave*.4;
+    col+=(fract(sin(dot(uv*512.,vec2(12.9898,78.233)))*43758.5453)-.5)*.011;
+    gl_FragColor=vec4(col,1);}`
+})));
+
+/* ── particle system ── */
+const N = 80000;
+let geom, points;
+const uniforms = {
+  uTime:{value:0}, uPhase:{value:0}, uPixel:{value:renderer.getPixelRatio()},
+  uRowFreq:{value:1.2}, uColFreq:{value:1.0}, uWaveAmp:{value:0.5},
+  uTwist:{value:0}, uMorph:{value:0}, uPetals:{value:5}, uCupDepth:{value:4},
+  uLight1:{value:new THREE.Vector3(1,.5,.3)},
+  uLight2:{value:new THREE.Vector3(-.5,.3,1)},
+  uTension:{value:0}, uBloomPass:{value:0}
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms, transparent:true, depthWrite:false,
+  vertexShader:`
+    uniform float uTime,uPixel,uPhase,uRowFreq,uColFreq,uWaveAmp;
+    uniform float uTwist,uMorph,uPetals,uCupDepth,uTension;
+    attribute vec2 gridPos; attribute float seed;
+    varying float vDensity,vHeight,vNR,vStitch; varying vec3 vPos,vNorm;
+    void main(){
+      float t=uTime, m=uMorph; vec2 gp=gridPos;
+      float r0=length(gp), maxR=12., nr0=clamp(r0/maxR,0.,1.);
+      float th0=atan(gp.y,gp.x);
+      /* Lorenz-inspired chaotic surface flow */
+      float flowA=sin(th0*3.+t*.45)*.28+cos(r0*.5-t*.32)*.18;
+      vec2 drift=vec2(
+        sin((th0+flowA*seed)*10.+t*.55)*nr0*.35*m,
+        cos((th0+flowA*seed)*7.+t*.38)*nr0*.35*m);
+      vec2 fgp=gp+drift;
+      float rowW=sin(fgp.y*uRowFreq+t*1.2+uPhase)*uWaveAmp;
+      float colW=sin(fgp.x*uColFreq+t*.7)*uWaveAmp;
+      float tw=uTwist*length(fgp)*.04;
+      float ct=cos(tw),st=sin(tw);
+      vec2 tw2=vec2(fgp.x*ct-fgp.y*st, fgp.x*st+fgp.y*ct);
+      float r2=length(fgp), nr2=clamp(r2/maxR,0.,1.);
+      float th2=atan(fgp.y,fgp.x);
+      float petal=.5+.5*cos(th2*uPetals);
+
+      /* tambour: tension flattens the cup like a taut drum-skin */
+      float tensionFlatten=1.-uTension*.45;
+      float cup=uCupDepth*nr2*nr2*(.6+.4*petal)*tensionFlatten*m;
+      /* slight rim pull inward when taut (opposite of fanfare) */
+      float rimPull=1.-uTension*.08*smoothstep(.5,.9,nr2);
+      float flare=(1.+.15*nr2*nr2*m)*rimPull;
+
+      vec3 flatP=vec3(tw2.x+rowW, tw2.y+colW, 0.);
+      float cx=tw2.x*flare+rowW*(1.-.5*m);
+      float cy=tw2.y*flare+colW*(1.-.5*m);
+      float cz=cup;
+      vec3 p=mix(flatP,vec3(cx,cy,cz),m);
+
+      /* chain-stitch detection: particles near petal-vein parametric curves
+         light up as visible embroidery lines */
+      /* radial veins along petal centers */
+      float veinRadial=abs(sin(th2*uPetals*.5));
+      float onRadialVein=smoothstep(.08,.0,veinRadial)*nr2;
+      /* concentric ring stitches */
+      float ringDist=fract(r2*1.1+.2);
+      float onRing=smoothstep(.06,.0,abs(ringDist-.5))*step(.2,nr2);
+      /* spiral chain stitch — the tambour chain curves */
+      float spiral=fract(th2/(6.2832)+r2*.18-t*.02);
+      float onSpiral=smoothstep(.04,.0,abs(spiral-.5))*smoothstep(.15,.35,nr2)*smoothstep(1.,.7,nr2);
+
+      float stitch=max(max(onRadialVein,onRing*.7),onSpiral*.85);
+      stitch=clamp(stitch,0.,1.);
+      vStitch=stitch;
+
+      /* approximate surface normal */
+      float dzdr=uCupDepth*2.*nr2/maxR*(.6+.4*petal)*m*tensionFlatten;
+      float dzdt=uCupDepth*nr2*nr2*.4*(-sin(th2*uPetals)*uPetals)*m;
+      float rSafe=r2+.01;
+      vNorm=normalize(vec3(
+        -dzdr*cos(th2)+dzdt*sin(th2)/rSafe,
+        -dzdr*sin(th2)-dzdt*cos(th2)/rSafe, 1.));
+      float interf=sin(fgp.y*uRowFreq*2.+t*1.2)*sin(fgp.x*uColFreq*2.+t*.7);
+      float vein=sin(th2*uPetals*3.+r2*1.5+t*.4);
+      vDensity=mix(interf,interf*.6+vein*.4,m);
+      vHeight=cz; vPos=p; vNR=nr2;
+      /* stitch particles slightly larger */
+      float stitchSize=1.+stitch*.8;
+      vec4 mv=modelViewMatrix*vec4(p,1.);
+      gl_PointSize=uPixel*max(1.8,(3.6+mv.z*.05)*stitchSize);
+      gl_Position=projectionMatrix*mv;
+    }`,
+  fragmentShader:`
+    uniform float uTime,uTension,uBloomPass;
+    uniform vec3 uLight1,uLight2;
+    varying float vDensity,vHeight,vNR,vStitch; varying vec3 vPos,vNorm;
+    void main(){
+      vec2 dc=gl_PointCoord-.5; float rr=dot(dc,dc);
+      if(rr>.25) discard;
+      vec3 n=normalize(vNorm);
+
+      /* bloom pass: stitch lines glow copper during tension */
+      if(uBloomPass>.5){
+        float stitchGlow=vStitch*uTension;
+        if(stitchGlow<.02) discard;
+        vec3 copper=vec3(.68,.42,.22)*stitchGlow*1.2;
+        float a=stitchGlow*(1.-smoothstep(.17,.25,rr));
+        gl_FragColor=vec4(copper,a); return;
+      }
+
+      /* lighting — linen-warm amber + cool shadow */
+      float d1=max(0.,dot(n,normalize(uLight1)));
+      float d2=max(0.,dot(n,normalize(uLight2)));
+      vec3 c1=vec3(.82,.56,.38); /* aged copper thread */
+      vec3 c2=vec3(.42,.44,.62); /* shadow blue */
+      vec3 ambient=vec3(.15,.12,.10);
+      vec3 lit=ambient+c1*d1*.70+c2*d2*.42;
+      float flowGlow=smoothstep(-.3,.6,vDensity)*.30;
+      float phase=sin(uTime*.12)*.5+.5;
+      vec3 trailCol=mix(c1,c2,phase)*flowGlow*.25;
+
+      /* base cloth: warm linen/parchment */
+      vec3 base=vec3(.90,.84,.76);
+      vec3 col=base*lit+trailCol;
+
+      /* chain-stitch coloring: copper/bronze thread on linen */
+      vec3 threadCol=mix(
+        vec3(.58,.38,.22),  /* dark copper thread */
+        vec3(.72,.52,.30),  /* bright copper */
+        vStitch*(.5+.5*sin(vNR*18.+uTime*.3))
+      );
+      col=mix(col, threadCol, vStitch*.55);
+      /* during tension, stitches warm further */
+      col+=vec3(.15,.08,.03)*vStitch*uTension;
+
+      /* rim tint — subtle, no fanfare brass */
+      float rim=smoothstep(.35,1.,vNR);
+      vec3 rimCol=mix(c1,c2,.4)*.35;
+      col+=rim*.18*rimCol;
+
+      float inner=smoothstep(.45,0.,vNR);
+      col*=.74+.26*(1.-inner*.40);
+      col+=smoothstep(0.,4.,vHeight)*vec3(.05,.03,.02);
+
+      /* tension warmth across whole surface */
+      col+=vec3(.08,.04,.01)*uTension*.5;
+
+      float alpha=(.70+flowGlow*.25+vStitch*.15)*(1.-smoothstep(.17,.25,rr));
+      gl_FragColor=vec4(col,alpha);
+    }`
+});
+
+/* ── grid builder ── */
+function buildGrid(rows,cols,seed){
+  const pos=new Float32Array(N*3),gpos=new Float32Array(N*2),sds=new Float32Array(N);
+  let s=seed>>>0;
+  const rng=()=>{s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);
+    t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};
+  const W=24,H=24,cW=W/cols,cH=H/rows;
+  let idx=0;const ppc=Math.floor(N/(rows*cols));
+  for(let i=0;i<rows&&idx<N;i++)for(let j=0;j<cols&&idx<N;j++)
+    for(let k=0;k<ppc&&idx<N;k++){
+      const x=(j+rng()-.5)*cW-W*.5,y=(i+rng()-.5)*cH-H*.5;
+      pos[idx*3]=x;pos[idx*3+1]=y;pos[idx*3+2]=0;
+      gpos[idx*2]=x;gpos[idx*2+1]=y;sds[idx]=rng();idx++;}
+  while(idx<N){const x=(rng()-.5)*W,y=(rng()-.5)*H;
+    pos[idx*3]=x;pos[idx*3+1]=y;pos[idx*3+2]=0;
+    gpos[idx*2]=x;gpos[idx*2+1]=y;sds[idx]=rng();idx++;}
+  return{positions:pos,gridPositions:gpos,seeds:sds};
+}
+
+function regenerate(){
+  const seed=Math.floor(Math.random()*1e9);
+  let s=seed>>>0;
+  const rng=()=>{s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);
+    t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};
+  const rows=80+Math.floor(rng()*60),cols=80+Math.floor(rng()*60);
+  uniforms.uRowFreq.value=.8+rng();uniforms.uColFreq.value=.8+rng();
+  uniforms.uWaveAmp.value=.3+rng()*.5;uniforms.uTwist.value=rng()*4;
+  uniforms.uPhase.value=rng()*6.28;uniforms.uPetals.value=4+Math.floor(rng()*4);
+  uniforms.uCupDepth.value=3+rng()*3;uniforms.uMorph.value=0;
+  const{positions,gridPositions,seeds}=buildGrid(rows,cols,seed);
+  if(!geom){
+    geom=new THREE.BufferGeometry();
+    geom.setAttribute('position',new THREE.BufferAttribute(positions,3));
+    geom.setAttribute('gridPos',new THREE.BufferAttribute(gridPositions,2));
+    geom.setAttribute('seed',new THREE.BufferAttribute(seeds,1));
+    points=new THREE.Points(geom,mat);scene.add(points);
+  }else{
+    geom.attributes.position.array.set(positions);geom.attributes.position.needsUpdate=true;
+    geom.attributes.gridPos.array.set(gridPositions);geom.attributes.gridPos.needsUpdate=true;
+    geom.attributes.seed.array.set(seeds);geom.attributes.seed.needsUpdate=true;
+  }
+  geom.computeBoundingSphere();
+}
+regenerate();
+addEventListener('click',e=>{if(e.target.tagName==='CANVAS')regenerate();});
+
+/* ── orbit (manual only — no Y-axis auto-rotation) ── */
+let isDrag=false,pX=0,pY=0,orbTh=0,orbPh=.55;
+const cv=renderer.domElement;
+cv.addEventListener('pointerdown',e=>{isDrag=true;pX=e.clientX;pY=e.clientY;e.preventDefault();});
+addEventListener('pointermove',e=>{if(!isDrag)return;
+  orbTh-=(e.clientX-pX)*.005;orbPh=Math.max(.1,Math.min(1.4,orbPh-(e.clientY-pY)*.005));
+  pX=e.clientX;pY=e.clientY;});
+addEventListener('pointerup',()=>{isDrag=false;});
+
+/* ── selective bloom (gated by uTension on stitch lines) ── */
+const bloomComposer = new EffectComposer(renderer);
+bloomComposer.addPass(new RenderPass(scene,camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(innerWidth,innerHeight), 0.7, 0.6, 0.85);
+bloomComposer.addPass(bloomPass);
+bloomComposer.renderToScreen = false;
+
+const addMat = new THREE.ShaderMaterial({
+  uniforms:{tBloom:{value:bloomComposer.renderTarget2.texture}},
+  vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0,1);}`,
+  fragmentShader:`uniform sampler2D tBloom;varying vec2 vUv;
+    void main(){gl_FragColor=texture2D(tBloom,vUv);}`,
+  transparent:true, blending:THREE.AdditiveBlending,
+  depthTest:false, depthWrite:false
+});
+const addScene = new THREE.Scene();
+addScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2),addMat));
+
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+  bloomComposer.setSize(innerWidth,innerHeight);
+  addMat.uniforms.tBloom.value=bloomComposer.renderTarget2.texture;
+  uniforms.uPixel.value=renderer.getPixelRatio();
+});
+
+/* ── animate ── */
+const t0 = performance.now();
+function loop(){
+  const t = (performance.now()-t0)/1000;
+  uniforms.uTime.value = t;
+  uniforms.uMorph.value += (1-uniforms.uMorph.value)*.015;
+
+  /* tambour tension timing: first at t≈14s, then every 30s
+     drum-skin tautens (rises) then slowly releases (falls) */
+  const tC = t<14 ? -99 : ((t-14)%30);
+  let ten = 0;
+  if(tC>=0&&tC<2) ten=tC/2;           /* tighten */
+  else if(tC>=2&&tC<4) ten=1;          /* held taut */
+  else if(tC>=4&&tC<11) ten=Math.max(0,1-(tC-4)/7); /* slow release */
+  ten = ten*ten*(3-2*ten); /* smoothstep ease */
+  uniforms.uTension.value = ten;
+
+  /* drifting lights — slow orbits, linen-warm */
+  const la1=t*.13, la2=t*.09+2.1;
+  uniforms.uLight1.value.set(Math.sin(la1)*.8,.5+.3*Math.sin(la1*.7),Math.cos(la1)*.6);
+  uniforms.uLight2.value.set(Math.cos(la2)*.6,.3+.2*Math.cos(la2*.5),Math.sin(la2)*.8);
+
+  /* camera: contemplative with subtle breathe, no auto-rotation */
+  const breathe = Math.sin(t*.06)*.3;
+  /* tension pulls camera slightly closer to see stitch detail */
+  const tenZoom = -ten*1.2;
+  const radius = 22+breathe+tenZoom;
+  const theta=orbTh, phi=orbPh;
+  const cY = 1.5*uniforms.uMorph.value;
+  camera.position.set(
+    radius*Math.sin(theta)*Math.sin(phi),
+    cY+radius*Math.cos(phi),
+    radius*Math.cos(theta)*Math.sin(phi));
+  camera.lookAt(0,cY,0);
+
+  /* selective bloom pass — stitch glow during tension */
+  if(ten>.01){
+    uniforms.uBloomPass.value=1;
+    renderer.autoClear=true;
+    bloomComposer.render();
+    uniforms.uBloomPass.value=0;
+  }
+
+  /* normal render */
+  renderer.autoClear=false;
+  renderer.clear();
+  renderer.render(bgScene,bgCam);
+  renderer.render(scene,camera);
+  if(ten>.01) renderer.render(addScene,bgCam);
+
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+<div id="piece-ctrl" style="position:fixed;top:10px;right:10px;z-index:999;display:flex;align-items:center;gap:6px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;"><button id="pc-like" title="keep this direction" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(201,168,106,0.7);cursor:pointer;font-size:13px;line-height:1">♥</button><button id="pc-dismiss" title="drop from pool" style="background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;color:rgba(215,107,90,0.7);cursor:pointer;font-size:13px;line-height:1">✕</button><input id="pc-input" type="text" maxlength="200" placeholder="What to change…"style="width:160px;background:rgba(0,0,0,0.6);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.13);border-radius:3px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none"onfocus="this.style.borderColor='rgba(201,168,106,0.6)'"onblur="this.style.borderColor='rgba(255,255,255,0.13)'"><button id="pc-submit" title="Generate iteration" style="background:rgba(0,0,0,0.55);border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:4px 10px;color:rgba(201,168,106,0.9);cursor:pointer;font-size:11px;line-height:1">→</button></div>
+<script>
+(function(){
+  var _pid=document.querySelector('.id')||{textContent:''};
+  var pid=_pid.textContent.trim()||location.pathname.split('/').filter(Boolean).pop();
+  var FKEY='particle_art_favorites',DKEY='particle_art_dismissed';
+  function _set(key,id){try{var s=new Set(JSON.parse(localStorage.getItem(key)||'[]'));s.add(id);localStorage.setItem(key,JSON.stringify([...s]));return true;}catch(e){return false;}}
+  function _react(action){fetch('/api/react',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({piece_id:pid,action:action})}).catch(function(){});}
+  document.getElementById('pc-like').onclick=function(){_set(FKEY,pid);this.style.color='#c9a86a';_react('favorite');};
+  document.getElementById('pc-dismiss').onclick=function(){_set(DKEY,pid);this.style.color='#d76b5a';this.style.borderColor='rgba(215,107,90,0.5)';_react('dismiss');goNext();};
+  function goNext(){fetch('/lineage.json?_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){var dismissed=new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'));var pieces=(data.pieces||[]).filter(function(p){return !dismissed.has(p.id);});var idx=pieces.findIndex(function(p){return p.id===pid;});var next=idx>=0&&idx+1<pieces.length?pieces[idx+1]:null;if(next)location.href='/pieces/'+next.id+'/';else location.href='/index.html';}).catch(function(){location.href='/index.html';});}
+  document.getElementById('pc-input').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('pc-submit').click();});
+  document.getElementById('pc-submit').onclick=function(){
+    var txt=document.getElementById('pc-input').value.trim();
+    if(!txt)return;
+    var btn=this;btn.textContent='…';btn.disabled=true;
+    fetch('/api/mutate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({parent_id:pid,directive:txt})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var jobId=d.job_id||'';
+      var qs='?a='+pid+(jobId?'&job='+jobId:'')+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    })
+    .catch(function(){
+      var qs='?a='+pid+'&directive='+encodeURIComponent(txt);
+      location.href='/compare'+qs;
+    });
+  };
+})();
+</script>
+
+<!-- gp: universal grade panel + save/config (injected by scripts/inject_grade_panel.py) -->
+<style>
+  #gp-panel{position:fixed;right:10px;top:52px;width:172px;z-index:998;
+    background:rgba(8,12,18,0.82);border:1px solid rgba(205,210,220,0.12);border-radius:6px;
+    padding:10px 12px 8px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;color:#cfe1d4;}
+  #gp-panel .gp-h{font-size:9px;letter-spacing:0.14em;text-transform:uppercase;
+    color:rgba(205,210,220,0.45);margin-bottom:8px;}
+  #gp-panel label{display:flex;justify-content:space-between;font-size:9px;
+    letter-spacing:0.04em;color:rgba(205,210,220,0.6);margin-bottom:2px;}
+  #gp-panel label span{color:rgba(205,210,220,0.85);font-variant-numeric:tabular-nums;}
+  #gp-panel input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+    background:rgba(205,210,220,0.12);border-radius:2px;outline:none;cursor:pointer;margin:0 0 9px;}
+  #gp-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;
+    border-radius:50%;background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-panel input[type=range]::-moz-range-thumb{width:10px;height:10px;border-radius:50%;
+    background:rgba(205,210,220,0.55);border:none;cursor:pointer;}
+  #gp-save{width:100%;margin-top:2px;background:rgba(0,0,0,0.5);
+    border:1px solid rgba(201,168,106,0.4);border-radius:3px;padding:5px 6px;
+    color:rgba(201,168,106,0.9);cursor:pointer;font-family:inherit;font-size:10px;letter-spacing:0.04em;}
+  #gp-save:hover{border-color:rgba(201,168,106,0.7);}
+  #gp-panel button.gp-cfg{display:block;width:100%;margin-top:5px;background:rgba(0,0,0,0.4);
+    border:1px solid rgba(205,210,220,0.15);border-radius:3px;padding:4px 6px;
+    color:rgba(205,210,220,0.75);cursor:pointer;font-family:inherit;font-size:10px;text-align:left;}
+  #gp-panel button.gp-cfg:hover{border-color:rgba(205,210,220,0.4);}
+</style>
+<div id="gp-panel">
+  <div class="gp-h">grade</div>
+  <label>hue<span id="gp-v-hue">0&deg;</span></label>
+  <input id="gp-hue" type="range" min="0" max="360" step="1" value="0">
+  <label>saturation<span id="gp-v-sat">1.00</span></label>
+  <input id="gp-sat" type="range" min="0" max="2" step="0.01" value="1">
+  <label>brightness<span id="gp-v-bri">1.00</span></label>
+  <input id="gp-bri" type="range" min="0.3" max="2" step="0.01" value="1">
+  <label>contrast<span id="gp-v-con">1.00</span></label>
+  <input id="gp-con" type="range" min="0.5" max="2" step="0.01" value="1">
+  <button id="gp-save">save config</button>
+  <div id="gp-saved"></div>
+</div>
+<script>
+(function(){
+  function pieceId(){
+    var parts=location.pathname.split('/').filter(Boolean);
+    var i=parts.indexOf('pieces');
+    if(i>=0&&parts[i+1]&&parts[i+1]!=='index.html')return parts[i+1];
+    var last=parts.pop();
+    if((last==='index.html'||!last)&&parts.length)last=parts.pop();
+    if(last)return last;
+    var el=document.querySelector('.id');
+    return el?el.textContent.trim().split(/[\s·]/)[0]:'unknown';
+  }
+  var pid=pieceId();
+  var KEY='pa_cfg_'+pid;
+  var G={hue:0,sat:1,bri:1,con:1};
+  function fmt(k,v){return k==='hue'?Math.round(v)+'°':(+v).toFixed(2);}
+  function applyFilter(){
+    var f='hue-rotate('+G.hue+'deg) saturate('+G.sat+') brightness('+G.bri+') contrast('+G.con+')';
+    var cs=document.querySelectorAll('canvas');
+    for(var i=0;i<cs.length;i++){cs[i].style.filter=f;}
+  }
+  var tries=0;
+  (function waitCanvas(){
+    if(document.querySelector('canvas')||tries++>80){applyFilter();return;}
+    setTimeout(waitCanvas,100);
+  })();
+  function bind(key,id){
+    var el=document.getElementById('gp-'+id),vl=document.getElementById('gp-v-'+id);
+    el.addEventListener('input',function(){G[key]=parseFloat(el.value);vl.textContent=fmt(key,G[key]);applyFilter();});
+  }
+  bind('hue','hue');bind('sat','sat');bind('bri','bri');bind('con','con');
+  function setSliders(c){
+    G={hue:+c.hue,sat:+c.sat,bri:+c.bri,con:+c.con};
+    var map={hue:'hue',sat:'sat',bri:'bri',con:'con'};
+    for(var k in map){
+      document.getElementById('gp-'+map[k]).value=G[k];
+      document.getElementById('gp-v-'+map[k]).textContent=fmt(k,G[k]);
+    }
+    applyFilter();
+  }
+  function load(){try{return JSON.parse(localStorage.getItem(KEY)||'[]');}catch(e){return [];}}
+  function store(arr){try{localStorage.setItem(KEY,JSON.stringify(arr));}catch(e){}}
+  function renderSaved(){
+    var wrap=document.getElementById('gp-saved');wrap.innerHTML='';
+    var arr=load();
+    arr.forEach(function(c,i){
+      var b=document.createElement('button');
+      b.className='gp-cfg';b.textContent='config '+(i+1);
+      try{b.title=new Date(c.id).toLocaleString()+' · right-click to delete';}catch(e){}
+      b.onclick=function(){setSliders(c);};
+      b.oncontextmenu=function(e){e.preventDefault();var a=load();a.splice(i,1);store(a);renderSaved();};
+      wrap.appendChild(b);
+    });
+  }
+  document.getElementById('gp-save').onclick=function(){
+    var arr=load();
+    var cfg={id:Date.now(),hue:G.hue,sat:G.sat,bri:G.bri,con:G.con};
+    arr.push(cfg);store(arr);renderSaved();
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({piece_id:pid,config:cfg})}).catch(function(){});
+  };
+  renderSaved();
+  function reposition(){
+    var gp=document.getElementById('gp-panel'),maxB=0;
+    ['piece-ctrl','panel'].forEach(function(id){
+      var el=document.getElementById(id);
+      if(el){var r=el.getBoundingClientRect();
+        if(r.right>window.innerWidth-80&&r.bottom>maxB)maxB=r.bottom;}
+    });
+    gp.style.top=(maxB>0?maxB+8:52)+'px';
+  }
+  reposition();addEventListener('resize',reposition);
+})();
+</script>
+
+</body>
+</html>
