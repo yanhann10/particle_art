@@ -3,6 +3,7 @@
  * scripts/preferences.json via GitHub API.
  *
  * POST /api/react  { piece_id, action: "favorite"|"unfavorite"|"dismiss"|"undismiss"|"star"|"unstar" }
+ *              or { actions: [{ piece_id, action }, ...] }
  *   → patches preferences.json marks[piece_id] on GitHub
  *   → returns { ok: true }
  *
@@ -12,6 +13,7 @@
  */
 
 const PREFS_PATH = "scripts/preferences.json";
+const DELETED_PATH = "scripts/deleted_pieces.json";
 const BRANCH = "main";
 
 export const config = { runtime: "edge" };
@@ -40,15 +42,17 @@ export default async function handler(req) {
     });
   }
 
-  const { piece_id, action } = body;
-  if (!piece_id || !action) {
+  const actions = Array.isArray(body.actions)
+    ? body.actions
+    : [{ piece_id: body.piece_id, action: body.action }];
+  if (!actions.length || actions.some(x => !x.piece_id || !x.action)) {
     return new Response(JSON.stringify({ error: "piece_id and action required" }), {
       status: 400, headers: { ...cors, "Content-Type": "application/json" },
     });
   }
 
   const validActions = ["favorite", "unfavorite", "dismiss", "undismiss", "star", "unstar"];
-  if (!validActions.includes(action)) {
+  if (actions.some(x => !validActions.includes(x.action))) {
     return new Response(JSON.stringify({ error: `action must be one of: ${validActions.join(", ")}` }), {
       status: 400, headers: { ...cors, "Content-Type": "application/json" },
     });
@@ -86,9 +90,11 @@ export default async function handler(req) {
 
     if (!prefs.marks) prefs.marks = {};
 
-    // 2. Apply the action
-    const mark = prefs.marks[piece_id] || {};
-    switch (action) {
+    // 2. Apply all actions in memory, then persist exactly once. This prevents
+    // rapid review decisions from racing and overwriting one another.
+    for (const { piece_id, action } of actions) {
+      const mark = prefs.marks[piece_id] || {};
+      switch (action) {
       case "favorite":
         mark.favorite = true;
         delete mark.drop;
@@ -99,6 +105,7 @@ export default async function handler(req) {
       case "dismiss":
         mark.drop = true;
         delete mark.favorite;
+        delete mark.star;
         break;
       case "undismiss":
         delete mark.drop;
@@ -109,13 +116,10 @@ export default async function handler(req) {
       case "unstar":
         delete mark.star;
         break;
-    }
+      }
 
-    // If the mark is now empty, remove it entirely
-    if (Object.keys(mark).length === 0) {
-      delete prefs.marks[piece_id];
-    } else {
-      prefs.marks[piece_id] = mark;
+      if (Object.keys(mark).length === 0) delete prefs.marks[piece_id];
+      else prefs.marks[piece_id] = mark;
     }
 
     prefs.updated_at = new Date().toISOString().slice(0, 10);
@@ -123,7 +127,9 @@ export default async function handler(req) {
     // 3. Commit updated preferences.json
     const newContent = JSON.stringify(prefs, null, 2) + "\n";
     const putBody = {
-      message: `react: ${action} ${piece_id}`,
+      message: actions.length === 1
+        ? `react: ${actions[0].action} ${actions[0].piece_id}`
+        : `react: batch ${actions.length} curation decisions`,
       content: btoa(unescape(encodeURIComponent(newContent))),
       branch: BRANCH,
       ...(sha ? { sha } : {}),
@@ -138,7 +144,28 @@ export default async function handler(req) {
       throw new Error(`GitHub PUT ${putRes.status}: ${err.slice(0, 200)}`);
     }
 
-    return new Response(JSON.stringify({ ok: true }), {
+    // Dismissals also enter the append-only tombstone manifest. Preferences
+    // remain the immediate UI fallback if this secondary write is delayed.
+    const dismissedIds = actions.filter(x => x.action === "dismiss").map(x => x.piece_id);
+    if (dismissedIds.length) {
+      const deletedUrl = `https://api.github.com/repos/${repo}/contents/${DELETED_PATH}`;
+      const deletedRes = await fetch(`${deletedUrl}?ref=${BRANCH}`, { headers: ghHeaders });
+      let deleted = { version: 1, ids: [] }, deletedSha = null;
+      if (deletedRes.ok) {
+        const file = await deletedRes.json(); deletedSha = file.sha;
+        deleted = JSON.parse(atob(file.content.replace(/\n/g, "")));
+      }
+      deleted.ids = [...new Set([...(deleted.ids || []), ...dismissedIds])].sort();
+      deleted.updated_at = new Date().toISOString().slice(0, 10);
+      const deletedPut = await fetch(deletedUrl, { method:"PUT", headers:ghHeaders, body:JSON.stringify({
+        message:`tombstone ${dismissedIds.length} rejected piece${dismissedIds.length === 1 ? "" : "s"}`,
+        content:btoa(unescape(encodeURIComponent(JSON.stringify(deleted,null,2)+"\n"))), branch:BRANCH,
+        ...(deletedSha ? { sha:deletedSha } : {}),
+      }) });
+      if (!deletedPut.ok) console.error(`tombstone PUT ${deletedPut.status}`);
+    }
+
+    return new Response(JSON.stringify({ ok: true, applied: actions.length }), {
       headers: { ...cors, "Content-Type": "application/json" },
     });
   } catch (e) {

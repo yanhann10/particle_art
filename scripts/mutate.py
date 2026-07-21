@@ -31,6 +31,7 @@ import budget
 import codes
 import element_counts
 import lib_claude
+import portfolio
 from evaluator import read_top_eval_note
 from lineage_lock import lineage_write_lock
 
@@ -40,6 +41,8 @@ PREFS = REPO / "scripts" / "preferences.json"
 DIRECTIVES = REPO / "scripts" / "mutation_directives.json"
 LOG = REPO / "scripts" / "mutation_log.jsonl"
 PENDING_QUEUE = REPO / "scripts" / "pending_directives.jsonl"
+DELETED_PIECES = REPO / "scripts" / "deleted_pieces.json"
+REJECTION_MEMORY = REPO / "scripts" / "rejection_memory.json"
 
 
 def load_json(p: Path) -> dict:
@@ -143,6 +146,8 @@ def pick_parent(lineage: dict, prefs: dict, recent: list[dict]) -> dict:
     marks = prefs.get("marks", {})
     favored = [p for p in pieces if marks.get(p["id"], {}).get("favorite")]
     dropped = {pid for pid, m in marks.items() if m.get("drop")}
+    if DELETED_PIECES.exists():
+        dropped.update(load_json(DELETED_PIECES).get("ids", []))
     pool = favored if favored else [p for p in pieces if p["id"] not in dropped]
     if not pool:
         pool = pieces
@@ -171,8 +176,25 @@ def pick_parent(lineage: dict, prefs: dict, recent: list[dict]) -> dict:
     candidates = [p for p in pool if p["id"] not in last_two] or pool
 
     # weight: 1 / (1 + descendants^0.7) → no descendants ⇒ weight 1.0; 1 ⇒ ~0.61; 4 ⇒ ~0.36; 16 ⇒ ~0.13
-    weights = [1.0 / (1.0 + (desc_count.get(p["id"], 0) ** 0.7)) for p in candidates]
+    frontier = [1.0 / (1.0 + (desc_count.get(p["id"], 0) ** 0.7)) for p in candidates]
+    novelty = portfolio.novelty_weights(candidates, pieces)
+    weights = [a * b for a, b in zip(frontier, novelty)]
     return random.choices(candidates, weights=weights, k=1)[0]
+
+
+def _creative_brief(parent: dict, directive_id: str, directive: str) -> dict:
+    """Record an explicit, falsifiable contract for the mutation."""
+    preserved = [x for x in (parent.get("tags") or [])[:4] if isinstance(x, str)]
+    return {
+        "concept": directive.strip(),
+        "formal_rule": f"Apply {directive_id} as a visible system-level change, not a post-process effect.",
+        "hero_moment": "The changed rule becomes legible without requiring input.",
+        "motion_arc": ["1s: amaze with legible intent", "5s: deepen into awe", "10s: prevent boredom through consequence"],
+        "must_preserve": preserved,
+        "must_avoid": ["cosmetic-only mutation", "generic rotation", "interaction-gated blank state"],
+        "prediction": "A viewer can identify the mutation from rendered frames without reading the source.",
+        "falsification": "Reject when the child reads as the parent with only palette, camera, or speed changes."
+    }
 
 
 def _lineage_chain(piece_id: str, pieces: list[dict]) -> list[str]:
@@ -256,6 +278,15 @@ def _swarm_block() -> str:
         return ""
 
 
+def _threejs_advice_block() -> str:
+    """Inject recent three.js technique notes before the artisan starts work."""
+    try:
+        from threejs_expert import advice_block
+        return advice_block()
+    except Exception:
+        return ""
+
+
 def _rejection_block() -> str:
     """Build a block describing what the user has rejected.
 
@@ -265,6 +296,13 @@ def _rejection_block() -> str:
     taste = _read_taste()
     prefs = _read_ratings()
     lines = []
+    if REJECTION_MEMORY.exists():
+        memory = load_json(REJECTION_MEMORY)
+        lines.append("DISTILLED REJECTION MEMORY — these are recurring failure classes, not optional suggestions:")
+        for item in memory.get("do_not_repeat", []):
+            lines.append(f"  - DO NOT: {item}")
+        for item in memory.get("required_countermoves", []):
+            lines.append(f"  - REQUIRED: {item}")
     dislikes = taste.get("dislikes", {})
     if dislikes.get("directions"):
         lines.append("Directions the user has explicitly rejected — DO NOT produce these:")
@@ -336,6 +374,7 @@ def _seed_block(seed_dir_path: str | None) -> tuple[str, str | None]:
 def build_prompt(parent: dict, parent_html: str, directive: str, seed_block: str = "") -> tuple[str, str]:
     rejection = _rejection_block()
     swarm = _swarm_block()
+    threejs = _threejs_advice_block()
     iterate_note = _iterate_when_chosen_block(parent["id"])
     eval_note = read_top_eval_note()
     system = (
@@ -350,6 +389,7 @@ def build_prompt(parent: dict, parent_html: str, directive: str, seed_block: str
         + ((iterate_note + "\n\n") if iterate_note else "")
         + ((seed_block + "\n\n") if seed_block else "")
         + ((swarm + "\n\n") if swarm else "")
+        + ((threejs + "\n\n") if threejs else "")
         + "If your output would violate any of the above, redesign before emitting. "
         "Better to produce a structurally simple piece that respects the guardrails "
         "than an ambitious piece that breaks them.\n\n"
@@ -370,7 +410,24 @@ def build_prompt(parent: dict, parent_html: str, directive: str, seed_block: str
         "elapsed/3.5 — the screenshot is taken at 5s but intro animations lasting 6-10s "
         "will look empty. "
         "(f) use ≥40,000 particles or dense enough geometry to cover at least 5%% of "
-        "frame area — isolated sparse points fail the 0.5%% non-bg threshold."
+        "frame area — isolated sparse points fail the 0.5%% non-bg threshold.\n\n"
+        "AUDIO-REACTIVE (optional, encouraged): a global `window.AR` audio bus may be "
+        "present (injected separately — do NOT add a <script> tag for it). It is safe to "
+        "read anytime and exposes a warped clock `AR.t` (ms) plus `AR.level`, `AR.bass`, "
+        "`AR.mid`, `AR.treble`, `AR.beat`, each 0..1. To make the piece react to sound in "
+        "ONE edit, drive your PRIMARY motion off `AR.t` instead of the rAF timestamp / "
+        "performance.now() — e.g. `const time = (window.AR ? AR.t : performance.now()) * "
+        "0.001;`. For finer control, scale a motion term by `AR.level` or add `AR.beat` to "
+        "an emphasis (brightness/scale) term. CRITICAL: when no audio is connected every "
+        "band is 0 and AR.t advances at exactly real-time, so the piece MUST look complete "
+        "and move normally with zero audio (this is also enforced by the render gate). "
+        "Never gate visuals on audio. Always guard with `window.AR ? ... : ...`."
+        "\n\nVIEWER-TIME GATE — design the temporal experience explicitly: (1) by t=1s the "
+        "viewer must be amazed by a clear subject and intent; (2) by t=5s the piece must "
+        "deepen into awe through a consequential reveal or transformation; (3) at t=10s "
+        "the viewer must not be bored, so introduce a meaningful new state, reversal, "
+        "accumulation, rupture, or discovery. Mere upward flow, drift, rotation, or "
+        "pulsation fails unless it has a nameable material and emotional identity."
     )
     eval_prefix = (eval_note + "\n\n") if eval_note else ""
     user = f"""{eval_prefix}# Mutation request
@@ -387,6 +444,12 @@ def build_prompt(parent: dict, parent_html: str, directive: str, seed_block: str
 
 ## Mutation directive
 {directive}
+
+## Creative contract
+Make the directive causal and visually testable. The child must expose one changed formal
+rule and a visible consequence. It fails if it reads as the parent with only palette,
+camera, post-processing, or speed changes. Compose a complete default state, then create
+a temporal arc of establish → transform → new equilibrium.
 
 ## Output
 Reply with ONLY the new HTML file content. Start with `<!doctype html>`. No prose, no
@@ -406,6 +469,21 @@ def extract_html(text: str) -> str:
     if m:
         return m.group(0)
     raise ValueError("no <!doctype html>…</html> found in response")
+
+
+_AUDIO_BUS_TAG = '<script src="/audio-reactive.js" defer></script>'
+
+
+def with_audio_bus(html: str) -> str:
+    """Inject the shared audio-reactive bus tag (see /audio-reactive.js) so every
+    new piece can read window.AR. Idempotent; harmless when no audio is connected
+    (AR.t runs at real-time, all bands 0)."""
+    if "audio-reactive.js" in html:
+        return html
+    idx = html.rfind("</body>")
+    if idx == -1:
+        return html.rstrip() + "\n" + _AUDIO_BUS_TAG + "\n"
+    return html[:idx] + _AUDIO_BUS_TAG + "\n" + html[idx:]
 
 
 def validate(html: str) -> None:
@@ -456,8 +534,10 @@ def main():
                                    "off the seed's lineage if descendants exist, else from a forced parent")
     args = ap.parse_args()
 
-    # budget gate
-    ok, why = budget.can_spend(lib_claude.BEDROCK_COST_ESTIMATE_USD)
+    # budget gate. A full quality tick may use gen v1 + three.js expert +
+    # gen v2 refinement. The expert is fail-soft, but reserve enough for the
+    # path that actually improves the current piece before it ships.
+    ok, why = budget.can_spend(lib_claude.BEDROCK_COST_ESTIMATE_USD * 5)
     if not ok and not args.dry_run:
         print(f"abort: budget — {why}")
         return 2
@@ -528,6 +608,38 @@ def main():
         print(f"raw response saved to {rej}")
         return 5
 
+    threejs_review = None
+    try:
+        import threejs_expert
+        tj = threejs_expert.review(html, {
+            "piece_id": f"(pending parent={parent['id']})",
+            "title": f"mut.{directive_id}",
+            "direction": directive,
+            "parent_id": parent["id"],
+        })
+        if tj and tj.get("directive"):
+            threejs_review = {"directive": tj["directive"], "tools": tj.get("tools", [])}
+            print(f"threejs-expert: {tj['directive']}")
+            refine_user = (
+                user
+                + "\n\n## First generated HTML — revise this exact piece, do not restart\n"
+                + "```html\n" + html + "\n```\n\n"
+                + "## three.js syntax expert review — adopt this only in service of a stronger visible artwork\n"
+                + tj["directive"] + "\n\n"
+                + "Return ONLY the revised full HTML file. Preserve the original mutation concept, but use the named three.js technique/tool where it makes the 5-second render visibly more sculptural, crisp, dense, or spatial."
+            )
+            try:
+                refined_text, refined_provider = lib_claude.call(system, refine_user)
+                refined_html = extract_html(refined_text)
+                validate(refined_html)
+                html = refined_html
+                provider = refined_provider
+                print(f"threejs-refine: adopted ({len(html)} bytes, provider={provider})")
+            except Exception as e:
+                print(f"threejs-refine failed (keeping v1): {e}")
+    except Exception as e:
+        print(f"threejs-expert skipped: {e}")
+
     # static precheck — catches hard-banned code patterns before disk write
     from precheck import run as _precheck
     _pc = _precheck(html)
@@ -546,7 +658,7 @@ def main():
 
     new_id = codes.generate(LINEAGE, n=1)[0]
     # tolerant replace — covers `<NEW_ID>` and HTML-escaped `&lt;NEW_ID&gt;`
-    html = html.replace("<NEW_ID>", new_id).replace("&lt;NEW_ID&gt;", new_id)
+    html = with_audio_bus(html.replace("<NEW_ID>", new_id).replace("&lt;NEW_ID&gt;", new_id))
 
     out_dir = PIECES / new_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -555,10 +667,11 @@ def main():
     # render-content gate — blank pieces (shader compile fail, design that waits
     # for interaction/network input that never comes, misframed camera, etc.)
     # must NEVER ship to Vercel. Validate via Playwright before proceeding.
-    # Blur failures trigger a remake (up to MAX_BLUR_REMAKES attempts) with an
-    # explicit sharpness constraint injected into the prompt.
-    MAX_BLUR_REMAKES = 2
-    _blur_attempt = 0
+    # Any measurable render failure triggers a reason-specific repair. Previously
+    # only blur was repairable, so empty and low-contrast work was thrown away even
+    # when the concept was sound.
+    MAX_RENDER_REMAKES = 2
+    _render_attempt = 0
     try:
         import shutil
         from validate_render import validate as render_validate
@@ -566,23 +679,23 @@ def main():
             rc, failures = render_validate([new_id], record_clip=False, return_details=True)
             if rc == 0:
                 break
-            is_blur = any("blurry" in reason for _, reason in failures)
+            failure_text = "; ".join(reason for _, reason in failures) or "unknown render failure"
             rej = REPO / "scripts" / f"reject_{new_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.html"
             rej.write_text(html)
             shutil.rmtree(out_dir, ignore_errors=True)
             thumb_path = REPO / "thumbs" / f"{new_id}.png"
             if thumb_path.exists():
                 thumb_path.unlink()
-            if is_blur and _blur_attempt < MAX_BLUR_REMAKES:
-                _blur_attempt += 1
-                print(f"render gate: BLUR FAIL — remake attempt {_blur_attempt}/{MAX_BLUR_REMAKES}")
+            if _render_attempt < MAX_RENDER_REMAKES:
+                _render_attempt += 1
+                print(f"render gate: FAIL ({failure_text}) — repair {_render_attempt}/{MAX_RENDER_REMAKES}")
                 sharp_constraint = (
-                    "\n\nCRITICAL REMAKE CONSTRAINT (previous render was blurry and rejected): "
-                    "Every particle/point MUST be visually sharp. "
-                    "Use PointsMaterial with sizeAttenuation=false or explicit pixel sizes ≥2px. "
-                    "Set opacity=1.0 or near-1.0 — no soft halos, no Gaussian-blur sprites, "
-                    "no feathered additive fog that washes out detail. "
-                    "If using MeshStandardMaterial, ensure strong key lighting so edges read crisply."
+                    f"\n\nCRITICAL RENDER REPAIR — measured failure: {failure_text}. "
+                    "Preserve the concept and causal motion law, but rebuild the visible marks to satisfy ALL: "
+                    "subject occupies 25–60% of frame at t=1s; crisp hard edges and fine detail; grayscale "
+                    "contrast ≥12 with clear foreground/background separation; no blank intro; no soft halo "
+                    "as the primary form. At 1s the subject is already legible and amazing. Use opaque cores, "
+                    "2px+ marks, strong key light, and a bounded camera. Do not merely raise saturation."
                 )
                 system, user = build_prompt(parent, parent_html,
                                             directive + sharp_constraint,
@@ -595,7 +708,7 @@ def main():
                     print(f"  remake failed: {e}")
                     return 7
                 new_id = codes.generate(LINEAGE, n=1)[0]
-                html = html.replace("<NEW_ID>", new_id).replace("&lt;NEW_ID&gt;", new_id)
+                html = with_audio_bus(html.replace("<NEW_ID>", new_id).replace("&lt;NEW_ID&gt;", new_id))
                 out_dir = PIECES / new_id
                 out_dir.mkdir(parents=True, exist_ok=True)
                 (out_dir / "index.html").write_text(html)
@@ -652,7 +765,11 @@ def main():
         "lineage_path": [new_id] + parent_chain,                       # [self, parent, grandparent, ...]
         "directives_in_lineage": parent_directives + [directive_id],   # root → here, ordered
         "tags": _tags_from_directive(directive_id, parent),
+        "curation_state": "laboratory",
+        "creative_brief": _creative_brief(parent, directive_id, directive),
     }
+    if threejs_review:
+        new_meta["threejs_review"] = threejs_review
     if args.seed:
         seed_slug = Path(args.seed).name
         new_meta["seed"] = seed_slug
@@ -671,6 +788,8 @@ def main():
             "generation": new_meta["generation"],
             "created_at": new_meta["created_at"],
             "style_key": _style_key_from_tags(new_meta["tags"]),
+            "curation_state": "laboratory",
+            "creative_brief": new_meta["creative_brief"],
         })
         lineage.setdefault("edges", []).append({
             "from": parent["id"], "to": new_id, "directive": directive_id,
@@ -684,6 +803,7 @@ def main():
     append_log({
         "ts": new_meta["created_at"], "id": new_id, "parent": parent["id"],
         "directive_id": directive_id, "provider": provider, "cost_usd": cost,
+        "threejs_review": threejs_review,
     })
 
     print(f"created: pieces/{new_id}/  (parent={parent['id']}, gen={new_meta['generation']}, provider={provider})")
@@ -714,9 +834,12 @@ def main():
         print(f"swarm debate skipped: {e}")
 
     _advice_path = REPO / "scripts" / "swarm_advice.jsonl"
+    _threejs_advice_path = REPO / "scripts" / "threejs_advice.jsonl"
     git_add = [f"pieces/{new_id}", "lineage.json", "taste.json", "scripts/mutation_log.jsonl"]
     if _advice_path.exists():
         git_add.append("scripts/swarm_advice.jsonl")
+    if _threejs_advice_path.exists():
+        git_add.append("scripts/threejs_advice.jsonl")
     run_git("add", *git_add)
     msg = f"mutate {parent['id']} → {new_id} · {directive_id}"
     run_git("commit", "-m", msg)

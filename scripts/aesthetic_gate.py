@@ -20,6 +20,7 @@ BUG_MD = REPO / "bug.md"
 IDEA_LOG = REPO / "scripts" / "idea_extracts.jsonl"
 QUEUE = REPO / "scripts" / "pending_directives.jsonl"
 FEEDBACK_LOG = REPO / "scripts" / "aesthetic_feedback.jsonl"
+REJECTION_MEMORY = REPO / "scripts" / "rejection_memory.json"
 
 
 def _requeue_ideas(ideas: list[str], piece_id: str, hits: list[str]) -> None:
@@ -98,6 +99,7 @@ def check(html: str, piece_id: str, parent: dict, directive: str) -> tuple[bool,
             + html[-4000:]
         )
 
+    rejection_memory = REJECTION_MEMORY.read_text()[:8000] if REJECTION_MEMORY.exists() else ""
     system = (
         "You are an aesthetic gate critic for an evolutionary particle-art gallery. "
         "Read the user's catalogue of documented aesthetic anti-patterns (bug.md) below. "
@@ -108,16 +110,20 @@ def check(html: str, piece_id: str, parent: dict, directive: str) -> tuple[bool,
         "If the piece fails, also extract any reusable creative IDEAS hidden inside it — "
         "the directive applied, novel technical approach, surprising material/concept choice, "
         "etc. — so the genius bits survive the cull.\n\n"
-        "THE 3-QUESTION MOTION RUBRIC (apply this to the piece's animation / camera path / particle drift):\n"
-        "  1. Would you show this AT MoMA?\n"
-        "  2. Would you START A HOLLYWOOD FILM with this?\n"
-        "  3. Would you put it on the LANDING PAGE of a billion-dollar AI startup?\n"
-        "If the honest answer is 3 NOs, the motion is shippable-grade FAIL — flag the piece. "
+        "THE VIEWER-TIME GATE (apply literally to form and motion):\n"
+        "  1. At 1 second: am I amazed, and is the intent legible?\n"
+        "  2. At 5 seconds: am I awed because the idea deepened or transformed?\n"
+        "  3. At 10 seconds: am I bored? If yes, reject it.\n"
+        "A piece must pass all three. Flow, drift, pulse, or rotation without a nameable "
+        "material/emotional identity and consequential state change is bland motion, not an arc. "
         "Cheap easing tweens, swirl-then-stop, zoom-from-corner, pulse-on-beat-in-obvious-sync, "
         "and other 2010-era PowerPoint-stock-template moves all fail this rubric.\n\n"
         "--- bug.md (user's anti-pattern catalogue) ---\n"
         f"{bugs}\n"
         "--- end bug.md ---\n\n"
+        "--- rejection_memory.json (distilled from every tombstoned work) ---\n"
+        f"{rejection_memory}\n"
+        "--- end rejection memory ---\n\n"
         "Return STRICT JSON only:\n"
         '{"pass": true|false,\n'
         ' "anti_patterns_hit": ["short ref to bug.md entry, e.g. dots-on-intestine"],\n'
